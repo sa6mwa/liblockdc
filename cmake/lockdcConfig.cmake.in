@@ -1,0 +1,63 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(lockdc_INCLUDE_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@")
+set(lockdc_LIBRARY_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
+
+if(NOT TARGET lockdc::shared AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.so")
+  add_library(lockdc::shared SHARED IMPORTED)
+  set_target_properties(lockdc::shared PROPERTIES
+    IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/liblockdc.so"
+    INTERFACE_INCLUDE_DIRECTORIES "${lockdc_INCLUDE_DIR}"
+  )
+endif()
+
+if(NOT TARGET lockdc::static AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.a")
+  find_dependency(Threads REQUIRED)
+
+  set(_lockdc_static_links)
+  if(EXISTS "${lockdc_LIBRARY_DIR}/libcurl.a")
+    list(APPEND _lockdc_static_links "${lockdc_LIBRARY_DIR}/libcurl.a")
+  else()
+    list(APPEND _lockdc_static_links curl)
+  endif()
+  if(EXISTS "${lockdc_LIBRARY_DIR}/libpslog.a")
+    list(APPEND _lockdc_static_links "${lockdc_LIBRARY_DIR}/libpslog.a")
+  else()
+    list(APPEND _lockdc_static_links pslog)
+  endif()
+  if(EXISTS "${lockdc_LIBRARY_DIR}/libssl.a")
+    list(APPEND _lockdc_static_links "${lockdc_LIBRARY_DIR}/libssl.a")
+  else()
+    list(APPEND _lockdc_static_links ssl)
+  endif()
+  if(EXISTS "${lockdc_LIBRARY_DIR}/libcrypto.a")
+    list(APPEND _lockdc_static_links "${lockdc_LIBRARY_DIR}/libcrypto.a")
+  else()
+    list(APPEND _lockdc_static_links crypto)
+  endif()
+  if(EXISTS "${lockdc_LIBRARY_DIR}/libnghttp2.a")
+    list(APPEND _lockdc_static_links "${lockdc_LIBRARY_DIR}/libnghttp2.a")
+  else()
+    list(APPEND _lockdc_static_links nghttp2)
+  endif()
+  if(EXISTS "${lockdc_LIBRARY_DIR}/libyajl_s.a")
+    list(APPEND _lockdc_static_links "${lockdc_LIBRARY_DIR}/libyajl_s.a")
+  else()
+    list(APPEND _lockdc_static_links yajl_s)
+  endif()
+  list(APPEND _lockdc_static_links Threads::Threads)
+  if(NOT "@CMAKE_DL_LIBS@" STREQUAL "")
+    list(APPEND _lockdc_static_links "@CMAKE_DL_LIBS@")
+  endif()
+
+  add_library(lockdc::static STATIC IMPORTED)
+  set_target_properties(lockdc::static PROPERTIES
+    IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/liblockdc.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${lockdc_INCLUDE_DIR}"
+    INTERFACE_LINK_LIBRARIES "${_lockdc_static_links}"
+  )
+endif()
+
+check_required_components(lockdc)

@@ -1,0 +1,11 @@
+build/
+cmake-build-*/
+.cache/
+dist/
+/stash/
+
+devenv/volumes/**
+!devenv/volumes/
+!devenv/volumes/minio-data/
+!devenv/volumes/minio-data/lockd-client-s3/
+!devenv/volumes/**/.gitkeep

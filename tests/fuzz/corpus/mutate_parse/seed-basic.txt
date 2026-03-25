@@ -1,0 +1,3 @@
+time:/ts=NOW
+textfile:/meta/blob=blob.txt
+count+=2

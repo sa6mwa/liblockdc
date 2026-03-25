@@ -1,0 +1,188 @@
+name: liblockdc-e2e
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: lockddev
+      MINIO_ROOT_PASSWORD: lockddevpass
+    ports:
+      - "${LOCKDC_MINIO_API_PORT:-19000}:9000"
+      - "${LOCKDC_MINIO_CONSOLE_PORT:-19001}:9001"
+    volumes:
+      - ./devenv/volumes/minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        until mc alias set local http://minio:9000 lockddev lockddevpass; do
+          sleep 1
+        done
+        mc alias set local http://minio:9000 lockddev lockddevpass
+        mc mb --ignore-existing local/lockd-client-s3
+        mc anonymous set none local/lockd-client-s3
+    restart: "no"
+
+  lockd-disk-a-ca:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    command: ["auth", "new", "ca", "--cn", "lockd-root", "--out", "/config/ca.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-disk-a-config:/config
+
+  lockd-disk-a-server-cert:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    depends_on:
+      - lockd-disk-a-ca
+    command: ["auth", "new", "server", "--ca-in", "/config/ca.pem", "--cn", "lockd-anywhere", "--hosts", "lockd-disk-a,lockd-disk-b,localhost,127.0.0.1", "--out", "/config/server.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-disk-a-config:/config
+
+  lockd-disk-a-client-cert:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    depends_on:
+      - lockd-disk-a-ca
+    command: ["auth", "new", "client", "--ca-in", "/config/ca.pem", "--cn", "lockd-client", "-n", "default=rw", "--out", "/config/client.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-disk-a-config:/config
+
+  lockd-disk-a-tc-client-cert:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    depends_on:
+      - lockd-disk-a-ca
+    command: ["auth", "new", "tcclient", "--ca-in", "/config/ca.pem", "--cn", "lockd-tc-client", "--out", "/config/tc-client.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-disk-a-config:/config
+
+  lockd-disk-a:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    restart: unless-stopped
+    command: ["--store", "disk:///storage", "--listen", ":9341", "--listen-proto", "tcp"]
+    environment:
+      LOCKD_CONFIG_DIR: /config
+      LOCKD_OTLP_ENDPOINT: ""
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 150m
+    ports:
+      - "${LOCKDC_DISK_A_PORT:-19441}:9341"
+    volumes:
+      - ./devenv/volumes/lockd-disk-a-config:/config
+      - ./devenv/volumes/lockd-disk-shared:/storage
+
+  lockd-disk-b:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    restart: unless-stopped
+    command: ["--store", "disk:///storage", "--listen", ":9341", "--listen-proto", "tcp"]
+    environment:
+      LOCKD_CONFIG_DIR: /config
+      LOCKD_OTLP_ENDPOINT: ""
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 150m
+    ports:
+      - "${LOCKDC_DISK_B_PORT:-19442}:9341"
+    volumes:
+      - ./devenv/volumes/lockd-disk-a-config:/config
+      - ./devenv/volumes/lockd-disk-shared:/storage
+
+  lockd-s3-ca:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    command: ["auth", "new", "ca", "--cn", "lockd-root", "--out", "/config/ca.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-s3-config:/config
+
+  lockd-s3-server-cert:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    depends_on:
+      - lockd-s3-ca
+    command: ["auth", "new", "server", "--ca-in", "/config/ca.pem", "--cn", "lockd-anywhere", "--hosts", "lockd-s3,localhost,127.0.0.1", "--out", "/config/server.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-s3-config:/config
+
+  lockd-s3-client-cert:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    depends_on:
+      - lockd-s3-ca
+    command: ["auth", "new", "client", "--ca-in", "/config/ca.pem", "--cn", "lockd-client", "-n", "default=rw", "--out", "/config/client.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-s3-config:/config
+
+  lockd-s3-tc-client-cert:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    depends_on:
+      - lockd-s3-ca
+    command: ["auth", "new", "tcclient", "--ca-in", "/config/ca.pem", "--cn", "lockd-tc-client", "--out", "/config/tc-client.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-s3-config:/config
+
+  lockd-s3:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    depends_on:
+      - minio
+      - minio-init
+    restart: unless-stopped
+    command: ["--store", "s3://minio:9000/lockd-client-s3/liblockdc?insecure=1&path-style=1", "--listen", ":9341", "--listen-proto", "tcp"]
+    environment:
+      LOCKD_CONFIG_DIR: /config
+      LOCKD_OTLP_ENDPOINT: ""
+      LOCKD_S3_ACCESS_KEY_ID: lockddev
+      LOCKD_S3_SECRET_ACCESS_KEY: lockddevpass
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 150m
+    ports:
+      - "${LOCKDC_S3_PORT:-19443}:9341"
+    volumes:
+      - ./devenv/volumes/lockd-s3-config:/config
+
+  lockd-mem-ca:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    command: ["auth", "new", "ca", "--cn", "lockd-root", "--out", "/config/ca.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-mem-config:/config
+
+  lockd-mem-server-cert:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    depends_on:
+      - lockd-mem-ca
+    command: ["auth", "new", "server", "--ca-in", "/config/ca.pem", "--cn", "lockd-anywhere", "--hosts", "localhost,127.0.0.1", "--out", "/config/server.pem", "--force"]
+    restart: on-failure
+    volumes:
+      - ./devenv/volumes/lockd-mem-config:/config
+
+  lockd-mem:
+    image: docker.io/pktsystems/lockd:v0.8.1
+    restart: unless-stopped
+    command: ["--disable-mtls", "--connguard-enabled=false", "--store", "mem://", "--listen", "/run/lockd/lockd.sock", "--listen-proto", "unix"]
+    environment:
+      LOCKD_CONFIG_DIR: /config
+      LOCKD_OTLP_ENDPOINT: ""
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 150m
+    volumes:
+      - ./devenv/volumes/lockd-mem-config:/config
+      - ./devenv/volumes/lockd-mem-run:/run/lockd

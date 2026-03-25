@@ -1,0 +1,4 @@
+textfile:/meta/blob=blob.txt
+base64file:/payload=blob.bin
+
+{"meta":{},"payload":"old"}

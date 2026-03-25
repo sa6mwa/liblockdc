@@ -1,0 +1,310 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "LOCKDC_DIST_DIR": "${sourceDir}/build/${presetName}/dist",
+        "LOCKDC_BUILD_STATIC": "ON",
+        "LOCKDC_BUILD_SHARED": "ON",
+        "LOCKDC_BUILD_DEPENDENCIES": "OFF",
+        "LOCKDC_BUILD_EXAMPLES": "OFF",
+        "LOCKDC_BUILD_TESTS": "ON",
+        "LOCKDC_BUILD_E2E_TESTS": "OFF",
+        "LOCKDC_BUILD_BENCHMARKS": "ON",
+        "LOCKDC_BUILD_FUZZERS": "OFF",
+        "LOCKDC_ENABLE_COVERAGE": "OFF",
+        "LOCKDC_INSTALL": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LOCKDC_BUILD_EXAMPLES": "ON",
+        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/host-debug",
+        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/host-debug",
+        "LOCKDC_TARGET_ARCH": "x86_64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "gnu"
+      }
+    },
+    {
+      "name": "e2e",
+      "inherits": "debug",
+      "cacheVariables": {
+        "LOCKDC_BUILD_E2E_TESTS": "ON"
+      }
+    },
+    {
+      "name": "x86_64-linux-gnu-release",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "LOCKDC_DIST_DIR": "${sourceDir}/dist",
+        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/x86_64-linux-gnu",
+        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/x86_64-linux-gnu",
+        "LOCKDC_TARGET_ARCH": "x86_64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "gnu"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "x86_64-linux-gnu-release"
+    },
+    {
+      "name": "x86_64-linux-musl-release",
+      "inherits": "x86_64-linux-gnu-release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-musl.cmake",
+      "cacheVariables": {
+        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/x86_64-linux-musl",
+        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/x86_64-linux-musl",
+        "LOCKDC_TARGET_ARCH": "x86_64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "musl"
+      }
+    },
+    {
+      "name": "aarch64-linux-gnu-release",
+      "inherits": "x86_64-linux-gnu-release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/aarch64-linux-gnu",
+        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/aarch64-linux-gnu",
+        "LOCKDC_TARGET_ARCH": "aarch64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "gnu"
+      }
+    },
+    {
+      "name": "aarch64-linux-musl-release",
+      "inherits": "x86_64-linux-gnu-release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-musl.cmake",
+      "cacheVariables": {
+        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/aarch64-linux-musl",
+        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/aarch64-linux-musl",
+        "LOCKDC_TARGET_ARCH": "aarch64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "musl"
+      }
+    },
+    {
+      "name": "armhf-linux-gnu-release",
+      "inherits": "x86_64-linux-gnu-release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/armhf-linux-gnu.cmake",
+      "cacheVariables": {
+        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/armhf-linux-gnu",
+        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/armhf-linux-gnu",
+        "LOCKDC_TARGET_ARCH": "armhf",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "gnu"
+      }
+    },
+    {
+      "name": "armhf-linux-musl-release",
+      "inherits": "x86_64-linux-gnu-release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/armhf-linux-musl.cmake",
+      "cacheVariables": {
+        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/armhf-linux-musl",
+        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/armhf-linux-musl",
+        "LOCKDC_TARGET_ARCH": "armhf",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "musl"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "debug",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS_DEBUG": "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+      }
+    },
+    {
+      "name": "coverage",
+      "inherits": "debug",
+      "cacheVariables": {
+        "LOCKDC_BUILD_EXAMPLES": "OFF",
+        "LOCKDC_BUILD_E2E_TESTS": "OFF",
+        "LOCKDC_BUILD_BENCHMARKS": "OFF",
+        "LOCKDC_ENABLE_COVERAGE": "ON"
+      }
+    },
+    {
+      "name": "fuzz",
+      "inherits": "debug",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_C_FLAGS_DEBUG": "-O1 -g -fno-omit-frame-pointer",
+        "LOCKDC_BUILD_EXAMPLES": "OFF",
+        "LOCKDC_BUILD_TESTS": "OFF",
+        "LOCKDC_BUILD_E2E_TESTS": "OFF",
+        "LOCKDC_BUILD_BENCHMARKS": "OFF",
+        "LOCKDC_BUILD_FUZZERS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "e2e",
+      "configurePreset": "e2e"
+    },
+    {
+      "name": "release",
+      "configurePreset": "x86_64-linux-gnu-release"
+    },
+    {
+      "name": "x86_64-linux-gnu-release",
+      "configurePreset": "x86_64-linux-gnu-release"
+    },
+    {
+      "name": "x86_64-linux-musl-release",
+      "configurePreset": "x86_64-linux-musl-release"
+    },
+    {
+      "name": "aarch64-linux-gnu-release",
+      "configurePreset": "aarch64-linux-gnu-release"
+    },
+    {
+      "name": "aarch64-linux-musl-release",
+      "configurePreset": "aarch64-linux-musl-release"
+    },
+    {
+      "name": "armhf-linux-gnu-release",
+      "configurePreset": "armhf-linux-gnu-release"
+    },
+    {
+      "name": "armhf-linux-musl-release",
+      "configurePreset": "armhf-linux-musl-release"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage"
+    },
+    {
+      "name": "coverage-report",
+      "configurePreset": "coverage",
+      "targets": [
+        "coverage-report"
+      ]
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "e2e",
+      "configurePreset": "e2e",
+      "filter": {
+        "include": {
+          "label": "e2e"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "x86_64-linux-gnu-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "x86_64-linux-gnu-release",
+      "configurePreset": "x86_64-linux-gnu-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "x86_64-linux-musl-release",
+      "configurePreset": "x86_64-linux-musl-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "aarch64-linux-gnu-release",
+      "configurePreset": "aarch64-linux-gnu-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "aarch64-linux-musl-release",
+      "configurePreset": "aarch64-linux-musl-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "armhf-linux-gnu-release",
+      "configurePreset": "armhf-linux-gnu-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "armhf-linux-musl-release",
+      "configurePreset": "armhf-linux-musl-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz",
+      "filter": {
+        "include": {
+          "label": "fuzz"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

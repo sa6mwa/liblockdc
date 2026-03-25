@@ -1,0 +1,1 @@
+{"message":{"namespace":"default","queue":"jobs","message_id":"msg-1","attempts":1,"max_attempts":3,"fcilure_attempts":0,"not_visible_until_unix":1,"visibility_timeout_seconds":30,"payload_content_type":"application/json","payload_bytes":4,"lease_expires_at_unix":4,"state_fencing_token":5,"state_txn_id":"state-txn-1"},"next_cursor":"cursor-1"}

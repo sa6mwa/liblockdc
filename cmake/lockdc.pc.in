@@ -1,0 +1,11 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: lockdc
+Description: lockd client library for C
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -llockdc
+Libs.private: -L${libdir} -lpslog -lcurl -lssl -lcrypto -lnghttp2 -lyajl_s -lpthread @CMAKE_DL_LIBS@
