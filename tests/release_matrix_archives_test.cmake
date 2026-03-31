@@ -44,17 +44,13 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
             "release preset ${lockdc_preset} resolved version ${LOCKDC_VERSION}, expected ${lockdc_release_version}")
     endif()
 
-    set(lockdc_runtime_archive "${lockdc_dist_dir}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
-    set(lockdc_dev_archive "${lockdc_dist_dir}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}-dev.tar.gz")
+    set(lockdc_release_archive "${lockdc_dist_dir}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
 
-    assert_archive_layout("${lockdc_runtime_archive}" runtime "${LOCKDC_VERSION}" "${LOCKDC_TARGET_ID}"
-        "${LOCKDC_SHARED_LIB_NAME}" "${LOCKDC_SHARED_SONAME}" "${LOCKDC_SHARED_LINK_NAME}")
-    assert_archive_layout("${lockdc_dev_archive}" dev "${LOCKDC_VERSION}" "${LOCKDC_TARGET_ID}"
+    assert_archive_layout("${lockdc_release_archive}" "${LOCKDC_VERSION}" "${LOCKDC_TARGET_ID}"
         "${LOCKDC_SHARED_LIB_NAME}" "${LOCKDC_SHARED_SONAME}" "${LOCKDC_SHARED_LINK_NAME}")
 
     list(APPEND lockdc_expected_archives
         "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz"
-        "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}-dev.tar.gz"
     )
 endforeach()
 

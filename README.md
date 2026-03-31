@@ -124,7 +124,7 @@ Additional development-environment notes are available in the repository at `dev
 
 ## Packaging and release archives
 
-The project ships one runtime archive and one `-dev` archive for each supported target.
+The project ships one combined archive for each supported target.
 
 Create the complete release set:
 
@@ -134,42 +134,30 @@ make release
 make verify-release-archives
 ```
 
-Create only the `x86_64-linux-gnu` packages:
+Create only the `x86_64-linux-gnu` package:
 
 ```bash
-make package-runtime
-make package-dev
+make package
 make package-checksums
 ```
 
 Package archive names follow this pattern:
 
-- runtime:
+- release archive:
   - `liblockdc-<version>-<target>.tar.gz`
-- development:
-  - `liblockdc-<version>-<target>-dev.tar.gz`
 - checksum manifest:
   - `liblockdc-<version>-CHECKSUMS`
 
-### Runtime archive contents
+### Release archive contents
 
-The runtime archive contains:
+The release archive contains:
 
 - `liblockdc` public headers
 - bundled dependency headers for `libpslog`, `curl`, `OpenSSL`, `nghttp2`, and `yajl`
 - `liblockdc.so*`
-- bundled shared runtime dependencies
-- project documentation and license files
-- bundled third-party license files
-
-### `-dev` archive contents
-
-The `-dev` archive contains:
-
-- the same public and third-party headers as the runtime archive
 - `liblockdc.a`
 - the static archives for the bundled third-party dependencies
-- the unversioned linker symlink for `liblockdc.so`
+- bundled shared runtime dependencies
 - `pkg-config` metadata
 - CMake package metadata
 - project documentation and license files

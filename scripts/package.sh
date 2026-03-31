@@ -38,12 +38,7 @@ run_target() {
     -DLOCKDC_BINARY_DIR="$build_dir" \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -P "$repo_root/cmake/package_runtime.cmake"
-  "$cmake_bin" \
-    -DLOCKDC_BINARY_DIR="$build_dir" \
-    -DLOCKDC_ROOT="$repo_root" \
-    -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -P "$repo_root/cmake/package_dev.cmake"
+    -P "$repo_root/cmake/package_archive.cmake"
 }
 
 run_cmake_script -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_clean_dist.cmake"

@@ -138,14 +138,11 @@ Dependency bootstrap is split from the low-level script workflow:
 
 ## Packaging
 
-Release packaging is split by ABI and by consumption model:
+Release packaging is split by ABI:
 
 - `liblockdc-<version>-<abi>.tar.gz`
-  - runtime bundle
-  - ships `liblockdc` headers, bundled dependency headers, `liblockdc.so*`, and the bundled shared runtime dependencies
-- `liblockdc-<version>-<abi>-dev.tar.gz`
-  - distro-style development bundle
-  - ships `liblockdc` headers, bundled dependency headers, `liblockdc.a`, bundled dependency static archives, the unversioned `liblockdc.so` linker name, and package metadata
+  - combined release bundle
+  - ships `liblockdc` headers, bundled dependency headers, `liblockdc.so*`, `liblockdc.a`, bundled third-party shared and static libraries, and package metadata
 
 Normal packaging flows:
 

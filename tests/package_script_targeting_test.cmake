@@ -85,11 +85,9 @@ endfunction()
 
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*cmake/package_clean_dist\\.cmake\\|" "clean-dist script invocation")
 assert_log_contains("build\\|aarch64-linux-musl-release\\|" "requested release preset")
-assert_log_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/aarch64-linux-musl-release\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-P\\|.*/cmake/package_runtime\\.cmake\\|" "requested runtime package script")
-assert_log_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/aarch64-linux-musl-release\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-P\\|.*/cmake/package_dev\\.cmake\\|" "requested dev package script")
+assert_log_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/aarch64-linux-musl-release\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-P\\|.*/cmake/package_archive\\.cmake\\|" "requested package script")
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-DLOCKDC_VERSION=1\\.2\\.3\\|-P\\|.*/cmake/package_checksums\\.cmake\\|" "checksums script invocation")
 
 assert_log_not_contains("build\\|x86_64-linux-gnu-release\\|" "x86_64-linux-gnu release preset build")
 assert_log_not_contains("cmake\\|--preset\\|release\\|" "generic release configure preset")
-assert_log_not_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|.*cmake/package_runtime\\.cmake\\|" "x86_64-linux-gnu runtime package script")
-assert_log_not_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|.*cmake/package_dev\\.cmake\\|" "x86_64-linux-gnu dev package script")
+assert_log_not_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|.*cmake/package_archive\\.cmake\\|" "x86_64-linux-gnu package script")

@@ -31,14 +31,14 @@ FUZZ_TIME ?= 30
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-e2e __test-all __test-asan __test-coverage \
 	__asan __coverage __fuzz __benchmarks \
-	__package-runtime __package-dev __package-checksums __clean-dist \
+	__package __package-checksums __clean-dist \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-e2e test-all test-asan test-coverage \
 	format \
 	asan coverage fuzz benchmarks \
-	package-runtime package-dev package-checksums verify-release-archives clean-dist \
+	package package-checksums verify-release-archives clean-dist \
 	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release clean
 
 help:
@@ -60,8 +60,7 @@ help:
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
-		'make package-runtime    Build the shipped x86_64-linux-gnu release preset and write the runtime archive to dist/.' \
-		'make package-dev        Build the shipped x86_64-linux-gnu release preset and write the development archive to dist/.' \
+		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive to dist/.' \
 		'make package-checksums  Refresh the dist/ checksum manifest.' \
 		'make verify-release-archives  Assert the complete shipped Linux release archive set and checksums.' \
 		'make clean-dist         Reset dist/ release artifacts.' \
@@ -215,17 +214,11 @@ benchmarks:
 __benchmarks: __build-x86_64-linux-gnu-release
 	./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench $(BENCH_ITERS) all
 
-package-runtime:
-	$(TIMED) package-runtime $(MAKE) __package-runtime
+package:
+	$(TIMED) package $(MAKE) __package
 
-__package-runtime: __build-x86_64-linux-gnu-release
-	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_runtime.cmake
-
-package-dev:
-	$(TIMED) package-dev $(MAKE) __package-dev
-
-__package-dev: __build-x86_64-linux-gnu-release
-	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_dev.cmake
+__package: __build-x86_64-linux-gnu-release
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_archive.cmake
 
 package-checksums:
 	$(TIMED) package-checksums $(MAKE) __package-checksums

@@ -1,4 +1,4 @@
-set(package_root "${LOCKDC_BINARY_DIR}/package/runtime")
+set(package_root "${LOCKDC_BINARY_DIR}/package/archive")
 if(DEFINED LOCKDC_DIST_DIR AND NOT "${LOCKDC_DIST_DIR}" STREQUAL "")
     set(lockdc_input_dist_dir "${LOCKDC_DIST_DIR}")
 endif()
@@ -68,13 +68,15 @@ function(lockdc_copy_required_license package_name destination_dir)
 
     list(JOIN candidates "\n  " candidate_list)
     message(FATAL_ERROR
-        "missing required ${package_name} runtime license; looked in:\n  ${candidate_list}")
+        "missing required ${package_name} package license; looked in:\n  ${candidate_list}")
 endfunction()
 
 file(REMOVE_RECURSE "${package_root}")
 file(MAKE_DIRECTORY "${package_root}/include/lc")
 file(MAKE_DIRECTORY "${package_root}/include")
 file(MAKE_DIRECTORY "${package_root}/lib")
+file(MAKE_DIRECTORY "${package_root}/lib/pkgconfig")
+file(MAKE_DIRECTORY "${package_root}/lib/cmake/lockdc")
 file(MAKE_DIRECTORY "${package_root}/share/doc/liblockdc")
 
 file(COPY "${LOCKDC_PUBLIC_HEADER}" DESTINATION "${package_root}/include/lc")
@@ -85,13 +87,30 @@ lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl-static/install/inc
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/include/openssl" "${package_root}/include")
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/include/nghttp2" "${package_root}/include")
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/yajl-static/install/include/yajl" "${package_root}/include")
+
+file(COPY "${LOCKDC_STATIC_LIB}" DESTINATION "${package_root}/lib")
 file(COPY "${LOCKDC_SHARED_LIB}" DESTINATION "${package_root}/lib")
+file(COPY "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/lib/libpslog.a" DESTINATION "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl-static/install/lib/libcurl.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libssl.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libcrypto.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/lib/libnghttp2.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/yajl-static/install/lib/libyajl_s.a" "${package_root}/lib")
+
 if(DEFINED LOCKDC_SHARED_SONAME
    AND DEFINED LOCKDC_SHARED_LIB_NAME
    AND NOT LOCKDC_SHARED_SONAME STREQUAL ""
    AND NOT LOCKDC_SHARED_SONAME STREQUAL LOCKDC_SHARED_LIB_NAME)
     file(CREATE_LINK "${LOCKDC_SHARED_LIB_NAME}"
          "${package_root}/lib/${LOCKDC_SHARED_SONAME}"
+         SYMBOLIC)
+endif()
+if(DEFINED LOCKDC_SHARED_LINK_NAME
+   AND NOT LOCKDC_SHARED_LINK_NAME STREQUAL ""
+   AND DEFINED LOCKDC_SHARED_SONAME
+   AND NOT LOCKDC_SHARED_SONAME STREQUAL "")
+    file(CREATE_LINK "${LOCKDC_SHARED_SONAME}"
+         "${package_root}/lib/${LOCKDC_SHARED_LINK_NAME}"
          SYMBOLIC)
 endif()
 
@@ -102,6 +121,9 @@ lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libc
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/nghttp2-shared/install/lib/libnghttp2.so*" "${package_root}/lib")
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/yajl-shared/install/lib/libyajl.so*" "${package_root}/lib")
 
+file(COPY "${LOCKDC_PUBLIC_PKGCONFIG}" DESTINATION "${package_root}/lib/pkgconfig")
+file(COPY "${LOCKDC_PUBLIC_CMAKE_CONFIG}" DESTINATION "${package_root}/lib/cmake/lockdc")
+file(COPY "${LOCKDC_PUBLIC_CMAKE_CONFIG_VERSION}" DESTINATION "${package_root}/lib/cmake/lockdc")
 lockdc_copy_if_exists("${LOCKDC_ROOT}/LICENSE" "${package_root}/share/doc/liblockdc")
 lockdc_copy_if_exists("${LOCKDC_ROOT}/README.md" "${package_root}/share/doc/liblockdc")
 
@@ -110,30 +132,40 @@ lockdc_copy_required_license(
     "${package_root}/share/doc/liblockdc/third_party/libpslog"
     "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/share/doc/libpslog/LICENSE"
     "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/share/doc/liblockdc-third-party/libpslog/LICENSE.txt"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/share/doc/libpslog/LICENSE"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/share/doc/liblockdc-third-party/libpslog/LICENSE.txt"
 )
 lockdc_copy_required_license(
     "openssl"
     "${package_root}/share/doc/liblockdc/third_party/openssl"
     "${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt"
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/openssl-shared/src/LICENSE.txt"
+    "${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt"
+    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/openssl-static/src/LICENSE.txt"
 )
 lockdc_copy_required_license(
     "curl"
     "${package_root}/share/doc/liblockdc/third_party/curl"
     "${LOCKDC_EXTERNAL_ROOT}/curl-shared-cmake/install/share/doc/liblockdc-third-party/curl/LICENSE.txt"
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl-shared-cmake/src/COPYING"
+    "${LOCKDC_EXTERNAL_ROOT}/curl-static/install/share/doc/liblockdc-third-party/curl/LICENSE.txt"
+    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl-static/src/COPYING"
 )
 lockdc_copy_required_license(
     "nghttp2"
     "${package_root}/share/doc/liblockdc/third_party/nghttp2"
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2-shared/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt"
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2-shared/src/COPYING"
+    "${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt"
+    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2-static/src/COPYING"
 )
 lockdc_copy_required_license(
     "yajl"
     "${package_root}/share/doc/liblockdc/third_party/yajl"
     "${LOCKDC_EXTERNAL_ROOT}/yajl-shared/install/share/doc/liblockdc-third-party/yajl/LICENSE.txt"
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/yajl-shared/src/COPYING"
+    "${LOCKDC_EXTERNAL_ROOT}/yajl-static/install/share/doc/liblockdc-third-party/yajl/LICENSE.txt"
+    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/yajl-static/src/COPYING"
 )
 
 file(MAKE_DIRECTORY "${LOCKDC_DIST_DIR}")
@@ -142,10 +174,10 @@ set(archive "${archive_base}.gz")
 find_program(LOCKDC_TAR_BIN NAMES tar)
 find_program(LOCKDC_GZIP_BIN NAMES gzip)
 if(NOT LOCKDC_TAR_BIN)
-    message(FATAL_ERROR "failed to find tar for runtime archive creation")
+    message(FATAL_ERROR "failed to find tar for archive creation")
 endif()
 if(NOT LOCKDC_GZIP_BIN)
-    message(FATAL_ERROR "failed to find gzip for runtime archive creation")
+    message(FATAL_ERROR "failed to find gzip for archive creation")
 endif()
 file(REMOVE "${archive_base}" "${archive}")
 execute_process(
@@ -154,7 +186,7 @@ execute_process(
     RESULT_VARIABLE tar_result
 )
 if(NOT tar_result EQUAL 0)
-    message(FATAL_ERROR "failed to create runtime tar archive")
+    message(FATAL_ERROR "failed to create package archive")
 endif()
 file(REMOVE "${archive}")
 execute_process(
@@ -162,5 +194,5 @@ execute_process(
     RESULT_VARIABLE gzip_result
 )
 if(NOT gzip_result EQUAL 0)
-    message(FATAL_ERROR "failed to gzip runtime archive")
+    message(FATAL_ERROR "failed to gzip package archive")
 endif()

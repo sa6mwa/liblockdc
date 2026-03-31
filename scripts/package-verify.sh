@@ -10,7 +10,7 @@ run_verify() {
   preset="$1"
 
   "$script_dir/build.sh" "$preset"
-  ctest --preset "$preset" -R '^(package_archives_test|version_resolution_test|c_only_configure_test)$'
+  ctest --preset "$preset" -R '^(package_archives_test|runtime_license_fallback_test|version_resolution_test|c_only_configure_test)$'
 }
 
 "$script_dir/package.sh" "$requested_abi"
