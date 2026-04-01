@@ -13,6 +13,30 @@
 
 #include "lc/lc.h"
 
+typedef struct e2e_status_doc {
+  char *status;
+} e2e_status_doc;
+
+static const lonejson_field e2e_status_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(e2e_status_doc, status, "status")};
+
+LONEJSON_MAP_DEFINE(e2e_status_map, e2e_status_doc, e2e_status_fields);
+
+static void assert_lc_ok(int rc, lc_error *error);
+
+static void save_json_text_or_die(lc_lease *lease, const char *json_text,
+                                  lc_error *error) {
+  lc_json *json;
+  int rc;
+
+  json = NULL;
+  rc = lc_json_from_string(json_text, &json, error);
+  assert_lc_ok(rc, error);
+  rc = lease->update(lease, json, NULL, error);
+  lc_json_close(json);
+  assert_lc_ok(rc, error);
+}
+
 static const char *env_or_default(const char *name, const char *fallback) {
   const char *value;
 
@@ -176,8 +200,7 @@ static void test_disk_lease_state_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(lease);
 
-  rc = lease->save(lease, json_text, &error);
-  assert_lc_ok(rc, &error);
+  save_json_text_or_die(lease, json_text, &error);
   assert_true(lease->version >= 1L);
   assert_non_null(lease->state_etag);
 
@@ -265,8 +288,7 @@ static void test_s3_attachment_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(lease);
 
-  rc = lease->save(lease, "{\"kind\":\"attachment\"}", &error);
-  assert_lc_ok(rc, &error);
+  save_json_text_or_die(lease, "{\"kind\":\"attachment\"}", &error);
 
   rc = lc_source_from_memory(payload, sizeof(payload), &src, &error);
   assert_lc_ok(rc, &error);
@@ -537,8 +559,7 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(lease);
 
-  rc = lease->save(lease, "{\"kind\":\"e2e-local\"}", &error);
-  assert_lc_ok(rc, &error);
+  save_json_text_or_die(lease, "{\"kind\":\"e2e-local\"}", &error);
 
   mutations[0] = "/filename=\"blob.txt\"";
   snprintf(mutation_buffer, sizeof(mutation_buffer), "textfile:/blob=%s",
@@ -659,8 +680,7 @@ static int e2e_consumer_record_payload(e2e_consumer_context *consumer_context,
 
 static int e2e_consumer_persist_state(e2e_consumer_context *consumer_context,
                                       lc_lease *state, lc_error *error) {
-  char *json_text;
-  size_t json_length;
+  e2e_status_doc doc;
   lc_get_res get_res;
   int rc;
 
@@ -668,14 +688,15 @@ static int e2e_consumer_persist_state(e2e_consumer_context *consumer_context,
     return LC_OK;
   }
 
-  json_text = NULL;
-  json_length = 0U;
+  memset(&doc, 0, sizeof(doc));
   memset(&get_res, 0, sizeof(get_res));
-  rc = state->save(state, "{\"status\":\"from-consumer-service\"}", error);
+  doc.status = "from-consumer-service";
+  rc = state->save(state, &e2e_status_map, &doc, NULL, error);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = state->load(state, &json_text, &json_length, NULL, &get_res, error);
+  memset(&doc, 0, sizeof(doc));
+  rc = state->load(state, &e2e_status_map, &doc, NULL, NULL, &get_res, error);
   if (rc != LC_OK) {
     lc_get_res_cleanup(&get_res);
     return rc;
@@ -684,10 +705,10 @@ static int e2e_consumer_persist_state(e2e_consumer_context *consumer_context,
   pthread_mutex_lock(&consumer_context->mutex);
   consumer_context->saw_state = 1;
   memset(consumer_context->state_json, 0, sizeof(consumer_context->state_json));
-  if (json_length >= sizeof(consumer_context->state_json)) {
-    json_length = sizeof(consumer_context->state_json) - 1U;
+  if (doc.status != NULL) {
+    strncpy(consumer_context->state_json, doc.status,
+            sizeof(consumer_context->state_json) - 1U);
   }
-  memcpy(consumer_context->state_json, json_text, json_length);
   memset(consumer_context->state_key, 0, sizeof(consumer_context->state_key));
   if (state->key != NULL) {
     strncpy(consumer_context->state_key, state->key,
@@ -695,7 +716,7 @@ static int e2e_consumer_persist_state(e2e_consumer_context *consumer_context,
   }
   pthread_mutex_unlock(&consumer_context->mutex);
 
-  free(json_text);
+  lonejson_cleanup(&e2e_status_map, &doc);
   lc_get_res_cleanup(&get_res);
   return LC_OK;
 }
@@ -1019,8 +1040,6 @@ static void test_mem_uds_dequeue_with_state_roundtrip(void **state) {
   lc_enqueue_res enqueue_res;
   lc_dequeue_req dequeue_req;
   lc_get_res get_res;
-  char *json_text;
-  size_t json_length;
   char queue_name[96];
   char expected_state_key[160];
   static const unsigned char payload[] = {'s', 't', 'a', 't', 'e',
@@ -1036,8 +1055,6 @@ static void test_mem_uds_dequeue_with_state_roundtrip(void **state) {
   src = NULL;
   message = NULL;
   state_lease = NULL;
-  json_text = NULL;
-  json_length = 0U;
   lc_error_init(&error);
   lc_enqueue_req_init(&enqueue_req);
   memset(&enqueue_res, 0, sizeof(enqueue_res));
@@ -1071,19 +1088,30 @@ static void test_mem_uds_dequeue_with_state_roundtrip(void **state) {
            queue_name, message->message_id);
   assert_string_equal(state_lease->key, expected_state_key);
 
-  rc = state_lease->save(state_lease, "{\"status\":\"from-direct-state\"}",
-                         &error);
+  {
+    e2e_status_doc doc;
+
+    doc.status = "from-direct-state";
+    rc = state_lease->save(state_lease, &e2e_status_map, &doc, NULL, &error);
+  }
   assert_lc_ok(rc, &error);
-  rc = state_lease->load(state_lease, &json_text, &json_length, NULL, &get_res,
-                         &error);
+  {
+    e2e_status_doc doc;
+
+    memset(&doc, 0, sizeof(doc));
+    rc = state_lease->load(state_lease, &e2e_status_map, &doc, NULL, NULL,
+                           &get_res, &error);
+    assert_lc_ok(rc, &error);
+    assert_non_null(doc.status);
+    assert_string_equal(doc.status, "from-direct-state");
+    lonejson_cleanup(&e2e_status_map, &doc);
+  }
   assert_lc_ok(rc, &error);
-  assert_non_null(strstr(json_text, "from-direct-state"));
 
   rc = message->ack(message, &error);
   assert_lc_ok(rc, &error);
   message = NULL;
 
-  free(json_text);
   lc_get_res_cleanup(&get_res);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_source_close(src);

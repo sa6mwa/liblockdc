@@ -28,6 +28,15 @@
 #include "lc/lc.h"
 #include "lc_engine_api.h"
 
+typedef struct test_value_doc {
+  lonejson_int64 value;
+} test_value_doc;
+
+static const lonejson_field test_value_fields[] = {
+    LONEJSON_FIELD_I64(test_value_doc, value, "value")};
+
+LONEJSON_MAP_DEFINE(test_value_map, test_value_doc, test_value_fields);
+
 typedef struct test_request_capture {
   char *data;
   size_t length;
@@ -2336,8 +2345,7 @@ test_public_bound_lease_methods_cover_state_and_attachments(void **state) {
   lc_error error;
   lc_get_opts get_opts;
   lc_get_res get_res;
-  char *json_text;
-  size_t json_length;
+  test_value_doc value_doc;
   lc_json *json;
   lc_update_opts update_opts;
   const char *mutations[2];
@@ -2361,8 +2369,7 @@ test_public_bound_lease_methods_cover_state_and_attachments(void **state) {
   (void)state;
   client = NULL;
   lease = NULL;
-  json_text = NULL;
-  json_length = 0U;
+  memset(&value_doc, 0, sizeof(value_doc));
   json = NULL;
   src = NULL;
   sink = NULL;
@@ -2408,14 +2415,12 @@ test_public_bound_lease_methods_cover_state_and_attachments(void **state) {
   assert_int_equal(lease->version, 4L);
 
   get_opts.public_read = 1;
-  rc = lc_lease_load(lease, &json_text, &json_length, &get_opts, &get_res,
-                     &error);
+  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
+                     &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_non_null(json_text);
-  assert_int_equal(json_length, strlen("{\"value\":1}"));
-  assert_string_equal(json_text, "{\"value\":1}");
+  assert_int_equal(value_doc.value, 1);
   assert_string_equal(get_res.etag, "etag-1");
-  free(json_text);
+  lonejson_cleanup(&test_value_map, &value_doc);
   lc_get_res_cleanup(&get_res);
 
   rc = lc_json_from_string("{\"value\":2}", &json, &error);

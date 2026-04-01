@@ -244,23 +244,25 @@ int lc_client_get_method(lc_client *self, const char *key,
 }
 
 int lc_client_load_method(lc_client *self, const char *key,
-                          const lc_get_opts *opts, char **json_text,
-                          size_t *json_length, lc_get_res *out,
+                          const lonejson_map *map, void *dst,
+                          const lonejson_parse_options *parse_options,
+                          const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error) {
   lc_client_handle *client;
   lc_engine_get_request legacy_req;
-  lc_engine_get_response legacy_res;
+  lc_engine_get_stream_response legacy_res;
   lc_engine_error legacy_error;
+  FILE *fp;
   int rc;
 
-  if (self == NULL || key == NULL || json_text == NULL || json_length == NULL ||
-      out == NULL) {
+  if (self == NULL || key == NULL || map == NULL || dst == NULL || out == NULL) {
     return lc_error_set(
         error, LC_ERR_INVALID, 0L,
-        "load requires self, key, json_text, json_length, and out", NULL, NULL,
+        "load requires self, key, map, destination, and out", NULL, NULL,
         NULL);
   }
   client = (lc_client_handle *)self;
+  fp = NULL;
   {
     pslog_field fields[2];
 
@@ -272,10 +274,17 @@ int lc_client_load_method(lc_client *self, const char *key,
   memset(&legacy_req, 0, sizeof(legacy_req));
   memset(&legacy_res, 0, sizeof(legacy_res));
   lc_engine_error_init(&legacy_error);
+  fp = tmpfile();
+  if (fp == NULL) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open temporary file for mapped load", NULL,
+                        NULL, NULL);
+  }
   legacy_req.key = key;
   legacy_req.public_read = opts != NULL ? opts->public_read : 0;
-  rc = lc_engine_client_get(client->legacy, &legacy_req, &legacy_res,
-                            &legacy_error);
+  rc = lc_engine_client_get_into(client->legacy, &legacy_req,
+                                 lc_engine_file_write_callback, fp,
+                                 &legacy_res, &legacy_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_legacy(error, &legacy_error);
     {
@@ -293,11 +302,10 @@ int lc_client_load_method(lc_client *self, const char *key,
               : "client.get.error",
           fields, 2U, error);
     }
+    fclose(fp);
     lc_engine_error_cleanup(&legacy_error);
     return rc;
   }
-  *json_text = lc_dup_bytes_as_text(legacy_res.body, legacy_res.body_length);
-  *json_length = legacy_res.body_length;
   out->no_content = legacy_res.no_content;
   out->content_type = lc_strdup_local(legacy_res.content_type);
   out->etag = lc_strdup_local(legacy_res.etag);
@@ -316,7 +324,26 @@ int lc_client_load_method(lc_client *self, const char *key,
     fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
     lc_log_trace(client->logger, "client.get.success", fields, 5U);
   }
-  lc_engine_get_response_cleanup(&legacy_res);
+  if (!legacy_res.no_content) {
+    if (fseek(fp, 0L, SEEK_SET) != 0) {
+      fclose(fp);
+      lc_engine_get_stream_response_cleanup(&legacy_res);
+      lc_engine_error_cleanup(&legacy_error);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to rewind mapped load temporary file", NULL,
+                          NULL, NULL);
+    }
+    rc = lc_lonejson_parse_file(fp, map, dst, parse_options, error,
+                                "failed to parse mapped state");
+    if (rc != LC_OK) {
+      fclose(fp);
+      lc_engine_get_stream_response_cleanup(&legacy_res);
+      lc_engine_error_cleanup(&legacy_error);
+      return rc;
+    }
+  }
+  fclose(fp);
+  lc_engine_get_stream_response_cleanup(&legacy_res);
   lc_engine_error_cleanup(&legacy_error);
   return LC_OK;
 }

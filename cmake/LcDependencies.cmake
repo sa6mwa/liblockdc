@@ -355,67 +355,80 @@ function(lc_add_curl variant shared_flag)
   endif()
 endfunction()
 
-function(lc_add_yajl variant shared_flag)
-  set(project_name "lc_yajl_${variant}_project")
-  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/yajl-${variant}")
+function(lc_get_lonejson_asset_info out_name out_hash)
+  set(asset_name "liblonejson-${LOCKDC_LONEJSON_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
+
+  if(asset_name STREQUAL "liblonejson-0.2.0-x86_64-linux-gnu.tar.gz")
+    set(asset_hash "5149cdbab1f9f4cb275b577d7637001fa42163d79546345715648fd068db7b82")
+  elseif(asset_name STREQUAL "liblonejson-0.2.0-x86_64-linux-musl.tar.gz")
+    set(asset_hash "632686ac516fd284dedd86a42dca8b4ecfca4b503889bf633175e3de5f02100c")
+  elseif(asset_name STREQUAL "liblonejson-0.2.0-aarch64-linux-gnu.tar.gz")
+    set(asset_hash "898fe239ace768766bbd868955c9607cb11a5173b0c4d33a1bf0f873dbe5fb21")
+  elseif(asset_name STREQUAL "liblonejson-0.2.0-aarch64-linux-musl.tar.gz")
+    set(asset_hash "0519c261ab25d12c0d23eeb8cf3e75d37a6144f8d5481169024ee5a7f6ce42f0")
+  elseif(asset_name STREQUAL "liblonejson-0.2.0-armhf-linux-gnu.tar.gz")
+    set(asset_hash "8d0342af2ef32ba9971de286b18c39de29d732678706125c55b02a486eac0990")
+  elseif(asset_name STREQUAL "liblonejson-0.2.0-armhf-linux-musl.tar.gz")
+    set(asset_hash "033ac6e3dcdc996d1189e773a653e8d77a43155d5fcd661bc8fbcbbeba2a5bf9")
+  else()
+    message(FATAL_ERROR "Unsupported liblonejson asset: ${asset_name}")
+  endif()
+
+  set(${out_name} "${asset_name}" PARENT_SCOPE)
+  set(${out_hash} "${asset_hash}" PARENT_SCOPE)
+endfunction()
+
+function(lc_add_lonejson variant shared_flag)
+  set(project_name "lc_lonejson_${variant}_project")
+  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/lonejson-${variant}")
   set(source_dir "${prefix_dir}/src")
-  set(build_dir "${prefix_dir}/build")
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/yajl-${variant}/install")
+  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/lonejson-${variant}/install")
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
+  lc_get_lonejson_asset_info(asset_name asset_hash)
+
   if(shared_flag)
-    set(build_shared ON)
-    set(build_static OFF)
     set(lib_type SHARED)
-    set(imported_location "${install_dir}/lib/libyajl${CMAKE_SHARED_LIBRARY_SUFFIX}.${LOCKDC_YAJL_VERSION}")
+    set(imported_location "${install_dir}/lib/liblonejson${CMAKE_SHARED_LIBRARY_SUFFIX}.0")
   else()
-    set(build_shared OFF)
-    set(build_static ON)
     set(lib_type STATIC)
-    set(imported_location "${install_dir}/lib/libyajl_s${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(imported_location "${install_dir}/lib/liblonejson${CMAKE_STATIC_LIBRARY_SUFFIX}")
   endif()
-  lc_append_common_external_cmake_args(common_cmake_args)
 
   if(LOCKDC_BUILD_DEPENDENCIES)
     ExternalProject_Add(${project_name}
-      URL "https://github.com/lloyd/yajl/archive/refs/tags/${LOCKDC_YAJL_VERSION}.tar.gz"
-      URL_HASH "SHA256=3fb73364a5a30efe615046d07e6db9d09fd2b41c763c5f7d3bfb121cd5c5ac5a"
-      DOWNLOAD_NAME "yajl-${LOCKDC_YAJL_VERSION}-${variant}.tar.gz"
+      URL "https://github.com/sa6mwa/lonejson/releases/download/v${LOCKDC_LONEJSON_VERSION}/${asset_name}"
+      URL_HASH "SHA256=${asset_hash}"
+      DOWNLOAD_NAME "${asset_name}"
       PREFIX "${prefix_dir}"
       DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
       SOURCE_DIR "${source_dir}"
-      BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
-      CMAKE_ARGS
-        -DCMAKE_INSTALL_PREFIX=${install_dir}
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-        -DBUILD_SHARED_LIBS=${build_shared}
-        -DBUILD_TESTING=OFF
-        -DYAJL_BUILD_TESTS=OFF
-        -DYAJL_BUILD_SHARED=${build_shared}
-        -DYAJL_BUILD_STATIC=${build_static}
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-        ${common_cmake_args}
-      BUILD_COMMAND ${CMAKE_COMMAND} --build .
-      INSTALL_COMMAND ${CMAKE_COMMAND} --install .
+      CONFIGURE_COMMAND ""
+      BUILD_COMMAND ""
+      INSTALL_COMMAND
+        ${CMAKE_COMMAND} -E rm -rf "${install_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${source_dir}" "${install_dir}"
+      BUILD_IN_SOURCE 1
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
   endif()
 
-  add_library(lc::yajl_${variant} ${lib_type} IMPORTED GLOBAL)
-  set_target_properties(lc::yajl_${variant}
+  add_library(lc::lonejson_${variant} ${lib_type} IMPORTED GLOBAL)
+  set_target_properties(lc::lonejson_${variant}
     PROPERTIES
       IMPORTED_LOCATION "${imported_location}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::yajl_${variant} ${project_name})
+    add_dependencies(lc::lonejson_${variant} ${project_name})
     lc_record_dependency_target(${project_name})
   else()
-    lc_require_dependency_file("${imported_location}" "YAJL (${variant})")
+    lc_require_dependency_file("${imported_location}" "lonejson (${variant})")
+    lc_require_dependency_file("${install_dir}/include/lonejson.h" "lonejson header (${variant})")
   endif()
 endfunction()
 
@@ -552,7 +565,7 @@ function(lc_configure_dependencies)
     lc_add_pslog(static FALSE)
     lc_add_openssl(static FALSE)
     lc_add_nghttp2(static FALSE)
-    lc_add_yajl(static FALSE)
+    lc_add_lonejson(static FALSE)
     lc_add_curl(static FALSE)
   endif()
 
@@ -560,7 +573,7 @@ function(lc_configure_dependencies)
     lc_add_pslog(shared TRUE)
     lc_add_openssl(shared TRUE)
     lc_add_nghttp2(shared TRUE)
-    lc_add_yajl(shared TRUE)
+    lc_add_lonejson(shared TRUE)
     lc_add_curl(shared TRUE)
   endif()
 

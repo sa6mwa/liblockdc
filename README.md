@@ -153,7 +153,7 @@ Package archive names follow this pattern:
 The release archive contains:
 
 - `liblockdc` public headers
-- bundled dependency headers for `libpslog`, `curl`, `OpenSSL`, `nghttp2`, and `yajl`
+- bundled dependency headers for `libpslog`, `curl`, `OpenSSL`, `nghttp2`, and `lonejson`
 - `liblockdc.so*`
 - `liblockdc.a`
 - the static archives for the bundled third-party dependencies

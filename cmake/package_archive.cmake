@@ -86,7 +86,7 @@ lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/include/pslo
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl-static/install/include/curl" "${package_root}/include")
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/include/openssl" "${package_root}/include")
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/include/nghttp2" "${package_root}/include")
-lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/yajl-static/install/include/yajl" "${package_root}/include")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/include/lonejson.h" "${package_root}/include")
 
 file(COPY "${LOCKDC_STATIC_LIB}" DESTINATION "${package_root}/lib")
 file(COPY "${LOCKDC_SHARED_LIB}" DESTINATION "${package_root}/lib")
@@ -95,7 +95,7 @@ lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl-static/install/lib/libcurl.a
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libssl.a" "${package_root}/lib")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libcrypto.a" "${package_root}/lib")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/lib/libnghttp2.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/yajl-static/install/lib/libyajl_s.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/lib/liblonejson.a" "${package_root}/lib")
 
 if(DEFINED LOCKDC_SHARED_SONAME
    AND DEFINED LOCKDC_SHARED_LIB_NAME
@@ -119,7 +119,7 @@ lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpsl
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libssl.so*" "${package_root}/lib")
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libcrypto.so*" "${package_root}/lib")
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/nghttp2-shared/install/lib/libnghttp2.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/yajl-shared/install/lib/libyajl.so*" "${package_root}/lib")
+lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/lib/liblonejson.so*" "${package_root}/lib")
 
 file(COPY "${LOCKDC_PUBLIC_PKGCONFIG}" DESTINATION "${package_root}/lib/pkgconfig")
 file(COPY "${LOCKDC_PUBLIC_CMAKE_CONFIG}" DESTINATION "${package_root}/lib/cmake/lockdc")
@@ -160,12 +160,12 @@ lockdc_copy_required_license(
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2-static/src/COPYING"
 )
 lockdc_copy_required_license(
-    "yajl"
-    "${package_root}/share/doc/liblockdc/third_party/yajl"
-    "${LOCKDC_EXTERNAL_ROOT}/yajl-shared/install/share/doc/liblockdc-third-party/yajl/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/yajl-shared/src/COPYING"
-    "${LOCKDC_EXTERNAL_ROOT}/yajl-static/install/share/doc/liblockdc-third-party/yajl/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/yajl-static/src/COPYING"
+    "lonejson"
+    "${package_root}/share/doc/liblockdc/third_party/lonejson"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/share/doc/liblonejson/LICENSE"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/share/doc/liblockdc-third-party/lonejson/LICENSE.txt"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/share/doc/liblonejson/LICENSE"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/share/doc/liblockdc-third-party/lonejson/LICENSE.txt"
 )
 
 file(MAKE_DIRECTORY "${LOCKDC_DIST_DIR}")

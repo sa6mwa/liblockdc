@@ -37,7 +37,7 @@ option(LOCKDC_INSTALL "Enable install rules." ON)
 set(LOCKDC_OPENSSL_VERSION "3.6.1" CACHE STRING "Pinned OpenSSL release used for CMake-managed dependency builds.")
 set(LOCKDC_CURL_VERSION "8.18.0" CACHE STRING "Pinned curl release used for CMake-managed dependency builds.")
 set(LOCKDC_NGHTTP2_VERSION "1.68.0" CACHE STRING "Pinned nghttp2 release used to enable libcurl HTTP/2 support.")
-set(LOCKDC_YAJL_VERSION "2.1.0" CACHE STRING "Pinned YAJL release used for streaming JSON generation/parsing helpers.")
+set(LOCKDC_LONEJSON_VERSION "0.2.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers.")
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.3.1" CACHE STRING "Pinned libpslog release used for SDK logging.")
 set(LOCKDC_EXTERNAL_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps/host-debug" CACHE PATH "Stable install root for downloaded third-party dependencies.")
@@ -248,6 +248,7 @@ set(lc_sources
     src/lc_core.c
     src/lc_intcompat.c
     src/lc_lease_api.c
+    src/lc_lonejson.c
     src/lc_local_mutate_api.c
     src/lc_management_api.c
     src/lc_message_api.c
@@ -262,13 +263,25 @@ set(lc_sources
 
 set(LOCKDC_PSLOG_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/include")
 set(LOCKDC_PSLOG_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/include")
+set(LOCKDC_LONEJSON_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/include")
+set(LOCKDC_LONEJSON_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/include")
 set(LOCKDC_PSLOG_INCLUDE_DIR "")
+set(LOCKDC_LONEJSON_INCLUDE_DIR "")
 foreach(lockdc_pslog_include_candidate
     "${LOCKDC_PSLOG_STATIC_INCLUDE_DIR}"
     "${LOCKDC_PSLOG_SHARED_INCLUDE_DIR}"
 )
     if(EXISTS "${lockdc_pslog_include_candidate}/pslog.h")
         set(LOCKDC_PSLOG_INCLUDE_DIR "${lockdc_pslog_include_candidate}")
+        break()
+    endif()
+endforeach()
+foreach(lockdc_lonejson_include_candidate
+    "${LOCKDC_LONEJSON_STATIC_INCLUDE_DIR}"
+    "${LOCKDC_LONEJSON_SHARED_INCLUDE_DIR}"
+)
+    if(EXISTS "${lockdc_lonejson_include_candidate}/lonejson.h")
+        set(LOCKDC_LONEJSON_INCLUDE_DIR "${lockdc_lonejson_include_candidate}")
         break()
     endif()
 endforeach()
@@ -279,6 +292,13 @@ if(LOCKDC_PSLOG_INCLUDE_DIR STREQUAL "")
         set(LOCKDC_PSLOG_INCLUDE_DIR "${LOCKDC_PSLOG_STATIC_INCLUDE_DIR}")
     endif()
 endif()
+if(LOCKDC_LONEJSON_INCLUDE_DIR STREQUAL "")
+    if(LOCKDC_BUILD_SHARED AND NOT LOCKDC_BUILD_STATIC)
+        set(LOCKDC_LONEJSON_INCLUDE_DIR "${LOCKDC_LONEJSON_SHARED_INCLUDE_DIR}")
+    else()
+        set(LOCKDC_LONEJSON_INCLUDE_DIR "${LOCKDC_LONEJSON_STATIC_INCLUDE_DIR}")
+    endif()
+endif()
 
 function(lc_configure_library_target target)
     target_sources(${target} PRIVATE ${lc_sources})
@@ -287,6 +307,7 @@ function(lc_configure_library_target target)
             $<BUILD_INTERFACE:${lc_generated_include_dir}>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<BUILD_INTERFACE:${LOCKDC_PSLOG_INCLUDE_DIR}>
+            $<BUILD_INTERFACE:${LOCKDC_LONEJSON_INCLUDE_DIR}>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -308,7 +329,7 @@ if(LOCKDC_BUILD_STATIC)
         lc::openssl_crypto_static
         lc::nghttp2_static
         lc::pslog_static
-        lc::yajl_static
+        lc::lonejson_static
     )
     set_target_properties(lc_static PROPERTIES
         OUTPUT_NAME lockdc
@@ -326,7 +347,7 @@ if(LOCKDC_BUILD_SHARED)
         lc::openssl_crypto_shared
         lc::nghttp2_shared
         lc::pslog_shared
-        lc::yajl_shared
+        lc::lonejson_shared
     )
     set_target_properties(lc_shared PROPERTIES
         OUTPUT_NAME lockdc
@@ -346,7 +367,7 @@ if(LOCKDC_BUILD_TESTS)
         lc::openssl_crypto_static
         lc::nghttp2_static
         lc::pslog_static
-        lc::yajl_static
+        lc::lonejson_static
     )
     set_target_properties(lc_test_static PROPERTIES
         OUTPUT_NAME lockdc_test

@@ -27,12 +27,12 @@ file(MAKE_DIRECTORY
     "${external_root}/pslog-shared/install/lib"
     "${external_root}/openssl-shared/install/lib"
     "${external_root}/nghttp2-shared/install/lib"
-    "${external_root}/yajl-shared/install/lib"
+    "${external_root}/lonejson-shared/install/lib"
     "${external_root}/curl-shared-cmake/install/share/doc/liblockdc-third-party/curl"
     "${external_root}/pslog-shared/install/share/doc/libpslog"
     "${external_root}/openssl-shared/install/share/doc/liblockdc-third-party/openssl"
     "${external_root}/nghttp2-shared/install/share/doc/liblockdc-third-party/nghttp2"
-    "${external_root}/yajl-shared/install/share/doc/liblockdc-third-party/yajl"
+    "${external_root}/lonejson-shared/install/share/doc/liblonejson"
 )
 
 file(WRITE "${fake_repo_root}/LICENSE" "liblockdc test license\n")
@@ -53,13 +53,13 @@ file(WRITE "${external_root}/pslog-shared/install/lib/libpslog.so.0" "pslog shar
 file(WRITE "${external_root}/openssl-shared/install/lib/libssl.so.3" "openssl ssl shared\n")
 file(WRITE "${external_root}/openssl-shared/install/lib/libcrypto.so.3" "openssl crypto shared\n")
 file(WRITE "${external_root}/nghttp2-shared/install/lib/libnghttp2.so.14" "nghttp2 shared\n")
-file(WRITE "${external_root}/yajl-shared/install/lib/libyajl.so.2" "yajl shared\n")
+file(WRITE "${external_root}/lonejson-shared/install/lib/liblonejson.so.0" "lonejson shared\n")
 
 file(WRITE "${external_root}/curl-shared-cmake/install/share/doc/liblockdc-third-party/curl/LICENSE.txt" "curl license\n")
 file(WRITE "${external_root}/pslog-shared/install/share/doc/libpslog/LICENSE" "pslog license\n")
 file(WRITE "${external_root}/openssl-shared/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt" "openssl license\n")
 file(WRITE "${external_root}/nghttp2-shared/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt" "nghttp2 license\n")
-file(WRITE "${external_root}/yajl-shared/install/share/doc/liblockdc-third-party/yajl/LICENSE.txt" "yajl license\n")
+file(WRITE "${external_root}/lonejson-shared/install/share/doc/liblonejson/LICENSE" "lonejson license\n")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}"
@@ -119,7 +119,7 @@ assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/openssl/LI
 assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/curl/LICENSE\\.txt(\n|$)" "curl staged license")
 assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/libpslog/LICENSE(\n|$)" "libpslog staged license")
 assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/nghttp2/LICENSE\\.txt(\n|$)" "nghttp2 staged license")
-assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/yajl/LICENSE\\.txt(\n|$)" "yajl staged license")
+assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/lonejson/LICENSE(\n|$)" "lonejson staged license")
 assert_archive_contains("(^|\n)(\\./)?lib/liblockdc\\.a(\n|$)" "static library")
 assert_archive_contains("(^|\n)(\\./)?lib/liblockdc\\.so\\.1\\.2\\.3(\n|$)" "versioned shared library")
 assert_archive_contains("(^|\n)(\\./)?lib/liblockdc\\.so\\.1(\n|$)" "shared library SONAME symlink")

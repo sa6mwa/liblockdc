@@ -1,6 +1,7 @@
 #include "lc_internal.h"
 #include "lc_log.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,7 +10,164 @@
 #include <curl/curl.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#include <yajl/yajl_tree.h>
+
+typedef struct lc_engine_watch_event_json {
+  char *namespace_name;
+  char *queue;
+  bool available;
+  char *head_message_id;
+  lonejson_int64 changed_at_unix;
+  char *correlation_id;
+} lc_engine_watch_event_json;
+
+typedef struct lc_engine_subscribe_message_json {
+  char *namespace_name;
+  char *queue;
+  char *message_id;
+  lonejson_int64 attempts;
+  lonejson_int64 max_attempts;
+  lonejson_int64 failure_attempts;
+  lonejson_int64 not_visible_until_unix;
+  lonejson_int64 visibility_timeout_seconds;
+  char *payload_content_type;
+  lonejson_int64 payload_bytes;
+  char *correlation_id;
+  char *lease_id;
+  lonejson_int64 lease_expires_at_unix;
+  lonejson_int64 fencing_token;
+  char *txn_id;
+  char *meta_etag;
+  char *state_etag;
+  char *state_lease_id;
+  lonejson_int64 state_lease_expires_at_unix;
+  lonejson_int64 state_fencing_token;
+  char *state_txn_id;
+} lc_engine_subscribe_message_json;
+
+typedef struct lc_engine_subscribe_meta_json {
+  lc_engine_subscribe_message_json message;
+  char *next_cursor;
+} lc_engine_subscribe_meta_json;
+
+static const lonejson_field lc_engine_watch_event_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_event_json, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_event_json, queue, "queue"),
+    LONEJSON_FIELD_BOOL(lc_engine_watch_event_json, available, "available"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_event_json, head_message_id,
+                                "head_message_id"),
+    LONEJSON_FIELD_I64(lc_engine_watch_event_json, changed_at_unix,
+                       "changed_at_unix"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_event_json, correlation_id,
+                                "correlation_id")};
+
+LONEJSON_MAP_DEFINE(lc_engine_watch_event_map, lc_engine_watch_event_json,
+                    lc_engine_watch_event_fields);
+
+static const lonejson_field lc_engine_subscribe_message_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, queue, "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, message_id,
+                                "message_id"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, attempts, "attempts"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, max_attempts,
+                       "max_attempts"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, failure_attempts,
+                       "failure_attempts"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, not_visible_until_unix,
+                       "not_visible_until_unix"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json,
+                       visibility_timeout_seconds,
+                       "visibility_timeout_seconds"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json,
+                                payload_content_type, "payload_content_type"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, payload_bytes,
+                       "payload_bytes"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json,
+                                correlation_id, "correlation_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, lease_id,
+                                "lease_id"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, lease_expires_at_unix,
+                       "lease_expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, fencing_token,
+                       "fencing_token"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, txn_id,
+                                "txn_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, meta_etag,
+                                "meta_etag"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, state_etag,
+                                "state_etag"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json,
+                                state_lease_id, "state_lease_id"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json,
+                       state_lease_expires_at_unix,
+                       "state_lease_expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, state_fencing_token,
+                       "state_fencing_token"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, state_txn_id,
+                                "state_txn_id")};
+
+LONEJSON_MAP_DEFINE(lc_engine_subscribe_message_map,
+                    lc_engine_subscribe_message_json,
+                    lc_engine_subscribe_message_fields);
+
+static const lonejson_field lc_engine_subscribe_meta_fields[] = {
+    LONEJSON_FIELD_OBJECT_REQ(lc_engine_subscribe_meta_json, message, "message",
+                              &lc_engine_subscribe_message_map),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_meta_json, next_cursor,
+                                "next_cursor")};
+
+LONEJSON_MAP_DEFINE(lc_engine_subscribe_meta_map, lc_engine_subscribe_meta_json,
+                    lc_engine_subscribe_meta_fields);
+
+static int lc_engine_i64_to_long_checked(lonejson_int64 value, const char *label,
+                                         long *out_value,
+                                         lc_engine_error *error) {
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing destination for long conversion");
+  }
+  if (value < (lonejson_int64)LONG_MIN || value > (lonejson_int64)LONG_MAX) {
+    return lc_engine_set_protocol_error(error, label);
+  }
+  *out_value = (long)value;
+  return LC_ENGINE_OK;
+}
+
+static int lc_engine_i64_to_int_checked(lonejson_int64 value, const char *label,
+                                        int *out_value,
+                                        lc_engine_error *error) {
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing destination for int conversion");
+  }
+  if (value < (lonejson_int64)INT_MIN || value > (lonejson_int64)INT_MAX) {
+    return lc_engine_set_protocol_error(error, label);
+  }
+  *out_value = (int)value;
+  return LC_ENGINE_OK;
+}
+
+static int
+lc_engine_i64_to_size_checked(lonejson_int64 value, const char *label,
+                              size_t *out_value, lc_engine_error *error) {
+  size_t narrowed;
+
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing destination for size conversion");
+  }
+  if (value < 0) {
+    return lc_engine_set_protocol_error(error, label);
+  }
+  narrowed = (size_t)value;
+  if ((lonejson_int64)narrowed != value) {
+    return lc_engine_set_protocol_error(error, label);
+  }
+  *out_value = narrowed;
+  return LC_ENGINE_OK;
+}
 
 typedef struct lc_engine_watch_state {
   lc_engine_queue_watch_handler handler;
@@ -268,16 +426,11 @@ static int lc_engine_watch_event_name_is_supported(const char *event_name) {
 }
 
 static int lc_engine_watch_dispatch_event(lc_engine_watch_state *state) {
-  yajl_val root;
   lc_engine_queue_watch_event event;
-  char errbuf[128];
-  static const char *path_namespace[] = {"namespace", NULL};
-  static const char *path_queue[] = {"queue", NULL};
-  static const char *path_available[] = {"available", NULL};
-  static const char *path_head[] = {"head_message_id", NULL};
-  static const char *path_changed[] = {"changed_at_unix", NULL};
-  static const char *path_correlation[] = {"correlation_id", NULL};
-  yajl_val value;
+  lc_engine_watch_event_json parsed;
+  lonejson_error lj_error;
+  lonejson_status status;
+  int rc;
 
   if (state->data_buffer.length == 0U) {
     return LC_ENGINE_OK;
@@ -291,68 +444,43 @@ static int lc_engine_watch_dispatch_event(lc_engine_watch_state *state) {
     return LC_ENGINE_OK;
   }
 
-  errbuf[0] = '\0';
-  root = yajl_tree_parse(state->data_buffer.data, errbuf, sizeof(errbuf));
-  if (root == NULL) {
-    return lc_engine_set_protocol_error(
-        state->error,
-        errbuf[0] != '\0' ? errbuf : "failed to parse queue watch event");
+  memset(&event, 0, sizeof(event));
+  memset(&parsed, 0, sizeof(parsed));
+  memset(&lj_error, 0, sizeof(lj_error));
+  status = lonejson_parse_cstr(&lc_engine_watch_event_map, &parsed,
+                               state->data_buffer.data, NULL, &lj_error);
+  rc = lc_engine_lonejson_error_from_status(
+      state->error, status, &lj_error, "failed to parse queue watch event");
+  if (rc != LC_ENGINE_OK) {
+    lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
+    return rc;
   }
 
-  memset(&event, 0, sizeof(event));
-  value = yajl_tree_get(root, path_namespace, yajl_t_string);
-  if (value != NULL) {
-    event.namespace_name = lc_engine_strdup_local(YAJL_GET_STRING(value));
-    if (event.namespace_name == NULL) {
-      yajl_tree_free(root);
-      return lc_engine_set_client_error(
-          state->error, LC_ENGINE_ERROR_NO_MEMORY,
-          "failed to allocate queue watch namespace");
-    }
+  event.namespace_name = parsed.namespace_name;
+  event.queue = parsed.queue;
+  event.available = parsed.available ? 1 : 0;
+  event.head_message_id = parsed.head_message_id;
+  rc = lc_engine_i64_to_long_checked(parsed.changed_at_unix,
+                                     "queue watch changed_at_unix is out of range",
+                                     &event.changed_at_unix, state->error);
+  if (rc != LC_ENGINE_OK) {
+    parsed.namespace_name = NULL;
+    parsed.queue = NULL;
+    parsed.head_message_id = NULL;
+    parsed.correlation_id = NULL;
+    lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
+    return rc;
   }
-  value = yajl_tree_get(root, path_queue, yajl_t_string);
-  if (value != NULL) {
-    event.queue = lc_engine_strdup_local(YAJL_GET_STRING(value));
-    if (event.queue == NULL) {
-      yajl_tree_free(root);
-      lc_engine_queue_watch_event_cleanup(&event);
-      return lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
-                                        "failed to allocate queue watch queue");
-    }
-  }
-  value = yajl_tree_get(root, path_head, yajl_t_string);
-  if (value != NULL) {
-    event.head_message_id = lc_engine_strdup_local(YAJL_GET_STRING(value));
-    if (event.head_message_id == NULL) {
-      yajl_tree_free(root);
-      lc_engine_queue_watch_event_cleanup(&event);
-      return lc_engine_set_client_error(
-          state->error, LC_ENGINE_ERROR_NO_MEMORY,
-          "failed to allocate queue watch head_message_id");
-    }
-  }
-  value = yajl_tree_get(root, path_available, yajl_t_true);
-  event.available = value != NULL;
-  value = yajl_tree_get(root, path_changed, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value),
-                                      &event.changed_at_unix)) {
-      yajl_tree_free(root);
-      lc_engine_queue_watch_event_cleanup(&event);
-      return lc_engine_set_protocol_error(
-          state->error, "queue watch changed_at_unix is out of range");
-    }
-  }
-  value = yajl_tree_get(root, path_correlation, yajl_t_string);
-  if (value != NULL) {
-    event.correlation_id = lc_engine_strdup_local(YAJL_GET_STRING(value));
+  if (parsed.correlation_id != NULL) {
+    event.correlation_id = parsed.correlation_id;
   } else if (state->correlation_id != NULL) {
     event.correlation_id = lc_engine_strdup_local(state->correlation_id);
-  }
-  yajl_tree_free(root);
-
-  if (value != NULL || state->correlation_id != NULL) {
     if (event.correlation_id == NULL) {
+      parsed.namespace_name = NULL;
+      parsed.queue = NULL;
+      parsed.head_message_id = NULL;
+      parsed.correlation_id = NULL;
+      lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
       lc_engine_queue_watch_event_cleanup(&event);
       return lc_engine_set_client_error(
           state->error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -361,6 +489,11 @@ static int lc_engine_watch_dispatch_event(lc_engine_watch_state *state) {
   }
 
   if (!state->handler(state->handler_context, &event, state->error)) {
+    parsed.namespace_name = NULL;
+    parsed.queue = NULL;
+    parsed.head_message_id = NULL;
+    parsed.correlation_id = NULL;
+    lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
     lc_engine_queue_watch_event_cleanup(&event);
     if (state->error->code == LC_ENGINE_OK) {
       return lc_engine_set_transport_error(state->error,
@@ -369,6 +502,11 @@ static int lc_engine_watch_dispatch_event(lc_engine_watch_state *state) {
     return state->error->code;
   }
 
+  parsed.namespace_name = NULL;
+  parsed.queue = NULL;
+  parsed.head_message_id = NULL;
+  parsed.correlation_id = NULL;
+  lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
   lc_engine_queue_watch_event_cleanup(&event);
   state->data_buffer.length = 0U;
   if (state->data_buffer.data != NULL) {
@@ -640,19 +778,6 @@ lc_engine_subscribe_extract_boundary(lc_engine_subscribe_state *state) {
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_subscribe_dup_string(yajl_val root,
-                                          const char *const *path,
-                                          char **out_value) {
-  yajl_val value;
-
-  value = yajl_tree_get(root, (const char **)path, yajl_t_string);
-  if (value == NULL) {
-    return 1;
-  }
-  *out_value = lc_engine_strdup_local(YAJL_GET_STRING(value));
-  return *out_value != NULL;
-}
-
 static int lc_engine_subscribe_parse_meta(lc_engine_subscribe_state *state) {
   int rc;
 
@@ -681,37 +806,11 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
                                         const char *fallback_correlation_id,
                                         lc_engine_dequeue_response *response,
                                         lc_engine_error *error) {
-  yajl_val root;
-  yajl_val message;
-  yajl_val value;
-  char errbuf[128];
-  static const char *path_message[] = {"message", NULL};
-  static const char *path_next_cursor[] = {"next_cursor", NULL};
-  static const char *path_namespace[] = {"namespace", NULL};
-  static const char *path_queue[] = {"queue", NULL};
-  static const char *path_message_id[] = {"message_id", NULL};
-  static const char *path_attempts[] = {"attempts", NULL};
-  static const char *path_max_attempts[] = {"max_attempts", NULL};
-  static const char *path_failure_attempts[] = {"failure_attempts", NULL};
-  static const char *path_not_visible_until[] = {"not_visible_until_unix",
-                                                 NULL};
-  static const char *path_visibility_timeout[] = {"visibility_timeout_seconds",
-                                                  NULL};
-  static const char *path_payload_content_type[] = {"payload_content_type",
-                                                    NULL};
-  static const char *path_payload_bytes[] = {"payload_bytes", NULL};
-  static const char *path_correlation_id[] = {"correlation_id", NULL};
-  static const char *path_lease_id[] = {"lease_id", NULL};
-  static const char *path_lease_expires[] = {"lease_expires_at_unix", NULL};
-  static const char *path_fencing_token[] = {"fencing_token", NULL};
-  static const char *path_txn_id[] = {"txn_id", NULL};
-  static const char *path_meta_etag[] = {"meta_etag", NULL};
-  static const char *path_state_etag[] = {"state_etag", NULL};
-  static const char *path_state_lease_id[] = {"state_lease_id", NULL};
-  static const char *path_state_lease_expires[] = {
-      "state_lease_expires_at_unix", NULL};
-  static const char *path_state_fencing_token[] = {"state_fencing_token", NULL};
-  static const char *path_state_txn_id[] = {"state_txn_id", NULL};
+  lc_engine_subscribe_meta_json parsed;
+  lc_engine_subscribe_message_json *message;
+  lonejson_error lj_error;
+  lonejson_status status;
+  int rc;
 
   if (json == NULL || response == NULL || error == NULL) {
     return lc_engine_set_client_error(
@@ -720,156 +819,116 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
   }
 
   lc_engine_dequeue_response_cleanup(response);
-  errbuf[0] = '\0';
-  root = yajl_tree_parse(json, errbuf, sizeof(errbuf));
-  if (root == NULL) {
-    if (errbuf[0] != '\0') {
-      return lc_engine_set_protocol_error(error, errbuf);
-    }
-    return lc_engine_set_protocol_error(error,
-                                        "failed to parse subscribe meta body");
-  }
-  message = yajl_tree_get(root, path_message, yajl_t_object);
-  if (message == NULL) {
-    yajl_tree_free(root);
-    return lc_engine_set_protocol_error(error,
-                                        "subscribe meta body missing message");
+  memset(&parsed, 0, sizeof(parsed));
+  memset(&lj_error, 0, sizeof(lj_error));
+  status = lonejson_parse_cstr(&lc_engine_subscribe_meta_map, &parsed, json,
+                               NULL, &lj_error);
+  rc = lc_engine_lonejson_error_from_status(
+      error, status, &lj_error, "failed to parse subscribe meta body");
+  if (rc != LC_ENGINE_OK) {
+    lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
+    return rc;
   }
 
-  if (!lc_engine_subscribe_dup_string(message, path_namespace,
-                                      &response->namespace_name) ||
-      !lc_engine_subscribe_dup_string(message, path_queue, &response->queue) ||
-      !lc_engine_subscribe_dup_string(message, path_message_id,
-                                      &response->message_id) ||
-      !lc_engine_subscribe_dup_string(message, path_payload_content_type,
-                                      &response->payload_content_type) ||
-      !lc_engine_subscribe_dup_string(message, path_correlation_id,
-                                      &response->correlation_id) ||
-      !lc_engine_subscribe_dup_string(message, path_lease_id,
-                                      &response->lease_id) ||
-      !lc_engine_subscribe_dup_string(message, path_txn_id,
-                                      &response->txn_id) ||
-      !lc_engine_subscribe_dup_string(message, path_meta_etag,
-                                      &response->meta_etag) ||
-      !lc_engine_subscribe_dup_string(message, path_state_etag,
-                                      &response->state_etag) ||
-      !lc_engine_subscribe_dup_string(message, path_state_lease_id,
-                                      &response->state_lease_id) ||
-      !lc_engine_subscribe_dup_string(message, path_state_txn_id,
-                                      &response->state_txn_id) ||
-      !lc_engine_subscribe_dup_string(root, path_next_cursor,
-                                      &response->next_cursor)) {
-    yajl_tree_free(root);
+  message = &parsed.message;
+  response->namespace_name = message->namespace_name;
+  response->queue = message->queue;
+  response->message_id = message->message_id;
+  response->payload_content_type = message->payload_content_type;
+  response->correlation_id = message->correlation_id;
+  response->lease_id = message->lease_id;
+  response->txn_id = message->txn_id;
+  response->meta_etag = message->meta_etag;
+  response->state_etag = message->state_etag;
+  response->state_lease_id = message->state_lease_id;
+  response->state_txn_id = message->state_txn_id;
+  response->next_cursor = parsed.next_cursor;
+  rc = lc_engine_i64_to_int_checked(message->attempts,
+                                    "queue attempts is out of range",
+                                    &response->attempts, error);
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_int_checked(message->max_attempts,
+                                      "queue max_attempts is out of range",
+                                      &response->max_attempts, error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_int_checked(message->failure_attempts,
+                                      "queue failure_attempts is out of range",
+                                      &response->failure_attempts, error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_long_checked(
+        message->not_visible_until_unix,
+        "queue not_visible_until_unix is out of range",
+        &response->not_visible_until_unix, error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_long_checked(
+        message->visibility_timeout_seconds,
+        "queue visibility_timeout_seconds is out of range",
+        &response->visibility_timeout_seconds, error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_size_checked(message->payload_bytes,
+                                       "queue payload_bytes is out of range",
+                                       &response->payload_length, error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_long_checked(message->lease_expires_at_unix,
+                                       "queue lease_expires_at_unix is out of range",
+                                       &response->lease_expires_at_unix,
+                                       error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_long_checked(message->fencing_token,
+                                       "queue fencing_token is out of range",
+                                       &response->fencing_token, error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_long_checked(
+        message->state_lease_expires_at_unix,
+        "queue state_lease_expires_at_unix is out of range",
+        &response->state_lease_expires_at_unix, error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_long_checked(
+        message->state_fencing_token,
+        "queue state_fencing_token is out of range",
+        &response->state_fencing_token, error);
+  }
+  if (rc != LC_ENGINE_OK) {
+    message->namespace_name = NULL;
+    message->queue = NULL;
+    message->message_id = NULL;
+    message->payload_content_type = NULL;
+    message->correlation_id = NULL;
+    message->lease_id = NULL;
+    message->txn_id = NULL;
+    message->meta_etag = NULL;
+    message->state_etag = NULL;
+    message->state_lease_id = NULL;
+    message->state_txn_id = NULL;
+    parsed.next_cursor = NULL;
+    lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
     lc_engine_dequeue_response_cleanup(response);
-    return lc_engine_set_client_error(
-        error, LC_ENGINE_ERROR_NO_MEMORY,
-        "failed to allocate subscribe delivery metadata");
-  }
-
-  value = yajl_tree_get(message, path_attempts, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_int_base10_checked(YAJL_GET_NUMBER(value),
-                                     &response->attempts)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(error,
-                                          "queue attempts is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_max_attempts, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_int_base10_checked(YAJL_GET_NUMBER(value),
-                                     &response->max_attempts)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(error,
-                                          "queue max_attempts is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_failure_attempts, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_int_base10_checked(YAJL_GET_NUMBER(value),
-                                     &response->failure_attempts)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(
-          error, "queue failure_attempts is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_not_visible_until, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value),
-                                      &response->not_visible_until_unix)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(
-          error, "queue not_visible_until_unix is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_visibility_timeout, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value),
-                                      &response->visibility_timeout_seconds)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(
-          error, "queue visibility_timeout_seconds is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_payload_bytes, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_size_base10_checked(YAJL_GET_NUMBER(value),
-                                      &response->payload_length)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(
-          error, "queue payload_bytes is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_lease_expires, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value),
-                                      &response->lease_expires_at_unix)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(
-          error, "queue lease_expires_at_unix is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_fencing_token, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value),
-                                      &response->fencing_token)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(
-          error, "queue fencing_token is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_state_lease_expires, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value),
-                                      &response->state_lease_expires_at_unix)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(
-          error, "queue state_lease_expires_at_unix is out of range");
-    }
-  }
-  value = yajl_tree_get(message, path_state_fencing_token, yajl_t_number);
-  if (value != NULL) {
-    if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value),
-                                      &response->state_fencing_token)) {
-      yajl_tree_free(root);
-      lc_engine_dequeue_response_cleanup(response);
-      return lc_engine_set_protocol_error(
-          error, "queue state_fencing_token is out of range");
-    }
+    return rc;
   }
   if (response->correlation_id == NULL && fallback_correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(fallback_correlation_id);
     if (response->correlation_id == NULL) {
-      yajl_tree_free(root);
+      message->namespace_name = NULL;
+      message->queue = NULL;
+      message->message_id = NULL;
+      message->payload_content_type = NULL;
+      message->correlation_id = NULL;
+      message->lease_id = NULL;
+      message->txn_id = NULL;
+      message->meta_etag = NULL;
+      message->state_etag = NULL;
+      message->state_lease_id = NULL;
+      message->state_txn_id = NULL;
+      parsed.next_cursor = NULL;
+      lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
       lc_engine_dequeue_response_cleanup(response);
       return lc_engine_set_client_error(
           error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -877,7 +936,19 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
     }
   }
 
-  yajl_tree_free(root);
+  message->namespace_name = NULL;
+  message->queue = NULL;
+  message->message_id = NULL;
+  message->payload_content_type = NULL;
+  message->correlation_id = NULL;
+  message->lease_id = NULL;
+  message->txn_id = NULL;
+  message->meta_etag = NULL;
+  message->state_etag = NULL;
+  message->state_lease_id = NULL;
+  message->state_txn_id = NULL;
+  parsed.next_cursor = NULL;
+  lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
   return LC_ENGINE_OK;
 }
 

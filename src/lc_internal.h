@@ -8,6 +8,7 @@
 #include <openssl/x509.h>
 #include <pslog.h>
 #include <stddef.h>
+#include <lonejson.h>
 
 #include "lc_engine_api.h"
 #include "lc_intcompat.h"
@@ -103,6 +104,10 @@ int lc_engine_json_get_long(const char *json, const char *field_name,
                             long *out_value);
 int lc_engine_json_get_bool(const char *json, const char *field_name,
                             int *out_value);
+int lc_engine_lonejson_error_from_status(lc_engine_error *error,
+                                         lonejson_status status,
+                                         const lonejson_error *lj_error,
+                                         const char *message);
 
 void lc_engine_http_result_cleanup(lc_engine_http_result *result);
 int lc_engine_http_request(lc_engine_client *client, const char *method,

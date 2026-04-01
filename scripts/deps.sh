@@ -181,8 +181,9 @@ required_paths=(
   "$deps_root/pslog-static/install/lib/libpslog.a"
   "$deps_root/pslog-static/install/include/pslog.h"
   "$deps_root/pslog-shared/install/lib/libpslog.so.0"
-  "$deps_root/yajl-static/install/lib/libyajl_s.a"
-  "$deps_root/yajl-shared/install/lib/libyajl.so.2.1.0"
+  "$deps_root/lonejson-static/install/lib/liblonejson.a"
+  "$deps_root/lonejson-static/install/include/lonejson.h"
+  "$deps_root/lonejson-shared/install/lib/liblonejson.so.0"
   "$deps_root/cmocka/install/lib/libcmocka.a"
 )
 
@@ -204,5 +205,5 @@ stage_dependency_license "openssl-shared" "openssl" "$deps_build_root/openssl-sh
 stage_dependency_license "curl-shared-cmake" "curl" "$deps_build_root/curl-shared-cmake/src/COPYING"
 stage_dependency_license "pslog-shared" "libpslog" "$deps_root/pslog-shared/install/share/doc/libpslog/LICENSE"
 stage_dependency_license "nghttp2-shared" "nghttp2" "$deps_build_root/nghttp2-shared/src/COPYING"
-stage_dependency_license "yajl-shared" "yajl" "$deps_build_root/yajl-shared/src/COPYING"
+stage_dependency_license "lonejson-shared" "lonejson" "$deps_root/lonejson-shared/install/share/doc/liblonejson/LICENSE"
 printf '%s\n' "$manifest" > "$manifest_path"

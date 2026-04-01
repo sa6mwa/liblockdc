@@ -1,13 +1,10 @@
+#include "lc_api_internal.h"
 #include "lc_internal.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
+#include <limits.h>
 #include <curl/curl.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#include <yajl/yajl_tree.h>
 
 typedef struct lc_engine_stream_request_state {
   lc_engine_write_callback writer;
@@ -47,6 +44,68 @@ typedef struct lc_engine_multipart_upload_state {
   void *payload_context;
   int payload_done;
 } lc_engine_multipart_upload_state;
+
+typedef struct lc_engine_attachment_info_json {
+  char *id;
+  char *name;
+  lonejson_int64 size;
+  char *plaintext_sha256;
+  char *content_type;
+  lonejson_int64 created_at_unix;
+  lonejson_int64 updated_at_unix;
+} lc_engine_attachment_info_json;
+
+typedef struct lc_engine_attach_response_json {
+  lc_engine_attachment_info_json attachment;
+  bool noop;
+  lonejson_int64 version;
+} lc_engine_attach_response_json;
+
+typedef struct lc_engine_list_attachments_response_json {
+  char *namespace_name;
+  char *key;
+  lonejson_object_array attachments;
+} lc_engine_list_attachments_response_json;
+
+static const lonejson_field lc_engine_attachment_info_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, id, "id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, name, "name"),
+    LONEJSON_FIELD_I64(lc_engine_attachment_info_json, size, "size"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, plaintext_sha256,
+                                "plaintext_sha256"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, content_type,
+                                "content_type"),
+    LONEJSON_FIELD_I64(lc_engine_attachment_info_json, created_at_unix,
+                       "created_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_attachment_info_json, updated_at_unix,
+                       "updated_at_unix")};
+
+LONEJSON_MAP_DEFINE(lc_engine_attachment_info_map, lc_engine_attachment_info_json,
+                    lc_engine_attachment_info_fields);
+
+static const lonejson_field lc_engine_attach_response_fields[] = {
+    LONEJSON_FIELD_OBJECT(lc_engine_attach_response_json, attachment,
+                          "attachment", &lc_engine_attachment_info_map),
+    LONEJSON_FIELD_BOOL(lc_engine_attach_response_json, noop, "noop"),
+    LONEJSON_FIELD_I64(lc_engine_attach_response_json, version, "version")};
+
+LONEJSON_MAP_DEFINE(lc_engine_attach_response_map, lc_engine_attach_response_json,
+                    lc_engine_attach_response_fields);
+
+static const lonejson_field lc_engine_list_attachments_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_list_attachments_response_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_list_attachments_response_json, key,
+                                "key"),
+    LONEJSON_FIELD_OBJECT_ARRAY(lc_engine_list_attachments_response_json,
+                                attachments, "attachments",
+                                lc_engine_attachment_info_json,
+                                &lc_engine_attachment_info_map,
+                                LONEJSON_OVERFLOW_FAIL)};
+
+LONEJSON_MAP_DEFINE(lc_engine_list_attachments_response_map,
+                    lc_engine_list_attachments_response_json,
+                    lc_engine_list_attachments_response_fields);
 
 static size_t lc_engine_multipart_upload_read(void *context, void *buffer,
                                               size_t count,
@@ -716,171 +775,146 @@ static int lc_engine_attachment_info_from_headers(
   return 1;
 }
 
-static int lc_engine_tree_parse(const char *json, yajl_val *out_root,
-                                lc_engine_error *error) {
-  char errbuf[128];
-  yajl_val root = NULL;
-
-  errbuf[0] = '\0';
-  root = yajl_tree_parse(json, errbuf, sizeof(errbuf));
-  if (root == NULL) {
-    if (errbuf[0] != '\0') {
-      return lc_engine_set_protocol_error(error, errbuf);
-    }
-    return lc_engine_set_protocol_error(error, "failed to parse JSON body");
+static int lc_engine_i64_to_long_checked(lonejson_int64 value,
+                                         const char *label, long *out_value,
+                                         lc_engine_error *error) {
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing long destination");
   }
-  *out_root = root;
-  return LC_ENGINE_OK;
-}
-
-static int lc_engine_tree_dup_string(yajl_val root, const char *const *path,
-                                     char **out_value) {
-  yajl_val value;
-
-  value = yajl_tree_get(root, (const char **)path, yajl_t_string);
-  if (value == NULL) {
-    return 1;
-  }
-  *out_value = lc_engine_strdup_local(YAJL_GET_STRING(value));
-  return *out_value != NULL;
-}
-
-static int lc_engine_tree_get_long_checked(yajl_val root,
-                                           const char *const *path,
-                                           const char *label, long *out_value,
-                                           lc_engine_error *error) {
-  yajl_val value;
-
-  value = yajl_tree_get(root, (const char **)path, yajl_t_number);
-  if (value == NULL) {
-    return LC_ENGINE_OK;
-  }
-  if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value), out_value)) {
+  if (value < (lonejson_int64)LONG_MIN || value > (lonejson_int64)LONG_MAX) {
     return lc_engine_set_protocol_error(error, label);
   }
+  *out_value = (long)value;
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_tree_get_int_checked(yajl_val root,
-                                          const char *const *path,
-                                          const char *label, int *out_value,
-                                          lc_engine_error *error) {
-  yajl_val value;
-
-  value = yajl_tree_get(root, (const char **)path, yajl_t_number);
-  if (value == NULL) {
-    return LC_ENGINE_OK;
+static int lc_engine_i64_to_int_checked(lonejson_int64 value,
+                                        const char *label, int *out_value,
+                                        lc_engine_error *error) {
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing int destination");
   }
-  if (!lc_parse_int_base10_checked(YAJL_GET_NUMBER(value), out_value)) {
+  if (value < (lonejson_int64)INT_MIN || value > (lonejson_int64)INT_MAX) {
     return lc_engine_set_protocol_error(error, label);
   }
+  *out_value = (int)value;
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_attachment_info_from_object(
-    yajl_val object, lc_engine_attachment_info *info, lc_engine_error *error) {
-  static const char *path_id[] = {"id", NULL};
-  static const char *path_name[] = {"name", NULL};
-  static const char *path_sha[] = {"plaintext_sha256", NULL};
-  static const char *path_content_type[] = {"content_type", NULL};
-  static const char *path_size[] = {"size", NULL};
-  static const char *path_created[] = {"created_at_unix", NULL};
-  static const char *path_updated[] = {"updated_at_unix", NULL};
+static int lc_engine_attachment_info_from_json(
+    lc_engine_attachment_info *info,
+    const lc_engine_attachment_info_json *parsed, lc_engine_error *error) {
   int rc;
 
-  if (!lc_engine_tree_dup_string(object, path_id, &info->id) ||
-      !lc_engine_tree_dup_string(object, path_name, &info->name) ||
-      !lc_engine_tree_dup_string(object, path_sha, &info->plaintext_sha256) ||
-      !lc_engine_tree_dup_string(object, path_content_type,
-                                 &info->content_type)) {
-    return 0;
-  }
-  rc = lc_engine_tree_get_long_checked(
-      object, path_size, "attachment size is out of range", &info->size, error);
+  info->id = parsed->id;
+  info->name = parsed->name;
+  info->plaintext_sha256 = parsed->plaintext_sha256;
+  info->content_type = parsed->content_type;
+  rc = lc_engine_i64_to_long_checked(parsed->size,
+                                     "attachment size is out of range",
+                                     &info->size, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  rc = lc_engine_tree_get_long_checked(
-      object, path_created, "attachment created_at_unix is out of range",
-      &info->created_at_unix, error);
+  rc = lc_engine_i64_to_long_checked(parsed->created_at_unix,
+                                     "attachment created_at_unix is out of range",
+                                     &info->created_at_unix, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  return lc_engine_tree_get_long_checked(
-      object, path_updated, "attachment updated_at_unix is out of range",
+  return lc_engine_i64_to_long_checked(
+      parsed->updated_at_unix, "attachment updated_at_unix is out of range",
       &info->updated_at_unix, error);
 }
 
-static int
-lc_engine_update_response_from_tree(yajl_val root,
-                                    lc_engine_update_response *response,
-                                    lc_engine_error *error) {
-  static const char *path_version[] = {"new_version", NULL};
-  static const char *path_etag[] = {"new_state_etag", NULL};
-  static const char *path_bytes[] = {"bytes", NULL};
+static int lc_engine_update_response_from_json(
+    const char *json, lc_engine_update_response *response,
+    lc_engine_error *error) {
   int rc;
 
-  rc = lc_engine_tree_get_long_checked(root, path_version,
-                                       "update new_version is out of range",
-                                       &response->new_version, error);
+  rc = lc_engine_json_get_long(json, "new_version", &response->new_version);
   if (rc != LC_ENGINE_OK) {
-    return rc;
+    return lc_engine_set_protocol_error(error,
+                                        "update new_version is out of range");
   }
-  if (!lc_engine_tree_dup_string(root, path_etag, &response->new_state_etag)) {
+  rc = lc_engine_json_get_string(json, "new_state_etag",
+                                 &response->new_state_etag);
+  if (rc == LC_ENGINE_ERROR_NO_MEMORY) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate update state etag");
   }
-  return lc_engine_tree_get_long_checked(root, path_bytes,
-                                         "update bytes is out of range",
-                                         &response->bytes, error);
+  if (rc != LC_ENGINE_OK) {
+    return lc_engine_set_protocol_error(error, "failed to decode update etag");
+  }
+  rc = lc_engine_json_get_long(json, "bytes", &response->bytes);
+  if (rc != LC_ENGINE_OK) {
+    return lc_engine_set_protocol_error(error, "update bytes is out of range");
+  }
+  return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_enqueue_response_from_tree(yajl_val root,
-                                     lc_engine_enqueue_response *response,
-                                     lc_engine_error *error) {
-  static const char *path_namespace[] = {"namespace", NULL};
-  static const char *path_queue[] = {"queue", NULL};
-  static const char *path_message_id[] = {"message_id", NULL};
-  static const char *path_attempts[] = {"attempts", NULL};
-  static const char *path_max_attempts[] = {"max_attempts", NULL};
-  static const char *path_failure_attempts[] = {"failure_attempts", NULL};
-  static const char *path_not_visible_until[] = {"not_visible_until_unix",
-                                                 NULL};
-  static const char *path_visibility_timeout[] = {"visibility_timeout_seconds",
-                                                  NULL};
-  static const char *path_payload_bytes[] = {"payload_bytes", NULL};
-  if (!lc_engine_tree_dup_string(root, path_namespace,
-                                 &response->namespace_name) ||
-      !lc_engine_tree_dup_string(root, path_queue, &response->queue) ||
-      !lc_engine_tree_dup_string(root, path_message_id,
-                                 &response->message_id)) {
+static int lc_engine_enqueue_response_from_json(
+    const char *json, lc_engine_enqueue_response *response,
+    lc_engine_error *error) {
+  long value;
+  int rc;
+
+  rc = lc_engine_json_get_string(json, "namespace", &response->namespace_name);
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_string(json, "queue", &response->queue);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_string(json, "message_id", &response->message_id);
+  }
+  if (rc == LC_ENGINE_ERROR_NO_MEMORY) {
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_NO_MEMORY,
         "failed to allocate enqueue response metadata");
   }
-  if (lc_engine_tree_get_int_checked(
-          root, path_attempts, "enqueue attempts is out of range",
-          &response->attempts, error) != LC_ENGINE_OK ||
-      lc_engine_tree_get_int_checked(
-          root, path_max_attempts, "enqueue max_attempts is out of range",
-          &response->max_attempts, error) != LC_ENGINE_OK ||
-      lc_engine_tree_get_int_checked(root, path_failure_attempts,
-                                     "enqueue failure_attempts is out of range",
-                                     &response->failure_attempts,
-                                     error) != LC_ENGINE_OK ||
-      lc_engine_tree_get_long_checked(
-          root, path_not_visible_until,
-          "enqueue not_visible_until_unix is out of range",
-          &response->not_visible_until_unix, error) != LC_ENGINE_OK ||
-      lc_engine_tree_get_long_checked(
-          root, path_visibility_timeout,
-          "enqueue visibility_timeout_seconds is out of range",
-          &response->visibility_timeout_seconds, error) != LC_ENGINE_OK ||
-      lc_engine_tree_get_long_checked(
-          root, path_payload_bytes, "enqueue payload_bytes is out of range",
-          &response->payload_bytes, error) != LC_ENGINE_OK) {
-    return error->code;
+  if (rc != LC_ENGINE_OK) {
+    return lc_engine_set_protocol_error(error,
+                                        "failed to decode enqueue metadata");
+  }
+  rc = lc_engine_json_get_long(json, "attempts", &value);
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_int_checked((lonejson_int64)value,
+                                      "enqueue attempts is out of range",
+                                      &response->attempts, error);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_long(json, "max_attempts", &value);
+    if (rc == LC_ENGINE_OK) {
+      rc = lc_engine_i64_to_int_checked((lonejson_int64)value,
+                                        "enqueue max_attempts is out of range",
+                                        &response->max_attempts, error);
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_long(json, "failure_attempts", &value);
+    if (rc == LC_ENGINE_OK) {
+      rc = lc_engine_i64_to_int_checked(
+          (lonejson_int64)value,
+          "enqueue failure_attempts is out of range",
+          &response->failure_attempts, error);
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_long(json, "not_visible_until_unix",
+                                 &response->not_visible_until_unix);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_long(json, "visibility_timeout_seconds",
+                                 &response->visibility_timeout_seconds);
+  }
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_long(json, "payload_bytes",
+                                 &response->payload_bytes);
+  }
+  if (rc != LC_ENGINE_OK) {
+    return lc_engine_set_protocol_error(error,
+                                        "failed to decode enqueue response");
   }
   return LC_ENGINE_OK;
 }
@@ -889,12 +923,9 @@ int lc_engine_parse_attach_response_json(const char *json,
                                          const char *correlation_id,
                                          lc_engine_attach_response *response,
                                          lc_engine_error *error) {
-  static const char *path_attachment[] = {"attachment", NULL};
-  static const char *path_noop[] = {"noop", NULL};
-  static const char *path_version[] = {"version", NULL};
-  yajl_val root = NULL;
-  yajl_val value;
-  yajl_val attachment;
+  lc_engine_attach_response_json parsed;
+  lonejson_error lj_error;
+  lonejson_status status;
   int rc;
 
   if (json == NULL || response == NULL || error == NULL) {
@@ -904,51 +935,53 @@ int lc_engine_parse_attach_response_json(const char *json,
   }
 
   lc_engine_attach_response_cleanup(response);
-  rc = lc_engine_tree_parse(json, &root, error);
+  memset(&parsed, 0, sizeof(parsed));
+  memset(&lj_error, 0, sizeof(lj_error));
+  status = lonejson_parse_cstr(&lc_engine_attach_response_map, &parsed, json,
+                               NULL, &lj_error);
+  rc = lc_engine_lonejson_error_from_status(error, status, &lj_error,
+                                            "failed to parse attach response");
   if (rc != LC_ENGINE_OK) {
+    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
     return rc;
   }
-  attachment = yajl_tree_get(root, path_attachment, yajl_t_object);
-  if (attachment != NULL &&
-      lc_engine_attachment_info_from_object(attachment, &response->attachment,
-                                            error) != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    lc_engine_attach_response_cleanup(response);
-    return error->code;
-  }
-  value = yajl_tree_get(root, path_noop, yajl_t_true);
-  response->noop = value != NULL;
-  rc = lc_engine_tree_get_long_checked(root, path_version,
-                                       "attach version is out of range",
-                                       &response->version, error);
+  rc = lc_engine_attachment_info_from_json(&response->attachment,
+                                           &parsed.attachment, error);
   if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
+    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
     lc_engine_attach_response_cleanup(response);
     return rc;
   }
+  response->noop = parsed.noop ? 1 : 0;
+  rc = lc_engine_i64_to_long_checked(parsed.version,
+                                     "attach version is out of range",
+                                     &response->version, error);
+  if (rc != LC_ENGINE_OK) {
+    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+    lc_engine_attach_response_cleanup(response);
+    return rc;
+  }
+  memset(&parsed.attachment, 0, sizeof(parsed.attachment));
   if (correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(correlation_id);
     if (response->correlation_id == NULL) {
-      yajl_tree_free(root);
+      lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
       lc_engine_attach_response_cleanup(response);
       return lc_engine_set_client_error(
           error, LC_ENGINE_ERROR_NO_MEMORY,
           "failed to allocate attachment correlation id");
     }
   }
-  yajl_tree_free(root);
+  lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
   return LC_ENGINE_OK;
 }
 
 int lc_engine_parse_list_attachments_response_json(
     const char *json, const char *correlation_id,
     lc_engine_list_attachments_response *response, lc_engine_error *error) {
-  static const char *path_namespace[] = {"namespace", NULL};
-  static const char *path_key[] = {"key", NULL};
-  static const char *path_attachments[] = {"attachments", NULL};
-  yajl_val root = NULL;
-  yajl_val attachments;
-  size_t index;
+  lc_engine_list_attachments_response_json parsed;
+  lonejson_error lj_error;
+  lonejson_status status;
   int rc;
 
   if (json == NULL || response == NULL || error == NULL) {
@@ -958,50 +991,55 @@ int lc_engine_parse_list_attachments_response_json(
   }
 
   lc_engine_list_attachments_response_cleanup(response);
-  rc = lc_engine_tree_parse(json, &root, error);
+  memset(&parsed, 0, sizeof(parsed));
+  memset(&lj_error, 0, sizeof(lj_error));
+  status = lonejson_parse_cstr(&lc_engine_list_attachments_response_map,
+                               &parsed, json, NULL, &lj_error);
+  rc = lc_engine_lonejson_error_from_status(
+      error, status, &lj_error, "failed to parse list_attachments response");
   if (rc != LC_ENGINE_OK) {
+    lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
     return rc;
   }
-  if (!lc_engine_tree_dup_string(root, path_namespace,
-                                 &response->namespace_name) ||
-      !lc_engine_tree_dup_string(root, path_key, &response->key)) {
-    yajl_tree_free(root);
-    lc_engine_list_attachments_response_cleanup(response);
-    return lc_engine_set_client_error(
-        error, LC_ENGINE_ERROR_NO_MEMORY,
-        "failed to allocate list_attachments response");
-  }
-  attachments = yajl_tree_get(root, path_attachments, yajl_t_array);
-  if (attachments != NULL && attachments->u.array.len > 0U) {
+  response->namespace_name = parsed.namespace_name;
+  response->key = parsed.key;
+  parsed.namespace_name = NULL;
+  parsed.key = NULL;
+  if (parsed.attachments.count > 0U) {
+    size_t index;
+    lc_engine_attachment_info_json *items;
+
     response->attachments = (lc_engine_attachment_info *)calloc(
-        attachments->u.array.len, sizeof(lc_engine_attachment_info));
+        parsed.attachments.count, sizeof(lc_engine_attachment_info));
     if (response->attachments == NULL) {
-      yajl_tree_free(root);
+      lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
       lc_engine_list_attachments_response_cleanup(response);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate attachments array");
     }
-    response->attachment_count = attachments->u.array.len;
-    for (index = 0U; index < attachments->u.array.len; ++index) {
-      if (lc_engine_attachment_info_from_object(
-              attachments->u.array.values[index], &response->attachments[index],
-              error) != LC_ENGINE_OK) {
-        yajl_tree_free(root);
+    response->attachment_count = parsed.attachments.count;
+    items = (lc_engine_attachment_info_json *)parsed.attachments.items;
+    for (index = 0U; index < parsed.attachments.count; ++index) {
+      rc = lc_engine_attachment_info_from_json(&response->attachments[index],
+                                               &items[index], error);
+      if (rc != LC_ENGINE_OK) {
+        lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
         lc_engine_list_attachments_response_cleanup(response);
-        return error->code;
+        return rc;
       }
+      memset(&items[index], 0, sizeof(items[index]));
     }
   }
   if (correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(correlation_id);
     if (response->correlation_id == NULL) {
-      yajl_tree_free(root);
+      lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
       lc_engine_list_attachments_response_cleanup(response);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate correlation id");
     }
   }
-  yajl_tree_free(root);
+  lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
   return LC_ENGINE_OK;
 }
 
@@ -1160,7 +1198,6 @@ int lc_engine_client_update_from(lc_engine_client *client,
   const char *namespace_name;
   char if_version_buffer[64];
   int rc;
-  yajl_val root = NULL;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL ||
       request->key == NULL || request->key[0] == '\0' ||
@@ -1227,14 +1264,8 @@ int lc_engine_client_update_from(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_tree_parse(state.body.data, &root, error);
+  rc = lc_engine_update_response_from_json(state.body.data, response, error);
   if (rc != LC_ENGINE_OK) {
-    lc_engine_stream_state_cleanup(&state);
-    return rc;
-  }
-  rc = lc_engine_update_response_from_tree(root, response, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
     lc_engine_stream_state_cleanup(&state);
     lc_engine_update_response_cleanup(response);
     return rc;
@@ -1242,7 +1273,6 @@ int lc_engine_client_update_from(lc_engine_client *client,
   if (state.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(state.correlation_id);
     if (response->correlation_id == NULL) {
-      yajl_tree_free(root);
       lc_engine_stream_state_cleanup(&state);
       lc_engine_update_response_cleanup(response);
       return lc_engine_set_client_error(
@@ -1250,7 +1280,6 @@ int lc_engine_client_update_from(lc_engine_client *client,
           "failed to allocate update_from correlation id");
     }
   }
-  yajl_tree_free(root);
   lc_engine_stream_state_cleanup(&state);
   return LC_ENGINE_OK;
 }
@@ -1272,7 +1301,6 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   const char *payload_content_type;
   int first_field;
   int rc;
-  yajl_val root = NULL;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL ||
       request->queue == NULL || request->queue[0] == '\0') {
@@ -1420,14 +1448,8 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_tree_parse(state.body.data, &root, error);
+  rc = lc_engine_enqueue_response_from_json(state.body.data, response, error);
   if (rc != LC_ENGINE_OK) {
-    lc_engine_stream_state_cleanup(&state);
-    return rc;
-  }
-  rc = lc_engine_enqueue_response_from_tree(root, response, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
     lc_engine_stream_state_cleanup(&state);
     lc_engine_enqueue_response_cleanup(response);
     return rc;
@@ -1435,7 +1457,6 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   if (state.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(state.correlation_id);
     if (response->correlation_id == NULL) {
-      yajl_tree_free(root);
       lc_engine_stream_state_cleanup(&state);
       lc_engine_enqueue_response_cleanup(response);
       return lc_engine_set_client_error(
@@ -1443,7 +1464,6 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
           "failed to allocate enqueue_from correlation id");
     }
   }
-  yajl_tree_free(root);
   lc_engine_stream_state_cleanup(&state);
   return LC_ENGINE_OK;
 }
@@ -1651,10 +1671,6 @@ int lc_engine_client_delete_attachment(
   char token_buf[64];
   lc_engine_http_result result;
   int rc;
-  yajl_val root = NULL;
-  static const char *path_deleted[] = {"deleted", NULL};
-  static const char *path_version[] = {"version", NULL};
-  yajl_val value;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL ||
       request->key == NULL || request->lease_id == NULL ||
@@ -1692,25 +1708,19 @@ int lc_engine_client_delete_attachment(
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_tree_parse(result.body.data, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    lc_engine_http_result_cleanup(&result);
-    return rc;
+  rc = lc_engine_json_get_bool(result.body.data, "deleted", &response->deleted);
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_long(result.body.data, "version",
+                                 &response->version);
   }
-  value = yajl_tree_get(root, path_deleted, yajl_t_true);
-  response->deleted = value != NULL;
-  rc = lc_engine_tree_get_long_checked(
-      root, path_version, "delete attachment version is out of range",
-      &response->version, error);
   if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
     lc_engine_http_result_cleanup(&result);
-    return rc;
+    return lc_engine_set_protocol_error(
+        error, "failed to decode delete attachment response");
   }
   if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
   }
-  yajl_tree_free(root);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -1726,9 +1736,6 @@ int lc_engine_client_delete_all_attachments(
   char token_buf[64];
   lc_engine_http_result result;
   int rc;
-  yajl_val root = NULL;
-  static const char *path_deleted[] = {"deleted", NULL};
-  static const char *path_version[] = {"version", NULL};
 
   if (client == NULL || request == NULL || response == NULL || error == NULL ||
       request->key == NULL || request->lease_id == NULL ||
@@ -1766,31 +1773,24 @@ int lc_engine_client_delete_all_attachments(
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_tree_parse(result.body.data, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    lc_engine_http_result_cleanup(&result);
-    return rc;
+  rc = lc_engine_json_get_long(result.body.data, "deleted", &response->version);
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_i64_to_int_checked((lonejson_int64)response->version,
+                                      "delete attachments deleted count is out of range",
+                                      &response->deleted, error);
   }
-  rc = lc_engine_tree_get_int_checked(
-      root, path_deleted, "delete attachments deleted count is out of range",
-      &response->deleted, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    lc_engine_http_result_cleanup(&result);
-    return rc;
+  if (rc == LC_ENGINE_OK) {
+    rc = lc_engine_json_get_long(result.body.data, "version",
+                                 &response->version);
   }
-  rc = lc_engine_tree_get_long_checked(
-      root, path_version, "delete attachments version is out of range",
-      &response->version, error);
   if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
     lc_engine_http_result_cleanup(&result);
-    return rc;
+    return lc_engine_set_protocol_error(
+        error, "failed to decode delete attachments response");
   }
   if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
   }
-  yajl_tree_free(root);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
