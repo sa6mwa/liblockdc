@@ -180,7 +180,7 @@ required_paths=(
   "$curl_shared_path"
   "$deps_root/pslog-static/install/lib/libpslog.a"
   "$deps_root/pslog-static/install/include/pslog.h"
-  "$deps_root/pslog-shared/install/lib/libpslog.so.0.1.0"
+  "$deps_root/pslog-shared/install/lib/libpslog.so.0"
   "$deps_root/yajl-static/install/lib/libyajl_s.a"
   "$deps_root/yajl-shared/install/lib/libyajl.so.2.1.0"
   "$deps_root/cmocka/install/lib/libcmocka.a"

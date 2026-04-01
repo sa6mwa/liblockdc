@@ -39,7 +39,7 @@ set(LOCKDC_CURL_VERSION "8.18.0" CACHE STRING "Pinned curl release used for CMak
 set(LOCKDC_NGHTTP2_VERSION "1.68.0" CACHE STRING "Pinned nghttp2 release used to enable libcurl HTTP/2 support.")
 set(LOCKDC_YAJL_VERSION "2.1.0" CACHE STRING "Pinned YAJL release used for streaming JSON generation/parsing helpers.")
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
-set(LOCKDC_PSLOG_VERSION "0.1.0" CACHE STRING "Pinned libpslog release used for SDK logging.")
+set(LOCKDC_PSLOG_VERSION "0.3.0" CACHE STRING "Pinned libpslog release used for SDK logging.")
 set(LOCKDC_EXTERNAL_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps/host-debug" CACHE PATH "Stable install root for downloaded third-party dependencies.")
 set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/host-debug" CACHE PATH "Stable build root for downloaded third-party dependencies.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
@@ -395,10 +395,10 @@ if(LOCKDC_INSTALL)
     endif()
     if(TARGET lc_shared
        AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.0"
-       AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.0.1.0")
+       AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.${LOCKDC_PSLOG_VERSION}")
         install(FILES
             "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.0"
-            "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.0.1.0"
+            "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.${LOCKDC_PSLOG_VERSION}"
             DESTINATION lib
             COMPONENT runtime
         )
