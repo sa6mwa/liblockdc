@@ -29,13 +29,13 @@ FUZZ_TIME ?= 30
 	help \
 	__deps-debug __deps-release __deps-cross \
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
-	__test-debug __test-e2e __test-all __test-asan __test-coverage \
+	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__asan __coverage __fuzz __benchmarks \
 	__package __package-checksums __clean-dist \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
-	test test-debug test-e2e test-all test-asan test-coverage \
+	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
 	asan coverage fuzz benchmarks \
 	package package-checksums verify-release-archives clean-dist \
@@ -49,9 +49,10 @@ help:
 		'make build-asan         Configure and build the ASan/UBSan preset.' \
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
-		'make test               Run the dependency-backed debug/unit suite.' \
+		'make test               Run the host release suite (x86_64 GNU + musl).' \
+		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
-		'make test-all           Run the full host verification path: unit plus mTLS/libcurl e2e.' \
+		'make test-all           Run host release suites plus non-host cross release suites.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
 		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
@@ -139,13 +140,25 @@ __build-fuzz: __deps-debug
 	$(CMAKE) --preset $(FUZZ_PRESET)
 	$(CMAKE) --build --preset $(FUZZ_PRESET)
 
-test: test-debug
+test: test-host
 
 test-debug:
 	$(TIMED) test-debug $(MAKE) __test-debug
 
 __test-debug: __build-debug
 	$(CTEST) --preset $(DEBUG_PRESET)
+
+test-host:
+	$(TIMED) test-host $(MAKE) __test-host
+
+__test-host:
+	bash ./scripts/host_test.sh
+
+test-cross:
+	$(TIMED) test-cross $(MAKE) __test-cross
+
+__test-cross:
+	bash ./scripts/cross_test.sh release
 
 test-e2e:
 	$(TIMED) test-e2e $(MAKE) __test-e2e
@@ -156,7 +169,7 @@ __test-e2e:
 test-all:
 	$(TIMED) test-all $(MAKE) __test-all
 
-__test-all: __test-debug __test-e2e
+__test-all: __test-host __test-cross
 
 dev-up:
 	$(TIMED) dev-up $(MAKE) __dev-up

@@ -67,13 +67,19 @@ Build the normal host development preset:
 make build
 ```
 
-Run the host unit and configuration suite:
+Run the host release suites for the shipped x86_64 GNU and musl builds:
 
 ```bash
 make test
 ```
 
-Run the full host verification path, including the local mTLS/libcurl e2e suite:
+Run the non-host cross release suites:
+
+```bash
+make test-cross
+```
+
+Run the full release verification path across host and cross targets:
 
 ```bash
 make test-all

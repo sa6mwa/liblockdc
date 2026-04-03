@@ -11,11 +11,19 @@
 
 static const char *LC_ENGINE_VERSION_STRING = LC_VERSION_STRING;
 
+typedef struct lc_engine_json_memory_source {
+  const unsigned char *cursor;
+  size_t remaining;
+} lc_engine_json_memory_source;
+
 static size_t lc_engine_curl_write_callback(void *contents, size_t size,
                                             size_t nmemb, void *userdata);
 static lonejson_status lc_engine_json_buffer_sink(void *user,
                                                   const void *data, size_t len,
                                                   lonejson_error *error);
+static lonejson_read_result lc_engine_json_memory_reader(void *user,
+                                                         unsigned char *buffer,
+                                                         size_t capacity);
 static size_t lc_engine_header_callback(char *buffer, size_t size,
                                         size_t nitems, void *userdata);
 static CURLcode lc_engine_ssl_ctx_callback(CURL *curl, void *ssl_ctx,
@@ -418,6 +426,7 @@ int lc_engine_json_add_raw_field(lc_engine_buffer *buffer, int *first_field,
                                  const char *name, const char *value) {
   lonejson_json_value json_value;
   lonejson_error lj_error;
+  lc_engine_json_memory_source source;
   lonejson_status status;
   int rc;
 
@@ -438,8 +447,11 @@ int lc_engine_json_add_raw_field(lc_engine_buffer *buffer, int *first_field,
   }
   lonejson_json_value_init(&json_value);
   lonejson_error_init(&lj_error);
-  status = lonejson_json_value_set_buffer(&json_value, value, strlen(value),
-                                          &lj_error);
+  source.cursor = (const unsigned char *)value;
+  source.remaining = strlen(value);
+  status = lonejson_json_value_set_reader(&json_value,
+                                          lc_engine_json_memory_reader,
+                                          &source, &lj_error);
   if (status != LONEJSON_STATUS_OK) {
     lonejson_json_value_cleanup(&json_value);
     return LC_ENGINE_ERROR_PROTOCOL;
@@ -452,6 +464,32 @@ int lc_engine_json_add_raw_field(lc_engine_buffer *buffer, int *first_field,
     return LC_ENGINE_ERROR_PROTOCOL;
   }
   return LC_ENGINE_OK;
+}
+
+static lonejson_read_result lc_engine_json_memory_reader(void *user,
+                                                         unsigned char *buffer,
+                                                         size_t capacity) {
+  lc_engine_json_memory_source *source;
+  lonejson_read_result result;
+  size_t count;
+
+  source = (lc_engine_json_memory_source *)user;
+  result = lonejson_default_read_result();
+  if (source == NULL || buffer == NULL || capacity == 0U) {
+    result.eof = 1;
+    return result;
+  }
+  if (source->remaining == 0U) {
+    result.eof = 1;
+    return result;
+  }
+  count = source->remaining < capacity ? source->remaining : capacity;
+  memcpy(buffer, source->cursor, count);
+  source->cursor += count;
+  source->remaining -= count;
+  result.bytes_read = count;
+  result.eof = source->remaining == 0U;
+  return result;
 }
 
 static int lc_engine_append_hex_escape(lc_engine_buffer *buffer,

@@ -63,6 +63,7 @@ function(lc_append_common_external_cmake_args out_var)
     -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
     -DCMAKE_AR=${CMAKE_AR}
     -DCMAKE_RANLIB=${CMAKE_RANLIB}
+    -Wno-dev
   )
 
   if(CMAKE_TOOLCHAIN_FILE)
@@ -270,10 +271,10 @@ function(lc_add_zlib)
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-        -DCMAKE_DEBUG_POSTFIX=
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DZLIB_BUILD_SHARED=ON
         -DZLIB_BUILD_STATIC=ON
+        -DZLIB_BUILD_TESTING=OFF
         -DZLIB_INSTALL=ON
         ${common_cmake_args}
       BUILD_COMMAND ${CMAKE_COMMAND} --build .
@@ -315,6 +316,7 @@ endfunction()
 
 function(lc_add_libssh2)
   set(project_name "lc_libssh2_project")
+  set(openssl_project "")
   set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/libssh2")
   set(source_dir "${prefix_dir}/src")
   set(build_dir "${prefix_dir}/build")
@@ -332,11 +334,13 @@ function(lc_add_libssh2)
   if(DEFINED LOCKDC_OPENSSL_shared_PREFIX AND NOT "${LOCKDC_OPENSSL_shared_PREFIX}" STREQUAL "")
     set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_shared_PREFIX}")
     set(libssh2_openssl_build_variant "shared")
+    set(openssl_project "lc_openssl_shared_project")
     set(libssh2_openssl_ssl_library "${libssh2_openssl_prefix}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(libssh2_openssl_crypto_library "${libssh2_openssl_prefix}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}")
   elseif(DEFINED LOCKDC_OPENSSL_static_PREFIX AND NOT "${LOCKDC_OPENSSL_static_PREFIX}" STREQUAL "")
     set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_static_PREFIX}")
     set(libssh2_openssl_build_variant "static")
+    set(openssl_project "lc_openssl_static_project")
     set(libssh2_openssl_ssl_library "${libssh2_openssl_prefix}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(libssh2_openssl_crypto_library "${libssh2_openssl_prefix}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}")
   else()
@@ -363,7 +367,6 @@ function(lc_add_libssh2)
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-        -DCMAKE_DEBUG_POSTFIX=
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON
         -DBUILD_STATIC_LIBS=ON
@@ -373,7 +376,10 @@ function(lc_add_libssh2)
         -DENABLE_ZLIB_COMPRESSION=ON
         -DCRYPTO_BACKEND=OpenSSL
         -DOpenSSL_DIR=${libssh2_openssl_prefix}/lib/cmake/OpenSSL
+        -DZLIB_ROOT=${LOCKDC_ZLIB_PREFIX}
         -DZLIB_DIR=${LOCKDC_ZLIB_PREFIX}/lib/cmake/zlib
+        -DZLIB_INCLUDE_DIRS=${LOCKDC_ZLIB_PREFIX}/include
+        -DZLIB_LIBRARIES=${LOCKDC_ZLIB_PREFIX}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.1.3.2
         ${common_cmake_args}
       DEPENDS
         ${openssl_project}
@@ -487,7 +493,6 @@ function(lc_add_curl variant shared_flag)
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-        -DCMAKE_DEBUG_POSTFIX=
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DCMAKE_INSTALL_RPATH=${curl_install_rpath}
         -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF
@@ -515,7 +520,6 @@ function(lc_add_curl variant shared_flag)
         -DCURL_USE_LIBPSL=OFF
         -DUSE_LIBRTMP=OFF
         -DUSE_LIBIDN2=OFF
-        -DZLIB_DIR=${LOCKDC_ZLIB_PREFIX}/lib/cmake/zlib
         -DZLIB_ROOT=${LOCKDC_ZLIB_PREFIX}
         -DZLIB_INCLUDE_DIR=${LOCKDC_ZLIB_PREFIX}/include
         -DZLIB_LIBRARY=${curl_zlib_library}
@@ -653,7 +657,6 @@ function(lc_add_cmocka)
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DBUILD_SHARED_LIBS=OFF
         -DBUILD_TESTING=OFF
-        -DWITH_CMOCKERY_SUPPORT=OFF
         -DPICKY_DEVELOPER=OFF
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         ${common_cmake_args}
