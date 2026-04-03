@@ -20,7 +20,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(LOCKDC_BUILD_STATIC "Build the static lockdc library." ON)
 option(LOCKDC_BUILD_SHARED "Build the shared lockdc library." ON)
-option(LOCKDC_BUILD_DEPENDENCIES "Download and build OpenSSL, zlib, nghttp2, libcurl, and libssh2." OFF)
+option(LOCKDC_BUILD_DEPENDENCIES "Download and build OpenSSL, zlib, nghttp2, libcurl, libssh2, and lonejson." OFF)
 option(LOCKDC_BUILD_EXAMPLES "Build example programs." ON)
 option(LOCKDC_BUILD_TESTS "Build unit tests." ON)
 cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS

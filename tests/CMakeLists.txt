@@ -8,6 +8,14 @@ else()
   return()
 endif()
 
+if(LOCKDC_EXTERNAL_ROOT)
+  add_test(NAME lonejson_dependency_interface
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+      -P "${CMAKE_SOURCE_DIR}/tests/lonejson_dependency_interface_test.cmake"
+  )
+endif()
+
 add_subdirectory(unit)
 if(LOCKDC_BUILD_E2E_TESTS)
   add_subdirectory(e2e)

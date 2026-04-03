@@ -1,6 +1,9 @@
 #ifndef LC_API_INTERNAL_H
 #define LC_API_INTERNAL_H
 
+#ifndef LONEJSON_WITH_CURL
+#define LONEJSON_WITH_CURL
+#endif
 #include "lc/lc.h"
 #include "lc_engine_api.h"
 
@@ -36,6 +39,7 @@ struct lc_client_handle {
   int disable_mtls;
   int insecure_skip_verify;
   int prefer_http_2;
+  size_t http_json_response_limit_bytes;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;

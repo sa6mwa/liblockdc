@@ -3103,6 +3103,163 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+static void test_public_lease_save_uses_mapped_lonejson_upload(void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *update_headers[] = {
+      "Content-Type: application/json", "X-Fencing-Token: 11",
+      "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
+  static const char *update_response_headers[] = {
+      "X-Correlation-Id: corr-update", "Content-Type: application/json"};
+  static const char *update_body[] = {"{\"value\":2}"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"},
+      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns",
+       update_headers, sizeof(update_headers) / sizeof(update_headers[0]),
+       update_body, 1U, 0, 200,
+       update_response_headers, 2U,
+       "{\"new_version\":5,\"new_state_etag\":\"etag-2\","
+       "\"bytes\":11}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  test_value_doc value_doc;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&value_doc, 0, sizeof(value_doc));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  value_doc.value = 2;
+  rc = lc_lease_save(lease, &test_value_map, &value_doc, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 5L);
+  assert_string_equal(lease->state_etag, "etag-2");
+
+  lonejson_cleanup(&test_value_map, &value_doc);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
+test_public_lease_load_respects_configured_json_response_limit(void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *get_headers[] = {
+      "X-Correlation-Id: corr-get", "Content-Type: application/json",
+      "ETag: etag-1", "X-Key-Version: 4", "X-Fencing-Token: 11"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, get_headers, 5U, "{\"value\":1}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  test_value_doc value_doc;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&value_doc, 0, sizeof(value_doc));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&get_opts, 0, sizeof(get_opts));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  config.http_json_response_limit_bytes = 1U;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  get_opts.public_read = 1;
+  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
+                     &get_res, &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_int_equal(error.code, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message,
+                      "mapped state response exceeds configured byte limit");
+  assert_int_equal(value_doc.value, 0);
+
+  lonejson_cleanup(&test_value_map, &value_doc);
+  lc_get_res_cleanup(&get_res);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
 static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
@@ -3182,6 +3339,9 @@ int main(void) {
       cmocka_unit_test(test_public_bound_lease_methods_emit_logs),
       cmocka_unit_test(
           test_public_bound_lease_methods_cover_state_and_attachments),
+      cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),
+      cmocka_unit_test(
+          test_public_lease_load_respects_configured_json_response_limit),
       cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path),
       cmocka_unit_test(test_public_management_methods_emit_logs),
       cmocka_unit_test(test_public_enqueue_emits_logs),

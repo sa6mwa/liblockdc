@@ -34,71 +34,44 @@ static void lc_client_log_operation_error(lc_client_handle *client,
   }
 }
 
-typedef struct lc_client_lonejson_load_bridge {
-  lc_stream_pipe *pipe;
-  lonejson_status status;
-  lonejson_error lj_error;
-} lc_client_lonejson_load_bridge;
+typedef struct lc_client_lonejson_load_state {
+  lonejson_curl_parse parse;
+  size_t byte_limit;
+  size_t bytes_received;
+} lc_client_lonejson_load_state;
 
 static int lc_client_lonejson_load_write_callback(void *context,
                                                   const void *bytes,
                                                   size_t count,
                                                   lc_engine_error *error) {
-  lc_client_lonejson_load_bridge *bridge;
+  lc_client_lonejson_load_state *state;
+  size_t written;
 
-  bridge = (lc_client_lonejson_load_bridge *)context;
-  if (bridge == NULL) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "mapped load bridge is required");
+  state = (lc_client_lonejson_load_state *)context;
+  if (state == NULL) {
+    lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                               "mapped load state is required");
+    return 0U;
   }
-  if (lc_stream_pipe_write(bridge->pipe, bytes, count, NULL) != LC_OK) {
-    return lc_engine_set_protocol_error(
-        error, "failed to stream mapped state response");
+  if (count > 0U && state->byte_limit > 0U &&
+      count > state->byte_limit - state->bytes_received) {
+    lc_engine_set_protocol_error(
+        error, "mapped state response exceeds configured byte limit");
+    return 0U;
   }
+  if (count == 0U) {
+    return 1;
+  }
+  written = lonejson_curl_write_callback((char *)bytes, 1U, count,
+                                         &state->parse);
+  if (written != count) {
+    lc_engine_lonejson_error_from_status(
+        error, state->parse.error.code, &state->parse.error,
+        "failed to parse mapped state response");
+    return 0U;
+  }
+  state->bytes_received += count;
   return 1;
-}
-
-typedef struct lc_client_lonejson_load_thread {
-  lc_client_lonejson_load_bridge *bridge;
-  const lonejson_map *map;
-  void *dst;
-  const lonejson_parse_options *parse_options;
-  lc_source *source;
-} lc_client_lonejson_load_thread;
-
-static lonejson_read_result lc_client_lonejson_load_reader(void *context,
-                                                           unsigned char *buffer,
-                                                           size_t capacity) {
-  lc_source *source;
-  lc_error public_error;
-  lonejson_read_result result;
-  size_t nread;
-
-  source = (lc_source *)context;
-  result = lonejson_default_read_result();
-  lc_error_init(&public_error);
-  nread = source->read(source, buffer, capacity, &public_error);
-  result.bytes_read = nread;
-  result.eof = nread == 0U && public_error.code == LC_OK ? 1 : 0;
-  result.would_block = 0;
-  result.error_code = public_error.code;
-  lc_error_cleanup(&public_error);
-  return result;
-}
-
-static void *lc_client_lonejson_load_thread_main(void *context) {
-  lc_client_lonejson_load_thread *thread;
-
-  thread = (lc_client_lonejson_load_thread *)context;
-  lonejson_error_init(&thread->bridge->lj_error);
-  thread->bridge->status = lonejson_parse_reader(
-      thread->map, thread->dst, lc_client_lonejson_load_reader, thread->source,
-      thread->parse_options, &thread->bridge->lj_error);
-  if (thread->bridge->status != LONEJSON_STATUS_OK) {
-    lc_stream_pipe_fail(thread->bridge->pipe, LC_ERR_PROTOCOL,
-                        thread->bridge->lj_error.message);
-  }
-  return NULL;
 }
 
 int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
@@ -320,10 +293,8 @@ int lc_client_load_method(lc_client *self, const char *key,
   lc_engine_get_request legacy_req;
   lc_engine_get_stream_response legacy_res;
   lc_engine_error legacy_error;
-  lc_client_lonejson_load_bridge bridge;
-  lc_client_lonejson_load_thread load_thread;
-  lc_source *source;
-  pthread_t thread;
+  lc_client_lonejson_load_state load_state;
+  lonejson_parse_options options;
   int no_content;
   char *content_type;
   char *etag;
@@ -350,36 +321,27 @@ int lc_client_load_method(lc_client *self, const char *key,
   memset(&legacy_req, 0, sizeof(legacy_req));
   memset(&legacy_res, 0, sizeof(legacy_res));
   lc_engine_error_init(&legacy_error);
-  memset(&bridge, 0, sizeof(bridge));
-  rc = lc_stream_pipe_open(65536U, &client->allocator, &source, &bridge.pipe,
-                           error);
+  memset(&load_state, 0, sizeof(load_state));
+  options = parse_options != NULL ? *parse_options
+                                  : lonejson_default_parse_options();
+  load_state.byte_limit = client->http_json_response_limit_bytes > 0U
+                              ? client->http_json_response_limit_bytes
+                              : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
+  lonejson_init(map, dst);
+  rc = lonejson_curl_parse_init(&load_state.parse, map, dst, &options);
   if (rc != LONEJSON_STATUS_OK) {
-    return rc;
-  }
-  memset(&load_thread, 0, sizeof(load_thread));
-  load_thread.bridge = &bridge;
-  load_thread.map = map;
-  load_thread.dst = dst;
-  load_thread.parse_options = parse_options;
-  load_thread.source = source;
-  rc = pthread_create(&thread, NULL, lc_client_lonejson_load_thread_main,
-                      &load_thread);
-  if (rc != 0) {
-    source->close(source);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to start mapped load parser thread", NULL,
-                        NULL, NULL);
+    lonejson_cleanup(map, dst);
+    return lc_lonejson_error_from_status(error, rc, &load_state.parse.error,
+                                         "failed to initialize mapped load parser");
   }
   legacy_req.key = key;
   legacy_req.public_read = opts != NULL ? opts->public_read : 0;
   rc = lc_engine_client_get_into(client->legacy, &legacy_req,
                                  lc_client_lonejson_load_write_callback,
-                                 &bridge,
+                                 &load_state,
                                  &legacy_res, &legacy_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_legacy(error, &legacy_error);
-    lc_stream_pipe_fail(bridge.pipe, error != NULL ? error->code : LC_ERR_TRANSPORT,
-                        error != NULL ? error->message : "failed to load mapped state");
     {
       pslog_field fields[2];
 
@@ -395,8 +357,8 @@ int lc_client_load_method(lc_client *self, const char *key,
               : "client.get.error",
           fields, 2U, error);
     }
-    pthread_join(thread, NULL);
-    source->close(source);
+    lonejson_curl_parse_cleanup(&load_state.parse);
+    lonejson_cleanup(map, dst);
     lc_engine_error_cleanup(&legacy_error);
     return rc;
   }
@@ -415,16 +377,19 @@ int lc_client_load_method(lc_client *self, const char *key,
   no_content = legacy_res.no_content;
   version = legacy_res.version;
   fencing_token = legacy_res.fencing_token;
-  lc_stream_pipe_finish(bridge.pipe);
-  pthread_join(thread, NULL);
-  source->close(source);
-  if (bridge.status != LONEJSON_STATUS_OK) {
-    lc_engine_get_stream_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
-    return lc_lonejson_error_from_status(
-        error, bridge.status, &bridge.lj_error,
-        "failed to parse mapped state");
+  if (!legacy_res.no_content) {
+    rc = lonejson_curl_parse_finish(&load_state.parse);
+    if (rc != LONEJSON_STATUS_OK) {
+      lc_engine_get_stream_response_cleanup(&legacy_res);
+      lc_engine_error_cleanup(&legacy_error);
+      lonejson_curl_parse_cleanup(&load_state.parse);
+      lonejson_cleanup(map, dst);
+      return lc_lonejson_error_from_status(
+          error, rc, &load_state.parse.error,
+          "failed to parse mapped state");
+    }
   }
+  lonejson_curl_parse_cleanup(&load_state.parse);
   content_type = lc_strdup_local(legacy_res.content_type);
   etag = lc_strdup_local(legacy_res.etag);
   correlation_id = lc_strdup_local(legacy_res.correlation_id);

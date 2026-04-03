@@ -41,6 +41,7 @@ typedef struct lc_engine_client_config {
   int disable_mtls;
   int insecure_skip_verify;
   int prefer_http_2;
+  size_t http_json_response_limit_bytes;
   pslog_logger *logger;
   int disable_logger_sys_field;
   lc_engine_allocator allocator;

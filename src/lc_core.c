@@ -837,6 +837,7 @@ void lc_client_config_init(lc_client_config *config) {
   memset(config, 0, sizeof(*config));
   config->timeout_ms = 30000L;
   config->prefer_http_2 = 1;
+  config->http_json_response_limit_bytes = 0U;
 }
 
 #define LC_INIT_STRUCT_FUNC(type_name, func_name)                              \
@@ -976,6 +977,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   legacy_config.disable_mtls = config->disable_mtls;
   legacy_config.insecure_skip_verify = config->insecure_skip_verify;
   legacy_config.prefer_http_2 = config->prefer_http_2;
+  legacy_config.http_json_response_limit_bytes =
+      config->http_json_response_limit_bytes;
   legacy_config.logger = config->logger;
   legacy_config.disable_logger_sys_field = config->disable_logger_sys_field;
   legacy_config.allocator.malloc_fn = config->allocator.malloc_fn;
@@ -1054,6 +1057,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->base_logger =
       config->logger != NULL ? config->logger : lc_log_noop_logger();
   client->logger = lc_engine_client_logger(client->legacy);
+  client->http_json_response_limit_bytes =
+      config->http_json_response_limit_bytes;
   client->allocator = config->allocator;
   client->pub.acquire = lc_client_acquire_method;
   client->pub.describe = lc_client_describe_method;

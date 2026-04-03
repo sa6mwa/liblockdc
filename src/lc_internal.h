@@ -8,6 +8,10 @@
 #include <openssl/x509.h>
 #include <pslog.h>
 #include <stddef.h>
+
+#ifndef LONEJSON_WITH_CURL
+#define LONEJSON_WITH_CURL
+#endif
 #include <lonejson.h>
 
 #include "lc_engine_api.h"
@@ -33,6 +37,12 @@ typedef struct lc_engine_http_result {
   long fencing_token;
   char *content_type;
   char *header_parse_error_message;
+  char *server_error_code;
+  char *detail;
+  char *leader_endpoint;
+  char *current_etag;
+  long current_version;
+  long retry_after_seconds;
   int header_parse_failed;
 } lc_engine_http_result;
 
@@ -54,6 +64,7 @@ struct lc_engine_client {
   int disable_mtls;
   int insecure_skip_verify;
   int prefer_http_2;
+  size_t http_json_response_limit_bytes;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
@@ -116,6 +127,11 @@ int lc_engine_http_request(lc_engine_client *client, const char *method,
                            const lc_engine_header_pair *headers,
                            size_t header_count, lc_engine_http_result *result,
                            lc_engine_error *error);
+int lc_engine_http_json_request(
+    lc_engine_client *client, const char *method, const char *path,
+    const void *body, size_t body_length, const lc_engine_header_pair *headers,
+    size_t header_count, const lonejson_map *response_map, void *response,
+    lc_engine_http_result *result, lc_engine_error *error);
 
 int lc_engine_load_bundle(lc_engine_client *client, const char *bundle_path,
                           lc_engine_error *error);

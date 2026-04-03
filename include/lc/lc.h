@@ -6,6 +6,9 @@
 #include <pslog.h>
 #include <stddef.h>
 
+/** Default maximum bytes accepted while parsing a typed JSON HTTP response. */
+#define LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT (1024UL * 1024UL)
+
 /** Opaque client handle. */
 typedef struct lc_client lc_client;
 /** Opaque lease/state handle returned from acquire and message state flows. */
@@ -82,6 +85,10 @@ typedef struct lc_client_config {
   int insecure_skip_verify;
   /** Prefers HTTP/2 when the endpoint and libcurl build support it. */
   int prefer_http_2;
+  /** Maximum typed JSON response bytes parsed through lonejson. Zero uses
+   * `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`.
+   */
+  size_t http_json_response_limit_bytes;
   /** Borrowed client logger used for SDK diagnostics. Defaults to a no-op
    * logger. */
   pslog_logger *logger;

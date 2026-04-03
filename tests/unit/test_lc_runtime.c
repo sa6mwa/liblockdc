@@ -39,6 +39,7 @@ static void test_client_config_init_sets_expected_defaults(void **state) {
   assert_int_equal(config.timeout_ms, 30000L);
   assert_int_equal(config.disable_mtls, 0);
   assert_int_equal(config.prefer_http_2, 1);
+  assert_int_equal(config.http_json_response_limit_bytes, 0U);
 }
 
 static void test_allocator_init_clears_allocator(void **state) {

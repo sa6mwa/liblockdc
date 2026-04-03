@@ -554,65 +554,190 @@ function(lc_add_curl variant shared_flag)
   endif()
 endfunction()
 
-function(lc_get_lonejson_asset_info out_name out_hash)
-  set(asset_name "liblonejson-${LOCKDC_LONEJSON_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
+function(lc_get_lonejson_header_info out_name out_hash)
+  set(asset_name "lonejson-${LOCKDC_LONEJSON_VERSION}.h.gz")
 
-  if(asset_name STREQUAL "liblonejson-0.3.0-x86_64-linux-gnu.tar.gz")
-    set(asset_hash "8f0dfcbece548d2bddcfb1da4051eef98724e3ca0257b6a3535e15ff58088300")
-  elseif(asset_name STREQUAL "liblonejson-0.3.0-x86_64-linux-musl.tar.gz")
-    set(asset_hash "cb83c035ee5dac26ea37d3990699eb58bfd9899ec71cc0ca5ea70c39bcafb3a2")
-  elseif(asset_name STREQUAL "liblonejson-0.3.0-aarch64-linux-gnu.tar.gz")
-    set(asset_hash "ae541fd556a396858496e6f0998e294ed5b790d270933928c696ecfd9d89041d")
-  elseif(asset_name STREQUAL "liblonejson-0.3.0-aarch64-linux-musl.tar.gz")
-    set(asset_hash "3b49343cc588acf75cf1c2ac106aba64fbf40f69a12005d934af6623241e075a")
-  elseif(asset_name STREQUAL "liblonejson-0.3.0-armhf-linux-gnu.tar.gz")
-    set(asset_hash "4d699c98782c1eb5727031b7a696d8f54def7405bf4b7be5ffc0410f8931b0bc")
-  elseif(asset_name STREQUAL "liblonejson-0.3.0-armhf-linux-musl.tar.gz")
-    set(asset_hash "f532ad25cee16fed0f643f6b8a4c1572cb959a529510f573b7a3389749b29854")
+  if(asset_name STREQUAL "lonejson-0.3.0.h.gz")
+    set(asset_hash "43f310d4e46b8d0d2db5616e72e1ae275ad545d5cec5a01f2df5181bea9629e4")
   else()
-    message(FATAL_ERROR "Unsupported liblonejson asset: ${asset_name}")
+    message(FATAL_ERROR "Unsupported lonejson header asset: ${asset_name}")
   endif()
 
   set(${out_name} "${asset_name}" PARENT_SCOPE)
   set(${out_hash} "${asset_hash}" PARENT_SCOPE)
 endfunction()
 
+function(lc_write_lonejson_license license_path)
+  file(WRITE "${license_path}" [=[
+MIT License
+
+Copyright (c) 2026 Michel Blomgren <mike@pkt.systems>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished
+to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+]=])
+endfunction()
+
+function(lc_prepare_lonejson_source variant shared_flag source_dir install_dir
+         curl_include_dir download_dir asset_name gzip_bin)
+  if(shared_flag)
+    set(lib_type SHARED)
+  else()
+    set(lib_type STATIC)
+  endif()
+
+  file(MAKE_DIRECTORY
+    "${source_dir}"
+    "${install_dir}/include"
+    "${install_dir}/lib"
+  )
+
+  file(WRITE "${source_dir}/lonejson_impl.c" [=[
+#include "lonejson.h"
+]=])
+
+  lc_write_lonejson_license("${source_dir}/LICENSE")
+
+  file(WRITE "${source_dir}/CMakeLists.txt" "cmake_minimum_required(VERSION 3.21)\n"
+    "\n"
+    "project(lonejson_bundle VERSION ${LOCKDC_LONEJSON_VERSION} LANGUAGES C)\n"
+    "\n"
+    "add_library(lonejson ${lib_type} lonejson_impl.c)\n"
+    "target_include_directories(lonejson PRIVATE \"${curl_include_dir}\" \"${source_dir}\")\n"
+    "target_compile_definitions(lonejson PRIVATE\n"
+    "  _POSIX_C_SOURCE=200809L\n"
+    "  LONEJSON_IMPLEMENTATION=1\n"
+    "  LONEJSON_WITH_CURL=1\n"
+    "  LONEJSON_DISABLE_SHORT_NAMES=1\n"
+    ")\n"
+    "set_target_properties(lonejson\n"
+    "  PROPERTIES\n"
+    "    OUTPUT_NAME lonejson\n"
+    "    POSITION_INDEPENDENT_CODE ON\n"
+    "    VERSION ${LOCKDC_LONEJSON_VERSION}\n"
+    "    SOVERSION 0\n"
+    ")\n"
+    "\n"
+    "if(CMAKE_C_COMPILER_ID MATCHES \"Clang|GNU\")\n"
+    "  target_compile_options(lonejson PRIVATE\n"
+    "    -std=c89\n"
+    "    -Wall\n"
+    "    -Wextra\n"
+    "    -Wpedantic\n"
+    "  )\n"
+    "endif()\n"
+    "\n"
+    "install(FILES \"${source_dir}/lonejson.h\" DESTINATION include)\n"
+    "install(TARGETS lonejson\n"
+    "  ARCHIVE DESTINATION lib\n"
+    "  LIBRARY DESTINATION lib\n"
+    ")\n"
+    "install(FILES \"${source_dir}/LICENSE\"\n"
+    "  DESTINATION share/doc/liblonejson\n"
+    ")\n"
+    "install(FILES \"${source_dir}/LICENSE\"\n"
+    "  DESTINATION share/doc/liblockdc-third-party/lonejson\n"
+    "  RENAME LICENSE.txt\n"
+    ")\n")
+
+  file(WRITE "${source_dir}/configure.cmake" "if(NOT EXISTS \"${download_dir}/${asset_name}\")\n"
+    "  message(FATAL_ERROR \"missing downloaded lonejson header archive: ${download_dir}/${asset_name}\")\n"
+    "endif()\n"
+    "execute_process(\n"
+    "  COMMAND \"${gzip_bin}\" -dc \"${download_dir}/${asset_name}\"\n"
+    "  OUTPUT_FILE \"${source_dir}/lonejson.h\"\n"
+    "  RESULT_VARIABLE gzip_result\n"
+    ")\n"
+    "if(NOT gzip_result EQUAL 0)\n"
+    "  message(FATAL_ERROR \"failed to decompress lonejson header archive: ${download_dir}/${asset_name}\")\n"
+    "endif()\n"
+    "execute_process(\n"
+    "  COMMAND \"${CMAKE_COMMAND}\" -S \"${source_dir}\" -B \"${build_dir}\"\n"
+    "          -G \"${CMAKE_GENERATOR}\"\n"
+    "          \"-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}\"\n"
+    "          \"-DCMAKE_AR=${CMAKE_AR}\"\n"
+    "          \"-DCMAKE_RANLIB=${CMAKE_RANLIB}\"\n")
+  if(CMAKE_TOOLCHAIN_FILE)
+    file(APPEND "${source_dir}/configure.cmake"
+      "          \"-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}\"\n")
+  endif()
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "")
+    file(APPEND "${source_dir}/configure.cmake"
+      "          \"-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}\"\n")
+  endif()
+  file(APPEND "${source_dir}/configure.cmake"
+    "          \"-DCMAKE_INSTALL_PREFIX=${install_dir}\"\n"
+    "          -Wno-dev\n"
+    "  RESULT_VARIABLE configure_result\n"
+    ")\n"
+    "if(NOT configure_result EQUAL 0)\n"
+    "  message(FATAL_ERROR \"failed to configure lonejson source build\")\n"
+    "endif()\n")
+endfunction()
+
 function(lc_add_lonejson variant shared_flag)
   set(project_name "lc_lonejson_${variant}_project")
   set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/lonejson-${variant}")
   set(source_dir "${prefix_dir}/src")
+  set(build_dir "${prefix_dir}/build")
   set(install_dir "${LOCKDC_EXTERNAL_ROOT}/lonejson-${variant}/install")
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
-  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
-
-  lc_get_lonejson_asset_info(asset_name asset_hash)
+  set(download_dir "${LOCKDC_EXTERNAL_ROOT}/downloads")
+  lc_get_lonejson_header_info(asset_name asset_hash)
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    find_program(LOCKDC_GZIP_BIN NAMES gzip REQUIRED)
+  endif()
 
   if(shared_flag)
     set(lib_type SHARED)
     set(imported_location "${install_dir}/lib/liblonejson${CMAKE_SHARED_LIBRARY_SUFFIX}.0")
+    set(curl_include_dir "${LOCKDC_EXTERNAL_ROOT}/curl-shared-cmake/install/include")
+    set(curl_project "lc_curl_shared_project")
   else()
     set(lib_type STATIC)
     set(imported_location "${install_dir}/lib/liblonejson${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(curl_include_dir "${LOCKDC_EXTERNAL_ROOT}/curl-static/install/include")
+    set(curl_project "lc_curl_static_project")
   endif()
 
   if(LOCKDC_BUILD_DEPENDENCIES)
+    lc_prepare_lonejson_source("${variant}" "${shared_flag}" "${source_dir}"
+                               "${install_dir}" "${curl_include_dir}"
+                               "${download_dir}" "${asset_name}"
+                               "${LOCKDC_GZIP_BIN}")
     ExternalProject_Add(${project_name}
       URL "https://github.com/sa6mwa/lonejson/releases/download/v${LOCKDC_LONEJSON_VERSION}/${asset_name}"
       URL_HASH "SHA256=${asset_hash}"
       DOWNLOAD_NAME "${asset_name}"
       PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      DOWNLOAD_DIR "${download_dir}"
       SOURCE_DIR "${source_dir}"
+      BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
-      CONFIGURE_COMMAND ""
-      BUILD_COMMAND ""
-      INSTALL_COMMAND
-        ${CMAKE_COMMAND} -E rm -rf "${install_dir}"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${source_dir}" "${install_dir}"
-      BUILD_IN_SOURCE 1
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+      DOWNLOAD_NO_EXTRACT TRUE
+      DEPENDS ${curl_project}
+      CONFIGURE_COMMAND
+        ${CMAKE_COMMAND} -P "${source_dir}/configure.cmake"
+      BUILD_COMMAND ${CMAKE_COMMAND} --build "${build_dir}"
+      INSTALL_COMMAND ${CMAKE_COMMAND} --install "${build_dir}"
+      BUILD_IN_SOURCE 0
     )
   endif()
 
@@ -773,15 +898,15 @@ function(lc_configure_dependencies)
   if(LOCKDC_BUILD_STATIC)
     lc_add_pslog(static FALSE)
     lc_add_nghttp2(static FALSE)
-    lc_add_lonejson(static FALSE)
     lc_add_curl(static FALSE)
+    lc_add_lonejson(static FALSE)
   endif()
 
   if(LOCKDC_BUILD_SHARED)
     lc_add_pslog(shared TRUE)
     lc_add_nghttp2(shared TRUE)
-    lc_add_lonejson(shared TRUE)
     lc_add_curl(shared TRUE)
+    lc_add_lonejson(shared TRUE)
   endif()
 
   if(LOCKDC_BUILD_TESTS)
