@@ -24,11 +24,14 @@ file(MAKE_DIRECTORY
     "${external_root}/pslog-static/install/include"
     "${external_root}/pslog-static/install/lib"
     "${external_root}/curl-shared-cmake/install/lib"
+    "${external_root}/libssh2/install/include"
+    "${external_root}/libssh2/install/lib"
     "${external_root}/pslog-shared/install/lib"
     "${external_root}/openssl-shared/install/lib"
     "${external_root}/nghttp2-shared/install/lib"
     "${external_root}/lonejson-shared/install/lib"
     "${external_root}/curl-shared-cmake/install/share/doc/liblockdc-third-party/curl"
+    "${external_root}/libssh2/install/share/doc/liblockdc-third-party/libssh2"
     "${external_root}/pslog-shared/install/share/doc/libpslog"
     "${external_root}/openssl-shared/install/share/doc/liblockdc-third-party/openssl"
     "${external_root}/nghttp2-shared/install/share/doc/liblockdc-third-party/nghttp2"
@@ -47,6 +50,13 @@ file(WRITE "${binary_dir}/lockdcConfigVersion.cmake" "set(PACKAGE_VERSION 1.2.3)
 file(WRITE "${external_root}/pslog-static/install/include/pslog.h" "/* pslog header */\n")
 file(WRITE "${external_root}/pslog-static/install/include/pslog_version.h" "/* pslog version header */\n")
 file(WRITE "${external_root}/pslog-static/install/lib/libpslog.a" "pslog static\n")
+file(WRITE "${external_root}/libssh2/install/include/libssh2.h" "/* libssh2 header */\n")
+file(WRITE "${external_root}/libssh2/install/include/libssh2_publickey.h" "/* libssh2 publickey header */\n")
+file(WRITE "${external_root}/libssh2/install/include/libssh2_sftp.h" "/* libssh2 sftp header */\n")
+file(WRITE "${external_root}/libssh2/install/lib/libssh2.a" "libssh2 static\n")
+file(WRITE "${external_root}/libssh2/install/lib/libssh2.so.1.0.1" "libssh2 shared version\n")
+file(CREATE_LINK "libssh2.so.1.0.1" "${external_root}/libssh2/install/lib/libssh2.so.1" SYMBOLIC)
+file(CREATE_LINK "libssh2.so.1" "${external_root}/libssh2/install/lib/libssh2.so" SYMBOLIC)
 
 file(WRITE "${external_root}/curl-shared-cmake/install/lib/libcurl.so.4" "curl shared\n")
 file(WRITE "${external_root}/pslog-shared/install/lib/libpslog.so.0" "pslog shared\n")
@@ -56,6 +66,7 @@ file(WRITE "${external_root}/nghttp2-shared/install/lib/libnghttp2.so.14" "nghtt
 file(WRITE "${external_root}/lonejson-shared/install/lib/liblonejson.so.0" "lonejson shared\n")
 
 file(WRITE "${external_root}/curl-shared-cmake/install/share/doc/liblockdc-third-party/curl/LICENSE.txt" "curl license\n")
+file(WRITE "${external_root}/libssh2/install/share/doc/liblockdc-third-party/libssh2/LICENSE.txt" "libssh2 license\n")
 file(WRITE "${external_root}/pslog-shared/install/share/doc/libpslog/LICENSE" "pslog license\n")
 file(WRITE "${external_root}/openssl-shared/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt" "openssl license\n")
 file(WRITE "${external_root}/nghttp2-shared/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt" "nghttp2 license\n")
@@ -117,6 +128,7 @@ endfunction()
 
 assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/openssl/LICENSE\\.txt(\n|$)" "OpenSSL staged license")
 assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/curl/LICENSE\\.txt(\n|$)" "curl staged license")
+assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/libssh2/LICENSE\\.txt(\n|$)" "libssh2 staged license")
 assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/libpslog/LICENSE(\n|$)" "libpslog staged license")
 assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/nghttp2/LICENSE\\.txt(\n|$)" "nghttp2 staged license")
 assert_archive_contains("(^|\n)(\\./)?share/doc/liblockdc/third_party/lonejson/LICENSE(\n|$)" "lonejson staged license")

@@ -8,4 +8,4 @@ Description: lockd client library for C
 Version: @PROJECT_VERSION@
 Cflags: -I${includedir}
 Libs: -L${libdir} -llockdc
-Libs.private: -L${libdir} -lpslog -llonejson -lcurl -lssl -lcrypto -lnghttp2 -lpthread @CMAKE_DL_LIBS@
+Libs.private: -L${libdir} -lpslog -llonejson -lcurl -lssh2 -lssl -lcrypto -lnghttp2 -lpthread @CMAKE_DL_LIBS@

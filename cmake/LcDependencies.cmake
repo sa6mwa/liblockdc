@@ -239,10 +239,108 @@ function(lc_add_nghttp2 variant shared_flag)
   set(LOCKDC_NGHTTP2_${variant}_PREFIX "${install_dir}" PARENT_SCOPE)
 endfunction()
 
+function(lc_add_libssh2)
+  set(project_name "lc_libssh2_project")
+  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/libssh2")
+  set(source_dir "${prefix_dir}/src")
+  set(build_dir "${prefix_dir}/build")
+  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/libssh2/install")
+  set(stamp_dir "${prefix_dir}/stamp")
+  set(tmp_dir "${prefix_dir}/tmp")
+  lc_append_common_external_cmake_args(common_cmake_args)
+  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
+
+  set(libssh2_shared_library "${install_dir}/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(libssh2_static_library "${install_dir}/lib/libssh2${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  if(DEFINED LOCKDC_OPENSSL_shared_PREFIX AND NOT "${LOCKDC_OPENSSL_shared_PREFIX}" STREQUAL "")
+    set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_shared_PREFIX}")
+    set(libssh2_openssl_build_variant "shared")
+    set(libssh2_openssl_ssl_library "${libssh2_openssl_prefix}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    set(libssh2_openssl_crypto_library "${libssh2_openssl_prefix}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  elseif(DEFINED LOCKDC_OPENSSL_static_PREFIX AND NOT "${LOCKDC_OPENSSL_static_PREFIX}" STREQUAL "")
+    set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_static_PREFIX}")
+    set(libssh2_openssl_build_variant "static")
+    set(libssh2_openssl_ssl_library "${libssh2_openssl_prefix}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(libssh2_openssl_crypto_library "${libssh2_openssl_prefix}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  else()
+    message(FATAL_ERROR "libssh2 requires OpenSSL to be configured first")
+  endif()
+  if(DEFINED LOCKDC_OPENSSL_static_PREFIX AND NOT "${LOCKDC_OPENSSL_static_PREFIX}" STREQUAL "")
+    set(libssh2_openssl_link_variant "static")
+  else()
+    set(libssh2_openssl_link_variant "${libssh2_openssl_build_variant}")
+  endif()
+
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    ExternalProject_Add(${project_name}
+      URL "https://libssh2.org/download/libssh2-${LOCKDC_LIBSSH2_VERSION}.tar.gz"
+      URL_HASH "SHA256=d9ec76cbe34db98eec3539fe2c899d26b0c837cb3eb466a56b0f109cabf658f7"
+      DOWNLOAD_NAME "libssh2-${LOCKDC_LIBSSH2_VERSION}.tar.gz"
+      PREFIX "${prefix_dir}"
+      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      SOURCE_DIR "${source_dir}"
+      BINARY_DIR "${build_dir}"
+      STAMP_DIR "${stamp_dir}"
+      TMP_DIR "${tmp_dir}"
+      CMAKE_ARGS
+        -DCMAKE_INSTALL_PREFIX=${install_dir}
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DCMAKE_DEBUG_POSTFIX=
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DBUILD_STATIC_LIBS=ON
+        -DBUILD_SHARED_LIBS=ON
+        -DBUILD_EXAMPLES=OFF
+        -DBUILD_TESTING=OFF
+        -DENABLE_ZLIB_COMPRESSION=OFF
+        -DCRYPTO_BACKEND=OpenSSL
+        -DOPENSSL_ROOT_DIR=${libssh2_openssl_prefix}
+        -DOPENSSL_INCLUDE_DIR=${libssh2_openssl_prefix}/include
+        -DOPENSSL_SSL_LIBRARY=${libssh2_openssl_ssl_library}
+        -DOPENSSL_CRYPTO_LIBRARY=${libssh2_openssl_crypto_library}
+        ${common_cmake_args}
+      BUILD_COMMAND ${CMAKE_COMMAND} --build .
+      INSTALL_COMMAND ${CMAKE_COMMAND} --install .
+      BUILD_IN_SOURCE 0
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+  endif()
+
+  add_library(lc::libssh2_static STATIC IMPORTED GLOBAL)
+  set_target_properties(lc::libssh2_static
+    PROPERTIES
+      IMPORTED_LOCATION "${libssh2_static_library}"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_${libssh2_openssl_link_variant}"
+  )
+
+  add_library(lc::libssh2_shared SHARED IMPORTED GLOBAL)
+  set_target_properties(lc::libssh2_shared
+    PROPERTIES
+      IMPORTED_LOCATION "${libssh2_shared_library}"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+  )
+
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    add_dependencies(lc::libssh2_static ${project_name})
+    add_dependencies(lc::libssh2_shared ${project_name})
+    lc_record_dependency_target(${project_name})
+  else()
+    lc_require_dependency_file("${libssh2_static_library}" "libssh2 static library")
+    lc_require_dependency_file("${libssh2_shared_library}" "libssh2 shared library")
+    lc_require_dependency_file("${install_dir}/include/libssh2.h" "libssh2 header")
+    lc_require_dependency_file("${install_dir}/include/libssh2_publickey.h" "libssh2 publickey header")
+    lc_require_dependency_file("${install_dir}/include/libssh2_sftp.h" "libssh2 sftp header")
+  endif()
+
+  set(LOCKDC_LIBSSH2_PREFIX "${install_dir}" PARENT_SCOPE)
+endfunction()
+
 function(lc_add_curl variant shared_flag)
   set(project_name "lc_curl_${variant}_project")
   set(openssl_project "lc_openssl_${variant}_project")
   set(nghttp2_project "lc_nghttp2_${variant}_project")
+  set(libssh2_project "lc_libssh2_project")
 
   if(shared_flag)
     set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl-shared-cmake")
@@ -251,10 +349,12 @@ function(lc_add_curl variant shared_flag)
     set(lib_suffix "${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(openssl_prefix "${LOCKDC_OPENSSL_shared_PREFIX}")
     set(nghttp2_prefix "${LOCKDC_NGHTTP2_shared_PREFIX}")
+    set(libssh2_prefix "${LOCKDC_LIBSSH2_PREFIX}")
     set(curl_download_name "curl-${LOCKDC_CURL_VERSION}-${variant}-cmake.tar.xz")
     set(curl_openssl_ssl_library "${openssl_prefix}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(curl_openssl_crypto_library "${openssl_prefix}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(curl_nghttp2_library "${nghttp2_prefix}/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    set(curl_libssh2_library "${libssh2_prefix}/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(curl_build_shared_libs ON)
     set(curl_build_static_libs OFF)
     set(curl_install_rpath "$ORIGIN")
@@ -266,10 +366,12 @@ function(lc_add_curl variant shared_flag)
     set(lib_suffix "${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(openssl_prefix "${LOCKDC_OPENSSL_static_PREFIX}")
     set(nghttp2_prefix "${LOCKDC_NGHTTP2_static_PREFIX}")
+    set(libssh2_prefix "${LOCKDC_LIBSSH2_PREFIX}")
     set(curl_download_name "curl-${LOCKDC_CURL_VERSION}-${variant}-cmake.tar.xz")
     set(curl_openssl_ssl_library "${openssl_prefix}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(curl_openssl_crypto_library "${openssl_prefix}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(curl_nghttp2_library "${nghttp2_prefix}/lib/libnghttp2${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(curl_libssh2_library "${libssh2_prefix}/lib/libssh2${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(curl_build_shared_libs OFF)
     set(curl_build_static_libs ON)
     set(curl_install_rpath "")
@@ -296,6 +398,7 @@ function(lc_add_curl variant shared_flag)
       DEPENDS
         ${openssl_project}
         ${nghttp2_project}
+        ${libssh2_project}
       CMAKE_ARGS
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
@@ -317,7 +420,7 @@ function(lc_add_curl variant shared_flag)
         -DCURL_DISABLE_INSTALL=OFF
         -DCURL_USE_PKGCONFIG=OFF
         -DCURL_USE_OPENSSL=ON
-        -DCURL_USE_LIBSSH2=OFF
+        -DCURL_USE_LIBSSH2=ON
         -DCURL_USE_LIBSSH=OFF
         -DUSE_NGHTTP2=ON
         -DCURL_DISABLE_LDAP=ON
@@ -334,6 +437,8 @@ function(lc_add_curl variant shared_flag)
         -DOPENSSL_CRYPTO_LIBRARY=${curl_openssl_crypto_library}
         -DNGHTTP2_INCLUDE_DIR=${nghttp2_prefix}/include
         -DNGHTTP2_LIBRARY=${curl_nghttp2_library}
+        -DLIBSSH2_INCLUDE_DIR=${libssh2_prefix}/include
+        -DLIBSSH2_LIBRARY=${curl_libssh2_library}
         ${common_cmake_args}
       BUILD_COMMAND ${CMAKE_COMMAND} --build .
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
@@ -347,7 +452,7 @@ function(lc_add_curl variant shared_flag)
     PROPERTIES
       IMPORTED_LOCATION "${install_dir}/lib/libcurl${lib_suffix}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_${variant};lc::openssl_crypto_${variant};lc::nghttp2_${variant};${CMAKE_DL_LIBS};Threads::Threads"
+      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_${variant};lc::openssl_crypto_${variant};lc::nghttp2_${variant};lc::libssh2_${variant};${CMAKE_DL_LIBS};Threads::Threads"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
     add_dependencies(lc::curl_${variant} ${project_name})
@@ -564,8 +669,17 @@ endfunction()
 
 function(lc_configure_dependencies)
   if(LOCKDC_BUILD_STATIC)
-    lc_add_pslog(static FALSE)
     lc_add_openssl(static FALSE)
+  endif()
+
+  if(LOCKDC_BUILD_SHARED)
+    lc_add_openssl(shared TRUE)
+  endif()
+
+  lc_add_libssh2()
+
+  if(LOCKDC_BUILD_STATIC)
+    lc_add_pslog(static FALSE)
     lc_add_nghttp2(static FALSE)
     lc_add_lonejson(static FALSE)
     lc_add_curl(static FALSE)
@@ -573,7 +687,6 @@ function(lc_configure_dependencies)
 
   if(LOCKDC_BUILD_SHARED)
     lc_add_pslog(shared TRUE)
-    lc_add_openssl(shared TRUE)
     lc_add_nghttp2(shared TRUE)
     lc_add_lonejson(shared TRUE)
     lc_add_curl(shared TRUE)

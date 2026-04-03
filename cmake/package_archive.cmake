@@ -86,6 +86,9 @@ lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/include/pslo
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl-static/install/include/curl" "${package_root}/include")
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/include/openssl" "${package_root}/include")
 lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/include/nghttp2" "${package_root}/include")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2.h" "${package_root}/include")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2_publickey.h" "${package_root}/include")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2_sftp.h" "${package_root}/include")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/include/lonejson.h" "${package_root}/include")
 
 file(COPY "${LOCKDC_STATIC_LIB}" DESTINATION "${package_root}/lib")
@@ -95,6 +98,7 @@ lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl-static/install/lib/libcurl.a
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libssl.a" "${package_root}/lib")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libcrypto.a" "${package_root}/lib")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/lib/libnghttp2.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.a" "${package_root}/lib")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/lib/liblonejson.a" "${package_root}/lib")
 
 if(DEFINED LOCKDC_SHARED_SONAME
@@ -119,6 +123,7 @@ lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpsl
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libssl.so*" "${package_root}/lib")
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libcrypto.so*" "${package_root}/lib")
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/nghttp2-shared/install/lib/libnghttp2.so*" "${package_root}/lib")
+lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.so*" "${package_root}/lib")
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/lib/liblonejson.so*" "${package_root}/lib")
 
 file(COPY "${LOCKDC_PUBLIC_PKGCONFIG}" DESTINATION "${package_root}/lib/pkgconfig")
@@ -158,6 +163,13 @@ lockdc_copy_required_license(
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2-shared/src/COPYING"
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt"
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2-static/src/COPYING"
+)
+lockdc_copy_required_license(
+    "libssh2"
+    "${package_root}/share/doc/liblockdc/third_party/libssh2"
+    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/share/doc/liblockdc-third-party/libssh2/LICENSE.txt"
+    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/share/doc/libssh2/COPYING"
+    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/libssh2/src/COPYING"
 )
 lockdc_copy_required_license(
     "lonejson"
