@@ -12,7 +12,7 @@
 #include <openssl/x509.h>
 
 #define LC_ENGINE_QUEUE_ERROR_BODY_LIMIT (8U * 1024U)
-#define LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT (64U * 1024U)
+#define LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT (4U * 1024U)
 
 typedef struct lc_engine_watch_event_json {
   char *namespace_name;
