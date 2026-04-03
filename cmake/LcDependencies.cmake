@@ -317,6 +317,8 @@ function(lc_add_curl variant shared_flag)
         -DCURL_DISABLE_INSTALL=OFF
         -DCURL_USE_PKGCONFIG=OFF
         -DCURL_USE_OPENSSL=ON
+        -DCURL_USE_LIBSSH2=OFF
+        -DCURL_USE_LIBSSH=OFF
         -DUSE_NGHTTP2=ON
         -DCURL_DISABLE_LDAP=ON
         -DCURL_DISABLE_LDAPS=ON
@@ -358,18 +360,18 @@ endfunction()
 function(lc_get_lonejson_asset_info out_name out_hash)
   set(asset_name "liblonejson-${LOCKDC_LONEJSON_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
 
-  if(asset_name STREQUAL "liblonejson-0.2.0-x86_64-linux-gnu.tar.gz")
-    set(asset_hash "5149cdbab1f9f4cb275b577d7637001fa42163d79546345715648fd068db7b82")
-  elseif(asset_name STREQUAL "liblonejson-0.2.0-x86_64-linux-musl.tar.gz")
-    set(asset_hash "632686ac516fd284dedd86a42dca8b4ecfca4b503889bf633175e3de5f02100c")
-  elseif(asset_name STREQUAL "liblonejson-0.2.0-aarch64-linux-gnu.tar.gz")
-    set(asset_hash "898fe239ace768766bbd868955c9607cb11a5173b0c4d33a1bf0f873dbe5fb21")
-  elseif(asset_name STREQUAL "liblonejson-0.2.0-aarch64-linux-musl.tar.gz")
-    set(asset_hash "0519c261ab25d12c0d23eeb8cf3e75d37a6144f8d5481169024ee5a7f6ce42f0")
-  elseif(asset_name STREQUAL "liblonejson-0.2.0-armhf-linux-gnu.tar.gz")
-    set(asset_hash "8d0342af2ef32ba9971de286b18c39de29d732678706125c55b02a486eac0990")
-  elseif(asset_name STREQUAL "liblonejson-0.2.0-armhf-linux-musl.tar.gz")
-    set(asset_hash "033ac6e3dcdc996d1189e773a653e8d77a43155d5fcd661bc8fbcbbeba2a5bf9")
+  if(asset_name STREQUAL "liblonejson-0.3.0-x86_64-linux-gnu.tar.gz")
+    set(asset_hash "8f0dfcbece548d2bddcfb1da4051eef98724e3ca0257b6a3535e15ff58088300")
+  elseif(asset_name STREQUAL "liblonejson-0.3.0-x86_64-linux-musl.tar.gz")
+    set(asset_hash "cb83c035ee5dac26ea37d3990699eb58bfd9899ec71cc0ca5ea70c39bcafb3a2")
+  elseif(asset_name STREQUAL "liblonejson-0.3.0-aarch64-linux-gnu.tar.gz")
+    set(asset_hash "ae541fd556a396858496e6f0998e294ed5b790d270933928c696ecfd9d89041d")
+  elseif(asset_name STREQUAL "liblonejson-0.3.0-aarch64-linux-musl.tar.gz")
+    set(asset_hash "3b49343cc588acf75cf1c2ac106aba64fbf40f69a12005d934af6623241e075a")
+  elseif(asset_name STREQUAL "liblonejson-0.3.0-armhf-linux-gnu.tar.gz")
+    set(asset_hash "4d699c98782c1eb5727031b7a696d8f54def7405bf4b7be5ffc0410f8931b0bc")
+  elseif(asset_name STREQUAL "liblonejson-0.3.0-armhf-linux-musl.tar.gz")
+    set(asset_hash "f532ad25cee16fed0f643f6b8a4c1572cb959a529510f573b7a3389749b29854")
   else()
     message(FATAL_ERROR "Unsupported liblonejson asset: ${asset_name}")
   endif()

@@ -1,4 +1,5 @@
 #include "lc_api_internal.h"
+#include "lc_internal.h"
 #include "lc_log.h"
 
 static void *lc_subscribe_handler_main(void *context);
@@ -31,6 +32,73 @@ static void lc_client_log_operation_error(lc_client_handle *client,
     lc_log_error(client->logger, message, combined, count + 3U);
     break;
   }
+}
+
+typedef struct lc_client_lonejson_load_bridge {
+  lc_stream_pipe *pipe;
+  lonejson_status status;
+  lonejson_error lj_error;
+} lc_client_lonejson_load_bridge;
+
+static int lc_client_lonejson_load_write_callback(void *context,
+                                                  const void *bytes,
+                                                  size_t count,
+                                                  lc_engine_error *error) {
+  lc_client_lonejson_load_bridge *bridge;
+
+  bridge = (lc_client_lonejson_load_bridge *)context;
+  if (bridge == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "mapped load bridge is required");
+  }
+  if (lc_stream_pipe_write(bridge->pipe, bytes, count, NULL) != LC_OK) {
+    return lc_engine_set_protocol_error(
+        error, "failed to stream mapped state response");
+  }
+  return 1;
+}
+
+typedef struct lc_client_lonejson_load_thread {
+  lc_client_lonejson_load_bridge *bridge;
+  const lonejson_map *map;
+  void *dst;
+  const lonejson_parse_options *parse_options;
+  lc_source *source;
+} lc_client_lonejson_load_thread;
+
+static lonejson_read_result lc_client_lonejson_load_reader(void *context,
+                                                           unsigned char *buffer,
+                                                           size_t capacity) {
+  lc_source *source;
+  lc_error public_error;
+  lonejson_read_result result;
+  size_t nread;
+
+  source = (lc_source *)context;
+  result = lonejson_default_read_result();
+  lc_error_init(&public_error);
+  nread = source->read(source, buffer, capacity, &public_error);
+  result.bytes_read = nread;
+  result.eof = nread == 0U && public_error.code == LC_OK ? 1 : 0;
+  result.would_block = 0;
+  result.error_code = public_error.code;
+  lc_error_cleanup(&public_error);
+  return result;
+}
+
+static void *lc_client_lonejson_load_thread_main(void *context) {
+  lc_client_lonejson_load_thread *thread;
+
+  thread = (lc_client_lonejson_load_thread *)context;
+  lonejson_error_init(&thread->bridge->lj_error);
+  thread->bridge->status = lonejson_parse_reader(
+      thread->map, thread->dst, lc_client_lonejson_load_reader, thread->source,
+      thread->parse_options, &thread->bridge->lj_error);
+  if (thread->bridge->status != LONEJSON_STATUS_OK) {
+    lc_stream_pipe_fail(thread->bridge->pipe, LC_ERR_PROTOCOL,
+                        thread->bridge->lj_error.message);
+  }
+  return NULL;
 }
 
 int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
@@ -252,7 +320,16 @@ int lc_client_load_method(lc_client *self, const char *key,
   lc_engine_get_request legacy_req;
   lc_engine_get_stream_response legacy_res;
   lc_engine_error legacy_error;
-  FILE *fp;
+  lc_client_lonejson_load_bridge bridge;
+  lc_client_lonejson_load_thread load_thread;
+  lc_source *source;
+  pthread_t thread;
+  int no_content;
+  char *content_type;
+  char *etag;
+  char *correlation_id;
+  long version;
+  long fencing_token;
   int rc;
 
   if (self == NULL || key == NULL || map == NULL || dst == NULL || out == NULL) {
@@ -262,7 +339,6 @@ int lc_client_load_method(lc_client *self, const char *key,
         NULL);
   }
   client = (lc_client_handle *)self;
-  fp = NULL;
   {
     pslog_field fields[2];
 
@@ -274,19 +350,36 @@ int lc_client_load_method(lc_client *self, const char *key,
   memset(&legacy_req, 0, sizeof(legacy_req));
   memset(&legacy_res, 0, sizeof(legacy_res));
   lc_engine_error_init(&legacy_error);
-  fp = tmpfile();
-  if (fp == NULL) {
+  memset(&bridge, 0, sizeof(bridge));
+  rc = lc_stream_pipe_open(65536U, &client->allocator, &source, &bridge.pipe,
+                           error);
+  if (rc != LONEJSON_STATUS_OK) {
+    return rc;
+  }
+  memset(&load_thread, 0, sizeof(load_thread));
+  load_thread.bridge = &bridge;
+  load_thread.map = map;
+  load_thread.dst = dst;
+  load_thread.parse_options = parse_options;
+  load_thread.source = source;
+  rc = pthread_create(&thread, NULL, lc_client_lonejson_load_thread_main,
+                      &load_thread);
+  if (rc != 0) {
+    source->close(source);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to open temporary file for mapped load", NULL,
+                        "failed to start mapped load parser thread", NULL,
                         NULL, NULL);
   }
   legacy_req.key = key;
   legacy_req.public_read = opts != NULL ? opts->public_read : 0;
   rc = lc_engine_client_get_into(client->legacy, &legacy_req,
-                                 lc_engine_file_write_callback, fp,
+                                 lc_client_lonejson_load_write_callback,
+                                 &bridge,
                                  &legacy_res, &legacy_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_legacy(error, &legacy_error);
+    lc_stream_pipe_fail(bridge.pipe, error != NULL ? error->code : LC_ERR_TRANSPORT,
+                        error != NULL ? error->message : "failed to load mapped state");
     {
       pslog_field fields[2];
 
@@ -302,16 +395,11 @@ int lc_client_load_method(lc_client *self, const char *key,
               : "client.get.error",
           fields, 2U, error);
     }
-    fclose(fp);
+    pthread_join(thread, NULL);
+    source->close(source);
     lc_engine_error_cleanup(&legacy_error);
     return rc;
   }
-  out->no_content = legacy_res.no_content;
-  out->content_type = lc_strdup_local(legacy_res.content_type);
-  out->etag = lc_strdup_local(legacy_res.etag);
-  out->version = legacy_res.version;
-  out->fencing_token = legacy_res.fencing_token;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
   {
     pslog_field fields[5];
 
@@ -324,25 +412,28 @@ int lc_client_load_method(lc_client *self, const char *key,
     fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
     lc_log_trace(client->logger, "client.get.success", fields, 5U);
   }
-  if (!legacy_res.no_content) {
-    if (fseek(fp, 0L, SEEK_SET) != 0) {
-      fclose(fp);
-      lc_engine_get_stream_response_cleanup(&legacy_res);
-      lc_engine_error_cleanup(&legacy_error);
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to rewind mapped load temporary file", NULL,
-                          NULL, NULL);
-    }
-    rc = lc_lonejson_parse_file(fp, map, dst, parse_options, error,
-                                "failed to parse mapped state");
-    if (rc != LC_OK) {
-      fclose(fp);
-      lc_engine_get_stream_response_cleanup(&legacy_res);
-      lc_engine_error_cleanup(&legacy_error);
-      return rc;
-    }
+  no_content = legacy_res.no_content;
+  version = legacy_res.version;
+  fencing_token = legacy_res.fencing_token;
+  lc_stream_pipe_finish(bridge.pipe);
+  pthread_join(thread, NULL);
+  source->close(source);
+  if (bridge.status != LONEJSON_STATUS_OK) {
+    lc_engine_get_stream_response_cleanup(&legacy_res);
+    lc_engine_error_cleanup(&legacy_error);
+    return lc_lonejson_error_from_status(
+        error, bridge.status, &bridge.lj_error,
+        "failed to parse mapped state");
   }
-  fclose(fp);
+  content_type = lc_strdup_local(legacy_res.content_type);
+  etag = lc_strdup_local(legacy_res.etag);
+  correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->no_content = no_content;
+  out->content_type = content_type;
+  out->etag = etag;
+  out->version = version;
+  out->fencing_token = fencing_token;
+  out->correlation_id = correlation_id;
   lc_engine_get_stream_response_cleanup(&legacy_res);
   lc_engine_error_cleanup(&legacy_error);
   return LC_OK;

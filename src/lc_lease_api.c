@@ -1,4 +1,5 @@
 #include "lc_api_internal.h"
+#include "lc_internal.h"
 #include "lc_log.h"
 
 static void lc_lease_log_error(lc_lease_handle *lease, pslog_level level,
@@ -27,6 +28,142 @@ static void lc_lease_log_error(lc_lease_handle *lease, pslog_level level,
     lc_log_error(lease->client->logger, message, combined, count + 3U);
     break;
   }
+}
+
+typedef struct lc_lease_lonejson_load_bridge {
+  lc_stream_pipe *pipe;
+  lonejson_status status;
+  lonejson_error lj_error;
+} lc_lease_lonejson_load_bridge;
+
+static int lc_lease_lonejson_load_write_callback(void *context,
+                                                 const void *bytes,
+                                                 size_t count,
+                                                 lc_engine_error *error) {
+  lc_lease_lonejson_load_bridge *bridge;
+
+  bridge = (lc_lease_lonejson_load_bridge *)context;
+  if (bridge == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "mapped load bridge is required");
+  }
+  if (lc_stream_pipe_write(bridge->pipe, bytes, count, NULL) != LC_OK) {
+    return lc_engine_set_protocol_error(
+        error, "failed to stream mapped lease state response");
+  }
+  return 1;
+}
+
+typedef struct lc_lease_lonejson_load_thread {
+  lc_lease_lonejson_load_bridge *bridge;
+  const lonejson_map *map;
+  void *dst;
+  const lonejson_parse_options *parse_options;
+  lc_source *source;
+} lc_lease_lonejson_load_thread;
+
+static lonejson_read_result lc_lease_lonejson_load_reader(void *context,
+                                                          unsigned char *buffer,
+                                                          size_t capacity) {
+  lc_source *source;
+  lc_error public_error;
+  lonejson_read_result result;
+  size_t nread;
+
+  source = (lc_source *)context;
+  result = lonejson_default_read_result();
+  lc_error_init(&public_error);
+  nread = source->read(source, buffer, capacity, &public_error);
+  result.bytes_read = nread;
+  result.eof = nread == 0U && public_error.code == LC_OK ? 1 : 0;
+  result.would_block = 0;
+  result.error_code = public_error.code;
+  lc_error_cleanup(&public_error);
+  return result;
+}
+
+static void *lc_lease_lonejson_load_thread_main(void *context) {
+  lc_lease_lonejson_load_thread *thread;
+
+  thread = (lc_lease_lonejson_load_thread *)context;
+  lonejson_error_init(&thread->bridge->lj_error);
+  thread->bridge->status = lonejson_parse_reader(
+      thread->map, thread->dst, lc_lease_lonejson_load_reader, thread->source,
+      thread->parse_options, &thread->bridge->lj_error);
+  if (thread->bridge->status != LONEJSON_STATUS_OK) {
+    lc_stream_pipe_fail(thread->bridge->pipe, LC_ERR_PROTOCOL,
+                        thread->bridge->lj_error.message);
+  }
+  return NULL;
+}
+
+typedef struct lc_lease_lonejson_save_bridge {
+  lc_stream_pipe *pipe;
+  lc_error thread_error;
+} lc_lease_lonejson_save_bridge;
+
+typedef struct lc_lease_lonejson_save_thread {
+  lc_lease_lonejson_save_bridge *bridge;
+  const lonejson_map *map;
+  const void *src;
+  const lonejson_write_options *write_options;
+  lonejson_status status;
+  lonejson_error lj_error;
+} lc_lease_lonejson_save_thread;
+
+static lonejson_status lc_lease_lonejson_save_sink(void *context,
+                                                   const void *data,
+                                                   size_t len,
+                                                   lonejson_error *error) {
+  lc_lease_lonejson_save_bridge *bridge;
+
+  bridge = (lc_lease_lonejson_save_bridge *)context;
+  if (bridge == NULL) {
+    if (error != NULL) {
+      error->code = LONEJSON_STATUS_INVALID_ARGUMENT;
+      snprintf(error->message, sizeof(error->message),
+               "mapped save bridge is required");
+    }
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (len == 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (lc_stream_pipe_write(bridge->pipe, data, len, &bridge->thread_error) !=
+      LC_OK) {
+    if (error != NULL) {
+      error->code = LONEJSON_STATUS_CALLBACK_FAILED;
+      snprintf(error->message, sizeof(error->message), "%s",
+               bridge->thread_error.message != NULL
+                   ? bridge->thread_error.message
+                   : "failed to write mapped save stream");
+    }
+    return LONEJSON_STATUS_CALLBACK_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static void *lc_lease_lonejson_save_thread_main(void *context) {
+  lc_lease_lonejson_save_thread *thread;
+
+  thread = (lc_lease_lonejson_save_thread *)context;
+  lc_error_init(&thread->bridge->thread_error);
+  thread->status = lonejson_serialize_sink(thread->map, thread->src,
+                                           lc_lease_lonejson_save_sink,
+                                           thread->bridge, thread->write_options,
+                                           &thread->lj_error);
+  if (thread->status != LONEJSON_STATUS_OK) {
+    lc_stream_pipe_fail(thread->bridge->pipe,
+                        thread->bridge->thread_error.code != LC_OK
+                            ? thread->bridge->thread_error.code
+                            : LC_ERR_TRANSPORT,
+                        thread->bridge->thread_error.message != NULL
+                            ? thread->bridge->thread_error.message
+                            : thread->lj_error.message);
+  } else {
+    lc_stream_pipe_finish(thread->bridge->pipe);
+  }
+  return NULL;
 }
 
 static void lc_lease_refresh_state_view(lc_lease_handle *lease,
@@ -228,7 +365,16 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   lc_engine_get_request legacy_req;
   lc_engine_get_stream_response legacy_res;
   lc_engine_error legacy_error;
-  FILE *fp;
+  lc_lease_lonejson_load_bridge bridge;
+  lc_lease_lonejson_load_thread load_thread;
+  lc_source *source;
+  pthread_t thread;
+  int no_content;
+  char *content_type;
+  char *etag;
+  char *correlation_id;
+  long version;
+  long fencing_token;
   int rc;
 
   if (self == NULL || map == NULL || dst == NULL || out == NULL) {
@@ -238,7 +384,6 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
         NULL);
   }
   lease = (lc_lease_handle *)self;
-  fp = NULL;
   {
     pslog_field fields[4];
 
@@ -252,10 +397,24 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   memset(&legacy_req, 0, sizeof(legacy_req));
   memset(&legacy_res, 0, sizeof(legacy_res));
   lc_engine_error_init(&legacy_error);
-  fp = tmpfile();
-  if (fp == NULL) {
+  memset(&bridge, 0, sizeof(bridge));
+  rc = lc_stream_pipe_open(65536U, &lease->client->allocator, &source,
+                           &bridge.pipe, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&load_thread, 0, sizeof(load_thread));
+  load_thread.bridge = &bridge;
+  load_thread.map = map;
+  load_thread.dst = dst;
+  load_thread.parse_options = parse_options;
+  load_thread.source = source;
+  rc = pthread_create(&thread, NULL, lc_lease_lonejson_load_thread_main,
+                      &load_thread);
+  if (rc != 0) {
+    source->close(source);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to open temporary file for mapped lease load",
+                        "failed to start mapped lease load parser thread",
                         NULL, NULL, NULL);
   }
   legacy_req.namespace_name = lease->namespace_name;
@@ -264,7 +423,8 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   legacy_req.fencing_token = lease->fencing_token;
   legacy_req.public_read = opts != NULL ? opts->public_read : 0;
   rc = lc_engine_client_get_into(lease->client->legacy, &legacy_req,
-                                 lc_engine_file_write_callback, fp,
+                                 lc_lease_lonejson_load_write_callback,
+                                 &bridge,
                                  &legacy_res, &legacy_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_legacy(error, &legacy_error);
@@ -285,16 +445,16 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
                              : "client.get.error",
                          fields, 4U, error);
     }
-    fclose(fp);
+    lc_engine_get_stream_response_cleanup(&legacy_res);
+    lc_stream_pipe_fail(bridge.pipe,
+                        error != NULL ? error->code : LC_ERR_TRANSPORT,
+                        error != NULL ? error->message
+                                        : "failed to load mapped lease state");
+    pthread_join(thread, NULL);
+    source->close(source);
     lc_engine_error_cleanup(&legacy_error);
     return rc;
   }
-  out->no_content = legacy_res.no_content;
-  out->content_type = lc_strdup_local(legacy_res.content_type);
-  out->etag = lc_strdup_local(legacy_res.etag);
-  out->version = legacy_res.version;
-  out->fencing_token = legacy_res.fencing_token;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
   lc_lease_refresh_state_view(lease, legacy_res.etag, legacy_res.version,
                               legacy_res.fencing_token, 0L);
   if (legacy_res.no_content) {
@@ -317,26 +477,28 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
     fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
     lc_log_trace(lease->client->logger, "client.get.success", fields, 5U);
   }
-  if (!legacy_res.no_content) {
-    if (fseek(fp, 0L, SEEK_SET) != 0) {
-      fclose(fp);
-      lc_engine_get_stream_response_cleanup(&legacy_res);
-      lc_engine_error_cleanup(&legacy_error);
-      return lc_error_set(
-          error, LC_ERR_TRANSPORT, 0L,
-          "failed to rewind mapped lease load temporary file", NULL, NULL,
-          NULL);
-    }
-    rc = lc_lonejson_parse_file(fp, map, dst, parse_options, error,
-                                "failed to parse mapped lease state");
-    if (rc != LC_OK) {
-      fclose(fp);
-      lc_engine_get_stream_response_cleanup(&legacy_res);
-      lc_engine_error_cleanup(&legacy_error);
-      return rc;
-    }
+  no_content = legacy_res.no_content;
+  version = legacy_res.version;
+  fencing_token = legacy_res.fencing_token;
+  lc_stream_pipe_finish(bridge.pipe);
+  pthread_join(thread, NULL);
+  source->close(source);
+  if (bridge.status != LONEJSON_STATUS_OK) {
+    lc_engine_get_stream_response_cleanup(&legacy_res);
+    lc_engine_error_cleanup(&legacy_error);
+    return lc_lonejson_error_from_status(
+        error, bridge.status, &bridge.lj_error,
+        "failed to parse mapped lease state");
   }
-  fclose(fp);
+  content_type = lc_strdup_local(legacy_res.content_type);
+  etag = lc_strdup_local(legacy_res.etag);
+  correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->no_content = no_content;
+  out->content_type = content_type;
+  out->etag = etag;
+  out->version = version;
+  out->fencing_token = fencing_token;
+  out->correlation_id = correlation_id;
   lc_engine_get_stream_response_cleanup(&legacy_res);
   lc_engine_error_cleanup(&legacy_error);
   return LC_OK;
@@ -346,52 +508,62 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
                          const void *src,
                          const lonejson_write_options *write_options,
                          lc_error *error) {
-  FILE *fp;
+  lc_lease_handle *lease;
+  lc_lease_lonejson_save_bridge save_bridge;
+  lc_lease_lonejson_save_thread save_thread;
   lc_source *source;
   lc_json *json;
   lc_update_opts update_opts;
+  pthread_t thread;
   int rc;
 
-  if (map == NULL || src == NULL) {
+  if (self == NULL || map == NULL || src == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "lease save requires map and source", NULL, NULL,
-                        NULL);
+                        "lease save requires self, map, and source", NULL,
+                        NULL, NULL);
   }
-  fp = tmpfile();
-  if (fp == NULL) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to open temporary file for mapped lease save",
-                        NULL, NULL, NULL);
-  }
-  rc = lc_lonejson_serialize_file(fp, map, src, write_options, error,
-                                  "failed to serialize mapped lease state");
+  lease = (lc_lease_handle *)self;
+  memset(&save_bridge, 0, sizeof(save_bridge));
+  rc = lc_stream_pipe_open(65536U, &lease->client->allocator, &source,
+                           &save_bridge.pipe, error);
   if (rc != LC_OK) {
-    fclose(fp);
     return rc;
-  }
-  if (fflush(fp) != 0 || fseek(fp, 0L, SEEK_SET) != 0) {
-    fclose(fp);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to prepare mapped lease save stream", NULL,
-                        NULL, NULL);
-  }
-  source = lc_source_from_open_file(fp, 1);
-  if (source == NULL) {
-    fclose(fp);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate mapped lease save source", NULL,
-                        NULL, NULL);
   }
   rc = lc_json_from_source(source, &json, error);
   if (rc != LC_OK) {
     source->close(source);
     return rc;
   }
+  memset(&save_thread, 0, sizeof(save_thread));
+  save_thread.bridge = &save_bridge;
+  save_thread.map = map;
+  save_thread.src = src;
+  save_thread.write_options = write_options;
+  save_bridge.thread_error.code = LC_OK;
+  save_bridge.thread_error.message = NULL;
+  rc = pthread_create(&thread, NULL, lc_lease_lonejson_save_thread_main,
+                      &save_thread);
+  if (rc != 0) {
+    json->close(json);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to start mapped lease save stream", NULL, NULL,
+                        NULL);
+  }
+  source = NULL;
   memset(&update_opts, 0, sizeof(update_opts));
   update_opts.content_type = "application/json";
   rc = lc_lease_update_method(self, json, &update_opts, error);
   json->close(json);
-  return rc;
+  pthread_join(thread, NULL);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (save_thread.status != LONEJSON_STATUS_OK) {
+    return lc_lonejson_error_from_status(
+        error, save_thread.status, &save_thread.lj_error,
+        "failed to serialize mapped lease state");
+  }
+  return LC_OK;
 }
 
 int lc_lease_update_method(lc_lease *self, lc_json *json,

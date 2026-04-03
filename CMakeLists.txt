@@ -37,7 +37,7 @@ option(LOCKDC_INSTALL "Enable install rules." ON)
 set(LOCKDC_OPENSSL_VERSION "3.6.1" CACHE STRING "Pinned OpenSSL release used for CMake-managed dependency builds.")
 set(LOCKDC_CURL_VERSION "8.18.0" CACHE STRING "Pinned curl release used for CMake-managed dependency builds.")
 set(LOCKDC_NGHTTP2_VERSION "1.68.0" CACHE STRING "Pinned nghttp2 release used to enable libcurl HTTP/2 support.")
-set(LOCKDC_LONEJSON_VERSION "0.2.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers.")
+set(LOCKDC_LONEJSON_VERSION "0.3.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers.")
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.3.1" CACHE STRING "Pinned libpslog release used for SDK logging.")
 set(LOCKDC_EXTERNAL_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps/host-debug" CACHE PATH "Stable install root for downloaded third-party dependencies.")
@@ -559,6 +559,16 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/pslog_build_modes_test.cmake
     )
     set_tests_properties(pslog_build_modes_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME curl_dependency_interface_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/curl_dependency_interface_test.cmake
+    )
+    set_tests_properties(curl_dependency_interface_test PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)
