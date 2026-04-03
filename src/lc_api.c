@@ -341,6 +341,26 @@ lc_source *lc_message_payload(lc_message *message) {
   return message->payload_reader(message);
 }
 
+int lc_message_payload_json(lc_message *message, lc_json **out,
+                            lc_error *error) {
+  lc_message_handle *handle;
+  lc_source *payload;
+
+  if (message == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "message payload_json requires message and out", NULL,
+                        NULL, NULL);
+  }
+  handle = (lc_message_handle *)message;
+  payload = handle->payload;
+  if (payload == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L, "message has no payload",
+                        NULL, NULL, NULL);
+  }
+  handle->payload = NULL;
+  return lc_json_from_source(payload, out, error);
+}
+
 int lc_message_rewind_payload(lc_message *message, lc_error *error) {
   if (message == NULL || message->rewind_payload == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,

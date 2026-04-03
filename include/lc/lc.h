@@ -2031,6 +2031,16 @@ int lc_message_extend(lc_message *message, const lc_extend_req *req,
 lc_lease *lc_message_state(lc_message *message);
 /** Returns the rewindable payload reader owned by the message handle. */
 lc_source *lc_message_payload(lc_message *message);
+/**
+ * Transfers the payload source into a rewindable JSON stream.
+ *
+ * Use this when the dequeue payload is itself JSON and you want to parse it
+ * through lonejson, including spool-backed fields for very large strings or
+ * byte arrays. Ownership of the payload source moves into `out`; the message
+ * no longer owns it after success.
+ */
+int lc_message_payload_json(lc_message *message, lc_json **out,
+                            lc_error *error);
 /** Rewinds a bound message payload so it can be consumed again. */
 int lc_message_rewind_payload(lc_message *message, lc_error *error);
 /** Copies a bound message payload into `dst`. */

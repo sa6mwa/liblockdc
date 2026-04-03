@@ -1732,7 +1732,8 @@ static int lc_dequeue_begin(void *context,
   (void)error;
   bridge = (lc_single_delivery_bridge *)context;
   lc_delivery_meta_copy(&bridge->meta, delivery);
-  rc = lc_sink_to_memory(&bridge->sink, bridge->error);
+  rc = lc_stream_pipe_open(65536U, &bridge->client->allocator, &bridge->payload,
+                           &bridge->pipe, bridge->error);
   return rc == LC_OK;
 }
 
@@ -1743,41 +1744,45 @@ static int lc_dequeue_chunk(void *context, const void *bytes, size_t count,
 
   (void)error;
   bridge = (lc_single_delivery_bridge *)context;
-  rc = bridge->sink->write(bridge->sink, bytes, count, bridge->error);
-  return rc != LC_OK;
+  if (bridge->pipe == NULL) {
+    lc_error_set(bridge->error, LC_ERR_INVALID, 0L,
+                 "missing dequeue payload stream", NULL, NULL, NULL);
+    return 0;
+  }
+  if (count == 0U) {
+    return 1;
+  }
+  rc = lc_stream_pipe_write(bridge->pipe, bytes, count, bridge->error);
+  return rc == LC_OK;
 }
 
 static int lc_dequeue_end(void *context,
                           const lc_engine_dequeue_response *delivery,
                           lc_engine_error *error) {
   lc_single_delivery_bridge *bridge;
-  const void *bytes;
-  size_t length;
   lc_source *payload;
   lc_message *message;
   lc_message **next;
   size_t next_count;
-  int rc;
 
   (void)delivery;
   (void)error;
   bridge = (lc_single_delivery_bridge *)context;
-  bytes = NULL;
-  length = 0U;
-  rc = lc_sink_memory_bytes(bridge->sink, &bytes, &length, bridge->error);
-  if (rc != LC_OK) {
+  if (bridge->pipe == NULL || bridge->payload == NULL) {
+    lc_error_set(bridge->error, LC_ERR_INVALID, 0L,
+                 "missing dequeue payload stream", NULL, NULL, NULL);
     return 0;
   }
-  rc = lc_source_from_memory(bytes, length, &payload, bridge->error);
-  bridge->sink->close(bridge->sink);
-  bridge->sink = NULL;
-  if (rc != LC_OK) {
-    return 0;
-  }
+  lc_stream_pipe_finish(bridge->pipe);
+  bridge->pipe = NULL;
+  payload = bridge->payload;
+  bridge->payload = NULL;
   message = lc_message_new(bridge->client, &bridge->meta, payload, NULL);
   lc_engine_dequeue_response_cleanup(&bridge->meta);
   if (message == NULL) {
-    payload->close(payload);
+    if (payload != NULL) {
+      payload->close(payload);
+    }
     return 0;
   }
   if (bridge->mode_batch) {
@@ -1852,8 +1857,14 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
                                        &bridge, &legacy_error);
   }
   if (rc != LC_ENGINE_OK) {
-    if (bridge.sink != NULL) {
-      bridge.sink->close(bridge.sink);
+    if (bridge.pipe != NULL) {
+      lc_stream_pipe_fail(bridge.pipe, LC_ERR_TRANSPORT,
+                          "failed to dequeue payload");
+      bridge.pipe = NULL;
+    }
+    if (bridge.payload != NULL) {
+      bridge.payload->close(bridge.payload);
+      bridge.payload = NULL;
     }
     lc_engine_dequeue_response_cleanup(&bridge.meta);
     if (error != NULL && error->code != LC_OK) {
@@ -1949,8 +1960,14 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
   rc = lc_engine_client_dequeue_into(client->legacy, &legacy_req, &handler,
                                      &bridge, &legacy_error);
   if (rc != LC_ENGINE_OK) {
-    if (bridge.sink != NULL) {
-      bridge.sink->close(bridge.sink);
+    if (bridge.pipe != NULL) {
+      lc_stream_pipe_fail(bridge.pipe, LC_ERR_TRANSPORT,
+                          "failed to dequeue payload");
+      bridge.pipe = NULL;
+    }
+    if (bridge.payload != NULL) {
+      bridge.payload->close(bridge.payload);
+      bridge.payload = NULL;
     }
     lc_engine_dequeue_response_cleanup(&bridge.meta);
     lc_dequeue_batch_cleanup(out);

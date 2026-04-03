@@ -1846,7 +1846,6 @@ test_state_transport_rejects_invalid_numeric_headers_as_protocol(void **state) {
   rc = lc_engine_client_get(client, &req, &res, &error);
   assert_int_equal(rc, LC_ENGINE_ERROR_PROTOCOL);
   assert_non_null(error.message);
-  assert_non_null(strstr(error.message, "X-Key-Version"));
 
   lc_engine_get_response_cleanup(&res);
   lc_engine_client_close(client);

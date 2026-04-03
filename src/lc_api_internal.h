@@ -110,7 +110,8 @@ typedef struct lc_single_delivery_bridge {
   lc_dequeue_batch_res *batch;
   lc_error *error;
   lc_engine_dequeue_response meta;
-  lc_sink *sink;
+  lc_source *payload;
+  lc_stream_pipe *pipe;
   int mode_batch;
 } lc_single_delivery_bridge;
 

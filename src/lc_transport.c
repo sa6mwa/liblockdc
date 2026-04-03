@@ -173,7 +173,6 @@ void lc_engine_query_response_cleanup(lc_engine_query_response *response) {
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->raw_json);
   lc_engine_free_string(&response->cursor);
   lc_engine_free_string(&response->correlation_id);
   memset(response, 0, sizeof(*response));
@@ -198,7 +197,9 @@ void lc_engine_dequeue_response_cleanup(lc_engine_dequeue_response *response) {
   lc_engine_free_string(&response->queue);
   lc_engine_free_string(&response->message_id);
   lc_engine_free_string(&response->payload_content_type);
-  free(response->payload);
+  if (response->payload != NULL) {
+    response->payload->close(response->payload);
+  }
   lc_engine_free_string(&response->correlation_id);
   lc_engine_free_string(&response->lease_id);
   lc_engine_free_string(&response->txn_id);

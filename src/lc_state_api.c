@@ -1,3 +1,4 @@
+#include "lc_api_internal.h"
 #include "lc_internal.h"
 
 #include <stdlib.h>
@@ -45,6 +46,29 @@ static int
 lc_engine_build_metadata_body(lc_engine_client *client,
                               const lc_engine_metadata_request *request,
                               lc_engine_buffer *body);
+typedef struct lc_engine_body_capture_state {
+  lc_engine_buffer buffer;
+} lc_engine_body_capture_state;
+typedef struct lc_engine_query_response_json {
+  char *cursor;
+  lonejson_int64 index_seq;
+} lc_engine_query_response_json;
+static const lonejson_field lc_engine_query_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_response_json, cursor,
+                                "cursor"),
+    LONEJSON_FIELD_I64(lc_engine_query_response_json, index_seq,
+                       "index_seq")};
+LONEJSON_MAP_DEFINE(lc_engine_query_response_map,
+                    lc_engine_query_response_json,
+                    lc_engine_query_response_fields);
+typedef struct lc_engine_dequeue_capture_state {
+  lc_allocator allocator;
+  lc_engine_client *client;
+  lc_engine_dequeue_response *response;
+  lc_source *payload;
+  lc_stream_pipe *pipe;
+  size_t payload_length;
+} lc_engine_dequeue_capture_state;
 typedef struct lc_engine_query_hidden_json {
   int query_hidden;
 } lc_engine_query_hidden_json;
@@ -237,14 +261,20 @@ LONEJSON_MAP_DEFINE(lc_engine_enqueue_response_map,
                     lc_engine_enqueue_response_fields);
 static int lc_engine_copy_bytes(unsigned char **out_bytes, size_t *out_length,
                                 const char *bytes, size_t count);
-static const char *lc_engine_find_bytes(const char *haystack,
-                                        size_t haystack_length,
-                                        const char *needle,
-                                        size_t needle_length);
-static int
-lc_engine_parse_dequeue_response(const lc_engine_http_result *result,
-                                 lc_engine_dequeue_response *response,
-                                 lc_engine_error *error);
+static int lc_engine_capture_body_writer(void *context, const void *bytes,
+                                         size_t count,
+                                         lc_engine_error *error);
+static int lc_engine_copy_dequeue_response(
+    lc_engine_dequeue_response *dst, const lc_engine_dequeue_response *src);
+static int lc_engine_dequeue_capture_begin(
+    void *context, const lc_engine_dequeue_response *delivery,
+    lc_engine_error *error);
+static int lc_engine_dequeue_capture_chunk(void *context, const void *bytes,
+                                           size_t count,
+                                           lc_engine_error *error);
+static int lc_engine_dequeue_capture_end(
+    void *context, const lc_engine_dequeue_response *delivery,
+    lc_engine_error *error);
 static int lc_engine_set_fencing_header(long fencing_token,
                                         lc_engine_buffer *buffer,
                                         lc_engine_header_pair *header);
@@ -778,253 +808,171 @@ static int lc_engine_copy_bytes(unsigned char **out_bytes, size_t *out_length,
   return LC_ENGINE_OK;
 }
 
-static const char *lc_engine_find_bytes(const char *haystack,
-                                        size_t haystack_length,
-                                        const char *needle,
-                                        size_t needle_length) {
-  size_t index;
+static int lc_engine_capture_body_writer(void *context, const void *bytes,
+                                         size_t count,
+                                         lc_engine_error *error) {
+  lc_engine_body_capture_state *state;
 
-  if (needle_length == 0U || haystack_length < needle_length) {
-    return NULL;
+  state = (lc_engine_body_capture_state *)context;
+  if (state == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing body capture state") ==
+           LC_ENGINE_OK;
   }
-  for (index = 0U; index + needle_length <= haystack_length; ++index) {
-    if (memcmp(haystack + index, needle, needle_length) == 0) {
-      return haystack + index;
-    }
+  if (count == 0U) {
+    return 1;
   }
-  return NULL;
+  if (lc_engine_buffer_append(&state->buffer, (const char *)bytes, count) !=
+      LC_ENGINE_OK) {
+    lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                               "failed to capture response body");
+    return 0;
+  }
+  return 1;
 }
 
-static int
-lc_engine_parse_dequeue_response(const lc_engine_http_result *result,
-                                 lc_engine_dequeue_response *response,
-                                 lc_engine_error *error) {
-  const char *boundary_key;
-  const char *boundary_value;
-  const char *boundary_end;
-  char *boundary;
-  lc_engine_buffer marker;
-  lc_engine_buffer next_marker;
-  const char *body;
-  size_t body_length;
-  const char *cursor;
-  const char *header_end;
-  const char *meta_start;
-  const char *meta_end;
-  const char *second_boundary;
-  const char *payload_header_end;
-  const char *payload_start;
-  const char *payload_end;
-  char *meta_json;
-  long value;
+static int lc_engine_copy_dequeue_response(
+    lc_engine_dequeue_response *dst, const lc_engine_dequeue_response *src) {
+  if (dst == NULL || src == NULL) {
+    return LC_ENGINE_ERROR_INVALID_ARGUMENT;
+  }
+
+  dst->namespace_name = lc_engine_strdup_local(src->namespace_name);
+  dst->queue = lc_engine_strdup_local(src->queue);
+  dst->message_id = lc_engine_strdup_local(src->message_id);
+  dst->attempts = src->attempts;
+  dst->max_attempts = src->max_attempts;
+  dst->failure_attempts = src->failure_attempts;
+  dst->not_visible_until_unix = src->not_visible_until_unix;
+  dst->visibility_timeout_seconds = src->visibility_timeout_seconds;
+  dst->payload_content_type = lc_engine_strdup_local(src->payload_content_type);
+  dst->payload = NULL;
+  dst->payload_length = src->payload_length;
+  dst->correlation_id = lc_engine_strdup_local(src->correlation_id);
+  dst->lease_id = lc_engine_strdup_local(src->lease_id);
+  dst->lease_expires_at_unix = src->lease_expires_at_unix;
+  dst->fencing_token = src->fencing_token;
+  dst->txn_id = lc_engine_strdup_local(src->txn_id);
+  dst->meta_etag = lc_engine_strdup_local(src->meta_etag);
+  dst->state_etag = lc_engine_strdup_local(src->state_etag);
+  dst->state_lease_id = lc_engine_strdup_local(src->state_lease_id);
+  dst->state_lease_expires_at_unix = src->state_lease_expires_at_unix;
+  dst->state_fencing_token = src->state_fencing_token;
+  dst->state_txn_id = lc_engine_strdup_local(src->state_txn_id);
+  dst->next_cursor = lc_engine_strdup_local(src->next_cursor);
+
+  if ((src->namespace_name != NULL && dst->namespace_name == NULL) ||
+      (src->queue != NULL && dst->queue == NULL) ||
+      (src->message_id != NULL && dst->message_id == NULL) ||
+      (src->payload_content_type != NULL && dst->payload_content_type == NULL) ||
+      (src->correlation_id != NULL && dst->correlation_id == NULL) ||
+      (src->lease_id != NULL && dst->lease_id == NULL) ||
+      (src->txn_id != NULL && dst->txn_id == NULL) ||
+      (src->meta_etag != NULL && dst->meta_etag == NULL) ||
+      (src->state_etag != NULL && dst->state_etag == NULL) ||
+      (src->state_lease_id != NULL && dst->state_lease_id == NULL) ||
+      (src->state_txn_id != NULL && dst->state_txn_id == NULL) ||
+      (src->next_cursor != NULL && dst->next_cursor == NULL)) {
+    lc_engine_dequeue_response_cleanup(dst);
+    return LC_ENGINE_ERROR_NO_MEMORY;
+  }
+
+  return LC_ENGINE_OK;
+}
+
+static int lc_engine_dequeue_capture_begin(
+    void *context, const lc_engine_dequeue_response *delivery,
+    lc_engine_error *error) {
+  lc_engine_dequeue_capture_state *state;
+  int rc;
+  lc_error pipe_error;
+
+  state = (lc_engine_dequeue_capture_state *)context;
+  if (state == NULL || state->response == NULL || delivery == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing dequeue capture state") ==
+           LC_ENGINE_OK;
+  }
+  lc_engine_dequeue_response_cleanup(state->response);
+  rc = lc_engine_copy_dequeue_response(state->response, delivery);
+  if (rc != LC_ENGINE_OK) {
+    lc_engine_set_client_error(error, rc, "failed to capture dequeue metadata");
+    return 0;
+  }
+  memset(&pipe_error, 0, sizeof(pipe_error));
+  rc = lc_stream_pipe_open(65536U, &state->allocator, &state->payload,
+                           &state->pipe, &pipe_error);
+  if (rc != LC_OK) {
+    lc_engine_set_transport_error(
+        error, pipe_error.message != NULL ? pipe_error.message
+                                          : "failed to create dequeue payload stream");
+    lc_error_cleanup(&pipe_error);
+    lc_engine_dequeue_response_cleanup(state->response);
+    return 0;
+  }
+  lc_error_cleanup(&pipe_error);
+  state->payload_length = 0U;
+  state->response->payload = state->payload;
+  state->response->payload_length = 0U;
+  return 1;
+}
+
+static int lc_engine_dequeue_capture_chunk(void *context, const void *bytes,
+                                           size_t count,
+                                           lc_engine_error *error) {
+  lc_engine_dequeue_capture_state *state;
   int rc;
 
-  if (result->content_type == NULL) {
-    return lc_engine_set_protocol_error(
-        error, "dequeue response missing Content-Type");
+  state = (lc_engine_dequeue_capture_state *)context;
+  if (state == NULL || state->response == NULL || state->pipe == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing dequeue capture state") ==
+           LC_ENGINE_OK;
   }
-  boundary_key = strstr(result->content_type, "boundary=");
-  if (boundary_key == NULL) {
-    return lc_engine_set_protocol_error(
-        error, "dequeue response missing multipart boundary");
+  if (count == 0U) {
+    return 1;
   }
-  boundary_value = boundary_key + strlen("boundary=");
-  if (*boundary_value == '"') {
-    boundary_end = strchr(boundary_value + 1, '"');
-    if (boundary_end == NULL) {
-      return lc_engine_set_protocol_error(error, "invalid multipart boundary");
+  {
+    lc_error pipe_error;
+
+    memset(&pipe_error, 0, sizeof(pipe_error));
+    rc = lc_stream_pipe_write(state->pipe, bytes, count, &pipe_error);
+    if (rc != LC_OK) {
+      lc_engine_set_transport_error(
+          error, pipe_error.message != NULL ? pipe_error.message
+                                            : "failed to stream dequeue payload");
+      lc_error_cleanup(&pipe_error);
+      return 0;
     }
-    boundary = lc_engine_strdup_range(boundary_value + 1, boundary_end);
-  } else {
-    boundary_end = boundary_value;
-    while (*boundary_end != '\0' && *boundary_end != ';' &&
-           *boundary_end != ' ' && *boundary_end != '\t') {
-      ++boundary_end;
-    }
-    boundary = lc_engine_strdup_range(boundary_value, boundary_end);
+    lc_error_cleanup(&pipe_error);
   }
-  if (boundary == NULL) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to copy multipart boundary");
+  if (state->payload_length > ((size_t)-1) - count) {
+    lc_engine_set_protocol_error(error, "dequeue payload is too large");
+    return 0;
   }
+  state->payload_length += count;
+  return 1;
+}
 
-  lc_engine_buffer_init(&marker);
-  lc_engine_buffer_init(&next_marker);
-  lc_engine_buffer_append_cstr(&marker, "--");
-  lc_engine_buffer_append_cstr(&marker, boundary);
-  lc_engine_buffer_append_cstr(&next_marker, "\r\n--");
-  lc_engine_buffer_append_cstr(&next_marker, boundary);
-  free(boundary);
+static int lc_engine_dequeue_capture_end(
+    void *context, const lc_engine_dequeue_response *delivery,
+    lc_engine_error *error) {
+  lc_engine_dequeue_capture_state *state;
 
-  body = result->body.data;
-  body_length = result->body.length;
-  cursor = lc_engine_find_bytes(body, body_length, marker.data, marker.length);
-  if (cursor == NULL) {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return lc_engine_set_protocol_error(
-        error, "multipart body missing first boundary");
+  (void)delivery;
+  state = (lc_engine_dequeue_capture_state *)context;
+  if (state == NULL || state->pipe == NULL || state->response == NULL ||
+      state->payload == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing dequeue capture state") ==
+           LC_ENGINE_OK;
   }
-  cursor += marker.length;
-  if (cursor + 2 <= body + body_length && cursor[0] == '\r' &&
-      cursor[1] == '\n') {
-    cursor += 2;
-  }
-  header_end = lc_engine_find_bytes(
-      cursor, body_length - (size_t)(cursor - body), "\r\n\r\n", 4U);
-  if (header_end == NULL) {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return lc_engine_set_protocol_error(
-        error, "multipart meta part missing header terminator");
-  }
-  meta_start = header_end + 4;
-  meta_end = lc_engine_find_bytes(meta_start,
-                                  body_length - (size_t)(meta_start - body),
-                                  next_marker.data, next_marker.length);
-  if (meta_end == NULL) {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return lc_engine_set_protocol_error(
-        error, "multipart meta part missing next boundary");
-  }
-
-  meta_json = lc_engine_strdup_range(meta_start, meta_end);
-  if (meta_json == NULL) {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to copy dequeue metadata");
-  }
-  while (strlen(meta_json) > 0U &&
-         (meta_json[strlen(meta_json) - 1U] == '\r' ||
-          meta_json[strlen(meta_json) - 1U] == '\n')) {
-    meta_json[strlen(meta_json) - 1U] = '\0';
-  }
-
-  rc = lc_engine_json_get_string(meta_json, "namespace",
-                                 &response->namespace_name);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "queue", &response->queue);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "message_id",
-                                   &response->message_id);
-  if (rc == LC_ENGINE_OK) {
-    value = 0L;
-    rc = lc_engine_json_get_long(meta_json, "attempts", &value);
-    response->attempts = (int)value;
-  }
-  if (rc == LC_ENGINE_OK) {
-    value = 0L;
-    rc = lc_engine_json_get_long(meta_json, "max_attempts", &value);
-    response->max_attempts = (int)value;
-  }
-  if (rc == LC_ENGINE_OK) {
-    value = 0L;
-    rc = lc_engine_json_get_long(meta_json, "failure_attempts", &value);
-    response->failure_attempts = (int)value;
-  }
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(meta_json, "not_visible_until_unix",
-                                 &response->not_visible_until_unix);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(meta_json, "visibility_timeout_seconds",
-                                 &response->visibility_timeout_seconds);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "payload_content_type",
-                                   &response->payload_content_type);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "correlation_id",
-                                   &response->correlation_id);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "lease_id", &response->lease_id);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(meta_json, "lease_expires_at_unix",
-                                 &response->lease_expires_at_unix);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(meta_json, "fencing_token",
-                                 &response->fencing_token);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "txn_id", &response->txn_id);
-  if (rc == LC_ENGINE_OK)
-    rc =
-        lc_engine_json_get_string(meta_json, "meta_etag", &response->meta_etag);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "state_etag",
-                                   &response->state_etag);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "state_lease_id",
-                                   &response->state_lease_id);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(meta_json, "state_lease_expires_at_unix",
-                                 &response->state_lease_expires_at_unix);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(meta_json, "state_fencing_token",
-                                 &response->state_fencing_token);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "state_txn_id",
-                                   &response->state_txn_id);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(meta_json, "next_cursor",
-                                   &response->next_cursor);
-  free(meta_json);
-  if (rc != LC_ENGINE_OK) {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return lc_engine_set_protocol_error(error,
-                                        "failed to decode dequeue metadata");
-  }
-
-  second_boundary = meta_end + 2;
-  second_boundary += marker.length;
-  if (second_boundary + 2 <= body + body_length && second_boundary[0] == '-' &&
-      second_boundary[1] == '-') {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return LC_ENGINE_OK;
-  }
-  if (second_boundary + 2 > body + body_length || second_boundary[0] != '\r' ||
-      second_boundary[1] != '\n') {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return lc_engine_set_protocol_error(error,
-                                        "multipart payload boundary malformed");
-  }
-  second_boundary += 2;
-  payload_header_end = lc_engine_find_bytes(
-      second_boundary, body_length - (size_t)(second_boundary - body),
-      "\r\n\r\n", 4U);
-  if (payload_header_end == NULL) {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return lc_engine_set_protocol_error(
-        error, "multipart payload part missing header terminator");
-  }
-  payload_start = payload_header_end + 4;
-  payload_end = lc_engine_find_bytes(
-      payload_start, body_length - (size_t)(payload_start - body),
-      next_marker.data, next_marker.length);
-  if (payload_end == NULL) {
-    lc_engine_buffer_cleanup(&marker);
-    lc_engine_buffer_cleanup(&next_marker);
-    return lc_engine_set_protocol_error(
-        error, "multipart payload part missing closing boundary");
-  }
-  rc = lc_engine_copy_bytes(&response->payload, &response->payload_length,
-                            payload_start,
-                            (size_t)(payload_end - payload_start));
-  lc_engine_buffer_cleanup(&marker);
-  lc_engine_buffer_cleanup(&next_marker);
-  if (rc != LC_ENGINE_OK) {
-    return lc_engine_set_client_error(error, rc,
-                                      "failed to copy dequeue payload");
-  }
-  if (response->payload_length >= 2U &&
-      response->payload[response->payload_length - 2U] == '\r' &&
-      response->payload[response->payload_length - 1U] == '\n') {
-    response->payload_length -= 2U;
-  }
-  return LC_ENGINE_OK;
+  lc_stream_pipe_finish(state->pipe);
+  state->pipe = NULL;
+  state->response->payload = state->payload;
+  state->response->payload_length = state->payload_length;
+  state->payload = NULL;
+  return 1;
 }
 
 static int lc_engine_set_fencing_header(long fencing_token,
@@ -1151,10 +1099,9 @@ int lc_engine_client_get(lc_engine_client *client,
                          lc_engine_get_response *response,
                          lc_engine_error *error) {
   lc_engine_buffer path;
-  lc_engine_header_pair headers[2];
   lc_engine_buffer fence_value;
-  size_t header_count;
-  lc_engine_http_result result;
+  lc_engine_body_capture_state body_state;
+  lc_engine_get_stream_response stream_response;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL) {
@@ -1180,71 +1127,70 @@ int lc_engine_client_get(lc_engine_client *client,
     return lc_engine_set_client_error(error, rc, "failed to build get path");
   }
 
-  header_count = 0U;
   lc_engine_buffer_init(&fence_value);
   if (!request->public_read) {
-    headers[header_count].name = "X-Lease-ID";
-    headers[header_count].value = request->lease_id;
-    ++header_count;
-    if (request->fencing_token > 0L) {
-      rc = lc_engine_set_fencing_header(request->fencing_token, &fence_value,
-                                        &headers[header_count]);
-      if (rc != LC_ENGINE_OK) {
-        lc_engine_buffer_cleanup(&fence_value);
-        lc_engine_buffer_cleanup(&path);
-        return rc;
-      }
-      ++header_count;
+    rc = lc_engine_set_fencing_header(request->fencing_token, &fence_value,
+                                      &((lc_engine_header_pair){0}));
+    if (rc != LC_ENGINE_OK) {
+      lc_engine_buffer_cleanup(&fence_value);
+      lc_engine_buffer_cleanup(&path);
+      return rc;
     }
   }
 
-  memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "GET", path.data, NULL, 0U, headers,
-                              header_count, &result, error);
+  lc_engine_buffer_init(&body_state.buffer);
+  memset(&stream_response, 0, sizeof(stream_response));
+  rc = lc_engine_client_get_into(client, request, lc_engine_capture_body_writer,
+                                 &body_state, &stream_response, error);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (result.http_status != 200L) {
-    rc = lc_engine_set_server_error_from_result(error, &result);
-    lc_engine_http_result_cleanup(&result);
+    lc_engine_buffer_cleanup(&body_state.buffer);
     return rc;
   }
 
-  rc = lc_engine_copy_bytes(&response->body, &response->body_length,
-                            result.body.data, result.body.length);
-  if (rc == LC_ENGINE_OK) {
-    response->content_type = lc_engine_strdup_local(
-        result.content_type != NULL ? result.content_type
-                                    : "application/octet-stream");
-    if (response->content_type == NULL) {
-      rc = LC_ENGINE_ERROR_NO_MEMORY;
+  if (!stream_response.no_content) {
+    rc = lc_engine_copy_bytes(&response->body, &response->body_length,
+                              body_state.buffer.data, body_state.buffer.length);
+    if (rc != LC_ENGINE_OK) {
+      lc_engine_get_response_cleanup(response);
+      lc_engine_buffer_cleanup(&body_state.buffer);
+      lc_engine_get_stream_response_cleanup(&stream_response);
+      return lc_engine_set_client_error(error, rc, "failed to copy get body");
     }
   }
-  if (rc == LC_ENGINE_OK && result.etag != NULL) {
-    response->etag = lc_engine_strdup_local(result.etag);
+  response->content_type = lc_engine_strdup_local(
+      stream_response.content_type != NULL ? stream_response.content_type
+                                           : "application/octet-stream");
+  if (response->content_type == NULL) {
+    rc = LC_ENGINE_ERROR_NO_MEMORY;
+  }
+  if (rc == LC_ENGINE_OK && stream_response.etag != NULL) {
+    response->etag = lc_engine_strdup_local(stream_response.etag);
     if (response->etag == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
     }
   }
   if (rc == LC_ENGINE_OK) {
-    response->version = result.key_version;
-    response->fencing_token = result.fencing_token;
+    response->version = stream_response.version;
+    response->fencing_token = stream_response.fencing_token;
   }
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
-    response->correlation_id = lc_engine_strdup_local(result.correlation_id);
+  if (rc == LC_ENGINE_OK && stream_response.correlation_id != NULL) {
+    response->correlation_id =
+        lc_engine_strdup_local(stream_response.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
     }
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_get_response_cleanup(response);
-    lc_engine_http_result_cleanup(&result);
+    lc_engine_buffer_cleanup(&body_state.buffer);
+    lc_engine_get_stream_response_cleanup(&stream_response);
     return lc_engine_set_client_error(error, rc, "failed to copy get response");
   }
 
-  lc_engine_http_result_cleanup(&result);
+  lc_engine_buffer_cleanup(&body_state.buffer);
+  lc_engine_get_stream_response_cleanup(&stream_response);
   return LC_ENGINE_OK;
 }
 
@@ -1936,7 +1882,7 @@ int lc_engine_client_query(lc_engine_client *client,
   lc_engine_buffer body;
   lc_engine_http_result result;
   lc_engine_header_pair headers[1];
-  long value;
+  lc_engine_query_response_json parsed;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL) {
@@ -1955,32 +1901,24 @@ int lc_engine_client_query(lc_engine_client *client,
   headers[0].name = "Content-Type";
   headers[0].value = "application/json";
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", "/v1/query", body.data,
-                              body.length, headers, 1U, &result, error);
+  memset(&parsed, 0, sizeof(parsed));
+  rc = lc_engine_http_json_request(
+      client, "POST", "/v1/query", body.data, body.length, headers, 1U,
+      &lc_engine_query_response_map, &parsed, &result, error);
   lc_engine_buffer_cleanup(&body);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status != 200L) {
     rc = lc_engine_set_server_error_from_result(error, &result);
+    lonejson_cleanup(&lc_engine_query_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-
-  response->raw_json = lc_engine_strdup_range(
-      result.body.data, result.body.data + result.body.length);
-  if (response->raw_json == NULL) {
-    lc_engine_http_result_cleanup(&result);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to copy query response");
-  }
-  rc = lc_engine_json_get_string(result.body.data, "cursor", &response->cursor);
-  if (rc == LC_ENGINE_OK) {
-    value = 0L;
-    rc = lc_engine_json_get_long(result.body.data, "index_seq", &value);
-    response->index_seq = (unsigned long)value;
-  }
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->cursor = parsed.cursor;
+  parsed.cursor = NULL;
+  response->index_seq = (unsigned long)parsed.index_seq;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -1988,11 +1926,13 @@ int lc_engine_client_query(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_query_response_cleanup(response);
+    lonejson_cleanup(&lc_engine_query_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode query response");
   }
 
+  lonejson_cleanup(&lc_engine_query_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -2170,10 +2110,8 @@ static int lc_engine_dequeue_internal(lc_engine_client *client,
                                       int with_state,
                                       lc_engine_dequeue_response *response,
                                       lc_engine_error *error) {
-  lc_engine_buffer body;
-  lc_engine_http_result result;
-  lc_engine_header_pair headers[2];
-  int first_field;
+  lc_engine_queue_stream_handler handler;
+  lc_engine_dequeue_capture_state capture;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL) {
@@ -2187,74 +2125,30 @@ static int lc_engine_dequeue_internal(lc_engine_client *client,
   }
 
   lc_engine_dequeue_response_cleanup(response);
-  lc_engine_buffer_init(&body);
-  rc = lc_engine_json_begin_object(&body);
-  first_field = 1;
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_add_string_field(
-        &body, &first_field, "namespace",
-        lc_engine_effective_namespace(client, request->namespace_name));
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_add_string_field(&body, &first_field, "queue",
-                                         request->queue);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_add_string_field(&body, &first_field, "owner",
-                                         request->owner);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_add_string_field(&body, &first_field, "txn_id",
-                                         request->txn_id);
-  if (rc == LC_ENGINE_OK && request->visibility_timeout_seconds > 0L)
-    rc = lc_engine_json_add_long_field(&body, &first_field,
-                                       "visibility_timeout_seconds",
-                                       request->visibility_timeout_seconds);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_add_long_field(&body, &first_field, "wait_seconds",
-                                       request->wait_seconds);
-  if (rc == LC_ENGINE_OK && request->page_size > 0)
-    rc = lc_engine_json_add_long_field(&body, &first_field, "page_size",
-                                       (long)request->page_size);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_add_string_field(&body, &first_field, "start_after",
-                                         request->start_after);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_end_object(&body);
+  memset(&handler, 0, sizeof(handler));
+  handler.begin = lc_engine_dequeue_capture_begin;
+  handler.chunk = lc_engine_dequeue_capture_chunk;
+  handler.end = lc_engine_dequeue_capture_end;
+  memset(&capture, 0, sizeof(capture));
+  capture.allocator.malloc_fn = client->allocator.malloc_fn;
+  capture.allocator.realloc_fn = client->allocator.realloc_fn;
+  capture.allocator.free_fn = client->allocator.free_fn;
+  capture.allocator.context = client->allocator.context;
+  capture.client = client;
+  capture.response = response;
+  rc = with_state ? lc_engine_client_dequeue_with_state_into(
+                       client, request, &handler, &capture, error)
+                  : lc_engine_client_dequeue_into(client, request, &handler,
+                                                  &capture, error);
   if (rc != LC_ENGINE_OK) {
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, rc,
-                                      "failed to build dequeue request");
-  }
-
-  headers[0].name = "Content-Type";
-  headers[0].value = "application/json";
-  headers[1].name = "Accept";
-  headers[1].value = "multipart/related";
-
-  memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(
-      client, "POST",
-      with_state ? "/v1/queue/dequeueWithState" : "/v1/queue/dequeue",
-      body.data, body.length, headers, 2U, &result, error);
-  lc_engine_buffer_cleanup(&body);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (result.http_status != 200L) {
-    rc = lc_engine_set_server_error_from_result(error, &result);
-    lc_engine_http_result_cleanup(&result);
-    return rc;
-  }
-
-  rc = lc_engine_parse_dequeue_response(&result, response, error);
-  if (rc == LC_ENGINE_OK && response->correlation_id == NULL &&
-      result.correlation_id != NULL) {
-    response->correlation_id = lc_engine_strdup_local(result.correlation_id);
-    if (response->correlation_id == NULL) {
-      rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to copy dequeue correlation id");
+    if (capture.payload != NULL) {
+      capture.payload->close(capture.payload);
+      capture.payload = NULL;
     }
+    lc_engine_dequeue_response_cleanup(response);
+    return rc;
   }
-  lc_engine_http_result_cleanup(&result);
-  return rc;
+  return LC_ENGINE_OK;
 }
 
 int lc_engine_client_dequeue(lc_engine_client *client,

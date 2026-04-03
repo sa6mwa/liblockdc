@@ -6,6 +6,7 @@
 
 typedef struct lc_engine_client lc_engine_client;
 typedef struct lc_engine_error lc_engine_error;
+typedef struct lc_source lc_source;
 
 typedef void *(*lc_engine_malloc_fn)(void *context, size_t size);
 typedef void *(*lc_engine_realloc_fn)(void *context, void *ptr, size_t size);
@@ -249,7 +250,6 @@ typedef struct lc_engine_query_request {
 } lc_engine_query_request;
 
 typedef struct lc_engine_query_response {
-  char *raw_json;
   char *cursor;
   unsigned long index_seq;
   char *correlation_id;
@@ -310,7 +310,7 @@ typedef struct lc_engine_dequeue_response {
   long not_visible_until_unix;
   long visibility_timeout_seconds;
   char *payload_content_type;
-  unsigned char *payload;
+  lc_source *payload;
   size_t payload_length;
   char *correlation_id;
   char *lease_id;
