@@ -8,6 +8,8 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#define LC_ENGINE_STREAM_ERROR_BODY_LIMIT (8U * 1024U)
+
 typedef struct lc_engine_stream_query_state {
   lc_engine_client *client;
   lc_engine_write_callback writer;
@@ -187,7 +189,8 @@ static size_t lc_engine_stream_write_callback(char *ptr, size_t size,
     return 0U;
   }
   if (state->saw_status && state->http_status >= 400L) {
-    if (lc_engine_buffer_append(&state->error_body, ptr, total) !=
+    if (lc_engine_buffer_append_limited(&state->error_body, ptr, total,
+                                         LC_ENGINE_STREAM_ERROR_BODY_LIMIT) !=
         LC_ENGINE_OK) {
       lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                  "failed to buffer error response");
@@ -424,23 +427,9 @@ int lc_engine_client_query_into(lc_engine_client *client,
       return LC_ENGINE_OK;
     }
 
-    if (state.error_body.length > 0U) {
-      lc_engine_http_result synthetic;
-
-      memset(&synthetic, 0, sizeof(synthetic));
-      synthetic.http_status = state.http_status;
-      synthetic.body.data = state.error_body.data;
-      synthetic.body.length = state.error_body.length;
-      synthetic.correlation_id = response->correlation_id;
-      rc = lc_engine_set_server_error_from_result(error, &synthetic);
-    } else {
-      lc_engine_http_result synthetic;
-
-      memset(&synthetic, 0, sizeof(synthetic));
-      synthetic.http_status = state.http_status;
-      synthetic.correlation_id = response->correlation_id;
-      rc = lc_engine_set_server_error_from_result(error, &synthetic);
-    }
+    rc = lc_engine_set_server_error_from_json(error, state.http_status,
+                                              response->correlation_id,
+                                              state.error_body.data);
     if (error->server_error_code == NULL ||
         strcmp(error->server_error_code, "node_passive") != 0) {
       lc_engine_buffer_cleanup(&body);

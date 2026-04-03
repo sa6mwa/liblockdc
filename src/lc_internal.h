@@ -30,7 +30,6 @@ typedef struct lc_engine_header_pair {
 
 typedef struct lc_engine_http_result {
   long http_status;
-  lc_engine_buffer body;
   char *correlation_id;
   char *etag;
   long key_version;
@@ -119,19 +118,22 @@ int lc_engine_lonejson_error_from_status(lc_engine_error *error,
                                          lonejson_status status,
                                          const lonejson_error *lj_error,
                                          const char *message);
+int lc_engine_buffer_append_limited(lc_engine_buffer *buffer,
+                                    const char *bytes, size_t count,
+                                    size_t limit);
+int lc_engine_buffer_append_cstr_limited(lc_engine_buffer *buffer,
+                                         const char *value, size_t limit);
 
 void lc_engine_http_result_cleanup(lc_engine_http_result *result);
-int lc_engine_http_request(lc_engine_client *client, const char *method,
-                           const char *path, const void *body,
-                           size_t body_length,
-                           const lc_engine_header_pair *headers,
-                           size_t header_count, lc_engine_http_result *result,
-                           lc_engine_error *error);
 int lc_engine_http_json_request(
     lc_engine_client *client, const char *method, const char *path,
     const void *body, size_t body_length, const lc_engine_header_pair *headers,
     size_t header_count, const lonejson_map *response_map, void *response,
     lc_engine_http_result *result, lc_engine_error *error);
+int lc_engine_set_server_error_from_json(lc_engine_error *error,
+                                         long http_status,
+                                         const char *correlation_id,
+                                         const char *json);
 
 int lc_engine_load_bundle(lc_engine_client *client, const char *bundle_path,
                           lc_engine_error *error);

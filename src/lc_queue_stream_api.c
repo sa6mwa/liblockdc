@@ -11,6 +11,9 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#define LC_ENGINE_QUEUE_ERROR_BODY_LIMIT (8U * 1024U)
+#define LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT (64U * 1024U)
+
 typedef struct lc_engine_watch_event_json {
   char *namespace_name;
   char *queue;
@@ -179,6 +182,7 @@ typedef struct lc_engine_watch_state {
   char *event_name;
   char *correlation_id;
   long http_status;
+  size_t error_limit;
   int callback_failed;
 } lc_engine_watch_state;
 
@@ -208,6 +212,8 @@ typedef struct lc_engine_subscribe_state {
   long http_status;
   long part_content_length;
   long payload_remaining;
+  size_t error_limit;
+  size_t meta_limit;
   lc_engine_subscribe_phase phase;
   int delivery_active;
   int callback_failed;
@@ -572,7 +578,8 @@ static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
   state = (lc_engine_watch_state *)userdata;
   total = size * nmemb;
   if (state->http_status >= 400L) {
-    if (lc_engine_buffer_append(&state->error_body, ptr, total) !=
+    if (lc_engine_buffer_append_limited(&state->error_body, ptr, total,
+                                        state->error_limit) !=
         LC_ENGINE_OK) {
       state->callback_failed = 1;
       lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -1154,9 +1161,11 @@ static int lc_engine_subscribe_process_line(lc_engine_subscribe_state *state) {
       state->phase = LC_ENGINE_SUBSCRIBE_READ_HEADERS;
       return LC_ENGINE_OK;
     }
-    if (lc_engine_buffer_append_cstr(&state->meta_buffer, line) !=
+    if (lc_engine_buffer_append_cstr_limited(&state->meta_buffer, line,
+                                             state->meta_limit) !=
             LC_ENGINE_OK ||
-        lc_engine_buffer_append_cstr(&state->meta_buffer, "\n") !=
+        lc_engine_buffer_append_cstr_limited(&state->meta_buffer, "\n",
+                                             state->meta_limit) !=
             LC_ENGINE_OK) {
       return lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to append subscribe meta line");
@@ -1178,7 +1187,8 @@ static size_t lc_engine_subscribe_write_callback(char *ptr, size_t size,
   state = (lc_engine_subscribe_state *)userdata;
   total = size * nmemb;
   if (state->http_status >= 400L) {
-    if (lc_engine_buffer_append(&state->error_body, ptr, total) !=
+    if (lc_engine_buffer_append_limited(&state->error_body, ptr, total,
+                                        state->error_limit) !=
         LC_ENGINE_OK) {
       state->callback_failed = 1;
       lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -1330,12 +1340,12 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
     char *url;
     size_t url_length;
     int rc;
-    lc_engine_http_result synthetic;
 
     memset(&state, 0, sizeof(state));
     state.handler = handler;
     state.handler_context = handler_context;
     state.error = error;
+    state.error_limit = LC_ENGINE_QUEUE_ERROR_BODY_LIMIT;
     lc_engine_buffer_init(&state.line_buffer);
     lc_engine_buffer_init(&state.data_buffer);
     lc_engine_buffer_init(&state.error_body);
@@ -1428,13 +1438,11 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
       break;
     }
 
-    memset(&synthetic, 0, sizeof(synthetic));
-    synthetic.http_status = state.http_status;
-    synthetic.body = state.error_body;
-    synthetic.correlation_id = state.correlation_id;
     lc_engine_queue_stream_log_error(client, "/v1/queue/watch", endpoint_index,
                                      "server returned error status");
-    rc = lc_engine_set_server_error_from_result(error, &synthetic);
+    rc = lc_engine_set_server_error_from_json(error, state.http_status,
+                                              state.correlation_id,
+                                              state.error_body.data);
     lc_engine_watch_state_cleanup(&state);
     if (error->server_error_code == NULL ||
         strcmp(error->server_error_code, "node_passive") != 0) {
@@ -1546,13 +1554,17 @@ static int lc_engine_client_subscribe_internal(
       char *url;
       size_t url_length;
       int rc;
-      lc_engine_http_result synthetic;
 
       memset(&state, 0, sizeof(state));
       state.handler = *handler;
       state.handler_context = handler_context;
       state.error = error;
+      state.error_limit = LC_ENGINE_QUEUE_ERROR_BODY_LIMIT;
       state.part_content_length = -1L;
+      state.meta_limit =
+          client->http_json_response_limit_bytes > 0U
+              ? client->http_json_response_limit_bytes
+              : (size_t)LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT;
       state.phase = LC_ENGINE_SUBSCRIBE_EXPECT_BOUNDARY;
       lc_engine_buffer_init(&state.line_buffer);
       lc_engine_buffer_init(&state.meta_buffer);
@@ -1663,13 +1675,11 @@ static int lc_engine_client_subscribe_internal(
         return LC_ENGINE_OK;
       }
 
-      memset(&synthetic, 0, sizeof(synthetic));
-      synthetic.http_status = state.http_status;
-      synthetic.body = state.error_body;
-      synthetic.correlation_id = state.correlation_id;
       lc_engine_queue_stream_log_error(client, path, endpoint_index,
                                        "server returned error status");
-      rc = lc_engine_set_server_error_from_result(error, &synthetic);
+      rc = lc_engine_set_server_error_from_json(error, state.http_status,
+                                                state.correlation_id,
+                                                state.error_body.data);
       lc_engine_subscribe_state_cleanup(&state);
       if (error->server_error_code != NULL &&
           (strcmp(error->server_error_code, "waiting") == 0 ||
