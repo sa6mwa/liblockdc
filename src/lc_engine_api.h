@@ -1,12 +1,13 @@
 #ifndef LC_ENGINE_LEGACY_API_H
 #define LC_ENGINE_LEGACY_API_H
 
+#include "lc/lc.h"
+
 #include <pslog.h>
 #include <stddef.h>
 
 typedef struct lc_engine_client lc_engine_client;
 typedef struct lc_engine_error lc_engine_error;
-typedef struct lc_source lc_source;
 
 typedef void *(*lc_engine_malloc_fn)(void *context, size_t size);
 typedef void *(*lc_engine_realloc_fn)(void *context, void *ptr, size_t size);

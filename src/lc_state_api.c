@@ -1129,8 +1129,10 @@ int lc_engine_client_get(lc_engine_client *client,
 
   lc_engine_buffer_init(&fence_value);
   if (!request->public_read) {
+    lc_engine_header_pair empty_header = {0};
+
     rc = lc_engine_set_fencing_header(request->fencing_token, &fence_value,
-                                      &((lc_engine_header_pair){0}));
+                                      &empty_header);
     if (rc != LC_ENGINE_OK) {
       lc_engine_buffer_cleanup(&fence_value);
       lc_engine_buffer_cleanup(&path);
