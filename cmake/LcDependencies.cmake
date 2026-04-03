@@ -239,6 +239,80 @@ function(lc_add_nghttp2 variant shared_flag)
   set(LOCKDC_NGHTTP2_${variant}_PREFIX "${install_dir}" PARENT_SCOPE)
 endfunction()
 
+function(lc_add_zlib)
+  set(project_name "lc_zlib_project")
+  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/zlib")
+  set(source_dir "${prefix_dir}/src")
+  set(build_dir "${prefix_dir}/build")
+  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/zlib/install")
+  set(stamp_dir "${prefix_dir}/stamp")
+  set(tmp_dir "${prefix_dir}/tmp")
+  lc_append_common_external_cmake_args(common_cmake_args)
+  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
+
+  set(zlib_shared_library "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.1.3.2")
+  set(zlib_shared_soname "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.1")
+  set(zlib_shared_link "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(zlib_static_library "${install_dir}/lib/libz${CMAKE_STATIC_LIBRARY_SUFFIX}")
+
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    ExternalProject_Add(${project_name}
+      URL "https://www.zlib.net/zlib-${LOCKDC_ZLIB_VERSION}.tar.gz"
+      URL_HASH "SHA256=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
+      DOWNLOAD_NAME "zlib-${LOCKDC_ZLIB_VERSION}.tar.gz"
+      PREFIX "${prefix_dir}"
+      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      SOURCE_DIR "${source_dir}"
+      BINARY_DIR "${build_dir}"
+      STAMP_DIR "${stamp_dir}"
+      TMP_DIR "${tmp_dir}"
+      CMAKE_ARGS
+        -DCMAKE_INSTALL_PREFIX=${install_dir}
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DCMAKE_DEBUG_POSTFIX=
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DZLIB_BUILD_SHARED=ON
+        -DZLIB_BUILD_STATIC=ON
+        -DZLIB_INSTALL=ON
+        ${common_cmake_args}
+      BUILD_COMMAND ${CMAKE_COMMAND} --build .
+      INSTALL_COMMAND ${CMAKE_COMMAND} --install .
+      BUILD_IN_SOURCE 0
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+  endif()
+
+  add_library(lc::zlib_static STATIC IMPORTED GLOBAL)
+  set_target_properties(lc::zlib_static
+    PROPERTIES
+      IMPORTED_LOCATION "${zlib_static_library}"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+  )
+
+  add_library(lc::zlib_shared SHARED IMPORTED GLOBAL)
+  set_target_properties(lc::zlib_shared
+    PROPERTIES
+      IMPORTED_LOCATION "${zlib_shared_library}"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+  )
+
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    add_dependencies(lc::zlib_static ${project_name})
+    add_dependencies(lc::zlib_shared ${project_name})
+    lc_record_dependency_target(${project_name})
+  else()
+    lc_require_dependency_file("${zlib_static_library}" "zlib static library")
+    lc_require_dependency_file("${zlib_shared_library}" "zlib shared library")
+    lc_require_dependency_file("${zlib_shared_soname}" "zlib shared-library SONAME")
+    lc_require_dependency_file("${zlib_shared_link}" "zlib shared-library linker symlink")
+    lc_require_dependency_file("${install_dir}/include/zlib.h" "zlib header")
+    lc_require_dependency_file("${install_dir}/include/zconf.h" "zlib configuration header")
+  endif()
+
+  set(LOCKDC_ZLIB_PREFIX "${install_dir}" PARENT_SCOPE)
+endfunction()
+
 function(lc_add_libssh2)
   set(project_name "lc_libssh2_project")
   set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/libssh2")
@@ -252,6 +326,9 @@ function(lc_add_libssh2)
 
   set(libssh2_shared_library "${install_dir}/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}")
   set(libssh2_static_library "${install_dir}/lib/libssh2${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  if(NOT DEFINED LOCKDC_ZLIB_PREFIX OR "${LOCKDC_ZLIB_PREFIX}" STREQUAL "")
+    message(FATAL_ERROR "libssh2 requires zlib to be configured first")
+  endif()
   if(DEFINED LOCKDC_OPENSSL_shared_PREFIX AND NOT "${LOCKDC_OPENSSL_shared_PREFIX}" STREQUAL "")
     set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_shared_PREFIX}")
     set(libssh2_openssl_build_variant "shared")
@@ -288,17 +365,19 @@ function(lc_add_libssh2)
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DCMAKE_DEBUG_POSTFIX=
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON
         -DBUILD_STATIC_LIBS=ON
         -DBUILD_SHARED_LIBS=ON
         -DBUILD_EXAMPLES=OFF
         -DBUILD_TESTING=OFF
-        -DENABLE_ZLIB_COMPRESSION=OFF
+        -DENABLE_ZLIB_COMPRESSION=ON
         -DCRYPTO_BACKEND=OpenSSL
-        -DOPENSSL_ROOT_DIR=${libssh2_openssl_prefix}
-        -DOPENSSL_INCLUDE_DIR=${libssh2_openssl_prefix}/include
-        -DOPENSSL_SSL_LIBRARY=${libssh2_openssl_ssl_library}
-        -DOPENSSL_CRYPTO_LIBRARY=${libssh2_openssl_crypto_library}
+        -DOpenSSL_DIR=${libssh2_openssl_prefix}/lib/cmake/OpenSSL
+        -DZLIB_DIR=${LOCKDC_ZLIB_PREFIX}/lib/cmake/zlib
         ${common_cmake_args}
+      DEPENDS
+        ${openssl_project}
+        lc_zlib_project
       BUILD_COMMAND ${CMAKE_COMMAND} --build .
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
       BUILD_IN_SOURCE 0
@@ -311,7 +390,7 @@ function(lc_add_libssh2)
     PROPERTIES
       IMPORTED_LOCATION "${libssh2_static_library}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_${libssh2_openssl_link_variant}"
+      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_${libssh2_openssl_link_variant};lc::zlib_static"
   )
 
   add_library(lc::libssh2_shared SHARED IMPORTED GLOBAL)
@@ -319,6 +398,7 @@ function(lc_add_libssh2)
     PROPERTIES
       IMPORTED_LOCATION "${libssh2_shared_library}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+      INTERFACE_LINK_LIBRARIES "lc::zlib_shared"
   )
 
   if(LOCKDC_BUILD_DEPENDENCIES)
@@ -341,6 +421,7 @@ function(lc_add_curl variant shared_flag)
   set(openssl_project "lc_openssl_${variant}_project")
   set(nghttp2_project "lc_nghttp2_${variant}_project")
   set(libssh2_project "lc_libssh2_project")
+  set(zlib_project "lc_zlib_project")
 
   if(shared_flag)
     set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl-shared-cmake")
@@ -355,6 +436,7 @@ function(lc_add_curl variant shared_flag)
     set(curl_openssl_crypto_library "${openssl_prefix}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(curl_nghttp2_library "${nghttp2_prefix}/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(curl_libssh2_library "${libssh2_prefix}/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    set(curl_zlib_library "${LOCKDC_ZLIB_PREFIX}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(curl_build_shared_libs ON)
     set(curl_build_static_libs OFF)
     set(curl_install_rpath "$ORIGIN")
@@ -372,6 +454,7 @@ function(lc_add_curl variant shared_flag)
     set(curl_openssl_crypto_library "${openssl_prefix}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(curl_nghttp2_library "${nghttp2_prefix}/lib/libnghttp2${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(curl_libssh2_library "${libssh2_prefix}/lib/libssh2${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(curl_zlib_library "${LOCKDC_ZLIB_PREFIX}/lib/libz${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(curl_build_shared_libs OFF)
     set(curl_build_static_libs ON)
     set(curl_install_rpath "")
@@ -396,6 +479,7 @@ function(lc_add_curl variant shared_flag)
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
       DEPENDS
+        ${zlib_project}
         ${openssl_project}
         ${nghttp2_project}
         ${libssh2_project}
@@ -425,12 +509,16 @@ function(lc_add_curl variant shared_flag)
         -DUSE_NGHTTP2=ON
         -DCURL_DISABLE_LDAP=ON
         -DCURL_DISABLE_LDAPS=ON
-        -DCURL_ZLIB=OFF
+        -DCURL_ZLIB=ON
         -DCURL_BROTLI=OFF
         -DCURL_ZSTD=OFF
         -DCURL_USE_LIBPSL=OFF
         -DUSE_LIBRTMP=OFF
         -DUSE_LIBIDN2=OFF
+        -DZLIB_DIR=${LOCKDC_ZLIB_PREFIX}/lib/cmake/zlib
+        -DZLIB_ROOT=${LOCKDC_ZLIB_PREFIX}
+        -DZLIB_INCLUDE_DIR=${LOCKDC_ZLIB_PREFIX}/include
+        -DZLIB_LIBRARY=${curl_zlib_library}
         -DOPENSSL_ROOT_DIR=${openssl_prefix}
         -DOPENSSL_INCLUDE_DIR=${openssl_prefix}/include
         -DOPENSSL_SSL_LIBRARY=${curl_openssl_ssl_library}
@@ -452,7 +540,7 @@ function(lc_add_curl variant shared_flag)
     PROPERTIES
       IMPORTED_LOCATION "${install_dir}/lib/libcurl${lib_suffix}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_${variant};lc::openssl_crypto_${variant};lc::nghttp2_${variant};lc::libssh2_${variant};${CMAKE_DL_LIBS};Threads::Threads"
+      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_${variant};lc::openssl_crypto_${variant};lc::nghttp2_${variant};lc::libssh2_${variant};lc::zlib_${variant};${CMAKE_DL_LIBS};Threads::Threads"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
     add_dependencies(lc::curl_${variant} ${project_name})
@@ -676,6 +764,7 @@ function(lc_configure_dependencies)
     lc_add_openssl(shared TRUE)
   endif()
 
+  lc_add_zlib()
   lc_add_libssh2()
 
   if(LOCKDC_BUILD_STATIC)

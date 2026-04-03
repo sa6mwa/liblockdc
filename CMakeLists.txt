@@ -20,7 +20,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(LOCKDC_BUILD_STATIC "Build the static lockdc library." ON)
 option(LOCKDC_BUILD_SHARED "Build the shared lockdc library." ON)
-option(LOCKDC_BUILD_DEPENDENCIES "Download and build OpenSSL, nghttp2, libcurl, and libssh2." OFF)
+option(LOCKDC_BUILD_DEPENDENCIES "Download and build OpenSSL, zlib, nghttp2, libcurl, and libssh2." OFF)
 option(LOCKDC_BUILD_EXAMPLES "Build example programs." ON)
 option(LOCKDC_BUILD_TESTS "Build unit tests." ON)
 cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS
@@ -35,6 +35,7 @@ option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumenta
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
 set(LOCKDC_OPENSSL_VERSION "3.6.1" CACHE STRING "Pinned OpenSSL release used for CMake-managed dependency builds.")
+set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release used for compression support in vendored dependencies.")
 set(LOCKDC_CURL_VERSION "8.18.0" CACHE STRING "Pinned curl release used for CMake-managed dependency builds.")
 set(LOCKDC_NGHTTP2_VERSION "1.68.0" CACHE STRING "Pinned nghttp2 release used to enable libcurl HTTP/2 support.")
 set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release used for SSH and SFTP support.")
