@@ -45,6 +45,196 @@ static int
 lc_engine_build_metadata_body(lc_engine_client *client,
                               const lc_engine_metadata_request *request,
                               lc_engine_buffer *body);
+typedef struct lc_engine_query_hidden_json {
+  int query_hidden;
+} lc_engine_query_hidden_json;
+typedef struct lc_engine_acquire_response_json {
+  char *namespace_name;
+  char *key;
+  char *owner;
+  char *lease_id;
+  char *txn_id;
+  long lease_expires_at_unix;
+  long version;
+  char *state_etag;
+  long fencing_token;
+} lc_engine_acquire_response_json;
+typedef struct lc_engine_keepalive_response_json {
+  long lease_expires_at_unix;
+  long version;
+  char *state_etag;
+} lc_engine_keepalive_response_json;
+typedef struct lc_engine_release_response_json {
+  int released;
+} lc_engine_release_response_json;
+typedef struct lc_engine_update_response_json {
+  long new_version;
+  char *new_state_etag;
+  long bytes;
+} lc_engine_update_response_json;
+typedef struct lc_engine_metadata_response_json {
+  char *namespace_name;
+  char *key;
+  long version;
+  lc_engine_query_hidden_json metadata;
+} lc_engine_metadata_response_json;
+typedef struct lc_engine_remove_response_json {
+  int removed;
+  long new_version;
+} lc_engine_remove_response_json;
+typedef struct lc_engine_describe_response_json {
+  char *namespace_name;
+  char *key;
+  char *owner;
+  char *lease_id;
+  long expires_at_unix;
+  long version;
+  char *state_etag;
+  long updated_at_unix;
+  lc_engine_query_hidden_json metadata;
+} lc_engine_describe_response_json;
+typedef struct lc_engine_enqueue_response_json {
+  char *namespace_name;
+  char *queue;
+  char *message_id;
+  long attempts;
+  long max_attempts;
+  long failure_attempts;
+  long not_visible_until_unix;
+  long visibility_timeout_seconds;
+  long payload_bytes;
+} lc_engine_enqueue_response_json;
+typedef struct lc_engine_queue_stats_response_json {
+  char *namespace_name;
+  char *queue;
+  long waiting_consumers;
+  long pending_candidates;
+  long total_consumers;
+  int has_active_watcher;
+  int available;
+  char *head_message_id;
+  long head_enqueued_at_unix;
+  long head_not_visible_until_unix;
+  long head_age_seconds;
+} lc_engine_queue_stats_response_json;
+typedef struct lc_engine_queue_ack_response_json {
+  int acked;
+} lc_engine_queue_ack_response_json;
+typedef struct lc_engine_queue_nack_response_json {
+  int requeued;
+  char *meta_etag;
+} lc_engine_queue_nack_response_json;
+typedef struct lc_engine_queue_extend_response_json {
+  long lease_expires_at_unix;
+  long visibility_timeout_seconds;
+  char *meta_etag;
+  long state_lease_expires_at_unix;
+} lc_engine_queue_extend_response_json;
+static const lonejson_map lc_engine_query_hidden_map;
+static const lonejson_field lc_engine_acquire_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, key, "key"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, owner,
+                                "owner"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, lease_id,
+                                "lease_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, txn_id,
+                                "txn_id"),
+    LONEJSON_FIELD_I64(lc_engine_acquire_response_json,
+                       lease_expires_at_unix, "expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_acquire_response_json, version, "version"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, state_etag,
+                                "state_etag"),
+    LONEJSON_FIELD_I64(lc_engine_acquire_response_json, fencing_token,
+                       "fencing_token")};
+static const lonejson_field lc_engine_keepalive_response_fields[] = {
+    LONEJSON_FIELD_I64(lc_engine_keepalive_response_json,
+                       lease_expires_at_unix, "expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_keepalive_response_json, version, "version"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_keepalive_response_json, state_etag,
+                                "state_etag")};
+static const lonejson_field lc_engine_release_response_fields[] = {
+    LONEJSON_FIELD_BOOL(lc_engine_release_response_json, released,
+                        "released")};
+static const lonejson_field lc_engine_update_response_fields[] = {
+    LONEJSON_FIELD_I64(lc_engine_update_response_json, new_version,
+                       "new_version"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_update_response_json, new_state_etag,
+                                "new_state_etag"),
+    LONEJSON_FIELD_I64(lc_engine_update_response_json, bytes, "bytes")};
+static const lonejson_field lc_engine_metadata_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_response_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_response_json, key, "key"),
+    LONEJSON_FIELD_I64(lc_engine_metadata_response_json, version, "version"),
+    LONEJSON_FIELD_OBJECT(lc_engine_metadata_response_json, metadata,
+                          "metadata", &lc_engine_query_hidden_map)};
+static const lonejson_field lc_engine_remove_response_fields[] = {
+    LONEJSON_FIELD_BOOL(lc_engine_remove_response_json, removed, "removed"),
+    LONEJSON_FIELD_I64(lc_engine_remove_response_json, new_version,
+                       "new_version")};
+static const lonejson_field lc_engine_describe_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, key, "key"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, owner,
+                                "owner"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, lease_id,
+                                "lease_id"),
+    LONEJSON_FIELD_I64(lc_engine_describe_response_json, expires_at_unix,
+                       "expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_describe_response_json, version, "version"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, state_etag,
+                                "state_etag"),
+    LONEJSON_FIELD_I64(lc_engine_describe_response_json, updated_at_unix,
+                       "updated_at_unix"),
+    LONEJSON_FIELD_OBJECT(lc_engine_describe_response_json, metadata,
+                          "metadata", &lc_engine_query_hidden_map)};
+static const lonejson_field lc_engine_query_hidden_fields[] = {
+    LONEJSON_FIELD_BOOL(lc_engine_query_hidden_json, query_hidden,
+                        "query_hidden")};
+LONEJSON_MAP_DEFINE(lc_engine_query_hidden_map, lc_engine_query_hidden_json,
+                    lc_engine_query_hidden_fields);
+static const lonejson_field lc_engine_enqueue_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, queue, "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, message_id,
+                                "message_id"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, attempts, "attempts"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, max_attempts,
+                       "max_attempts"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, failure_attempts,
+                       "failure_attempts"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json,
+                       not_visible_until_unix, "not_visible_until_unix"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json,
+                       visibility_timeout_seconds,
+                       "visibility_timeout_seconds"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, payload_bytes,
+                       "payload_bytes")};
+LONEJSON_MAP_DEFINE(lc_engine_acquire_response_map, lc_engine_acquire_response_json,
+                    lc_engine_acquire_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_keepalive_response_map,
+                    lc_engine_keepalive_response_json,
+                    lc_engine_keepalive_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_release_response_map,
+                    lc_engine_release_response_json,
+                    lc_engine_release_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_update_response_map, lc_engine_update_response_json,
+                    lc_engine_update_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_metadata_response_map,
+                    lc_engine_metadata_response_json,
+                    lc_engine_metadata_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_remove_response_map, lc_engine_remove_response_json,
+                    lc_engine_remove_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_describe_response_map,
+                    lc_engine_describe_response_json,
+                    lc_engine_describe_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_enqueue_response_map,
+                    lc_engine_enqueue_response_json,
+                    lc_engine_enqueue_response_fields);
 static int lc_engine_copy_bytes(unsigned char **out_bytes, size_t *out_length,
                                 const char *bytes, size_t count);
 static const char *lc_engine_find_bytes(const char *haystack,
@@ -62,8 +252,6 @@ static int lc_engine_apply_common_mutation_headers(
     const char *content_type, const char *txn_id, const char *if_state_etag,
     lc_engine_buffer *fence_value, lc_engine_header_pair *headers,
     size_t *header_count, long fencing_token);
-static int lc_engine_extract_metadata_query_hidden(const char *json,
-                                                   int *has_value, int *value);
 static int lc_engine_buffer_append_long_decimal(lc_engine_buffer *buffer,
                                                 long value);
 static int lc_engine_buffer_append_json_string_literal(lc_engine_buffer *buffer,
@@ -880,32 +1068,6 @@ static int lc_engine_apply_common_mutation_headers(
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_extract_metadata_query_hidden(const char *json,
-                                                   int *has_value, int *value) {
-  const char *metadata_start;
-
-  *has_value = 0;
-  *value = 0;
-  if (json == NULL) {
-    return LC_ENGINE_OK;
-  }
-  metadata_start = strstr(json, "\"metadata\"");
-  if (metadata_start == NULL) {
-    return LC_ENGINE_OK;
-  }
-  if (strstr(metadata_start, "\"query_hidden\":true") != NULL) {
-    *has_value = 1;
-    *value = 1;
-    return LC_ENGINE_OK;
-  }
-  if (strstr(metadata_start, "\"query_hidden\":false") != NULL) {
-    *has_value = 1;
-    *value = 0;
-    return LC_ENGINE_OK;
-  }
-  return LC_ENGINE_OK;
-}
-
 int lc_engine_client_acquire(lc_engine_client *client,
                              const lc_engine_acquire_request *request,
                              lc_engine_acquire_response *response,
@@ -913,6 +1075,7 @@ int lc_engine_client_acquire(lc_engine_client *client,
   lc_engine_buffer body;
   lc_engine_http_result result;
   lc_engine_header_pair headers[1];
+  lc_engine_acquire_response_json response_json;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL) {
@@ -931,8 +1094,10 @@ int lc_engine_client_acquire(lc_engine_client *client,
   headers[0].name = "Content-Type";
   headers[0].value = "application/json";
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", "/v1/acquire", body.data,
-                              body.length, headers, 1U, &result, error);
+  rc = lc_engine_http_json_request(client, "POST", "/v1/acquire", body.data,
+                                   body.length, headers, 1U,
+                                   &lc_engine_acquire_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&body);
   if (rc != LC_ENGINE_OK) {
     return rc;
@@ -943,31 +1108,22 @@ int lc_engine_client_acquire(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_string(result.body.data, "namespace",
-                                 &response->namespace_name);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "lease_id",
-                                   &response->lease_id);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "txn_id",
-                                   &response->txn_id);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "key", &response->key);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "owner", &response->owner);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "expires_at_unix",
-                                 &response->lease_expires_at_unix);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "version",
-                                 &response->version);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "state_etag",
-                                   &response->state_etag);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "fencing_token",
-                                 &response->fencing_token);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->namespace_name = response_json.namespace_name;
+  response_json.namespace_name = NULL;
+  response->key = response_json.key;
+  response_json.key = NULL;
+  response->owner = response_json.owner;
+  response_json.owner = NULL;
+  response->lease_id = response_json.lease_id;
+  response_json.lease_id = NULL;
+  response->txn_id = response_json.txn_id;
+  response_json.txn_id = NULL;
+  response->lease_expires_at_unix = response_json.lease_expires_at_unix;
+  response->version = response_json.version;
+  response->state_etag = response_json.state_etag;
+  response_json.state_etag = NULL;
+  response->fencing_token = response_json.fencing_token;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -975,6 +1131,12 @@ int lc_engine_client_acquire(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_acquire_response_cleanup(response);
+    lc_engine_free_string(&response_json.namespace_name);
+    lc_engine_free_string(&response_json.key);
+    lc_engine_free_string(&response_json.owner);
+    lc_engine_free_string(&response_json.lease_id);
+    lc_engine_free_string(&response_json.txn_id);
+    lc_engine_free_string(&response_json.state_etag);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode acquire response");
@@ -1094,6 +1256,7 @@ int lc_engine_client_keepalive(lc_engine_client *client,
   lc_engine_buffer fence_value;
   lc_engine_header_pair headers[2];
   lc_engine_http_result result;
+  lc_engine_keepalive_response_json response_json;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL) {
@@ -1120,8 +1283,10 @@ int lc_engine_client_keepalive(lc_engine_client *client,
   headers[0].value = "application/json";
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", "/v1/keepalive", body.data,
-                              body.length, headers, 2U, &result, error);
+  rc = lc_engine_http_json_request(client, "POST", "/v1/keepalive", body.data,
+                                   body.length, headers, 2U,
+                                   &lc_engine_keepalive_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&body);
   lc_engine_buffer_cleanup(&fence_value);
   if (rc != LC_ENGINE_OK) {
@@ -1133,15 +1298,11 @@ int lc_engine_client_keepalive(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_long(result.body.data, "expires_at_unix",
-                               &response->lease_expires_at_unix);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "version",
-                                 &response->version);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "state_etag",
-                                   &response->state_etag);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->lease_expires_at_unix = response_json.lease_expires_at_unix;
+  response->version = response_json.version;
+  response->state_etag = response_json.state_etag;
+  response_json.state_etag = NULL;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -1149,6 +1310,7 @@ int lc_engine_client_keepalive(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_keepalive_response_cleanup(response);
+    lc_engine_free_string(&response_json.state_etag);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode keepalive response");
@@ -1166,6 +1328,7 @@ int lc_engine_client_release(lc_engine_client *client,
   lc_engine_buffer fence_value;
   lc_engine_header_pair headers[2];
   lc_engine_http_result result;
+  lc_engine_release_response_json response_json;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL) {
@@ -1192,8 +1355,10 @@ int lc_engine_client_release(lc_engine_client *client,
   headers[0].value = "application/json";
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", "/v1/release", body.data,
-                              body.length, headers, 2U, &result, error);
+  rc = lc_engine_http_json_request(client, "POST", "/v1/release", body.data,
+                                   body.length, headers, 2U,
+                                   &lc_engine_release_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&body);
   lc_engine_buffer_cleanup(&fence_value);
   if (rc != LC_ENGINE_OK) {
@@ -1205,9 +1370,8 @@ int lc_engine_client_release(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_bool(result.body.data, "released",
-                               &response->released);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->released = response_json.released;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -1242,6 +1406,7 @@ int lc_engine_client_update(lc_engine_client *client,
   lc_engine_buffer version_value;
   lc_engine_header_pair headers[5];
   lc_engine_http_result result;
+  lc_engine_update_response_json response_json;
   size_t header_count;
   int rc;
 
@@ -1293,9 +1458,10 @@ int lc_engine_client_update(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", path.data, request->body,
-                              request->body_length, headers, header_count,
-                              &result, error);
+  rc = lc_engine_http_json_request(client, "POST", path.data, request->body,
+                                   request->body_length, headers, header_count,
+                                   &lc_engine_update_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&version_value);
@@ -1308,14 +1474,11 @@ int lc_engine_client_update(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_long(result.body.data, "new_version",
-                               &response->new_version);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "new_state_etag",
-                                   &response->new_state_etag);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "bytes", &response->bytes);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->new_version = response_json.new_version;
+  response->new_state_etag = response_json.new_state_etag;
+  response_json.new_state_etag = NULL;
+  response->bytes = response_json.bytes;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -1323,6 +1486,7 @@ int lc_engine_client_update(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_update_response_cleanup(response);
+    lc_engine_free_string(&response_json.new_state_etag);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode update response");
@@ -1351,6 +1515,7 @@ int lc_engine_client_mutate(lc_engine_client *client,
   lc_engine_buffer version_value;
   lc_engine_header_pair headers[5];
   lc_engine_http_result result;
+  lc_engine_update_response_json response_json;
   size_t header_count;
   int rc;
 
@@ -1399,8 +1564,10 @@ int lc_engine_client_mutate(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", path.data, body.data, body.length,
-                              headers, header_count, &result, error);
+  rc = lc_engine_http_json_request(client, "POST", path.data, body.data,
+                                   body.length, headers, header_count,
+                                   &lc_engine_update_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&body);
   lc_engine_buffer_cleanup(&fence_value);
@@ -1414,14 +1581,11 @@ int lc_engine_client_mutate(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_long(result.body.data, "new_version",
-                               &response->new_version);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "new_state_etag",
-                                   &response->new_state_etag);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "bytes", &response->bytes);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->new_version = response_json.new_version;
+  response->new_state_etag = response_json.new_state_etag;
+  response_json.new_state_etag = NULL;
+  response->bytes = response_json.bytes;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -1429,6 +1593,7 @@ int lc_engine_client_mutate(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_mutate_response_cleanup(response);
+    lc_engine_free_string(&response_json.new_state_etag);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode mutate response");
@@ -1459,6 +1624,7 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   lc_engine_buffer version_value;
   lc_engine_header_pair headers[4];
   lc_engine_http_result result;
+  lc_engine_metadata_response_json response_json;
   size_t header_count;
   int rc;
 
@@ -1516,8 +1682,10 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", path.data, body.data, body.length,
-                              headers, header_count, &result, error);
+  rc = lc_engine_http_json_request(client, "POST", path.data, body.data,
+                                   body.length, headers, header_count,
+                                   &lc_engine_metadata_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&body);
   lc_engine_buffer_cleanup(&fence_value);
@@ -1531,17 +1699,14 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_string(result.body.data, "namespace",
-                                 &response->namespace_name);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "key", &response->key);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "version",
-                                 &response->version);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_extract_metadata_query_hidden(
-        result.body.data, &response->has_query_hidden, &response->query_hidden);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->namespace_name = response_json.namespace_name;
+  response_json.namespace_name = NULL;
+  response->key = response_json.key;
+  response_json.key = NULL;
+  response->version = response_json.version;
+  response->has_query_hidden = 1;
+  response->query_hidden = response_json.metadata.query_hidden;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -1549,6 +1714,8 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_metadata_response_cleanup(response);
+    lc_engine_free_string(&response_json.namespace_name);
+    lc_engine_free_string(&response_json.key);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode metadata response");
@@ -1575,6 +1742,7 @@ int lc_engine_client_remove(lc_engine_client *client,
   lc_engine_buffer version_value;
   lc_engine_header_pair headers[5];
   lc_engine_http_result result;
+  lc_engine_remove_response_json response_json;
   size_t header_count;
   int rc;
 
@@ -1634,8 +1802,10 @@ int lc_engine_client_remove(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", path.data, NULL, 0U, headers,
-                              header_count, &result, error);
+  rc = lc_engine_http_json_request(client, "POST", path.data, NULL, 0U,
+                                   headers, header_count,
+                                   &lc_engine_remove_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&version_value);
@@ -1648,11 +1818,9 @@ int lc_engine_client_remove(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_bool(result.body.data, "removed", &response->removed);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "new_version",
-                                 &response->new_version);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->removed = response_json.removed;
+  response->new_version = response_json.new_version;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -1689,6 +1857,7 @@ int lc_engine_client_describe(lc_engine_client *client,
                               lc_engine_error *error) {
   lc_engine_buffer path;
   lc_engine_http_result result;
+  lc_engine_describe_response_json response_json;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL) {
@@ -1710,8 +1879,9 @@ int lc_engine_client_describe(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "GET", path.data, NULL, 0U, NULL, 0U,
-                              &result, error);
+  rc = lc_engine_http_json_request(client, "GET", path.data, NULL, 0U, NULL,
+                                   0U, &lc_engine_describe_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {
     return rc;
@@ -1722,31 +1892,22 @@ int lc_engine_client_describe(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_string(result.body.data, "namespace",
-                                 &response->namespace_name);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "key", &response->key);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "owner", &response->owner);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "lease_id",
-                                   &response->lease_id);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "expires_at_unix",
-                                 &response->expires_at_unix);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "version",
-                                 &response->version);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "state_etag",
-                                   &response->state_etag);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "updated_at_unix",
-                                 &response->updated_at_unix);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_extract_metadata_query_hidden(
-        result.body.data, &response->has_query_hidden, &response->query_hidden);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->namespace_name = response_json.namespace_name;
+  response_json.namespace_name = NULL;
+  response->key = response_json.key;
+  response_json.key = NULL;
+  response->owner = response_json.owner;
+  response_json.owner = NULL;
+  response->lease_id = response_json.lease_id;
+  response_json.lease_id = NULL;
+  response->expires_at_unix = response_json.expires_at_unix;
+  response->version = response_json.version;
+  response->state_etag = response_json.state_etag;
+  response_json.state_etag = NULL;
+  response->updated_at_unix = response_json.updated_at_unix;
+  response->has_query_hidden = 1;
+  response->query_hidden = response_json.metadata.query_hidden;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -1754,6 +1915,11 @@ int lc_engine_client_describe(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_describe_response_cleanup(response);
+    lc_engine_free_string(&response_json.namespace_name);
+    lc_engine_free_string(&response_json.key);
+    lc_engine_free_string(&response_json.owner);
+    lc_engine_free_string(&response_json.lease_id);
+    lc_engine_free_string(&response_json.state_etag);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode describe response");
@@ -1840,9 +2006,9 @@ int lc_engine_client_enqueue(lc_engine_client *client,
   lc_engine_buffer content_type;
   lc_engine_http_result result;
   lc_engine_header_pair headers[1];
+  lc_engine_enqueue_response_json response_json;
   const char *boundary;
   int first_field;
-  long value;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL) {
@@ -1951,8 +2117,10 @@ int lc_engine_client_enqueue(lc_engine_client *client,
   headers[0].value = content_type.data;
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_request(client, "POST", "/v1/queue/enqueue", body.data,
-                              body.length, headers, 1U, &result, error);
+  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/enqueue",
+                                   body.data, body.length, headers, 1U,
+                                   &lc_engine_enqueue_response_map,
+                                   &response_json, &result, error);
   lc_engine_buffer_cleanup(&body);
   lc_engine_buffer_cleanup(&content_type);
   if (rc != LC_ENGINE_OK) {
@@ -1964,38 +2132,20 @@ int lc_engine_client_enqueue(lc_engine_client *client,
     return rc;
   }
 
-  rc = lc_engine_json_get_string(result.body.data, "namespace",
-                                 &response->namespace_name);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "queue", &response->queue);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_string(result.body.data, "message_id",
-                                   &response->message_id);
-  if (rc == LC_ENGINE_OK) {
-    value = 0L;
-    rc = lc_engine_json_get_long(result.body.data, "attempts", &value);
-    response->attempts = (int)value;
-  }
-  if (rc == LC_ENGINE_OK) {
-    value = 0L;
-    rc = lc_engine_json_get_long(result.body.data, "max_attempts", &value);
-    response->max_attempts = (int)value;
-  }
-  if (rc == LC_ENGINE_OK) {
-    value = 0L;
-    rc = lc_engine_json_get_long(result.body.data, "failure_attempts", &value);
-    response->failure_attempts = (int)value;
-  }
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "not_visible_until_unix",
-                                 &response->not_visible_until_unix);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "visibility_timeout_seconds",
-                                 &response->visibility_timeout_seconds);
-  if (rc == LC_ENGINE_OK)
-    rc = lc_engine_json_get_long(result.body.data, "payload_bytes",
-                                 &response->payload_bytes);
-  if (rc == LC_ENGINE_OK && result.correlation_id != NULL) {
+  response->namespace_name = response_json.namespace_name;
+  response_json.namespace_name = NULL;
+  response->queue = response_json.queue;
+  response_json.queue = NULL;
+  response->message_id = response_json.message_id;
+  response_json.message_id = NULL;
+  response->attempts = (int)response_json.attempts;
+  response->max_attempts = (int)response_json.max_attempts;
+  response->failure_attempts = (int)response_json.failure_attempts;
+  response->not_visible_until_unix = response_json.not_visible_until_unix;
+  response->visibility_timeout_seconds =
+      response_json.visibility_timeout_seconds;
+  response->payload_bytes = response_json.payload_bytes;
+  if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
@@ -2003,6 +2153,9 @@ int lc_engine_client_enqueue(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_enqueue_response_cleanup(response);
+    lc_engine_free_string(&response_json.namespace_name);
+    lc_engine_free_string(&response_json.queue);
+    lc_engine_free_string(&response_json.message_id);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode enqueue response");

@@ -26,6 +26,7 @@
 #include <openssl/x509v3.h>
 
 #include "lc/lc.h"
+#include "lc_api_internal.h"
 #include "lc_engine_api.h"
 
 typedef struct test_value_doc {
@@ -3230,7 +3231,7 @@ test_public_lease_load_respects_configured_json_response_limit(void **state) {
   memset(&error, 0, sizeof(error));
   init_public_client_config(&config, server.port, material.client_bundle_path,
                             NULL);
-  config.http_json_response_limit_bytes = 1U;
+  config.http_json_response_limit_bytes = 0U;
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -3241,6 +3242,7 @@ test_public_lease_load_respects_configured_json_response_limit(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
 
+  ((lc_client_handle *)client)->http_json_response_limit_bytes = 1U;
   get_opts.public_read = 1;
   rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
                      &get_res, &error);

@@ -10,6 +10,95 @@ typedef enum lc_engine_queue_parse_kind {
   LC_ENGINE_QUEUE_PARSE_STATS = 4
 } lc_engine_queue_parse_kind;
 
+typedef struct lc_engine_queue_stats_response_json {
+  char *namespace_name;
+  char *queue;
+  lonejson_int64 waiting_consumers;
+  lonejson_int64 pending_candidates;
+  lonejson_int64 total_consumers;
+  bool has_active_watcher;
+  bool available;
+  char *head_message_id;
+  lonejson_int64 head_enqueued_at_unix;
+  lonejson_int64 head_not_visible_until_unix;
+  lonejson_int64 head_age_seconds;
+} lc_engine_queue_stats_response_json;
+
+typedef struct lc_engine_queue_ack_response_json {
+  bool acked;
+} lc_engine_queue_ack_response_json;
+
+typedef struct lc_engine_queue_nack_response_json {
+  bool requeued;
+  char *meta_etag;
+} lc_engine_queue_nack_response_json;
+
+typedef struct lc_engine_queue_extend_response_json {
+  lonejson_int64 lease_expires_at_unix;
+  lonejson_int64 visibility_timeout_seconds;
+  char *meta_etag;
+  lonejson_int64 state_lease_expires_at_unix;
+} lc_engine_queue_extend_response_json;
+
+static const lonejson_field lc_engine_queue_stats_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_response_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_response_json, queue,
+                                "queue"),
+    LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json, waiting_consumers,
+                       "waiting_consumers"),
+    LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json,
+                       pending_candidates, "pending_candidates"),
+    LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json, total_consumers,
+                       "total_consumers"),
+    LONEJSON_FIELD_BOOL(lc_engine_queue_stats_response_json,
+                        has_active_watcher, "has_active_watcher"),
+    LONEJSON_FIELD_BOOL(lc_engine_queue_stats_response_json, available,
+                        "available"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_response_json,
+                                head_message_id, "head_message_id"),
+    LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json,
+                       head_enqueued_at_unix, "head_enqueued_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json,
+                       head_not_visible_until_unix,
+                       "head_not_visible_until_unix"),
+    LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json, head_age_seconds,
+                       "head_age_seconds")};
+
+static const lonejson_field lc_engine_queue_ack_response_fields[] = {
+    LONEJSON_FIELD_BOOL(lc_engine_queue_ack_response_json, acked, "acked")};
+
+static const lonejson_field lc_engine_queue_nack_response_fields[] = {
+    LONEJSON_FIELD_BOOL(lc_engine_queue_nack_response_json, requeued,
+                        "requeued"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_response_json, meta_etag,
+                                "meta_etag")};
+
+static const lonejson_field lc_engine_queue_extend_response_fields[] = {
+    LONEJSON_FIELD_I64(lc_engine_queue_extend_response_json,
+                       lease_expires_at_unix, "lease_expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_queue_extend_response_json,
+                       visibility_timeout_seconds,
+                       "visibility_timeout_seconds"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_response_json, meta_etag,
+                                "meta_etag"),
+    LONEJSON_FIELD_I64(lc_engine_queue_extend_response_json,
+                       state_lease_expires_at_unix,
+                       "state_lease_expires_at_unix")};
+
+LONEJSON_MAP_DEFINE(lc_engine_queue_stats_response_map,
+                    lc_engine_queue_stats_response_json,
+                    lc_engine_queue_stats_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_queue_ack_response_map,
+                    lc_engine_queue_ack_response_json,
+                    lc_engine_queue_ack_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_queue_nack_response_map,
+                    lc_engine_queue_nack_response_json,
+                    lc_engine_queue_nack_response_fields);
+LONEJSON_MAP_DEFINE(lc_engine_queue_extend_response_map,
+                    lc_engine_queue_extend_response_json,
+                    lc_engine_queue_extend_response_fields);
+
 static int
 lc_engine_queue_apply_correlation(char **out_correlation_id,
                                   const lc_engine_http_result *result) {
@@ -20,6 +109,20 @@ lc_engine_queue_apply_correlation(char **out_correlation_id,
     }
   }
   return 1;
+}
+
+static int lc_engine_i64_to_int_checked(lonejson_int64 value, const char *label,
+                                        int *out_value,
+                                        lc_engine_error *error) {
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing int output");
+  }
+  if (value < (lonejson_int64)INT_MIN || value > (lonejson_int64)INT_MAX) {
+    return lc_engine_set_protocol_error(error, label);
+  }
+  *out_value = (int)value;
+  return LC_ENGINE_OK;
 }
 
 static int lc_engine_queue_request_headers(
@@ -68,15 +171,11 @@ static int lc_engine_queue_finish_request(lc_engine_buffer *body,
   return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_queue_parse_response_json(const lc_engine_http_result *result,
-                                    lc_engine_queue_parse_kind kind,
-                                    void *response, lc_engine_error *error) {
-  int rc;
-  long value;
-  int bool_value;
-
-  if (result == NULL || response == NULL || error == NULL) {
+static int lc_engine_queue_parse_response_json(
+    const void *parsed_json, const lc_engine_http_result *result,
+    lc_engine_queue_parse_kind kind, void *response, lc_engine_error *error) {
+  if (parsed_json == NULL || result == NULL || response == NULL ||
+      error == NULL) {
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "queue response parsing requires result, response, and error");
@@ -85,136 +184,81 @@ lc_engine_queue_parse_response_json(const lc_engine_http_result *result,
   switch (kind) {
   case LC_ENGINE_QUEUE_PARSE_ACK: {
     lc_engine_queue_ack_response *ack_response;
+    const lc_engine_queue_ack_response_json *parsed;
 
     ack_response = (lc_engine_queue_ack_response *)response;
-    rc = lc_engine_json_get_bool(result->body.data, "acked", &ack_response->acked);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(error,
-                                          "failed to parse queue_ack response");
-    }
+    parsed = (const lc_engine_queue_ack_response_json *)parsed_json;
+    ack_response->acked = parsed->acked ? 1 : 0;
     break;
   }
   case LC_ENGINE_QUEUE_PARSE_NACK: {
     lc_engine_queue_nack_response *nack_response;
+    lc_engine_queue_nack_response_json *parsed;
 
     nack_response = (lc_engine_queue_nack_response *)response;
-    rc = lc_engine_json_get_bool(result->body.data, "requeued",
-                                 &nack_response->requeued);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(
-          error, "failed to parse queue_nack requeued");
-    }
-    rc = lc_engine_json_get_string(result->body.data, "meta_etag",
-                                   &nack_response->meta_etag);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(error,
-                                          "failed to parse queue_nack meta_etag");
-    }
+    parsed = (lc_engine_queue_nack_response_json *)parsed_json;
+    nack_response->requeued = parsed->requeued ? 1 : 0;
+    nack_response->meta_etag = parsed->meta_etag;
+    parsed->meta_etag = NULL;
     break;
   }
   case LC_ENGINE_QUEUE_PARSE_EXTEND: {
     lc_engine_queue_extend_response *extend_response;
+    lc_engine_queue_extend_response_json *parsed;
 
     extend_response = (lc_engine_queue_extend_response *)response;
-    rc = lc_engine_json_get_long(result->body.data, "lease_expires_at_unix",
-                                 &extend_response->lease_expires_at_unix);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(
-          error, "failed to parse queue_extend lease_expires_at_unix");
-    }
-    rc = lc_engine_json_get_long(result->body.data, "visibility_timeout_seconds",
-                                 &extend_response->visibility_timeout_seconds);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(
-          error, "failed to parse queue_extend visibility_timeout_seconds");
-    }
-    rc = lc_engine_json_get_string(result->body.data, "meta_etag",
-                                   &extend_response->meta_etag);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(error,
-                                          "failed to parse queue_extend meta_etag");
-    }
-    rc = lc_engine_json_get_long(result->body.data,
-                                 "state_lease_expires_at_unix",
-                                 &extend_response->state_lease_expires_at_unix);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(
-          error, "failed to parse queue_extend state_lease_expires_at_unix");
-    }
+    parsed = (lc_engine_queue_extend_response_json *)parsed_json;
+    extend_response->lease_expires_at_unix = parsed->lease_expires_at_unix;
+    extend_response->visibility_timeout_seconds =
+        parsed->visibility_timeout_seconds;
+    extend_response->meta_etag = parsed->meta_etag;
+    extend_response->state_lease_expires_at_unix =
+        parsed->state_lease_expires_at_unix;
+    parsed->meta_etag = NULL;
     break;
   }
   case LC_ENGINE_QUEUE_PARSE_STATS: {
     lc_engine_queue_stats_response *stats_response;
+    lc_engine_queue_stats_response_json *parsed;
+    int value;
+    int int_rc;
 
     stats_response = (lc_engine_queue_stats_response *)response;
-    rc = lc_engine_json_get_string(result->body.data, "namespace",
-                                   &stats_response->namespace_name);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(error,
-                                          "failed to parse queue_stats namespace");
+    parsed = (lc_engine_queue_stats_response_json *)parsed_json;
+    value = 0;
+    int_rc = lc_engine_i64_to_int_checked(
+        parsed->waiting_consumers, "queue_stats waiting_consumers is out of range",
+        &value, error);
+    if (int_rc != LC_ENGINE_OK) {
+      return int_rc;
     }
-    rc = lc_engine_json_get_string(result->body.data, "queue",
-                                   &stats_response->queue);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(error,
-                                          "failed to parse queue_stats queue");
+    stats_response->waiting_consumers = value;
+    int_rc = lc_engine_i64_to_int_checked(
+        parsed->pending_candidates,
+        "queue_stats pending_candidates is out of range", &value, error);
+    if (int_rc != LC_ENGINE_OK) {
+      return int_rc;
     }
-    rc = lc_engine_json_get_long(result->body.data, "waiting_consumers", &value);
-    if (rc != LC_ENGINE_OK || value < (long)INT_MIN || value > (long)INT_MAX) {
-      return lc_engine_set_protocol_error(
-          error, "queue_stats waiting_consumers is out of range");
+    stats_response->pending_candidates = value;
+    int_rc = lc_engine_i64_to_int_checked(
+        parsed->total_consumers, "queue_stats total_consumers is out of range",
+        &value, error);
+    if (int_rc != LC_ENGINE_OK) {
+      return int_rc;
     }
-    stats_response->waiting_consumers = (int)value;
-    rc = lc_engine_json_get_long(result->body.data, "pending_candidates", &value);
-    if (rc != LC_ENGINE_OK || value < (long)INT_MIN || value > (long)INT_MAX) {
-      return lc_engine_set_protocol_error(
-          error, "queue_stats pending_candidates is out of range");
-    }
-    stats_response->pending_candidates = (int)value;
-    rc = lc_engine_json_get_long(result->body.data, "total_consumers", &value);
-    if (rc != LC_ENGINE_OK || value < (long)INT_MIN || value > (long)INT_MAX) {
-      return lc_engine_set_protocol_error(
-          error, "queue_stats total_consumers is out of range");
-    }
-    stats_response->total_consumers = (int)value;
-    rc = lc_engine_json_get_bool(result->body.data, "has_active_watcher",
-                                 &bool_value);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(
-          error, "failed to parse queue_stats has_active_watcher");
-    }
-    stats_response->has_active_watcher = bool_value;
-    rc = lc_engine_json_get_bool(result->body.data, "available", &bool_value);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(error,
-                                          "failed to parse queue_stats available");
-    }
-    stats_response->available = bool_value;
-    rc = lc_engine_json_get_string(result->body.data, "head_message_id",
-                                   &stats_response->head_message_id);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(
-          error, "failed to parse queue_stats head_message_id");
-    }
-    rc = lc_engine_json_get_long(result->body.data, "head_enqueued_at_unix",
-                                 &stats_response->head_enqueued_at_unix);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(
-          error, "failed to parse queue_stats head_enqueued_at_unix");
-    }
-    rc = lc_engine_json_get_long(result->body.data,
-                                 "head_not_visible_until_unix",
-                                 &stats_response->head_not_visible_until_unix);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(
-          error, "failed to parse queue_stats head_not_visible_until_unix");
-    }
-    rc = lc_engine_json_get_long(result->body.data, "head_age_seconds",
-                                 &stats_response->head_age_seconds);
-    if (rc != LC_ENGINE_OK) {
-      return lc_engine_set_protocol_error(error,
-                                          "failed to parse queue_stats head_age_seconds");
-    }
+    stats_response->total_consumers = value;
+    stats_response->has_active_watcher = parsed->has_active_watcher ? 1 : 0;
+    stats_response->available = parsed->available ? 1 : 0;
+    stats_response->namespace_name = parsed->namespace_name;
+    stats_response->queue = parsed->queue;
+    stats_response->head_message_id = parsed->head_message_id;
+    stats_response->head_enqueued_at_unix = parsed->head_enqueued_at_unix;
+    stats_response->head_not_visible_until_unix =
+        parsed->head_not_visible_until_unix;
+    stats_response->head_age_seconds = parsed->head_age_seconds;
+    parsed->namespace_name = NULL;
+    parsed->queue = NULL;
+    parsed->head_message_id = NULL;
     break;
   }
   default:
@@ -554,6 +598,7 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
+  lc_engine_queue_stats_response_json parsed;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -573,25 +618,29 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
     return rc;
   }
   lc_engine_queue_request_headers(&headers, &header_count);
-  rc = lc_engine_http_request(client, "POST", "/v1/queue/stats", body.data,
-                              body.length, headers, header_count, &result,
-                              error);
+  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/stats",
+                                   body.data, body.length, headers,
+                                   header_count,
+                                   &lc_engine_queue_stats_response_map,
+                                   &parsed, &result, error);
   lc_engine_buffer_cleanup(&body);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status < 200 || result.http_status >= 300) {
     rc = lc_engine_set_server_error_from_result(error, &result);
+    lonejson_cleanup(&lc_engine_queue_stats_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_queue_parse_response_json(&result, LC_ENGINE_QUEUE_PARSE_STATS,
-                                           response, error);
+  rc = lc_engine_queue_parse_response_json(
+      &parsed, &result, LC_ENGINE_QUEUE_PARSE_STATS, response, error);
   if (rc == LC_ENGINE_OK &&
       !lc_engine_queue_apply_correlation(&response->correlation_id, &result)) {
     rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                     "failed to copy queue_stats correlation_id");
   }
+  lonejson_cleanup(&lc_engine_queue_stats_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -604,6 +653,7 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
+  lc_engine_queue_ack_response_json parsed;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -624,25 +674,29 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
     return rc;
   }
   lc_engine_queue_request_headers(&headers, &header_count);
-  rc = lc_engine_http_request(client, "POST", "/v1/queue/ack", body.data,
-                              body.length, headers, header_count, &result,
-                              error);
+  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/ack", body.data,
+                                   body.length, headers, header_count,
+                                   &lc_engine_queue_ack_response_map, &parsed,
+                                   &result, error);
   lc_engine_buffer_cleanup(&body);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status < 200 || result.http_status >= 300) {
     rc = lc_engine_set_server_error_from_result(error, &result);
+    lonejson_cleanup(&lc_engine_queue_ack_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_queue_parse_response_json(&result, LC_ENGINE_QUEUE_PARSE_ACK,
-                                           response, error);
+  rc = lc_engine_queue_parse_response_json(&parsed, &result,
+                                           LC_ENGINE_QUEUE_PARSE_ACK, response,
+                                           error);
   if (rc == LC_ENGINE_OK &&
       !lc_engine_queue_apply_correlation(&response->correlation_id, &result)) {
     rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                     "failed to copy queue_ack correlation_id");
   }
+  lonejson_cleanup(&lc_engine_queue_ack_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -655,6 +709,7 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
+  lc_engine_queue_nack_response_json parsed;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -675,25 +730,29 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
     return rc;
   }
   lc_engine_queue_request_headers(&headers, &header_count);
-  rc = lc_engine_http_request(client, "POST", "/v1/queue/nack", body.data,
-                              body.length, headers, header_count, &result,
-                              error);
+  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/nack", body.data,
+                                   body.length, headers, header_count,
+                                   &lc_engine_queue_nack_response_map, &parsed,
+                                   &result, error);
   lc_engine_buffer_cleanup(&body);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status < 200 || result.http_status >= 300) {
     rc = lc_engine_set_server_error_from_result(error, &result);
+    lonejson_cleanup(&lc_engine_queue_nack_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_queue_parse_response_json(&result, LC_ENGINE_QUEUE_PARSE_NACK,
-                                           response, error);
+  rc = lc_engine_queue_parse_response_json(&parsed, &result,
+                                           LC_ENGINE_QUEUE_PARSE_NACK, response,
+                                           error);
   if (rc == LC_ENGINE_OK &&
       !lc_engine_queue_apply_correlation(&response->correlation_id, &result)) {
     rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                     "failed to copy queue_nack correlation_id");
   }
+  lonejson_cleanup(&lc_engine_queue_nack_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -706,6 +765,7 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
+  lc_engine_queue_extend_response_json parsed;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -726,26 +786,31 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
     return rc;
   }
   lc_engine_queue_request_headers(&headers, &header_count);
-  rc = lc_engine_http_request(client, "POST", "/v1/queue/extend", body.data,
-                              body.length, headers, header_count, &result,
-                              error);
+  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/extend",
+                                   body.data, body.length, headers,
+                                   header_count,
+                                   &lc_engine_queue_extend_response_map,
+                                   &parsed, &result, error);
   lc_engine_buffer_cleanup(&body);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status < 200 || result.http_status >= 300) {
     rc = lc_engine_set_server_error_from_result(error, &result);
+    lonejson_cleanup(&lc_engine_queue_extend_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_queue_parse_response_json(
-      &result, LC_ENGINE_QUEUE_PARSE_EXTEND, response, error);
+  rc = lc_engine_queue_parse_response_json(&parsed, &result,
+                                           LC_ENGINE_QUEUE_PARSE_EXTEND,
+                                           response, error);
   if (rc == LC_ENGINE_OK &&
       !lc_engine_queue_apply_correlation(&response->correlation_id, &result)) {
     rc = lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_NO_MEMORY,
         "failed to copy queue_extend correlation_id");
   }
+  lonejson_cleanup(&lc_engine_queue_extend_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
