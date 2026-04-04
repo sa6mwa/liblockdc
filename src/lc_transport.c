@@ -1272,6 +1272,7 @@ int lc_engine_http_json_request(
     if (curl_code != CURLE_OK) {
       pslog_field error_fields[6];
       const char *error_text;
+      int return_code;
 
       error_text = error_buffer[0] != '\0' ? error_buffer
                                            : curl_easy_strerror(curl_code);
@@ -1283,36 +1284,65 @@ int lc_engine_http_json_request(
       error_fields[4] = lc_log_u64_field("total", client->endpoint_count);
       error_fields[5] = lc_log_str_field("error", error_text);
       lc_log_trace(client->logger, "client.http.error", error_fields, 6U);
-      curl_slist_free_all(curl_headers);
-      curl_easy_cleanup(easy);
-      lc_engine_buffer_cleanup(&url);
       if (state.limit_exceeded) {
-        lc_engine_http_result_cleanup(result);
-        return error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
-      }
-      if (result->header_parse_failed) {
+        return_code =
+            error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+        should_retry = 0;
+      } else if (state.parser_initialized != 0 &&
+                 (error == NULL || error->code != LC_ENGINE_OK)) {
+        return_code = error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+        should_retry = 0;
+      } else if (result->header_parse_failed) {
         lc_engine_set_protocol_error(error,
                                      result->header_parse_error_message != NULL
                                          ? result->header_parse_error_message
                                          : "response header is invalid");
-        lc_engine_http_result_cleanup(result);
-        return error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+        return_code = error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+        should_retry = 0;
+      } else if (endpoint_index + 1U < client->endpoint_count) {
+        should_retry = 1;
+        return_code = LC_ENGINE_OK;
+      } else {
+        if (error_buffer[0] != '\0') {
+          lc_engine_set_transport_error(error, error_buffer);
+        } else {
+          lc_engine_set_transport_error(error, curl_easy_strerror(curl_code));
+        }
+        return_code =
+            error != NULL ? error->code : LC_ENGINE_ERROR_TRANSPORT;
+        should_retry = 0;
       }
-      if (endpoint_index + 1U < client->endpoint_count) {
+      curl_slist_free_all(curl_headers);
+      curl_easy_cleanup(easy);
+      lc_engine_buffer_cleanup(&url);
+      if (state.parser_initialized != 0 && state.parser_is_error == 0 &&
+          state.response_map != NULL && state.response_dst != NULL) {
+        lonejson_cleanup(state.response_map, state.response_dst);
+      }
+      lc_engine_json_http_state_cleanup(&state);
+      lc_engine_http_result_cleanup(result);
+      if (should_retry) {
         continue;
       }
-      if (error_buffer[0] != '\0') {
-        lc_engine_set_transport_error(error, error_buffer);
-        lc_engine_http_result_cleanup(result);
-        return error != NULL ? error->code : LC_ENGINE_ERROR_TRANSPORT;
-      }
-      lc_engine_set_transport_error(error, curl_easy_strerror(curl_code));
-      lc_engine_http_result_cleanup(result);
-      return error != NULL ? error->code : LC_ENGINE_ERROR_TRANSPORT;
+      return return_code;
     }
 
     curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &result->http_status);
     if (state.parser_initialized && state.parser_is_error) {
+      lonejson_status parse_status;
+
+      parse_status = lonejson_curl_parse_finish(&state.parse);
+      if (parse_status != LONEJSON_STATUS_OK) {
+        lc_engine_lonejson_error_from_status(
+            error, parse_status, &state.parse.error,
+            "failed to finish typed JSON error response");
+        curl_slist_free_all(curl_headers);
+        curl_easy_cleanup(easy);
+        lc_engine_buffer_cleanup(&url);
+        lc_engine_json_http_state_cleanup(&state);
+        lc_engine_http_result_cleanup(result);
+        return error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+      }
       result->server_error_code = state.error_body.server_error_code;
       result->detail = state.error_body.detail;
       result->leader_endpoint = state.error_body.leader_endpoint;

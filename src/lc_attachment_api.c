@@ -792,10 +792,12 @@ static int lc_engine_perform_streaming(lc_engine_client *client,
     curl_rc = curl_easy_perform(curl);
     free(url);
     if (curl_rc == CURLE_WRITE_ERROR && state->stream_error) {
+      curl_slist_free_all(headers);
       curl_easy_cleanup(curl);
       return state->error->code;
     }
     if (curl_rc != CURLE_OK) {
+      curl_slist_free_all(headers);
       curl_easy_cleanup(curl);
       return lc_engine_set_transport_error(state->error,
                                            curl_easy_strerror(curl_rc));
@@ -823,6 +825,18 @@ static int lc_engine_perform_streaming(lc_engine_client *client,
     }
 
     if (state->parser_initialized && state->parser_is_error) {
+      lonejson_status parse_status;
+
+      parse_status = lonejson_curl_parse_finish(&state->parse);
+      if (parse_status != LONEJSON_STATUS_OK) {
+        lc_engine_lonejson_error_from_status(
+            state->error, parse_status, &state->parse.error,
+            "failed to finish typed JSON error response");
+        rc = state->error->code;
+        curl_slist_free_all(headers);
+        lc_engine_stream_state_cleanup(state);
+        return rc;
+      }
       memset(&synthetic, 0, sizeof(synthetic));
       synthetic.http_status = state->http_status;
       synthetic.server_error_code = state->error_body.server_error_code;
@@ -841,11 +855,10 @@ static int lc_engine_perform_streaming(lc_engine_client *client,
         return rc;
       }
       lc_engine_error_reset(state->error);
-      lonejson_cleanup(&lc_engine_http_error_map, &state->error_body);
-      state->parser_initialized = 0;
-      state->parser_is_error = 0;
       curl_slist_free_all(headers);
       lc_engine_stream_state_cleanup(state);
+      state->parser_initialized = 0;
+      state->parser_is_error = 0;
       continue;
     }
 

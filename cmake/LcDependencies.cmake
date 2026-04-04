@@ -492,6 +492,7 @@ function(lc_add_curl variant shared_flag)
       CMAKE_ARGS
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_DEBUG_POSTFIX=
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DCMAKE_INSTALL_RPATH=${curl_install_rpath}
