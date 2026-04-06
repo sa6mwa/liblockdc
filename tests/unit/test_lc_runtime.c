@@ -127,7 +127,8 @@ static void test_error_from_legacy_maps_transport_and_fields(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_set_server_error_from_result_copies_server_fields(void **state) {
+static void
+test_set_server_error_from_result_copies_server_fields(void **state) {
   lc_engine_http_result result;
   lc_engine_error error;
   int rc;
@@ -463,8 +464,7 @@ int main(void) {
       cmocka_unit_test(test_allocator_init_clears_allocator),
       cmocka_unit_test(test_error_cleanup_resets_allocated_fields),
       cmocka_unit_test(test_error_from_legacy_maps_transport_and_fields),
-      cmocka_unit_test(
-          test_set_server_error_from_result_copies_server_fields),
+      cmocka_unit_test(test_set_server_error_from_result_copies_server_fields),
       cmocka_unit_test(test_error_set_duplicates_message_fields),
       cmocka_unit_test(test_error_set_returns_code_without_error_object),
       cmocka_unit_test(test_error_from_legacy_maps_protocol_and_server_codes),

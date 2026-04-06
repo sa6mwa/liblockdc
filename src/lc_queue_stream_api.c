@@ -70,7 +70,8 @@ LONEJSON_MAP_DEFINE(lc_engine_watch_event_map, lc_engine_watch_event_json,
 static const lonejson_field lc_engine_subscribe_message_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json,
                                 namespace_name, "namespace"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, queue, "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, queue,
+                                "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, message_id,
                                 "message_id"),
     LONEJSON_FIELD_I64(lc_engine_subscribe_message_json, attempts, "attempts"),
@@ -150,14 +151,15 @@ static int lc_engine_i64_to_int_checked(lonejson_int64 value, const char *label,
   return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_i64_to_size_checked(lonejson_int64 value, const char *label,
-                              size_t *out_value, lc_engine_error *error) {
+static int lc_engine_i64_to_size_checked(lonejson_int64 value,
+                                         const char *label, size_t *out_value,
+                                         lc_engine_error *error) {
   size_t narrowed;
 
   if (out_value == NULL) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "missing destination for size conversion");
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "missing destination for size conversion");
   }
   if (value < 0) {
     return lc_engine_set_protocol_error(error, label);
@@ -471,9 +473,9 @@ static int lc_engine_watch_dispatch_event(lc_engine_watch_state *state) {
     return lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to copy queue watch event");
   }
-  rc = lc_engine_i64_to_int64_checked(parsed.changed_at_unix,
-                                      "queue watch changed_at_unix is out of range",
-                                      &event.changed_at_unix, state->error);
+  rc = lc_engine_i64_to_int64_checked(
+      parsed.changed_at_unix, "queue watch changed_at_unix is out of range",
+      &event.changed_at_unix, state->error);
   if (rc != LC_ENGINE_OK) {
     lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
     return rc;
@@ -575,8 +577,7 @@ static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
   total = size * nmemb;
   if (state->http_status >= 400L) {
     if (lc_engine_buffer_append_limited(&state->error_body, ptr, total,
-                                        state->error_limit) !=
-        LC_ENGINE_OK) {
+                                        state->error_limit) != LC_ENGINE_OK) {
       state->callback_failed = 1;
       lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                  "failed to buffer watch_queue error body");
@@ -889,8 +890,7 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
     }
   }
   if (rc == LC_ENGINE_OK) {
-    response->state_lease_id =
-        lc_engine_strdup_local(message->state_lease_id);
+    response->state_lease_id = lc_engine_strdup_local(message->state_lease_id);
     if (message->state_lease_id != NULL && response->state_lease_id == NULL) {
       rc = LC_ENGINE_ERROR_NO_MEMORY;
     }
@@ -910,9 +910,8 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
   if (rc != LC_ENGINE_OK) {
     lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
     lc_engine_dequeue_response_cleanup(response);
-    return lc_engine_set_client_error(
-        error, LC_ENGINE_ERROR_NO_MEMORY,
-        "failed to copy subscribe meta response");
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                      "failed to copy subscribe meta response");
   }
   rc = lc_engine_i64_to_int_checked(message->attempts,
                                     "queue attempts is out of range",
@@ -945,10 +944,10 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
                                        &response->payload_length, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_int64_checked(message->lease_expires_at_unix,
-                                        "queue lease_expires_at_unix is out of range",
-                                        &response->lease_expires_at_unix,
-                                        error);
+    rc = lc_engine_i64_to_int64_checked(
+        message->lease_expires_at_unix,
+        "queue lease_expires_at_unix is out of range",
+        &response->lease_expires_at_unix, error);
   }
   if (rc == LC_ENGINE_OK) {
     rc = lc_engine_i64_to_int64_checked(message->fencing_token,
@@ -1189,12 +1188,10 @@ static int lc_engine_subscribe_process_line(lc_engine_subscribe_state *state) {
       state->phase = LC_ENGINE_SUBSCRIBE_READ_HEADERS;
       return LC_ENGINE_OK;
     }
-    if (lc_engine_buffer_append_cstr_limited(&state->meta_buffer, line,
-                                             state->meta_limit) !=
-            LC_ENGINE_OK ||
-        lc_engine_buffer_append_cstr_limited(&state->meta_buffer, "\n",
-                                             state->meta_limit) !=
-            LC_ENGINE_OK) {
+    if (lc_engine_buffer_append_cstr_limited(
+            &state->meta_buffer, line, state->meta_limit) != LC_ENGINE_OK ||
+        lc_engine_buffer_append_cstr_limited(
+            &state->meta_buffer, "\n", state->meta_limit) != LC_ENGINE_OK) {
       return lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to append subscribe meta line");
     }
@@ -1216,8 +1213,7 @@ static size_t lc_engine_subscribe_write_callback(char *ptr, size_t size,
   total = size * nmemb;
   if (state->http_status >= 400L) {
     if (lc_engine_buffer_append_limited(&state->error_body, ptr, total,
-                                        state->error_limit) !=
-        LC_ENGINE_OK) {
+                                        state->error_limit) != LC_ENGINE_OK) {
       state->callback_failed = 1;
       lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                  "failed to buffer subscribe error body");
@@ -1468,9 +1464,8 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
 
     lc_engine_queue_stream_log_error(client, "/v1/queue/watch", endpoint_index,
                                      "server returned error status");
-    rc = lc_engine_set_server_error_from_json(error, state.http_status,
-                                              state.correlation_id,
-                                              state.error_body.data);
+    rc = lc_engine_set_server_error_from_json(
+        error, state.http_status, state.correlation_id, state.error_body.data);
     lc_engine_watch_state_cleanup(&state);
     if (error->server_error_code == NULL ||
         strcmp(error->server_error_code, "node_passive") != 0) {
@@ -1589,10 +1584,9 @@ static int lc_engine_client_subscribe_internal(
       state.error = error;
       state.error_limit = LC_ENGINE_QUEUE_ERROR_BODY_LIMIT;
       state.part_content_length = -1L;
-      state.meta_limit =
-          client->http_json_response_limit_bytes > 0U
-              ? client->http_json_response_limit_bytes
-              : (size_t)LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT;
+      state.meta_limit = client->http_json_response_limit_bytes > 0U
+                             ? client->http_json_response_limit_bytes
+                             : (size_t)LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT;
       state.phase = LC_ENGINE_SUBSCRIBE_EXPECT_BOUNDARY;
       lc_engine_buffer_init(&state.line_buffer);
       lc_engine_buffer_init(&state.meta_buffer);

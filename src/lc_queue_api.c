@@ -62,12 +62,12 @@ static const lonejson_field lc_engine_queue_stats_response_fields[] = {
                                 "queue"),
     LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json, waiting_consumers,
                        "waiting_consumers"),
-    LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json,
-                       pending_candidates, "pending_candidates"),
+    LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json, pending_candidates,
+                       "pending_candidates"),
     LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json, total_consumers,
                        "total_consumers"),
-    LONEJSON_FIELD_BOOL(lc_engine_queue_stats_response_json,
-                        has_active_watcher, "has_active_watcher"),
+    LONEJSON_FIELD_BOOL(lc_engine_queue_stats_response_json, has_active_watcher,
+                        "has_active_watcher"),
     LONEJSON_FIELD_BOOL(lc_engine_queue_stats_response_json, available,
                         "available"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_response_json,
@@ -101,8 +101,8 @@ static const lonejson_field lc_engine_queue_extend_response_fields[] = {
                        state_lease_expires_at_unix,
                        "state_lease_expires_at_unix")};
 static const lonejson_field lc_engine_queue_stats_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_request,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_request, namespace_name,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_request, queue, "queue")};
 static const lonejson_field lc_engine_queue_ack_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, namespace_name,
@@ -112,8 +112,7 @@ static const lonejson_field lc_engine_queue_ack_body_fields[] = {
                                 "message_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, lease_id,
                                 "lease_id"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, txn_id,
-                                "txn_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, txn_id, "txn_id"),
     LONEJSON_FIELD_I64(lc_engine_queue_ack_request, fencing_token,
                        "fencing_token"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, meta_etag,
@@ -127,8 +126,7 @@ static const lonejson_field lc_engine_queue_ack_body_fields[] = {
 static const lonejson_field lc_engine_queue_extend_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, namespace_name,
                                 "namespace"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, queue,
-                                "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, queue, "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, message_id,
                                 "message_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, lease_id,
@@ -148,8 +146,7 @@ static const lonejson_field lc_engine_queue_extend_body_fields[] = {
 static const lonejson_field lc_engine_queue_nack_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, namespace_name,
                                 "namespace"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, queue,
-                                "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, queue, "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, message_id,
                                 "message_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, lease_id,
@@ -224,8 +221,9 @@ static int lc_engine_i64_to_int_checked(lonejson_int64 value, const char *label,
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_queue_request_headers(
-    const lc_engine_header_pair **out_headers, size_t *out_header_count) {
+static int
+lc_engine_queue_request_headers(const lc_engine_header_pair **out_headers,
+                                size_t *out_header_count) {
   static const lc_engine_header_pair headers[] = {
       {"Content-Type", "application/json"}, {"Accept", "application/json"}};
 
@@ -234,12 +232,9 @@ static int lc_engine_queue_request_headers(
   return 1;
 }
 
-static int lc_engine_queue_add_namespace(lc_engine_buffer *body,
-                                         int *first_field,
-                                         lc_engine_client *client,
-                                         const char *namespace_name,
-                                         const char *label,
-                                         lc_engine_error *error) {
+static int lc_engine_queue_add_namespace(
+    lc_engine_buffer *body, int *first_field, lc_engine_client *client,
+    const char *namespace_name, const char *label, lc_engine_error *error) {
   const char *effective_namespace;
 
   effective_namespace = lc_engine_effective_namespace(client, namespace_name);
@@ -332,8 +327,8 @@ static int lc_engine_queue_parse_response_json(
     parsed = (lc_engine_queue_stats_response_json *)parsed_json;
     value = 0;
     int_rc = lc_engine_i64_to_int_checked(
-        parsed->waiting_consumers, "queue_stats waiting_consumers is out of range",
-        &value, error);
+        parsed->waiting_consumers,
+        "queue_stats waiting_consumers is out of range", &value, error);
     if (int_rc != LC_ENGINE_OK) {
       return int_rc;
     }
@@ -413,8 +408,7 @@ static int lc_engine_build_queue_stats_body(lc_engine_client *client,
 static int
 lc_engine_build_queue_ack_body(lc_engine_client *client,
                                const lc_engine_queue_ack_request *request,
-                               lc_engine_buffer *body,
-                               lc_engine_error *error) {
+                               lc_engine_buffer *body, lc_engine_error *error) {
   int first_field;
   int rc;
 
@@ -423,10 +417,9 @@ lc_engine_build_queue_ack_body(lc_engine_client *client,
     return rc;
   }
   first_field = 1;
-  rc = lc_engine_queue_add_namespace(body, &first_field, client,
-                                     request->namespace_name,
-                                     "failed to add queue_ack namespace",
-                                     error);
+  rc = lc_engine_queue_add_namespace(
+      body, &first_field, client, request->namespace_name,
+      "failed to add queue_ack namespace", error);
   if (rc != LC_ENGINE_OK ||
       lc_engine_json_add_string_field(body, &first_field, "queue",
                                       request->queue) != LC_ENGINE_OK ||
@@ -502,10 +495,9 @@ static int lc_engine_build_queue_nack_body(
     return rc;
   }
   first_field = 1;
-  rc = lc_engine_queue_add_namespace(body, &first_field, client,
-                                     request->namespace_name,
-                                     "failed to add queue_nack namespace",
-                                     error);
+  rc = lc_engine_queue_add_namespace(
+      body, &first_field, client, request->namespace_name,
+      "failed to add queue_nack namespace", error);
   if (rc != LC_ENGINE_OK ||
       lc_engine_json_add_string_field(body, &first_field, "queue",
                                       request->queue) != LC_ENGINE_OK ||
@@ -586,11 +578,9 @@ static int lc_engine_build_queue_nack_body(
   return lc_engine_queue_finish_request(body, error);
 }
 
-static int
-lc_engine_build_queue_extend_body(lc_engine_client *client,
-                                  const lc_engine_queue_extend_request *request,
-                                  lc_engine_buffer *body,
-                                  lc_engine_error *error) {
+static int lc_engine_build_queue_extend_body(
+    lc_engine_client *client, const lc_engine_queue_extend_request *request,
+    lc_engine_buffer *body, lc_engine_error *error) {
   int first_field;
   int rc;
 
@@ -599,10 +589,9 @@ lc_engine_build_queue_extend_body(lc_engine_client *client,
     return rc;
   }
   first_field = 1;
-  rc = lc_engine_queue_add_namespace(body, &first_field, client,
-                                     request->namespace_name,
-                                     "failed to add queue_extend namespace",
-                                     error);
+  rc = lc_engine_queue_add_namespace(
+      body, &first_field, client, request->namespace_name,
+      "failed to add queue_extend namespace", error);
   if (rc != LC_ENGINE_OK ||
       lc_engine_json_add_string_field(body, &first_field, "queue",
                                       request->queue) != LC_ENGINE_OK ||
@@ -745,8 +734,9 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
       &parsed, &result, LC_ENGINE_QUEUE_PARSE_STATS, response, error);
   if (rc == LC_ENGINE_OK &&
       !lc_engine_queue_apply_correlation(&response->correlation_id, &result)) {
-    rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                    "failed to copy queue_stats correlation_id");
+    rc =
+        lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                   "failed to copy queue_stats correlation_id");
   }
   lonejson_cleanup(&lc_engine_queue_stats_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
@@ -782,9 +772,9 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
   body_src.namespace_name =
       (char *)lc_engine_effective_namespace(client, request->namespace_name);
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/queue/ack", &lc_engine_queue_ack_body_map,
-      &body_src, NULL, headers, header_count,
-      &lc_engine_queue_ack_response_map, &parsed, &result, error);
+      client, "POST", "/v1/queue/ack", &lc_engine_queue_ack_body_map, &body_src,
+      NULL, headers, header_count, &lc_engine_queue_ack_response_map, &parsed,
+      &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -794,9 +784,8 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_queue_parse_response_json(&parsed, &result,
-                                           LC_ENGINE_QUEUE_PARSE_ACK, response,
-                                           error);
+  rc = lc_engine_queue_parse_response_json(
+      &parsed, &result, LC_ENGINE_QUEUE_PARSE_ACK, response, error);
   if (rc == LC_ENGINE_OK &&
       !lc_engine_queue_apply_correlation(&response->correlation_id, &result)) {
     rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -869,9 +858,8 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_queue_parse_response_json(&parsed, &result,
-                                           LC_ENGINE_QUEUE_PARSE_NACK, response,
-                                           error);
+  rc = lc_engine_queue_parse_response_json(
+      &parsed, &result, LC_ENGINE_QUEUE_PARSE_NACK, response, error);
   if (rc == LC_ENGINE_OK &&
       !lc_engine_queue_apply_correlation(&response->correlation_id, &result)) {
     rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -923,9 +911,8 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_queue_parse_response_json(&parsed, &result,
-                                           LC_ENGINE_QUEUE_PARSE_EXTEND,
-                                           response, error);
+  rc = lc_engine_queue_parse_response_json(
+      &parsed, &result, LC_ENGINE_QUEUE_PARSE_EXTEND, response, error);
   if (rc == LC_ENGINE_OK &&
       !lc_engine_queue_apply_correlation(&response->correlation_id, &result)) {
     rc = lc_engine_set_client_error(

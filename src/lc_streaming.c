@@ -190,7 +190,7 @@ static size_t lc_engine_stream_write_callback(char *ptr, size_t size,
   }
   if (state->saw_status && state->http_status >= 400L) {
     if (lc_engine_buffer_append_limited(&state->error_body, ptr, total,
-                                         LC_ENGINE_STREAM_ERROR_BODY_LIMIT) !=
+                                        LC_ENGINE_STREAM_ERROR_BODY_LIMIT) !=
         LC_ENGINE_OK) {
       lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                  "failed to buffer error response");

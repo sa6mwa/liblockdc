@@ -50,8 +50,8 @@ lc_engine_build_metadata_body(lc_engine_client *client,
                               lc_engine_buffer *body);
 static size_t lc_engine_enqueue_read_callback(char *ptr, size_t size,
                                               size_t nmemb, void *userdata);
-static void lc_engine_enqueue_stream_state_cleanup(
-    lc_engine_enqueue_stream_state *state);
+static void
+lc_engine_enqueue_stream_state_cleanup(lc_engine_enqueue_stream_state *state);
 typedef struct lc_engine_body_capture_state {
   lc_engine_buffer buffer;
 } lc_engine_body_capture_state;
@@ -146,10 +146,8 @@ LONEJSON_MAP_DEFINE(lc_engine_mutate_body_map, lc_engine_mutate_body_json,
 static const lonejson_field lc_engine_query_response_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_response_json, cursor,
                                 "cursor"),
-    LONEJSON_FIELD_I64(lc_engine_query_response_json, index_seq,
-                       "index_seq")};
-LONEJSON_MAP_DEFINE(lc_engine_query_response_map,
-                    lc_engine_query_response_json,
+    LONEJSON_FIELD_I64(lc_engine_query_response_json, index_seq, "index_seq")};
+LONEJSON_MAP_DEFINE(lc_engine_query_response_map, lc_engine_query_response_json,
                     lc_engine_query_response_fields);
 typedef struct lc_engine_dequeue_capture_state {
   lc_allocator allocator;
@@ -174,8 +172,7 @@ static const lonejson_field lc_engine_enqueue_meta_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, queue, "queue"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, delay_seconds,
                        "delay_seconds"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json,
-                       visibility_timeout_seconds,
+    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, visibility_timeout_seconds,
                        "visibility_timeout_seconds"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, ttl_seconds, "ttl_seconds"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, max_attempts,
@@ -289,8 +286,8 @@ typedef struct lc_engine_queue_extend_response_json {
 } lc_engine_queue_extend_response_json;
 static const lonejson_map lc_engine_query_hidden_map;
 static const lonejson_field lc_engine_acquire_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, namespace_name,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, key, "key"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, owner,
                                 "owner"),
@@ -298,22 +295,21 @@ static const lonejson_field lc_engine_acquire_response_fields[] = {
                                 "lease_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, txn_id,
                                 "txn_id"),
-    LONEJSON_FIELD_I64(lc_engine_acquire_response_json,
-                       lease_expires_at_unix, "expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_acquire_response_json, lease_expires_at_unix,
+                       "expires_at_unix"),
     LONEJSON_FIELD_I64(lc_engine_acquire_response_json, version, "version"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, state_etag,
                                 "state_etag"),
     LONEJSON_FIELD_I64(lc_engine_acquire_response_json, fencing_token,
                        "fencing_token")};
 static const lonejson_field lc_engine_keepalive_response_fields[] = {
-    LONEJSON_FIELD_I64(lc_engine_keepalive_response_json,
-                       lease_expires_at_unix, "expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_keepalive_response_json, lease_expires_at_unix,
+                       "expires_at_unix"),
     LONEJSON_FIELD_I64(lc_engine_keepalive_response_json, version, "version"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_keepalive_response_json, state_etag,
                                 "state_etag")};
 static const lonejson_field lc_engine_release_response_fields[] = {
-    LONEJSON_FIELD_BOOL(lc_engine_release_response_json, released,
-                        "released")};
+    LONEJSON_FIELD_BOOL(lc_engine_release_response_json, released, "released")};
 static const lonejson_field lc_engine_update_response_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_update_response_json, new_version,
                        "new_version"),
@@ -332,8 +328,8 @@ static const lonejson_field lc_engine_remove_response_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_remove_response_json, new_version,
                        "new_version")};
 static const lonejson_field lc_engine_describe_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json,
+                                namespace_name, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, key, "key"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, owner,
                                 "owner"),
@@ -356,7 +352,8 @@ LONEJSON_MAP_DEFINE(lc_engine_query_hidden_map, lc_engine_query_hidden_json,
 static const lonejson_field lc_engine_enqueue_response_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, namespace_name,
                                 "namespace"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, queue, "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, queue,
+                                "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, message_id,
                                 "message_id"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, attempts, "attempts"),
@@ -364,14 +361,15 @@ static const lonejson_field lc_engine_enqueue_response_fields[] = {
                        "max_attempts"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, failure_attempts,
                        "failure_attempts"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json,
-                       not_visible_until_unix, "not_visible_until_unix"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, not_visible_until_unix,
+                       "not_visible_until_unix"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_response_json,
                        visibility_timeout_seconds,
                        "visibility_timeout_seconds"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, payload_bytes,
                        "payload_bytes")};
-LONEJSON_MAP_DEFINE(lc_engine_acquire_response_map, lc_engine_acquire_response_json,
+LONEJSON_MAP_DEFINE(lc_engine_acquire_response_map,
+                    lc_engine_acquire_response_json,
                     lc_engine_acquire_response_fields);
 LONEJSON_MAP_DEFINE(lc_engine_keepalive_response_map,
                     lc_engine_keepalive_response_json,
@@ -379,12 +377,14 @@ LONEJSON_MAP_DEFINE(lc_engine_keepalive_response_map,
 LONEJSON_MAP_DEFINE(lc_engine_release_response_map,
                     lc_engine_release_response_json,
                     lc_engine_release_response_fields);
-LONEJSON_MAP_DEFINE(lc_engine_update_response_map, lc_engine_update_response_json,
+LONEJSON_MAP_DEFINE(lc_engine_update_response_map,
+                    lc_engine_update_response_json,
                     lc_engine_update_response_fields);
 LONEJSON_MAP_DEFINE(lc_engine_metadata_response_map,
                     lc_engine_metadata_response_json,
                     lc_engine_metadata_response_fields);
-LONEJSON_MAP_DEFINE(lc_engine_remove_response_map, lc_engine_remove_response_json,
+LONEJSON_MAP_DEFINE(lc_engine_remove_response_map,
+                    lc_engine_remove_response_json,
                     lc_engine_remove_response_fields);
 LONEJSON_MAP_DEFINE(lc_engine_describe_response_map,
                     lc_engine_describe_response_json,
@@ -395,19 +395,21 @@ LONEJSON_MAP_DEFINE(lc_engine_enqueue_response_map,
 static int lc_engine_copy_bytes(unsigned char **out_bytes, size_t *out_length,
                                 const char *bytes, size_t count);
 static int lc_engine_capture_body_writer(void *context, const void *bytes,
-                                         size_t count,
-                                         lc_engine_error *error);
-static int lc_engine_copy_dequeue_response(
-    lc_engine_dequeue_response *dst, const lc_engine_dequeue_response *src);
-static int lc_engine_dequeue_capture_begin(
-    void *context, const lc_engine_dequeue_response *delivery,
-    lc_engine_error *error);
+                                         size_t count, lc_engine_error *error);
+static int
+lc_engine_copy_dequeue_response(lc_engine_dequeue_response *dst,
+                                const lc_engine_dequeue_response *src);
+static int
+lc_engine_dequeue_capture_begin(void *context,
+                                const lc_engine_dequeue_response *delivery,
+                                lc_engine_error *error);
 static int lc_engine_dequeue_capture_chunk(void *context, const void *bytes,
                                            size_t count,
                                            lc_engine_error *error);
-static int lc_engine_dequeue_capture_end(
-    void *context, const lc_engine_dequeue_response *delivery,
-    lc_engine_error *error);
+static int
+lc_engine_dequeue_capture_end(void *context,
+                              const lc_engine_dequeue_response *delivery,
+                              lc_engine_error *error);
 static int lc_engine_set_fencing_header(lonejson_int64 fencing_token,
                                         lc_engine_buffer *buffer,
                                         lc_engine_header_pair *header);
@@ -922,8 +924,8 @@ lc_engine_build_metadata_body(lc_engine_client *client,
   return rc;
 }
 
-static void lc_engine_enqueue_stream_state_cleanup(
-    lc_engine_enqueue_stream_state *state) {
+static void
+lc_engine_enqueue_stream_state_cleanup(lc_engine_enqueue_stream_state *state) {
   if (state == NULL) {
     return;
   }
@@ -1083,8 +1085,7 @@ static int lc_engine_copy_bytes(unsigned char **out_bytes, size_t *out_length,
 }
 
 static int lc_engine_capture_body_writer(void *context, const void *bytes,
-                                         size_t count,
-                                         lc_engine_error *error) {
+                                         size_t count, lc_engine_error *error) {
   lc_engine_body_capture_state *state;
 
   state = (lc_engine_body_capture_state *)context;
@@ -1105,8 +1106,9 @@ static int lc_engine_capture_body_writer(void *context, const void *bytes,
   return 1;
 }
 
-static int lc_engine_copy_dequeue_response(
-    lc_engine_dequeue_response *dst, const lc_engine_dequeue_response *src) {
+static int
+lc_engine_copy_dequeue_response(lc_engine_dequeue_response *dst,
+                                const lc_engine_dequeue_response *src) {
   if (dst == NULL || src == NULL) {
     return LC_ENGINE_ERROR_INVALID_ARGUMENT;
   }
@@ -1138,7 +1140,8 @@ static int lc_engine_copy_dequeue_response(
   if ((src->namespace_name != NULL && dst->namespace_name == NULL) ||
       (src->queue != NULL && dst->queue == NULL) ||
       (src->message_id != NULL && dst->message_id == NULL) ||
-      (src->payload_content_type != NULL && dst->payload_content_type == NULL) ||
+      (src->payload_content_type != NULL &&
+       dst->payload_content_type == NULL) ||
       (src->correlation_id != NULL && dst->correlation_id == NULL) ||
       (src->lease_id != NULL && dst->lease_id == NULL) ||
       (src->txn_id != NULL && dst->txn_id == NULL) ||
@@ -1154,9 +1157,10 @@ static int lc_engine_copy_dequeue_response(
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_dequeue_capture_begin(
-    void *context, const lc_engine_dequeue_response *delivery,
-    lc_engine_error *error) {
+static int
+lc_engine_dequeue_capture_begin(void *context,
+                                const lc_engine_dequeue_response *delivery,
+                                lc_engine_error *error) {
   lc_engine_dequeue_capture_state *state;
   int rc;
   lc_error pipe_error;
@@ -1178,8 +1182,9 @@ static int lc_engine_dequeue_capture_begin(
                            &state->pipe, &pipe_error);
   if (rc != LC_OK) {
     lc_engine_set_transport_error(
-        error, pipe_error.message != NULL ? pipe_error.message
-                                          : "failed to create dequeue payload stream");
+        error, pipe_error.message != NULL
+                   ? pipe_error.message
+                   : "failed to create dequeue payload stream");
     lc_error_cleanup(&pipe_error);
     lc_engine_dequeue_response_cleanup(state->response);
     return 0;
@@ -1212,9 +1217,10 @@ static int lc_engine_dequeue_capture_chunk(void *context, const void *bytes,
     memset(&pipe_error, 0, sizeof(pipe_error));
     rc = lc_stream_pipe_write(state->pipe, bytes, count, &pipe_error);
     if (rc != LC_OK) {
-      lc_engine_set_transport_error(
-          error, pipe_error.message != NULL ? pipe_error.message
-                                            : "failed to stream dequeue payload");
+      lc_engine_set_transport_error(error,
+                                    pipe_error.message != NULL
+                                        ? pipe_error.message
+                                        : "failed to stream dequeue payload");
       lc_error_cleanup(&pipe_error);
       return 0;
     }
@@ -1228,9 +1234,10 @@ static int lc_engine_dequeue_capture_chunk(void *context, const void *bytes,
   return 1;
 }
 
-static int lc_engine_dequeue_capture_end(
-    void *context, const lc_engine_dequeue_response *delivery,
-    lc_engine_error *error) {
+static int
+lc_engine_dequeue_capture_end(void *context,
+                              const lc_engine_dequeue_response *delivery,
+                              lc_engine_error *error) {
   lc_engine_dequeue_capture_state *state;
 
   (void)delivery;
@@ -1315,9 +1322,8 @@ int lc_engine_client_acquire(lc_engine_client *client,
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
       client, "POST", "/v1/acquire", &lc_engine_acquire_body_map, &body_src,
-      NULL, headers, 1U,
-                                   &lc_engine_acquire_response_map,
-                                   &response_json, &result, error);
+      NULL, headers, 1U, &lc_engine_acquire_response_map, &response_json,
+      &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -1327,7 +1333,8 @@ int lc_engine_client_acquire(lc_engine_client *client,
     return rc;
   }
 
-  response->namespace_name = lc_engine_strdup_local(response_json.namespace_name);
+  response->namespace_name =
+      lc_engine_strdup_local(response_json.namespace_name);
   response->key = lc_engine_strdup_local(response_json.key);
   response->owner = lc_engine_strdup_local(response_json.owner);
   response->lease_id = lc_engine_strdup_local(response_json.lease_id);
@@ -1336,7 +1343,8 @@ int lc_engine_client_acquire(lc_engine_client *client,
   response->version = response_json.version;
   response->state_etag = lc_engine_strdup_local(response_json.state_etag);
   response->fencing_token = response_json.fencing_token;
-  if ((response_json.namespace_name != NULL && response->namespace_name == NULL) ||
+  if ((response_json.namespace_name != NULL &&
+       response->namespace_name == NULL) ||
       (response_json.key != NULL && response->key == NULL) ||
       (response_json.owner != NULL && response->owner == NULL) ||
       (response_json.lease_id != NULL && response->lease_id == NULL) ||
@@ -1495,10 +1503,9 @@ int lc_engine_client_keepalive(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/keepalive", &lc_engine_keepalive_body_map,
-      &body_src, NULL, headers, 2U,
-                                   &lc_engine_keepalive_response_map,
-                                   &response_json, &result, error);
+      client, "POST", "/v1/keepalive", &lc_engine_keepalive_body_map, &body_src,
+      NULL, headers, 2U, &lc_engine_keepalive_response_map, &response_json,
+      &result, error);
   lc_engine_buffer_cleanup(&fence_value);
   if (rc != LC_ENGINE_OK) {
     return rc;
@@ -1565,9 +1572,8 @@ int lc_engine_client_release(lc_engine_client *client,
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
       client, "POST", "/v1/release", &lc_engine_release_body_map, &body_src,
-      NULL, headers, 2U,
-                                   &lc_engine_release_response_map,
-                                   &response_json, &result, error);
+      NULL, headers, 2U, &lc_engine_release_response_map, &response_json,
+      &result, error);
   lc_engine_buffer_cleanup(&fence_value);
   if (rc != LC_ENGINE_OK) {
     return rc;
@@ -1685,7 +1691,8 @@ int lc_engine_client_update(lc_engine_client *client,
   response->new_version = response_json.new_version;
   response->new_state_etag =
       lc_engine_strdup_local(response_json.new_state_etag);
-  if (response_json.new_state_etag != NULL && response->new_state_etag == NULL) {
+  if (response_json.new_state_etag != NULL &&
+      response->new_state_etag == NULL) {
     rc = LC_ENGINE_ERROR_NO_MEMORY;
   }
   response->bytes = response_json.bytes;
@@ -1706,11 +1713,13 @@ int lc_engine_client_update(lc_engine_client *client,
   return LC_ENGINE_OK;
 }
 
-int lc_engine_client_update_stream(
-    lc_engine_client *client, const lc_engine_update_request *request,
-    const lonejson_map *body_map, const void *body_src,
-    const lonejson_write_options *body_options,
-    lc_engine_update_response *response, lc_engine_error *error) {
+int lc_engine_client_update_stream(lc_engine_client *client,
+                                   const lc_engine_update_request *request,
+                                   const lonejson_map *body_map,
+                                   const void *body_src,
+                                   const lonejson_write_options *body_options,
+                                   lc_engine_update_response *response,
+                                   lc_engine_error *error) {
   lc_engine_buffer path;
   lc_engine_buffer fence_value;
   lc_engine_buffer version_value;
@@ -1792,7 +1801,8 @@ int lc_engine_client_update_stream(
   response->new_version = response_json.new_version;
   response->new_state_etag =
       lc_engine_strdup_local(response_json.new_state_etag);
-  if (response_json.new_state_etag != NULL && response->new_state_etag == NULL) {
+  if (response_json.new_state_etag != NULL &&
+      response->new_state_etag == NULL) {
     rc = LC_ENGINE_ERROR_NO_MEMORY;
   }
   response->bytes = response_json.bytes;
@@ -1880,12 +1890,10 @@ int lc_engine_client_mutate(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_json_request_stream(client, "POST", path.data,
-                                          &lc_engine_mutate_body_map,
-                                          &body_src, NULL, headers,
-                                          header_count,
-                                   &lc_engine_update_response_map,
-                                   &response_json, &result, error);
+  rc = lc_engine_http_json_request_stream(
+      client, "POST", path.data, &lc_engine_mutate_body_map, &body_src, NULL,
+      headers, header_count, &lc_engine_update_response_map, &response_json,
+      &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&version_value);
@@ -1901,7 +1909,8 @@ int lc_engine_client_mutate(lc_engine_client *client,
   response->new_version = response_json.new_version;
   response->new_state_etag =
       lc_engine_strdup_local(response_json.new_state_etag);
-  if (response_json.new_state_etag != NULL && response->new_state_etag == NULL) {
+  if (response_json.new_state_etag != NULL &&
+      response->new_state_etag == NULL) {
     rc = LC_ENGINE_ERROR_NO_MEMORY;
   }
   response->bytes = response_json.bytes;
@@ -1993,9 +2002,8 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
       client, "POST", path.data, &lc_engine_metadata_body_map, request, NULL,
-      headers, header_count,
-                                   &lc_engine_metadata_response_map,
-                                   &response_json, &result, error);
+      headers, header_count, &lc_engine_metadata_response_map, &response_json,
+      &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&version_value);
@@ -2008,7 +2016,8 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
     return rc;
   }
 
-  response->namespace_name = lc_engine_strdup_local(response_json.namespace_name);
+  response->namespace_name =
+      lc_engine_strdup_local(response_json.namespace_name);
   response->key = lc_engine_strdup_local(response_json.key);
   if ((response_json.namespace_name != NULL &&
        response->namespace_name == NULL) ||
@@ -2114,9 +2123,8 @@ int lc_engine_client_remove(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_json_request(client, "POST", path.data, NULL, 0U,
-                                   headers, header_count,
-                                   &lc_engine_remove_response_map,
+  rc = lc_engine_http_json_request(client, "POST", path.data, NULL, 0U, headers,
+                                   header_count, &lc_engine_remove_response_map,
                                    &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
@@ -2191,8 +2199,8 @@ int lc_engine_client_describe(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_json_request(client, "GET", path.data, NULL, 0U, NULL,
-                                   0U, &lc_engine_describe_response_map,
+  rc = lc_engine_http_json_request(client, "GET", path.data, NULL, 0U, NULL, 0U,
+                                   &lc_engine_describe_response_map,
                                    &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {
@@ -2204,7 +2212,8 @@ int lc_engine_client_describe(lc_engine_client *client,
     return rc;
   }
 
-  response->namespace_name = lc_engine_strdup_local(response_json.namespace_name);
+  response->namespace_name =
+      lc_engine_strdup_local(response_json.namespace_name);
   response->key = lc_engine_strdup_local(response_json.key);
   response->owner = lc_engine_strdup_local(response_json.owner);
   response->lease_id = lc_engine_strdup_local(response_json.lease_id);
@@ -2289,8 +2298,7 @@ int lc_engine_client_query(lc_engine_client *client,
   memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_http_json_request_stream(
       client, "POST", "/v1/query", &lc_engine_query_body_map, &body_src, NULL,
-      headers, 1U,
-      &lc_engine_query_response_map, &parsed, &result, error);
+      headers, 1U, &lc_engine_query_response_map, &parsed, &result, error);
   lonejson_json_value_cleanup(&body_src.selector);
   lonejson_json_value_cleanup(&body_src.fields);
   if (rc != LC_ENGINE_OK) {
@@ -2446,10 +2454,9 @@ int lc_engine_client_enqueue(lc_engine_client *client,
   headers[0].value = content_type.data;
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/enqueue",
-                                   body.data, body.length, headers, 1U,
-                                   &lc_engine_enqueue_response_map,
-                                   &response_json, &result, error);
+  rc = lc_engine_http_json_request(
+      client, "POST", "/v1/queue/enqueue", body.data, body.length, headers, 1U,
+      &lc_engine_enqueue_response_map, &response_json, &result, error);
   lc_engine_buffer_cleanup(&body);
   lc_engine_buffer_cleanup(&content_type);
   if (rc != LC_ENGINE_OK) {
@@ -2461,7 +2468,8 @@ int lc_engine_client_enqueue(lc_engine_client *client,
     return rc;
   }
 
-  response->namespace_name = lc_engine_strdup_local(response_json.namespace_name);
+  response->namespace_name =
+      lc_engine_strdup_local(response_json.namespace_name);
   response->queue = lc_engine_strdup_local(response_json.queue);
   response->message_id = lc_engine_strdup_local(response_json.message_id);
   if ((response_json.namespace_name != NULL &&
@@ -2529,7 +2537,7 @@ static int lc_engine_dequeue_internal(lc_engine_client *client,
   capture.client = client;
   capture.response = response;
   rc = with_state ? lc_engine_client_dequeue_with_state_into(
-                       client, request, &handler, &capture, error)
+                        client, request, &handler, &capture, error)
                   : lc_engine_client_dequeue_into(client, request, &handler,
                                                   &capture, error);
   if (rc != LC_ENGINE_OK) {

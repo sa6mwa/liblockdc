@@ -62,8 +62,8 @@ static int lc_client_lonejson_load_write_callback(void *context,
   if (count == 0U) {
     return 1;
   }
-  written = lonejson_curl_write_callback((char *)bytes, 1U, count,
-                                         &state->parse);
+  written =
+      lonejson_curl_write_callback((char *)bytes, 1U, count, &state->parse);
   if (written != count) {
     lc_engine_lonejson_error_from_status(
         error, state->parse.error.code, &state->parse.error,
@@ -303,11 +303,11 @@ int lc_client_load_method(lc_client *self, const char *key,
   long fencing_token;
   int rc;
 
-  if (self == NULL || key == NULL || map == NULL || dst == NULL || out == NULL) {
-    return lc_error_set(
-        error, LC_ERR_INVALID, 0L,
-        "load requires self, key, map, destination, and out", NULL, NULL,
-        NULL);
+  if (self == NULL || key == NULL || map == NULL || dst == NULL ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "load requires self, key, map, destination, and out",
+                        NULL, NULL, NULL);
   }
   client = (lc_client_handle *)self;
   {
@@ -322,8 +322,8 @@ int lc_client_load_method(lc_client *self, const char *key,
   memset(&legacy_res, 0, sizeof(legacy_res));
   lc_engine_error_init(&legacy_error);
   memset(&load_state, 0, sizeof(load_state));
-  options = parse_options != NULL ? *parse_options
-                                  : lonejson_default_parse_options();
+  options =
+      parse_options != NULL ? *parse_options : lonejson_default_parse_options();
   load_state.byte_limit = client->http_json_response_limit_bytes > 0U
                               ? client->http_json_response_limit_bytes
                               : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
@@ -331,15 +331,15 @@ int lc_client_load_method(lc_client *self, const char *key,
   rc = lonejson_curl_parse_init(&load_state.parse, map, dst, &options);
   if (rc != LONEJSON_STATUS_OK) {
     lonejson_cleanup(map, dst);
-    return lc_lonejson_error_from_status(error, rc, &load_state.parse.error,
-                                         "failed to initialize mapped load parser");
+    return lc_lonejson_error_from_status(
+        error, rc, &load_state.parse.error,
+        "failed to initialize mapped load parser");
   }
   legacy_req.key = key;
   legacy_req.public_read = opts != NULL ? opts->public_read : 0;
   rc = lc_engine_client_get_into(client->legacy, &legacy_req,
                                  lc_client_lonejson_load_write_callback,
-                                 &load_state,
-                                 &legacy_res, &legacy_error);
+                                 &load_state, &legacy_res, &legacy_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_legacy(error, &legacy_error);
     {
@@ -384,9 +384,8 @@ int lc_client_load_method(lc_client *self, const char *key,
       lc_engine_error_cleanup(&legacy_error);
       lonejson_curl_parse_cleanup(&load_state.parse);
       lonejson_cleanup(map, dst);
-      return lc_lonejson_error_from_status(
-          error, rc, &load_state.parse.error,
-          "failed to parse mapped state");
+      return lc_lonejson_error_from_status(error, rc, &load_state.parse.error,
+                                           "failed to parse mapped state");
     }
   }
   lonejson_curl_parse_cleanup(&load_state.parse);

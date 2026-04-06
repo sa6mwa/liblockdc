@@ -43,17 +43,22 @@ int lc_engine_lonejson_error_from_status(lc_engine_error *error,
   case LONEJSON_STATUS_OK:
     return LC_ENGINE_OK;
   case LONEJSON_STATUS_INVALID_ARGUMENT:
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      message != NULL ? message
-                                                      : lc_lonejson_detail_message(lj_error, "invalid lonejson argument"));
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        message != NULL ? message
+                        : lc_lonejson_detail_message(
+                              lj_error, "invalid lonejson argument"));
   case LONEJSON_STATUS_ALLOCATION_FAILED:
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      message != NULL ? message
-                                                      : lc_lonejson_detail_message(lj_error, "lonejson allocation failed"));
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_NO_MEMORY,
+        message != NULL ? message
+                        : lc_lonejson_detail_message(
+                              lj_error, "lonejson allocation failed"));
   default:
-    return lc_engine_set_protocol_error(error,
-                                        message != NULL ? message
-                                                        : lc_lonejson_detail_message(lj_error, "failed to parse JSON"));
+    return lc_engine_set_protocol_error(
+        error, message != NULL ? message
+                               : lc_lonejson_detail_message(
+                                     lj_error, "failed to parse JSON"));
   }
 }
 
@@ -63,8 +68,9 @@ int lc_engine_file_write_callback(void *context, const void *bytes,
 
   fp = (FILE *)context;
   if (fp == NULL || (count > 0U && bytes == NULL)) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "file write callback requires file and bytes");
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "file write callback requires file and bytes");
   }
   if (count > 0U && fwrite(bytes, 1U, count, fp) != count) {
     if (ferror(fp)) {
@@ -84,10 +90,11 @@ int lc_lonejson_parse_file(FILE *fp, const lonejson_map *map, void *dst,
 
   memset(&lj_error, 0, sizeof(lj_error));
   if (fp == NULL || map == NULL || dst == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        message != NULL ? message
-                                        : "lonejson parse requires file, map, and destination",
-                        NULL, NULL, NULL);
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        message != NULL ? message
+                        : "lonejson parse requires file, map, and destination",
+        NULL, NULL, NULL);
   }
   status = lonejson_parse_filep(map, dst, fp, options, &lj_error);
   return lc_lonejson_error_from_status(error, status, &lj_error, message);
@@ -102,10 +109,11 @@ int lc_lonejson_serialize_file(FILE *fp, const lonejson_map *map,
 
   memset(&lj_error, 0, sizeof(lj_error));
   if (fp == NULL || map == NULL || src == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        message != NULL ? message
-                                        : "lonejson serialize requires file, map, and source",
-                        NULL, NULL, NULL);
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        message != NULL ? message
+                        : "lonejson serialize requires file, map, and source",
+        NULL, NULL, NULL);
   }
   status = lonejson_serialize_filep(map, src, fp, options, &lj_error);
   return lc_lonejson_error_from_status(error, status, &lj_error, message);

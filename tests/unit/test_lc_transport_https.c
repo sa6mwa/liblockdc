@@ -87,7 +87,8 @@ typedef struct subscribe_capture {
   size_t payload_length;
 } subscribe_capture;
 
-static int watch_event_sink(void *context, const lc_engine_queue_watch_event *event,
+static int watch_event_sink(void *context,
+                            const lc_engine_queue_watch_event *event,
                             lc_engine_error *error) {
   (void)context;
   (void)event;
@@ -331,10 +332,9 @@ static int read_http_request(SSL *ssl, test_request_capture *capture) {
     }
     if (header_end != NULL) {
       if (chunked) {
-        if (chunked_request_complete(header_end + 4,
-                                     capture->length -
-                                         (size_t)((header_end + 4) -
-                                                  capture->data))) {
+        if (chunked_request_complete(
+                header_end + 4,
+                capture->length - (size_t)((header_end + 4) - capture->data))) {
           return 1;
         }
       } else if (capture->length >= target_length) {
@@ -513,8 +513,8 @@ static void verify_expectation(https_testserver *server, size_t index,
   for (header_index = 0U;
        header_index < expectation->required_body_substring_count;
        ++header_index) {
-    if (strstr(body_view, expectation->required_body_substrings[header_index]) ==
-        NULL) {
+    if (strstr(body_view,
+               expectation->required_body_substrings[header_index]) == NULL) {
       set_failure(server, "missing required body substring: %s body=%s",
                   expectation->required_body_substrings[header_index],
                   body_view);
@@ -1359,14 +1359,13 @@ static void test_state_transport_paths_use_mtls(void **state) {
   rc = lc_engine_client_keepalive(client, &keepalive_req, &keepalive_res,
                                   &error);
   if (rc != LC_ENGINE_OK) {
-    fail_msg("keepalive rc=%d code=%d http_status=%ld message=%s server=%s "
-             "detail=%s failure=%s",
-             rc, error.code, error.http_status,
-             error.message != NULL ? error.message : "(null)",
-             error.server_error_code != NULL ? error.server_error_code
-                                             : "(null)",
-             error.detail != NULL ? error.detail : "(null)",
-             server.failure_message);
+    fail_msg(
+        "keepalive rc=%d code=%d http_status=%ld message=%s server=%s "
+        "detail=%s failure=%s",
+        rc, error.code, error.http_status,
+        error.message != NULL ? error.message : "(null)",
+        error.server_error_code != NULL ? error.server_error_code : "(null)",
+        error.detail != NULL ? error.detail : "(null)", server.failure_message);
   }
   assert_int_equal(keepalive_res.version, 9L);
 
@@ -1920,8 +1919,8 @@ static void test_queue_transport_rejects_oversized_error_body(void **state) {
       {"POST", "/v1/queue/stats", queue_headers, 1U,
        (const char *const[]){"\"namespace\":\"transport-ns\"",
                              "\"queue\":\"jobs\""},
-       2U, 0, 503, (const char *const[]){"Content-Type: application/json"},
-       1U, NULL, "liblockdc test client"}};
+       2U, 0, 503, (const char *const[]){"Content-Type: application/json"}, 1U,
+       NULL, "liblockdc test client"}};
   https_tls_material material;
   https_testserver server;
   lc_engine_client_config config;
@@ -1973,8 +1972,8 @@ static void test_watch_transport_rejects_oversized_error_body(void **state) {
       {"POST", "/v1/queue/watch", watch_headers, 1U,
        (const char *const[]){"\"namespace\":\"transport-ns\"",
                              "\"queue\":\"jobs\""},
-       2U, 0, 503, (const char *const[]){"Content-Type: application/json"},
-       1U, NULL, "liblockdc test client"}};
+       2U, 0, 503, (const char *const[]){"Content-Type: application/json"}, 1U,
+       NULL, "liblockdc test client"}};
   https_tls_material material;
   https_testserver server;
   lc_engine_client_config config;
@@ -2066,7 +2065,8 @@ test_queue_transport_rejects_overflowing_numeric_fields(void **state) {
   https_tls_material_cleanup(&material);
 }
 
-static void test_queue_transport_preserves_typed_json_parse_errors(void **state) {
+static void
+test_queue_transport_preserves_typed_json_parse_errors(void **state) {
   static const char *queue_headers[] = {"Content-Type: application/json"};
   static const char malformed_body[] = "{";
   https_expectation expectations[] = {
@@ -3090,9 +3090,8 @@ test_public_lease_attach_rejects_malformed_json_response(void **state) {
       {"POST",
        "/v1/attachments?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
        "content_type=text%2Fplain",
-       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]),
-       NULL, 0U, 0, 200, attach_response_headers, 2U, "{",
-       "liblockdc test client"}};
+       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]), NULL,
+       0U, 0, 200, attach_response_headers, 2U, "{", "liblockdc test client"}};
   https_tls_material material;
   https_testserver server;
   lc_client_config config;
@@ -3179,14 +3178,14 @@ test_public_lease_attach_retries_node_passive_and_cleans_parser_state(
       {"POST",
        "/v1/attachments?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
        "content_type=text%2Fplain",
-       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]),
-       NULL, 0U, 0, 503, first_attach_response_headers, 2U,
+       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]), NULL,
+       0U, 0, 503, first_attach_response_headers, 2U,
        "{\"error\":\"node_passive\"}", "liblockdc test client"},
       {"POST",
        "/v1/attachments?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
        "content_type=text%2Fplain",
-       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]),
-       NULL, 0U, 0, 200, second_attach_response_headers, 2U,
+       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]), NULL,
+       0U, 0, 200, second_attach_response_headers, 2U,
        "{\"attachment\":{\"id\":\"att-1\",\"name\":\"blob.txt\","
        "\"size\":11,\"plaintext_sha256\":\"sha-1\","
        "\"content_type\":\"text/plain\",\"created_at_unix\":1000,"
@@ -3262,11 +3261,11 @@ test_public_lease_attach_retries_node_passive_and_cleans_parser_state(
   https_tls_material_cleanup(&material);
 }
 
-static void
-test_queue_transport_retries_node_passive_and_cleans_parser_state(void **state) {
+static void test_queue_transport_retries_node_passive_and_cleans_parser_state(
+    void **state) {
   static const char *queue_headers[] = {"Content-Type: application/json"};
-  static const char *const queue_stats_body[] = {"\"namespace\":\"transport-ns\"",
-                                                 "\"queue\":\"jobs\""};
+  static const char *const queue_stats_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"queue\":\"jobs\""};
   static const char *first_response_headers[] = {
       "X-Correlation-Id: corr-queue-stats-passive-1",
       "Content-Type: application/json"};
@@ -3274,14 +3273,14 @@ test_queue_transport_retries_node_passive_and_cleans_parser_state(void **state) 
       "X-Correlation-Id: corr-queue-stats-passive-2",
       "Content-Type: application/json"};
   static const https_expectation expectations[] = {
-      {"POST", "/v1/queue/stats", queue_headers, 1U,
-       queue_stats_body, sizeof(queue_stats_body) / sizeof(queue_stats_body[0]),
-       0, 503, first_response_headers,
+      {"POST", "/v1/queue/stats", queue_headers, 1U, queue_stats_body,
+       sizeof(queue_stats_body) / sizeof(queue_stats_body[0]), 0, 503,
+       first_response_headers,
        sizeof(first_response_headers) / sizeof(first_response_headers[0]),
        "{\"error\":\"node_passive\"}", "liblockdc test client"},
-      {"POST", "/v1/queue/stats", queue_headers, 1U,
-       queue_stats_body, sizeof(queue_stats_body) / sizeof(queue_stats_body[0]),
-       0, 200, second_response_headers,
+      {"POST", "/v1/queue/stats", queue_headers, 1U, queue_stats_body,
+       sizeof(queue_stats_body) / sizeof(queue_stats_body[0]), 0, 200,
+       second_response_headers,
        sizeof(second_response_headers) / sizeof(second_response_headers[0]),
        "{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
        "\"waiting_consumers\":1,\"pending_candidates\":2,"
@@ -3318,14 +3317,13 @@ test_queue_transport_retries_node_passive_and_cleans_parser_state(void **state) 
   req.queue = "jobs";
   rc = lc_engine_client_queue_stats(client, &req, &res, &error);
   if (rc != LC_ENGINE_OK) {
-    fail_msg("queue_stats retry rc=%d code=%d http_status=%ld message=%s "
-             "server=%s detail=%s handled=%zu",
-             rc, error.code, error.http_status,
-             error.message != NULL ? error.message : "(null)",
-             error.server_error_code != NULL ? error.server_error_code
-                                             : "(null)",
-             error.detail != NULL ? error.detail : "(null)",
-             server.handled_count);
+    fail_msg(
+        "queue_stats retry rc=%d code=%d http_status=%ld message=%s "
+        "server=%s detail=%s handled=%zu",
+        rc, error.code, error.http_status,
+        error.message != NULL ? error.message : "(null)",
+        error.server_error_code != NULL ? error.server_error_code : "(null)",
+        error.detail != NULL ? error.detail : "(null)", server.handled_count);
   }
   assert_int_equal(rc, LC_ENGINE_OK);
   assert_int_equal(res.waiting_consumers, 1);
@@ -3350,19 +3348,17 @@ test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
       "X-Correlation-Id: corr-enqueue-passive-2",
       "Content-Type: application/json"};
   static const char *const request_body_substrings[] = {
-      "\"namespace\":\"transport-ns\"", "\"queue\":\"jobs\"",
-      "name=\"meta\"", "name=\"payload\""};
+      "\"namespace\":\"transport-ns\"", "\"queue\":\"jobs\"", "name=\"meta\"",
+      "name=\"payload\""};
   static const https_expectation expectations[] = {
-      {"POST", "/v1/queue/enqueue", queue_headers, 1U,
-       request_body_substrings,
-       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]),
-       0, 503, enqueue_response_headers,
+      {"POST", "/v1/queue/enqueue", queue_headers, 1U, request_body_substrings,
+       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]), 0,
+       503, enqueue_response_headers,
        sizeof(enqueue_response_headers) / sizeof(enqueue_response_headers[0]),
        "{\"error\":\"node_passive\"}", "liblockdc test client"},
-      {"POST", "/v1/queue/enqueue", queue_headers, 1U,
-       request_body_substrings,
-       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]),
-       0, 200, enqueue_response_headers,
+      {"POST", "/v1/queue/enqueue", queue_headers, 1U, request_body_substrings,
+       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]), 0,
+       200, enqueue_response_headers,
        sizeof(enqueue_response_headers) / sizeof(enqueue_response_headers[0]),
        "{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
        "\"message_id\":\"msg-enqueue-passive-2\",\"attempts\":0,"
@@ -4021,8 +4017,7 @@ static void test_public_lease_save_uses_mapped_lonejson_upload(void **state) {
        "liblockdc test client"},
       {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns",
        update_headers, sizeof(update_headers) / sizeof(update_headers[0]),
-       update_body, 1U, 0, 200,
-       update_response_headers, 2U,
+       update_body, 1U, 0, 200, update_response_headers, 2U,
        "{\"new_version\":5,\"new_state_etag\":\"etag-2\","
        "\"bytes\":11}",
        "liblockdc test client"}};
@@ -4231,8 +4226,7 @@ int main(void) {
       cmocka_unit_test(test_queue_transport_rejects_oversized_error_body),
       cmocka_unit_test(test_watch_transport_rejects_oversized_error_body),
       cmocka_unit_test(test_queue_transport_rejects_overflowing_numeric_fields),
-      cmocka_unit_test(
-          test_queue_transport_preserves_typed_json_parse_errors),
+      cmocka_unit_test(test_queue_transport_preserves_typed_json_parse_errors),
       cmocka_unit_test(test_subscribe_accepts_content_length_with_trailing_ows),
       cmocka_unit_test(test_subscribe_respects_client_meta_limit),
       cmocka_unit_test(test_subscribe_rejects_default_meta_overflow),

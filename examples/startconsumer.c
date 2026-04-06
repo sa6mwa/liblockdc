@@ -73,8 +73,8 @@ static int parse_hello_json(const char *json_text, char *hello_out,
   }
   memset(&parsed, 0, sizeof(parsed));
   memset(&error, 0, sizeof(error));
-  status = lonejson_parse_cstr(&example_hello_map, &parsed, json_text, NULL,
-                               &error);
+  status =
+      lonejson_parse_cstr(&example_hello_map, &parsed, json_text, NULL, &error);
   if (status != LONEJSON_STATUS_OK || parsed.hello == NULL) {
     lonejson_cleanup(&example_hello_map, &parsed);
     return 1;

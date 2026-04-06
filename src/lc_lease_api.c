@@ -58,8 +58,8 @@ static int lc_lease_lonejson_load_write_callback(void *context,
   if (count == 0U) {
     return 1;
   }
-  written = lonejson_curl_write_callback((char *)bytes, 1U, count,
-                                         &state->parse);
+  written =
+      lonejson_curl_write_callback((char *)bytes, 1U, count, &state->parse);
   if (written != count) {
     lc_engine_lonejson_error_from_status(
         error, state->parse.error.code, &state->parse.error,
@@ -280,10 +280,9 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   int rc;
 
   if (self == NULL || map == NULL || dst == NULL || out == NULL) {
-    return lc_error_set(
-        error, LC_ERR_INVALID, 0L,
-        "lease load requires self, map, destination, and out", NULL, NULL,
-        NULL);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lease load requires self, map, destination, and out",
+                        NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
   {
@@ -300,8 +299,8 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   memset(&legacy_res, 0, sizeof(legacy_res));
   lc_engine_error_init(&legacy_error);
   memset(&load_state, 0, sizeof(load_state));
-  options = parse_options != NULL ? *parse_options
-                                  : lonejson_default_parse_options();
+  options =
+      parse_options != NULL ? *parse_options : lonejson_default_parse_options();
   load_state.byte_limit = lease->client->http_json_response_limit_bytes > 0U
                               ? lease->client->http_json_response_limit_bytes
                               : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
@@ -320,8 +319,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   legacy_req.public_read = opts != NULL ? opts->public_read : 0;
   rc = lc_engine_client_get_into(lease->client->legacy, &legacy_req,
                                  lc_lease_lonejson_load_write_callback,
-                                 &load_state,
-                                 &legacy_res, &legacy_error);
+                                 &load_state, &legacy_res, &legacy_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_legacy(error, &legacy_error);
     {
@@ -412,8 +410,8 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
 
   if (self == NULL || map == NULL || src == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "lease save requires self, map, and source", NULL,
-                        NULL, NULL);
+                        "lease save requires self, map, and source", NULL, NULL,
+                        NULL);
   }
   lease = (lc_lease_handle *)self;
   memset(&legacy_req, 0, sizeof(legacy_req));
@@ -459,7 +457,8 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
     return rc;
   }
   lc_client_free(lease->client, lease->state_etag);
-  lease->state_etag = lc_client_strdup(lease->client, legacy_res.new_state_etag);
+  lease->state_etag =
+      lc_client_strdup(lease->client, legacy_res.new_state_etag);
   lease->version = legacy_res.new_version;
   lease->pub.state_etag = lease->state_etag;
   lease->pub.version = lease->version;

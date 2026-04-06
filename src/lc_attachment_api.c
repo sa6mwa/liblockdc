@@ -1,8 +1,8 @@
 #include "lc_api_internal.h"
 #include "lc_internal.h"
 
-#include <limits.h>
 #include <curl/curl.h>
+#include <limits.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
@@ -100,8 +100,8 @@ static const lonejson_field lc_engine_attachment_info_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, id, "id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, name, "name"),
     LONEJSON_FIELD_I64(lc_engine_attachment_info_json, size, "size"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, plaintext_sha256,
-                                "plaintext_sha256"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json,
+                                plaintext_sha256, "plaintext_sha256"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, content_type,
                                 "content_type"),
     LONEJSON_FIELD_I64(lc_engine_attachment_info_json, created_at_unix,
@@ -109,7 +109,8 @@ static const lonejson_field lc_engine_attachment_info_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_attachment_info_json, updated_at_unix,
                        "updated_at_unix")};
 
-LONEJSON_MAP_DEFINE(lc_engine_attachment_info_map, lc_engine_attachment_info_json,
+LONEJSON_MAP_DEFINE(lc_engine_attachment_info_map,
+                    lc_engine_attachment_info_json,
                     lc_engine_attachment_info_fields);
 
 static const lonejson_field lc_engine_attach_response_fields[] = {
@@ -118,7 +119,8 @@ static const lonejson_field lc_engine_attach_response_fields[] = {
     LONEJSON_FIELD_BOOL(lc_engine_attach_response_json, noop, "noop"),
     LONEJSON_FIELD_I64(lc_engine_attach_response_json, version, "version")};
 
-LONEJSON_MAP_DEFINE(lc_engine_attach_response_map, lc_engine_attach_response_json,
+LONEJSON_MAP_DEFINE(lc_engine_attach_response_map,
+                    lc_engine_attach_response_json,
                     lc_engine_attach_response_fields);
 
 static const lonejson_field lc_engine_list_attachments_response_fields[] = {
@@ -126,11 +128,10 @@ static const lonejson_field lc_engine_list_attachments_response_fields[] = {
                                 namespace_name, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_list_attachments_response_json, key,
                                 "key"),
-    LONEJSON_FIELD_OBJECT_ARRAY(lc_engine_list_attachments_response_json,
-                                attachments, "attachments",
-                                lc_engine_attachment_info_json,
-                                &lc_engine_attachment_info_map,
-                                LONEJSON_OVERFLOW_FAIL)};
+    LONEJSON_FIELD_OBJECT_ARRAY(
+        lc_engine_list_attachments_response_json, attachments, "attachments",
+        lc_engine_attachment_info_json, &lc_engine_attachment_info_map,
+        LONEJSON_OVERFLOW_FAIL)};
 
 LONEJSON_MAP_DEFINE(lc_engine_list_attachments_response_map,
                     lc_engine_list_attachments_response_json,
@@ -149,8 +150,8 @@ LONEJSON_MAP_DEFINE(lc_engine_delete_attachment_response_map,
 static const lonejson_field lc_engine_delete_all_attachments_response_fields[] =
     {LONEJSON_FIELD_I64(lc_engine_delete_all_attachments_response_json, deleted,
                         "deleted"),
-     LONEJSON_FIELD_I64(lc_engine_delete_all_attachments_response_json,
-                        version, "version")};
+     LONEJSON_FIELD_I64(lc_engine_delete_all_attachments_response_json, version,
+                        "version")};
 
 LONEJSON_MAP_DEFINE(lc_engine_delete_all_attachments_response_map,
                     lc_engine_delete_all_attachments_response_json,
@@ -181,8 +182,8 @@ typedef struct lc_engine_update_response_json {
 static const lonejson_field lc_engine_update_response_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_update_response_json, new_version,
                        "new_version"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_update_response_json,
-                                new_state_etag, "new_state_etag"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_update_response_json, new_state_etag,
+                                "new_state_etag"),
     LONEJSON_FIELD_I64(lc_engine_update_response_json, bytes, "bytes")};
 
 LONEJSON_MAP_DEFINE(lc_engine_update_response_map,
@@ -202,14 +203,13 @@ typedef struct lc_engine_enqueue_response_json {
 } lc_engine_enqueue_response_json;
 
 static const lonejson_field lc_engine_enqueue_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, namespace_name,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, queue,
                                 "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, message_id,
                                 "message_id"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, attempts,
-                       "attempts"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, attempts, "attempts"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, max_attempts,
                        "max_attempts"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, failure_attempts,
@@ -558,8 +558,8 @@ lc_engine_stream_state_cleanup(lc_engine_stream_request_state *state) {
   lc_engine_free_string(&state->attachment_content_type);
 }
 
-static int lc_engine_stream_json_init_parser(
-    lc_engine_stream_request_state *state) {
+static int
+lc_engine_stream_json_init_parser(lc_engine_stream_request_state *state) {
   lonejson_parse_options options;
   const lonejson_map *map;
   void *dst;
@@ -568,8 +568,10 @@ static int lc_engine_stream_json_init_parser(
   if (state == NULL) {
     return 0;
   }
-  map = state->parser_is_error ? &lc_engine_http_error_map : state->response_map;
-  dst = state->parser_is_error ? (void *)&state->error_body : state->response_dst;
+  map =
+      state->parser_is_error ? &lc_engine_http_error_map : state->response_map;
+  dst =
+      state->parser_is_error ? (void *)&state->error_body : state->response_dst;
   if (map == NULL || dst == NULL) {
     return 0;
   }
@@ -633,9 +635,9 @@ static size_t lc_engine_stream_json_write_callback(char *contents, size_t size,
   }
   written = lonejson_curl_write_callback(contents, 1U, total, &state->parse);
   if (written != total) {
-    lc_engine_lonejson_error_from_status(
-        state->error, state->parse.error.code, &state->parse.error,
-        "failed to parse typed JSON response");
+    lc_engine_lonejson_error_from_status(state->error, state->parse.error.code,
+                                         &state->parse.error,
+                                         "failed to parse typed JSON response");
     state->stream_error = 1;
     return 0U;
   }
@@ -709,16 +711,12 @@ lc_engine_build_stream_headers(const char *content_type, const char *accept,
   return headers;
 }
 
-static int lc_engine_perform_streaming(lc_engine_client *client,
-                                       const char *method, const char *path,
-                                       struct curl_slist *headers,
-                                       lc_engine_read_callback reader,
-                                       void *reader_context,
-                                       lc_engine_reset_callback reader_reset,
-                                       void *reader_reset_context,
-                                       const lonejson_map *response_map,
-                                       void *response_dst,
-                                       lc_engine_stream_request_state *state) {
+static int lc_engine_perform_streaming(
+    lc_engine_client *client, const char *method, const char *path,
+    struct curl_slist *headers, lc_engine_read_callback reader,
+    void *reader_context, lc_engine_reset_callback reader_reset,
+    void *reader_reset_context, const lonejson_map *response_map,
+    void *response_dst, lc_engine_stream_request_state *state) {
   CURL *curl;
   CURLcode curl_rc;
   lc_engine_reader_state read_state;
@@ -1083,8 +1081,8 @@ static int lc_engine_i64_to_long_checked(lonejson_int64 value,
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_i64_to_int_checked(lonejson_int64 value,
-                                        const char *label, int *out_value,
+static int lc_engine_i64_to_int_checked(lonejson_int64 value, const char *label,
+                                        int *out_value,
                                         lc_engine_error *error) {
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
@@ -1114,15 +1112,14 @@ static int lc_engine_attachment_info_from_json(
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to copy attachment strings");
   }
-  rc = lc_engine_i64_to_long_checked(parsed->size,
-                                     "attachment size is out of range",
-                                     &info->size, error);
+  rc = lc_engine_i64_to_long_checked(
+      parsed->size, "attachment size is out of range", &info->size, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  rc = lc_engine_i64_to_long_checked(parsed->created_at_unix,
-                                     "attachment created_at_unix is out of range",
-                                     &info->created_at_unix, error);
+  rc = lc_engine_i64_to_long_checked(
+      parsed->created_at_unix, "attachment created_at_unix is out of range",
+      &info->created_at_unix, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -1218,8 +1215,9 @@ int lc_engine_parse_list_attachments_response_json(
       (parsed.key != NULL && response->key == NULL)) {
     lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
     lc_engine_list_attachments_response_cleanup(response);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to copy list_attachments response");
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_NO_MEMORY,
+        "failed to copy list_attachments response");
   }
   if (parsed.attachments.count > 0U) {
     size_t index;
@@ -1651,20 +1649,17 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   upload_state.payload_reader =
       reader != NULL ? reader : lc_engine_empty_reader;
   upload_state.payload_context = reader_context;
-  upload_state.payload_reset =
-      reader != NULL ? lc_legacy_reset_bridge : NULL;
+  upload_state.payload_reset = reader != NULL ? lc_legacy_reset_bridge : NULL;
   upload_state.payload_reset_context = reader_context;
 
   memset(&state, 0, sizeof(state));
   state.error = error;
   memset(&parsed, 0, sizeof(parsed));
-  rc = lc_engine_perform_streaming(client, "POST", "/v1/queue/enqueue", headers,
-                                   lc_engine_multipart_upload_read,
-                                   &upload_state,
-                                   lc_engine_multipart_upload_reset,
-                                   &upload_state,
-                                   &lc_engine_enqueue_response_map, &parsed,
-                                   &state);
+  rc = lc_engine_perform_streaming(
+      client, "POST", "/v1/queue/enqueue", headers,
+      lc_engine_multipart_upload_read, &upload_state,
+      lc_engine_multipart_upload_reset, &upload_state,
+      &lc_engine_enqueue_response_map, &parsed, &state);
   lc_engine_buffer_cleanup(&prefix);
   lc_engine_buffer_cleanup(&suffix);
   lc_engine_buffer_cleanup(&content_type);
@@ -1699,9 +1694,10 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
         &response->failure_attempts, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(parsed.not_visible_until_unix,
-                                       "enqueue not_visible_until_unix is out of range",
-                                       &response->not_visible_until_unix, error);
+    rc = lc_engine_i64_to_long_checked(
+        parsed.not_visible_until_unix,
+        "enqueue not_visible_until_unix is out of range",
+        &response->not_visible_until_unix, error);
   }
   if (rc == LC_ENGINE_OK) {
     rc = lc_engine_i64_to_long_checked(
@@ -1780,11 +1776,10 @@ int lc_engine_client_attach_from(lc_engine_client *client,
   memset(&state, 0, sizeof(state));
   state.error = error;
   memset(&parsed, 0, sizeof(parsed));
-  rc = lc_engine_perform_streaming(client, "POST", path.data, headers, reader,
-                                   reader_context,
-                                   reader != NULL ? lc_legacy_reset_bridge : NULL,
-                                   reader_context, &lc_engine_attach_response_map,
-                                   &parsed, &state);
+  rc = lc_engine_perform_streaming(
+      client, "POST", path.data, headers, reader, reader_context,
+      reader != NULL ? lc_legacy_reset_bridge : NULL, reader_context,
+      &lc_engine_attach_response_map, &parsed, &state);
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {
     lc_engine_stream_state_cleanup(&state);
@@ -1874,10 +1869,9 @@ int lc_engine_client_list_attachments(
     }
   }
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_json_request(client, "GET", path.data, NULL, 0U, headers,
-                                   header_count,
-                                   &lc_engine_list_attachments_response_map,
-                                   &parsed, &result, error);
+  rc = lc_engine_http_json_request(
+      client, "GET", path.data, NULL, 0U, headers, header_count,
+      &lc_engine_list_attachments_response_map, &parsed, &result, error);
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {
     return rc;
@@ -1894,8 +1888,9 @@ int lc_engine_client_list_attachments(
       (parsed.key != NULL && response->key == NULL)) {
     lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
     lc_engine_list_attachments_response_cleanup(response);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to copy list_attachments response");
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_NO_MEMORY,
+        "failed to copy list_attachments response");
   }
   if (parsed.attachments.count > 0U) {
     size_t index;
@@ -2109,8 +2104,7 @@ int lc_engine_client_delete_all_attachments(
   rc = lc_engine_http_json_request(
       client, "DELETE", path.data, NULL, 0U, headers,
       request->fencing_token > 0L ? 3U : 2U,
-      &lc_engine_delete_all_attachments_response_map, &parsed, &result,
-      error);
+      &lc_engine_delete_all_attachments_response_map, &parsed, &result, error);
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {
     return rc;

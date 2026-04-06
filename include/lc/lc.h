@@ -1973,10 +1973,10 @@ int lc_lease_get(lc_lease *lease, lc_sink *dst, const lc_get_opts *opts,
 int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
                   const lonejson_parse_options *parse_options,
                   const lc_get_opts *opts, lc_get_res *out, lc_error *error);
-/** Convenience mapped-struct `update()` variant for lonejson-compatible data. */
+/** Convenience mapped-struct `update()` variant for lonejson-compatible data.
+ */
 int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
-                  const lonejson_write_options *write_options,
-                  lc_error *error);
+                  const lonejson_write_options *write_options, lc_error *error);
 /** Streams a replacement JSON state document into a bound lease. */
 int lc_lease_update(lc_lease *lease, lc_json *json, const lc_update_opts *opts,
                     lc_error *error);
