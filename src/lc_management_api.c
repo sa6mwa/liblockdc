@@ -64,6 +64,22 @@ typedef struct lc_engine_tcrm_list_response_json {
   lonejson_object_array backends;
   lonejson_int64 updated_at_unix;
 } lc_engine_tcrm_list_response_json;
+static const lonejson_field lc_engine_txn_participant_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, key, "key"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, backend_hash,
+                                "backend_hash")};
+LONEJSON_MAP_DEFINE(lc_engine_txn_participant_map, lc_engine_txn_participant,
+                    lc_engine_txn_participant_fields);
+typedef struct lc_engine_txn_decision_body_json {
+  char *txn_id;
+  char *state;
+  lonejson_object_array participants;
+  lonejson_int64 expires_at_unix;
+  lonejson_int64 tc_term;
+  char *target_backend_hash;
+} lc_engine_txn_decision_body_json;
 
 static const lonejson_field lc_engine_namespace_query_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_query_json,
@@ -105,6 +121,102 @@ LONEJSON_MAP_DEFINE(lc_engine_index_flush_response_map,
 static const lonejson_field lc_engine_txn_response_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_response_json, txn_id, "txn_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_response_json, state, "state")};
+
+static const lonejson_field lc_engine_namespace_config_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_OBJECT(lc_engine_namespace_config_response_json, query,
+                          "query", &lc_engine_namespace_query_map)};
+
+static const lonejson_field lc_engine_index_flush_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_request, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_request, mode, "mode")};
+
+static const lonejson_field lc_engine_txn_replay_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_replay_request, txn_id,
+                                "txn_id")};
+
+static const lonejson_field lc_engine_txn_decision_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_decision_body_json, txn_id,
+                                "txn_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_decision_body_json, state,
+                                "state"),
+    LONEJSON_FIELD_OBJECT_ARRAY(lc_engine_txn_decision_body_json, participants,
+                                "participants", lc_engine_txn_participant,
+                                &lc_engine_txn_participant_map,
+                                LONEJSON_OVERFLOW_FAIL),
+    LONEJSON_FIELD_I64(lc_engine_txn_decision_body_json, expires_at_unix,
+                       "expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_txn_decision_body_json, tc_term, "tc_term"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_decision_body_json,
+                                target_backend_hash, "target_backend_hash")};
+
+static const lonejson_field lc_engine_tc_lease_acquire_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_acquire_request,
+                                candidate_id, "candidate_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_acquire_request,
+                                candidate_endpoint, "candidate_endpoint"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_acquire_request, term, "term"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_acquire_request, ttl_ms, "ttl_ms")};
+
+static const lonejson_field lc_engine_tc_lease_renew_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_renew_request, leader_id,
+                                "leader_id"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_renew_request, term, "term"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_renew_request, ttl_ms, "ttl_ms")};
+
+static const lonejson_field lc_engine_tc_lease_release_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_release_request, leader_id,
+                                "leader_id"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_release_request, term, "term")};
+
+static const lonejson_field lc_engine_tc_cluster_announce_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_cluster_announce_request,
+                                self_endpoint, "self_endpoint")};
+
+static const lonejson_field lc_engine_tcrm_register_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_register_request, backend_hash,
+                                "backend_hash"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_register_request, endpoint,
+                                "endpoint")};
+
+static const lonejson_field lc_engine_tcrm_unregister_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_unregister_request, backend_hash,
+                                "backend_hash"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_unregister_request, endpoint,
+                                "endpoint")};
+
+LONEJSON_MAP_DEFINE(lc_engine_namespace_config_body_map,
+                    lc_engine_namespace_config_response_json,
+                    lc_engine_namespace_config_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_index_flush_body_map,
+                    lc_engine_index_flush_request,
+                    lc_engine_index_flush_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_txn_replay_body_map,
+                    lc_engine_txn_replay_request,
+                    lc_engine_txn_replay_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_txn_decision_body_map,
+                    lc_engine_txn_decision_body_json,
+                    lc_engine_txn_decision_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_tc_lease_acquire_body_map,
+                    lc_engine_tc_lease_acquire_request,
+                    lc_engine_tc_lease_acquire_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_tc_lease_renew_body_map,
+                    lc_engine_tc_lease_renew_request,
+                    lc_engine_tc_lease_renew_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_tc_lease_release_body_map,
+                    lc_engine_tc_lease_release_request,
+                    lc_engine_tc_lease_release_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_tc_cluster_announce_body_map,
+                    lc_engine_tc_cluster_announce_request,
+                    lc_engine_tc_cluster_announce_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_tcrm_register_body_map,
+                    lc_engine_tcrm_register_request,
+                    lc_engine_tcrm_register_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_tcrm_unregister_body_map,
+                    lc_engine_tcrm_unregister_request,
+                    lc_engine_tcrm_unregister_body_fields);
 
 LONEJSON_MAP_DEFINE(lc_engine_txn_response_map, lc_engine_txn_response_json,
                     lc_engine_txn_response_fields);
@@ -181,37 +293,26 @@ LONEJSON_MAP_DEFINE(lc_engine_tcrm_list_response_map,
 
 static int lc_engine_mgmt_i64_to_long_checked(lonejson_int64 value,
                                               const char *label,
-                                              long *out_value,
+                                              lonejson_int64 *out_value,
                                               lc_engine_error *error) {
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "missing long output");
+                                      "missing i64 output");
   }
-  if (value < (lonejson_int64)LONG_MIN || value > (lonejson_int64)LONG_MAX) {
-    return lc_engine_set_protocol_error(error, label);
-  }
-  *out_value = (long)value;
+  *out_value = value;
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_mgmt_i64_to_ulong_checked(lonejson_int64 value,
+static int lc_engine_mgmt_i64_to_int64_checked(lonejson_int64 value,
                                                const char *label,
-                                               unsigned long *out_value,
+                                               lonejson_int64 *out_value,
                                                lc_engine_error *error) {
-  unsigned long narrowed;
 
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "missing unsigned long output");
+                                      "missing i64 output");
   }
-  if (value < 0) {
-    return lc_engine_set_protocol_error(error, label);
-  }
-  narrowed = (unsigned long)value;
-  if ((lonejson_int64)narrowed != value) {
-    return lc_engine_set_protocol_error(error, label);
-  }
-  *out_value = narrowed;
+  *out_value = value;
   return LC_ENGINE_OK;
 }
 
@@ -521,7 +622,7 @@ static int lc_engine_parse_tc_lease_acquire_response(
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate tc lease response");
   }
-  if (lc_engine_mgmt_i64_to_ulong_checked(parsed->term,
+  if (lc_engine_mgmt_i64_to_int64_checked(parsed->term,
                                           "tc lease term is out of range",
                                           &response->term, error) !=
       LC_ENGINE_OK) {
@@ -790,11 +891,10 @@ int lc_engine_client_get_namespace_config(
 int lc_engine_client_update_namespace_config(
     lc_engine_client *client, const lc_engine_namespace_config_request *request,
     lc_engine_namespace_config_response *response, lc_engine_error *error) {
-  lc_engine_buffer body;
-  lc_engine_buffer query;
+  lc_engine_namespace_config_response_json body_src;
   lc_engine_namespace_config_response_json parsed;
-  int first_field;
-  int query_first_field;
+  lc_engine_http_result result;
+  lc_engine_header_pair headers[1];
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -802,68 +902,35 @@ int lc_engine_client_update_namespace_config(
                                       "update_namespace_config requires "
                                       "client, request, response, and error");
   }
-  rc = lc_engine_mgmt_start_body(&body, error);
+  if (request->preferred_engine == NULL && request->fallback_engine == NULL) {
+    return lc_engine_client_get_namespace_config(client, request->namespace_name,
+                                                 response, error);
+  }
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  memset(&result, 0, sizeof(result));
+  body_src.namespace_name =
+      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.query.preferred_engine = (char *)request->preferred_engine;
+  body_src.query.fallback_engine = (char *)request->fallback_engine;
+  headers[0].name = "Content-Type";
+  headers[0].value = "application/json";
+  rc = lc_engine_http_json_request_stream(
+      client, "PUT", "/v1/namespace", &lc_engine_namespace_config_body_map,
+      &body_src, NULL, headers, 1U, &lc_engine_namespace_config_response_map,
+      &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  first_field = 1;
-  if (request->namespace_name != NULL && request->namespace_name[0] != '\0' &&
-      lc_engine_json_add_string_field(&body, &first_field, "namespace",
-                                      request->namespace_name) !=
-          LC_ENGINE_OK) {
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add namespace name");
-  }
-  if (request->preferred_engine != NULL || request->fallback_engine != NULL) {
-    lc_engine_buffer_init(&query);
-    if (lc_engine_json_begin_object(&query) != LC_ENGINE_OK) {
-      lc_engine_buffer_cleanup(&body);
-      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                        "failed to start namespace query config");
-    }
-    query_first_field = 1;
-    if (request->preferred_engine != NULL &&
-        request->preferred_engine[0] != '\0' &&
-        lc_engine_json_add_string_field(&query, &query_first_field,
-                                        "preferred_engine",
-                                        request->preferred_engine) !=
-            LC_ENGINE_OK) {
-      lc_engine_buffer_cleanup(&query);
-      lc_engine_buffer_cleanup(&body);
-      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                        "failed to add preferred engine");
-    }
-    if (request->fallback_engine != NULL &&
-        request->fallback_engine[0] != '\0' &&
-        lc_engine_json_add_string_field(&query, &query_first_field,
-                                        "fallback_engine",
-                                        request->fallback_engine) !=
-            LC_ENGINE_OK) {
-      lc_engine_buffer_cleanup(&query);
-      lc_engine_buffer_cleanup(&body);
-      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                        "failed to add fallback engine");
-    }
-    if (lc_engine_json_end_object(&query) != LC_ENGINE_OK ||
-        lc_engine_json_add_raw_field(&body, &first_field, "query",
-                                     query.data) != LC_ENGINE_OK) {
-      lc_engine_buffer_cleanup(&query);
-      lc_engine_buffer_cleanup(&body);
-      return lc_engine_set_protocol_error(
-          error, "failed to build namespace query config");
-    }
-    lc_engine_buffer_cleanup(&query);
-  }
-  rc = lc_engine_mgmt_finish_body(&body, error);
-  if (rc != LC_ENGINE_OK) {
+  if (result.http_status != 200L) {
+    rc = lc_engine_set_server_error_from_result(error, &result);
+    lonejson_cleanup(&lc_engine_namespace_config_response_map, &parsed);
+    lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_mgmt_call_json(client, "PUT", "/v1/namespace", &body,
-                                &lc_engine_namespace_config_response_map,
-                                &parsed, response, error,
-                                lc_engine_parse_namespace_response);
-  lc_engine_buffer_cleanup(&body);
+  rc = lc_engine_parse_namespace_response(&parsed, &result, response, error);
+  lonejson_cleanup(&lc_engine_namespace_config_response_map, &parsed);
+  lc_engine_http_result_cleanup(&result);
   return rc;
 }
 
@@ -886,9 +953,12 @@ int lc_engine_client_index_flush(lc_engine_client *client,
     return rc;
   }
   first_field = 1;
-  if (request->namespace_name != NULL && request->namespace_name[0] != '\0' &&
+  if (lc_engine_effective_namespace(client, request->namespace_name) != NULL &&
+      lc_engine_effective_namespace(client, request->namespace_name)[0] != '\0' &&
       lc_engine_json_add_string_field(&body, &first_field, "namespace",
-                                      request->namespace_name) != LC_ENGINE_OK) {
+                                      lc_engine_effective_namespace(
+                                          client, request->namespace_name)) !=
+          LC_ENGINE_OK) {
     lc_engine_buffer_cleanup(&body);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to add flush namespace");

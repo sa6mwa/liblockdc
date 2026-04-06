@@ -638,6 +638,22 @@ size_t lc_legacy_read_bridge(void *context, void *buffer, size_t count,
   return nread;
 }
 
+int lc_legacy_reset_bridge(void *context, lc_engine_error *error) {
+  lc_read_bridge *bridge;
+  lc_error public_error;
+  int rc;
+
+  bridge = (lc_read_bridge *)context;
+  lc_error_init(&public_error);
+  rc = bridge->source->reset(bridge->source, &public_error);
+  if (rc != LC_OK && public_error.code != LC_OK) {
+    error->code = LC_ENGINE_ERROR_TRANSPORT;
+    error->message = lc_strdup_local(public_error.message);
+  }
+  lc_error_cleanup(&public_error);
+  return rc;
+}
+
 int lc_legacy_write_bridge(void *context, const void *bytes, size_t count,
                            lc_engine_error *error) {
   lc_write_bridge *bridge;

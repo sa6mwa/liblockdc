@@ -156,6 +156,7 @@ void lc_attachment_info_copy(lc_attachment_info *dst,
                              const lc_engine_attachment_info *src);
 size_t lc_legacy_read_bridge(void *context, void *buffer, size_t count,
                              lc_engine_error *error);
+int lc_legacy_reset_bridge(void *context, lc_engine_error *error);
 int lc_legacy_write_bridge(void *context, const void *bytes, size_t count,
                            lc_engine_error *error);
 lc_source *lc_source_from_open_file(FILE *fp, int close_file);

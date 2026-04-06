@@ -39,6 +39,21 @@ typedef struct lc_engine_queue_extend_response_json {
   char *meta_etag;
   lonejson_int64 state_lease_expires_at_unix;
 } lc_engine_queue_extend_response_json;
+typedef struct lc_engine_queue_nack_body_json {
+  char *namespace_name;
+  char *queue;
+  char *message_id;
+  char *lease_id;
+  char *txn_id;
+  lonejson_int64 fencing_token;
+  char *meta_etag;
+  char *state_etag;
+  lonejson_int64 delay_seconds;
+  lonejson_json_value last_error;
+  char *intent;
+  char *state_lease_id;
+  lonejson_int64 state_fencing_token;
+} lc_engine_queue_nack_body_json;
 
 static const lonejson_field lc_engine_queue_stats_response_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_response_json,
@@ -85,6 +100,90 @@ static const lonejson_field lc_engine_queue_extend_response_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_queue_extend_response_json,
                        state_lease_expires_at_unix,
                        "state_lease_expires_at_unix")};
+static const lonejson_field lc_engine_queue_stats_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_request,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_request, queue, "queue")};
+static const lonejson_field lc_engine_queue_ack_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, queue, "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, message_id,
+                                "message_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, lease_id,
+                                "lease_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, txn_id,
+                                "txn_id"),
+    LONEJSON_FIELD_I64(lc_engine_queue_ack_request, fencing_token,
+                       "fencing_token"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, meta_etag,
+                                "meta_etag"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, state_etag,
+                                "state_etag"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, state_lease_id,
+                                "state_lease_id"),
+    LONEJSON_FIELD_I64(lc_engine_queue_ack_request, state_fencing_token,
+                       "state_fencing_token")};
+static const lonejson_field lc_engine_queue_extend_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, queue,
+                                "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, message_id,
+                                "message_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, lease_id,
+                                "lease_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, txn_id,
+                                "txn_id"),
+    LONEJSON_FIELD_I64(lc_engine_queue_extend_request, fencing_token,
+                       "fencing_token"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, meta_etag,
+                                "meta_etag"),
+    LONEJSON_FIELD_I64(lc_engine_queue_extend_request, extend_by_seconds,
+                       "extend_by_seconds"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, state_lease_id,
+                                "state_lease_id"),
+    LONEJSON_FIELD_I64(lc_engine_queue_extend_request, state_fencing_token,
+                       "state_fencing_token")};
+static const lonejson_field lc_engine_queue_nack_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, queue,
+                                "queue"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, message_id,
+                                "message_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, lease_id,
+                                "lease_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, txn_id,
+                                "txn_id"),
+    LONEJSON_FIELD_I64(lc_engine_queue_nack_body_json, fencing_token,
+                       "fencing_token"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, meta_etag,
+                                "meta_etag"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, state_etag,
+                                "state_etag"),
+    LONEJSON_FIELD_I64(lc_engine_queue_nack_body_json, delay_seconds,
+                       "delay_seconds"),
+    LONEJSON_FIELD_JSON_VALUE_REQ(lc_engine_queue_nack_body_json, last_error,
+                                  "last_error"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, intent,
+                                "intent"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, state_lease_id,
+                                "state_lease_id"),
+    LONEJSON_FIELD_I64(lc_engine_queue_nack_body_json, state_fencing_token,
+                       "state_fencing_token")};
+
+LONEJSON_MAP_DEFINE(lc_engine_queue_stats_body_map,
+                    lc_engine_queue_stats_request,
+                    lc_engine_queue_stats_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_queue_ack_body_map, lc_engine_queue_ack_request,
+                    lc_engine_queue_ack_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_queue_extend_body_map,
+                    lc_engine_queue_extend_request,
+                    lc_engine_queue_extend_body_fields);
+LONEJSON_MAP_DEFINE(lc_engine_queue_nack_body_map,
+                    lc_engine_queue_nack_body_json,
+                    lc_engine_queue_nack_body_fields);
 
 LONEJSON_MAP_DEFINE(lc_engine_queue_stats_response_map,
                     lc_engine_queue_stats_response_json,
@@ -198,8 +297,11 @@ static int lc_engine_queue_parse_response_json(
     nack_response = (lc_engine_queue_nack_response *)response;
     parsed = (lc_engine_queue_nack_response_json *)parsed_json;
     nack_response->requeued = parsed->requeued ? 1 : 0;
-    nack_response->meta_etag = parsed->meta_etag;
-    parsed->meta_etag = NULL;
+    nack_response->meta_etag = lc_engine_strdup_local(parsed->meta_etag);
+    if (parsed->meta_etag != NULL && nack_response->meta_etag == NULL) {
+      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                        "failed to copy queue_nack response");
+    }
     break;
   }
   case LC_ENGINE_QUEUE_PARSE_EXTEND: {
@@ -211,10 +313,13 @@ static int lc_engine_queue_parse_response_json(
     extend_response->lease_expires_at_unix = parsed->lease_expires_at_unix;
     extend_response->visibility_timeout_seconds =
         parsed->visibility_timeout_seconds;
-    extend_response->meta_etag = parsed->meta_etag;
+    extend_response->meta_etag = lc_engine_strdup_local(parsed->meta_etag);
+    if (parsed->meta_etag != NULL && extend_response->meta_etag == NULL) {
+      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                        "failed to copy queue_extend response");
+    }
     extend_response->state_lease_expires_at_unix =
         parsed->state_lease_expires_at_unix;
-    parsed->meta_etag = NULL;
     break;
   }
   case LC_ENGINE_QUEUE_PARSE_STATS: {
@@ -249,16 +354,23 @@ static int lc_engine_queue_parse_response_json(
     stats_response->total_consumers = value;
     stats_response->has_active_watcher = parsed->has_active_watcher ? 1 : 0;
     stats_response->available = parsed->available ? 1 : 0;
-    stats_response->namespace_name = parsed->namespace_name;
-    stats_response->queue = parsed->queue;
-    stats_response->head_message_id = parsed->head_message_id;
+    stats_response->namespace_name =
+        lc_engine_strdup_local(parsed->namespace_name);
+    stats_response->queue = lc_engine_strdup_local(parsed->queue);
+    stats_response->head_message_id =
+        lc_engine_strdup_local(parsed->head_message_id);
+    if ((parsed->namespace_name != NULL &&
+         stats_response->namespace_name == NULL) ||
+        (parsed->queue != NULL && stats_response->queue == NULL) ||
+        (parsed->head_message_id != NULL &&
+         stats_response->head_message_id == NULL)) {
+      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                        "failed to copy queue_stats response");
+    }
     stats_response->head_enqueued_at_unix = parsed->head_enqueued_at_unix;
     stats_response->head_not_visible_until_unix =
         parsed->head_not_visible_until_unix;
     stats_response->head_age_seconds = parsed->head_age_seconds;
-    parsed->namespace_name = NULL;
-    parsed->queue = NULL;
-    parsed->head_message_id = NULL;
     break;
   }
   default:
@@ -594,10 +706,10 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
                                  const lc_engine_queue_stats_request *request,
                                  lc_engine_queue_stats_response *response,
                                  lc_engine_error *error) {
-  lc_engine_buffer body;
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
+  lc_engine_queue_stats_request body_src;
   lc_engine_queue_stats_response_json parsed;
   int rc;
 
@@ -612,18 +724,14 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_build_queue_stats_body(client, request->namespace_name,
-                                        request->queue, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
   lc_engine_queue_request_headers(&headers, &header_count);
-  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/stats",
-                                   body.data, body.length, headers,
-                                   header_count,
-                                   &lc_engine_queue_stats_response_map,
-                                   &parsed, &result, error);
-  lc_engine_buffer_cleanup(&body);
+  body_src = *request;
+  body_src.namespace_name =
+      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  rc = lc_engine_http_json_request_stream(
+      client, "POST", "/v1/queue/stats", &lc_engine_queue_stats_body_map,
+      &body_src, NULL, headers, header_count,
+      &lc_engine_queue_stats_response_map, &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -649,10 +757,10 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
                                const lc_engine_queue_ack_request *request,
                                lc_engine_queue_ack_response *response,
                                lc_engine_error *error) {
-  lc_engine_buffer body;
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
+  lc_engine_queue_ack_request body_src;
   lc_engine_queue_ack_response_json parsed;
   int rc;
 
@@ -669,16 +777,14 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_build_queue_ack_body(client, request, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
   lc_engine_queue_request_headers(&headers, &header_count);
-  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/ack", body.data,
-                                   body.length, headers, header_count,
-                                   &lc_engine_queue_ack_response_map, &parsed,
-                                   &result, error);
-  lc_engine_buffer_cleanup(&body);
+  body_src = *request;
+  body_src.namespace_name =
+      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  rc = lc_engine_http_json_request_stream(
+      client, "POST", "/v1/queue/ack", &lc_engine_queue_ack_body_map,
+      &body_src, NULL, headers, header_count,
+      &lc_engine_queue_ack_response_map, &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -705,7 +811,6 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
                                 const lc_engine_queue_nack_request *request,
                                 lc_engine_queue_nack_response *response,
                                 lc_engine_error *error) {
-  lc_engine_buffer body;
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
@@ -725,16 +830,36 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_build_queue_nack_body(client, request, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
   lc_engine_queue_request_headers(&headers, &header_count);
-  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/nack", body.data,
-                                   body.length, headers, header_count,
-                                   &lc_engine_queue_nack_response_map, &parsed,
-                                   &result, error);
-  lc_engine_buffer_cleanup(&body);
+  {
+    lc_engine_queue_nack_body_json body_src;
+    lc_engine_json_reader_source last_error_source;
+
+    memset(&body_src, 0, sizeof(body_src));
+    body_src.namespace_name =
+        (char *)lc_engine_effective_namespace(client, request->namespace_name);
+    body_src.queue = (char *)request->queue;
+    body_src.message_id = (char *)request->message_id;
+    body_src.lease_id = (char *)request->lease_id;
+    body_src.txn_id = (char *)request->txn_id;
+    body_src.fencing_token = request->fencing_token;
+    body_src.meta_etag = (char *)request->meta_etag;
+    body_src.state_etag = (char *)request->state_etag;
+    body_src.delay_seconds = request->delay_seconds;
+    body_src.intent = (char *)request->intent;
+    body_src.state_lease_id = (char *)request->state_lease_id;
+    body_src.state_fencing_token = request->state_fencing_token;
+    rc = lc_engine_json_value_init_from_cstr(&body_src.last_error,
+                                             &last_error_source,
+                                             request->last_error_json, error);
+    if (rc == LC_ENGINE_OK) {
+      rc = lc_engine_http_json_request_stream(
+          client, "POST", "/v1/queue/nack", &lc_engine_queue_nack_body_map,
+          &body_src, NULL, headers, header_count,
+          &lc_engine_queue_nack_response_map, &parsed, &result, error);
+    }
+    lonejson_json_value_cleanup(&body_src.last_error);
+  }
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -761,10 +886,10 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
                                   const lc_engine_queue_extend_request *request,
                                   lc_engine_queue_extend_response *response,
                                   lc_engine_error *error) {
-  lc_engine_buffer body;
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
+  lc_engine_queue_extend_request body_src;
   lc_engine_queue_extend_response_json parsed;
   int rc;
 
@@ -781,17 +906,14 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
   }
 
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_build_queue_extend_body(client, request, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
   lc_engine_queue_request_headers(&headers, &header_count);
-  rc = lc_engine_http_json_request(client, "POST", "/v1/queue/extend",
-                                   body.data, body.length, headers,
-                                   header_count,
-                                   &lc_engine_queue_extend_response_map,
-                                   &parsed, &result, error);
-  lc_engine_buffer_cleanup(&body);
+  body_src = *request;
+  body_src.namespace_name =
+      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  rc = lc_engine_http_json_request_stream(
+      client, "POST", "/v1/queue/extend", &lc_engine_queue_extend_body_map,
+      &body_src, NULL, headers, header_count,
+      &lc_engine_queue_extend_response_map, &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }

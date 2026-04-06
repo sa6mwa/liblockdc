@@ -198,16 +198,114 @@ static long parse_content_length(const char *headers) {
   return 0L;
 }
 
+static int request_uses_chunked_transfer_encoding(const char *headers) {
+  return strstr(headers, "Transfer-Encoding: chunked") != NULL;
+}
+
+static int chunked_request_complete(const char *body, size_t length) {
+  size_t offset;
+
+  offset = 0U;
+  while (offset < length) {
+    const char *line_end;
+    char *end_ptr;
+    unsigned long chunk_size;
+    size_t chunk_begin;
+
+    line_end = strstr(body + offset, "\r\n");
+    if (line_end == NULL) {
+      return 0;
+    }
+    chunk_size = strtoul(body + offset, &end_ptr, 16);
+    if (end_ptr != line_end) {
+      return 0;
+    }
+    offset = (size_t)(line_end - body) + 2U;
+    if (chunk_size == 0UL) {
+      return offset + 2U <= length && memcmp(body + offset, "\r\n", 2U) == 0;
+    }
+    chunk_begin = offset;
+    if ((size_t)chunk_size > length - chunk_begin) {
+      return 0;
+    }
+    offset = chunk_begin + (size_t)chunk_size;
+    if (offset + 2U > length || memcmp(body + offset, "\r\n", 2U) != 0) {
+      return 0;
+    }
+    offset += 2U;
+  }
+  return 0;
+}
+
+static int decode_chunked_request_body(const char *body, size_t length,
+                                       char **out_body) {
+  test_request_capture decoded;
+  size_t offset;
+
+  if (out_body == NULL) {
+    return 0;
+  }
+  *out_body = NULL;
+  memset(&decoded, 0, sizeof(decoded));
+  offset = 0U;
+  while (offset < length) {
+    const char *line_end;
+    char *end_ptr;
+    unsigned long chunk_size;
+    size_t chunk_begin;
+
+    line_end = strstr(body + offset, "\r\n");
+    if (line_end == NULL) {
+      buffer_cleanup(&decoded);
+      return 0;
+    }
+    chunk_size = strtoul(body + offset, &end_ptr, 16);
+    if (end_ptr != line_end) {
+      buffer_cleanup(&decoded);
+      return 0;
+    }
+    offset = (size_t)(line_end - body) + 2U;
+    if (chunk_size == 0UL) {
+      if (offset + 2U > length || memcmp(body + offset, "\r\n", 2U) != 0) {
+        buffer_cleanup(&decoded);
+        return 0;
+      }
+      *out_body = decoded.data;
+      decoded.data = NULL;
+      return 1;
+    }
+    chunk_begin = offset;
+    if ((size_t)chunk_size > length - chunk_begin) {
+      buffer_cleanup(&decoded);
+      return 0;
+    }
+    if (!buffer_append(&decoded, body + chunk_begin, (size_t)chunk_size)) {
+      buffer_cleanup(&decoded);
+      return 0;
+    }
+    offset = chunk_begin + (size_t)chunk_size;
+    if (offset + 2U > length || memcmp(body + offset, "\r\n", 2U) != 0) {
+      buffer_cleanup(&decoded);
+      return 0;
+    }
+    offset += 2U;
+  }
+  buffer_cleanup(&decoded);
+  return 0;
+}
+
 static int read_http_request(SSL *ssl, test_request_capture *capture) {
   char chunk[2048];
   const char *header_end;
   long content_length;
   size_t target_length;
+  int chunked;
 
   memset(capture, 0, sizeof(*capture));
   header_end = NULL;
   content_length = 0L;
   target_length = 0U;
+  chunked = 0;
   while (1) {
     int read_count;
 
@@ -221,15 +319,27 @@ static int read_http_request(SSL *ssl, test_request_capture *capture) {
     if (header_end == NULL) {
       header_end = find_header_end(capture->data, capture->length);
       if (header_end != NULL) {
+        chunked = request_uses_chunked_transfer_encoding(capture->data);
         content_length = parse_content_length(capture->data);
         target_length = (size_t)((header_end + 4) - capture->data);
-        if (content_length > 0L) {
+        if (chunked) {
+          target_length = 0U;
+        } else if (content_length > 0L) {
           target_length += (size_t)content_length;
         }
       }
     }
-    if (header_end != NULL && capture->length >= target_length) {
-      return 1;
+    if (header_end != NULL) {
+      if (chunked) {
+        if (chunked_request_complete(header_end + 4,
+                                     capture->length -
+                                         (size_t)((header_end + 4) -
+                                                  capture->data))) {
+          return 1;
+        }
+      } else if (capture->length >= target_length) {
+        return 1;
+      }
     }
   }
 }
@@ -307,7 +417,7 @@ static int extract_common_name(X509 *cert, char *buffer, size_t buffer_size) {
   return len >= 0;
 }
 
-static void verify_expectation(https_testserver *server,
+static void verify_expectation(https_testserver *server, size_t index,
                                const https_expectation *expectation,
                                const test_request_capture *capture, SSL *ssl) {
   const char *request_line_end;
@@ -315,11 +425,14 @@ static void verify_expectation(https_testserver *server,
   const char *path_end;
   const char *headers;
   const char *body;
+  const char *body_view;
+  char *decoded_body;
+  size_t body_length;
   char method[32];
   char path[1024];
   size_t method_length;
   size_t path_length;
-  size_t index;
+  size_t header_index;
 
   request_line_end = strstr(capture->data, "\r\n");
   if (request_line_end == NULL) {
@@ -353,12 +466,13 @@ static void verify_expectation(https_testserver *server,
   path[path_length] = '\0';
 
   if (strcmp(method, expectation->method) != 0) {
-    set_failure(server, "expected method %s, got %s", expectation->method,
-                method);
+    set_failure(server, "request[%zu] expected method %s, got %s", index,
+                expectation->method, method);
     return;
   }
   if (strcmp(path, expectation->path) != 0) {
-    set_failure(server, "expected path %s, got %s", expectation->path, path);
+    set_failure(server, "request[%zu] expected path %s, got %s", index,
+                expectation->path, path);
     return;
   }
 
@@ -369,26 +483,46 @@ static void verify_expectation(https_testserver *server,
     return;
   }
   body += 4;
+  body_view = body;
+  decoded_body = NULL;
+  body_length = capture->length - (size_t)(body - capture->data);
+  if (request_uses_chunked_transfer_encoding(headers)) {
+    if (!decode_chunked_request_body(body, body_length, &decoded_body)) {
+      set_failure(server, "failed to decode chunked request body");
+      return;
+    }
+    body_view = decoded_body;
+  }
 
-  for (index = 0U; index < expectation->required_header_count; ++index) {
-    if (strstr(headers, expectation->required_headers[index]) == NULL) {
+  for (header_index = 0U; header_index < expectation->required_header_count;
+       ++header_index) {
+    if (strstr(headers, expectation->required_headers[header_index]) == NULL) {
       set_failure(server, "missing required header substring: %s",
-                  expectation->required_headers[index]);
+                  expectation->required_headers[header_index]);
+      free(decoded_body);
       return;
     }
   }
-  if (expectation->expect_empty_body && body[0] != '\0') {
-    set_failure(server, "expected empty body, got %s", body);
+  if (expectation->expect_empty_body &&
+      (body_view != NULL && body_view[0] != '\0')) {
+    set_failure(server, "expected empty body, got %s",
+                body_view != NULL ? body_view : "(null)");
+    free(decoded_body);
     return;
   }
-  for (index = 0U; index < expectation->required_body_substring_count;
-       ++index) {
-    if (strstr(body, expectation->required_body_substrings[index]) == NULL) {
+  for (header_index = 0U;
+       header_index < expectation->required_body_substring_count;
+       ++header_index) {
+    if (strstr(body_view, expectation->required_body_substrings[header_index]) ==
+        NULL) {
       set_failure(server, "missing required body substring: %s body=%s",
-                  expectation->required_body_substrings[index], body);
+                  expectation->required_body_substrings[header_index],
+                  body_view);
+      free(decoded_body);
       return;
     }
   }
+  free(decoded_body);
   if (expectation->expected_client_cn != NULL) {
     X509 *peer_cert;
     char common_name[256];
@@ -448,18 +582,16 @@ static void *https_testserver_main(void *context) {
 
     if (!read_http_request(ssl, &capture)) {
       buffer_cleanup(&capture);
-      SSL_shutdown(ssl);
       SSL_free(ssl);
       close(client_fd);
       set_failure(server, "failed to read HTTP request");
       break;
     }
-    verify_expectation(server, expectation, &capture, ssl);
+    verify_expectation(server, index, expectation, &capture, ssl);
     if (!write_http_response(ssl, expectation)) {
       set_failure(server, "failed to write HTTP response");
     }
     buffer_cleanup(&capture);
-    SSL_shutdown(ssl);
     SSL_free(ssl);
     close(client_fd);
     server->handled_count = index + 1U;
@@ -1132,7 +1264,15 @@ static void test_state_transport_paths_use_mtls(void **state) {
   describe_req.namespace_name = "transport-ns";
   describe_req.key = "resource/1";
   rc = lc_engine_client_describe(client, &describe_req, &describe_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
+  if (rc != LC_ENGINE_OK) {
+    fail_msg("describe rc=%d code=%d http_status=%ld message=%s detail=%s "
+             "server=%s",
+             rc, error.code, error.http_status,
+             error.message != NULL ? error.message : "(null)",
+             error.detail != NULL ? error.detail : "(null)",
+             server.failure_message[0] != '\0' ? server.failure_message
+                                               : "(none)");
+  }
   assert_true(describe_res.has_query_hidden);
   assert_true(describe_res.query_hidden);
 
@@ -1218,7 +1358,16 @@ static void test_state_transport_paths_use_mtls(void **state) {
   keepalive_req.fencing_token = 11L;
   rc = lc_engine_client_keepalive(client, &keepalive_req, &keepalive_res,
                                   &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
+  if (rc != LC_ENGINE_OK) {
+    fail_msg("keepalive rc=%d code=%d http_status=%ld message=%s server=%s "
+             "detail=%s failure=%s",
+             rc, error.code, error.http_status,
+             error.message != NULL ? error.message : "(null)",
+             error.server_error_code != NULL ? error.server_error_code
+                                             : "(null)",
+             error.detail != NULL ? error.detail : "(null)",
+             server.failure_message);
+  }
   assert_int_equal(keepalive_res.version, 9L);
 
   memset(&release_req, 0, sizeof(release_req));
@@ -1726,7 +1875,15 @@ static void test_queue_transport_paths_use_mtls(void **state) {
   nack_req.state_lease_id = "state-lease-1";
   nack_req.state_fencing_token = 10L;
   rc = lc_engine_client_queue_nack(client, &nack_req, &nack_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
+  if (rc != LC_ENGINE_OK) {
+    fail_msg("queue nack rc=%d code=%d http_status=%ld message=%s detail=%s "
+             "server=%s",
+             rc, error.code, error.http_status,
+             error.message != NULL ? error.message : "(null)",
+             error.detail != NULL ? error.detail : "(null)",
+             server.failure_message[0] != '\0' ? server.failure_message
+                                               : "(none)");
+  }
   assert_true(nack_res.requeued);
 
   memset(&extend_req, 0, sizeof(extend_req));
@@ -2540,7 +2697,15 @@ static void test_public_bound_lease_methods_emit_logs(void **state) {
 
   release_req.rollback = 1;
   rc = lc_lease_release(lease, &release_req, &error);
-  assert_int_equal(rc, LC_OK);
+  if (rc != LC_OK) {
+    fail_msg("lease release rc=%d code=%d http_status=%ld message=%s "
+             "detail=%s server=%s",
+             rc, error.code, error.http_status,
+             error.message != NULL ? error.message : "(null)",
+             error.detail != NULL ? error.detail : "(null)",
+             server.failure_message[0] != '\0' ? server.failure_message
+                                               : "(none)");
+  }
   lease = NULL;
 
   lc_client_close(client);
@@ -2828,6 +2993,15 @@ test_public_bound_lease_methods_cover_state_and_attachments(void **state) {
   attach_req.name = "blob.txt";
   attach_req.content_type = "text/plain";
   rc = lc_lease_attach(lease, &attach_req, src, &attach_res, &error);
+  if (rc != LC_OK) {
+    fail_msg("lease attach retry rc=%d code=%d http_status=%ld message=%s "
+             "server=%s handled=%zu",
+             rc, error.code, error.http_status,
+             error.message != NULL ? error.message : "(null)",
+             server.failure_message[0] != '\0' ? server.failure_message
+                                               : "(null)",
+             server.handled_count);
+  }
   assert_int_equal(rc, LC_OK);
   assert_string_equal(attach_res.attachment.id, "att-1");
   assert_string_equal(attach_res.attachment.name, "blob.txt");
@@ -2883,6 +3057,203 @@ test_public_bound_lease_methods_cover_state_and_attachments(void **state) {
   assert_null(lease->state_etag);
   assert_int_equal(lease->version, 11L);
 
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
+test_public_lease_attach_rejects_malformed_json_response(void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *attach_headers[] = {
+      "Content-Type: text/plain", "X-Lease-ID: lease-1",
+      "X-Txn-ID: txn-acquire", "X-Fencing-Token: 11"};
+  static const char *attach_response_headers[] = {
+      "X-Correlation-Id: corr-attach-bad-json",
+      "Content-Type: application/json"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"},
+      {"POST",
+       "/v1/attachments?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
+       "content_type=text%2Fplain",
+       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]),
+       NULL, 0U, 0, 200, attach_response_headers, 2U, "{",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_source *src;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  src = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&attach_req, 0, sizeof(attach_req));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  rc = lc_source_from_memory("hello world", 11U, &src, &error);
+  assert_int_equal(rc, LC_OK);
+  attach_req.name = "blob.txt";
+  attach_req.content_type = "text/plain";
+  rc = lc_lease_attach(lease, &attach_req, src, &attach_res, &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_int_equal(error.code, LC_ERR_PROTOCOL);
+  assert_non_null(error.message);
+
+  lc_attach_res_cleanup(&attach_res);
+  lc_source_close(src);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
+test_public_lease_attach_retries_node_passive_and_cleans_parser_state(
+    void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *attach_headers[] = {
+      "Content-Type: text/plain", "X-Lease-ID: lease-1",
+      "X-Txn-ID: txn-acquire", "X-Fencing-Token: 11"};
+  static const char *first_attach_response_headers[] = {
+      "X-Correlation-Id: corr-attach-passive-1",
+      "Content-Type: application/json"};
+  static const char *second_attach_response_headers[] = {
+      "X-Correlation-Id: corr-attach-passive-2",
+      "Content-Type: application/json"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"},
+      {"POST",
+       "/v1/attachments?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
+       "content_type=text%2Fplain",
+       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]),
+       NULL, 0U, 0, 503, first_attach_response_headers, 2U,
+       "{\"error\":\"node_passive\"}", "liblockdc test client"},
+      {"POST",
+       "/v1/attachments?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
+       "content_type=text%2Fplain",
+       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]),
+       NULL, 0U, 0, 200, second_attach_response_headers, 2U,
+       "{\"attachment\":{\"id\":\"att-1\",\"name\":\"blob.txt\","
+       "\"size\":11,\"plaintext_sha256\":\"sha-1\","
+       "\"content_type\":\"text/plain\",\"created_at_unix\":1000,"
+       "\"updated_at_unix\":1001},\"noop\":false,\"version\":5}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_source *src;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  src = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&attach_req, 0, sizeof(attach_req));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  static char endpoint_a[128];
+  static char endpoint_b[128];
+  static const char *endpoints[2];
+  snprintf(endpoint_a, sizeof(endpoint_a), "https://127.0.0.1:%u",
+           (unsigned)server.port);
+  snprintf(endpoint_b, sizeof(endpoint_b), "https://127.0.0.1:%u",
+           (unsigned)server.port);
+  endpoints[0] = endpoint_a;
+  endpoints[1] = endpoint_b;
+  config.endpoints = endpoints;
+  config.endpoint_count = 2U;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  rc = lc_source_from_memory("hello world", 11U, &src, &error);
+  assert_int_equal(rc, LC_OK);
+  attach_req.name = "blob.txt";
+  attach_req.content_type = "text/plain";
+  rc = lc_lease_attach(lease, &attach_req, src, &attach_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(attach_res.attachment.id, "att-1");
+  assert_string_equal(attach_res.attachment.name, "blob.txt");
+  assert_false(attach_res.noop);
+  assert_int_equal(attach_res.version, 5L);
+
+  lc_attach_res_cleanup(&attach_res);
+  lc_source_close(src);
   lc_lease_close(lease);
   lc_client_close(client);
   https_testserver_stop(&server);
@@ -2965,6 +3336,86 @@ test_queue_transport_retries_node_passive_and_cleans_parser_state(void **state) 
   assert_string_equal(res.head_message_id, "msg-1");
 
   lc_engine_queue_stats_response_cleanup(&res);
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
+test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
+  static const char *queue_headers[] = {"Content-Type: application/json"};
+  static const char *enqueue_response_headers[] = {
+      "X-Correlation-Id: corr-enqueue-passive-2",
+      "Content-Type: application/json"};
+  static const char *const request_body_substrings[] = {
+      "\"namespace\":\"transport-ns\"", "\"queue\":\"jobs\"",
+      "name=\"meta\"", "name=\"payload\""};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/queue/enqueue", queue_headers, 1U,
+       request_body_substrings,
+       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]),
+       0, 503, enqueue_response_headers,
+       sizeof(enqueue_response_headers) / sizeof(enqueue_response_headers[0]),
+       "{\"error\":\"node_passive\"}", "liblockdc test client"},
+      {"POST", "/v1/queue/enqueue", queue_headers, 1U,
+       request_body_substrings,
+       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]),
+       0, 200, enqueue_response_headers,
+       sizeof(enqueue_response_headers) / sizeof(enqueue_response_headers[0]),
+       "{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+       "\"message_id\":\"msg-enqueue-passive-2\",\"attempts\":0,"
+       "\"max_attempts\":5,\"failure_attempts\":0,"
+       "\"not_visible_until_unix\":123,\"visibility_timeout_seconds\":30,"
+       "\"payload_bytes\":0}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_enqueue_request req;
+  lc_engine_enqueue_response res;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  init_client_config_two_endpoints(&config, server.port,
+                                   material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  req.namespace_name = "transport-ns";
+  req.queue = "jobs";
+  req.payload_content_type = "application/json";
+  rc = lc_engine_client_enqueue_from(client, &req, NULL, NULL, &res, &error);
+  if (rc != LC_ENGINE_OK) {
+    fail_msg("enqueue_from retry rc=%d code=%d http_status=%ld message=%s "
+             "server=%s handled=%zu",
+             rc, error.code, error.http_status,
+             error.message != NULL ? error.message : "(null)",
+             server.failure_message[0] != '\0' ? server.failure_message
+                                               : "(null)",
+             server.handled_count);
+  }
+  assert_int_equal(rc, LC_ENGINE_OK);
+  assert_string_equal(res.namespace_name, "transport-ns");
+  assert_string_equal(res.queue, "jobs");
+  assert_string_equal(res.message_id, "msg-enqueue-passive-2");
+  assert_string_equal(res.correlation_id, "corr-enqueue-passive-2");
+  assert_int_equal(res.payload_bytes, 0L);
+
+  lc_engine_enqueue_response_cleanup(&res);
   lc_engine_client_close(client);
   https_testserver_stop(&server);
   assert_server_ok(&server);
@@ -3791,7 +4242,13 @@ int main(void) {
       cmocka_unit_test(
           test_public_bound_lease_methods_cover_state_and_attachments),
       cmocka_unit_test(
+          test_public_lease_attach_rejects_malformed_json_response),
+      cmocka_unit_test(
+          test_public_lease_attach_retries_node_passive_and_cleans_parser_state),
+      cmocka_unit_test(
           test_queue_transport_retries_node_passive_and_cleans_parser_state),
+      cmocka_unit_test(
+          test_enqueue_from_retries_node_passive_and_cleans_parser_state),
       cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),
       cmocka_unit_test(
           test_public_lease_load_respects_configured_json_response_limit),

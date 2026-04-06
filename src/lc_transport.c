@@ -12,11 +12,6 @@
 static const char *LC_ENGINE_VERSION_STRING = LC_VERSION_STRING;
 #define LC_ENGINE_HTTP_ERROR_BODY_LIMIT_DEFAULT (8U * 1024U)
 
-typedef struct lc_engine_json_memory_source {
-  const unsigned char *cursor;
-  size_t remaining;
-} lc_engine_json_memory_source;
-
 static lonejson_status lc_engine_json_buffer_sink(void *user,
                                                   const void *data, size_t len,
                                                   lonejson_error *error);
@@ -429,7 +424,7 @@ int lc_engine_json_add_string_field(lc_engine_buffer *buffer, int *first_field,
 }
 
 int lc_engine_json_add_long_field(lc_engine_buffer *buffer, int *first_field,
-                                  const char *name, long value) {
+                                  const char *name, lonejson_int64 value) {
   char digits[64];
   int rc;
 
@@ -445,7 +440,7 @@ int lc_engine_json_add_long_field(lc_engine_buffer *buffer, int *first_field,
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  sprintf(digits, "%ld", value);
+  snprintf(digits, sizeof(digits), "%lld", (long long)value);
   return lc_engine_buffer_append_cstr(buffer, digits);
 }
 
@@ -475,7 +470,7 @@ int lc_engine_json_add_raw_field(lc_engine_buffer *buffer, int *first_field,
                                  const char *name, const char *value) {
   lonejson_json_value json_value;
   lonejson_error lj_error;
-  lc_engine_json_memory_source source;
+  lc_engine_json_reader_source source;
   lonejson_status status;
   int rc;
 
@@ -518,11 +513,11 @@ int lc_engine_json_add_raw_field(lc_engine_buffer *buffer, int *first_field,
 static lonejson_read_result lc_engine_json_memory_reader(void *user,
                                                          unsigned char *buffer,
                                                          size_t capacity) {
-  lc_engine_json_memory_source *source;
+  lc_engine_json_reader_source *source;
   lonejson_read_result result;
   size_t count;
 
-  source = (lc_engine_json_memory_source *)user;
+  source = (lc_engine_json_reader_source *)user;
   result = lonejson_default_read_result();
   if (source == NULL || buffer == NULL || capacity == 0U) {
     result.eof = 1;
@@ -539,6 +534,35 @@ static lonejson_read_result lc_engine_json_memory_reader(void *user,
   result.bytes_read = count;
   result.eof = source->remaining == 0U;
   return result;
+}
+
+int lc_engine_json_value_init_from_cstr(
+    lonejson_json_value *value, lc_engine_json_reader_source *source,
+    const char *json, lc_engine_error *error) {
+  lonejson_error lj_error;
+  lonejson_status status;
+
+  if (value == NULL || source == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "value and source are required");
+  }
+  lonejson_json_value_init(value);
+  source->cursor = (const unsigned char *)"";
+  source->remaining = 0U;
+  if (json == NULL) {
+    return LC_ENGINE_OK;
+  }
+  source->cursor = (const unsigned char *)json;
+  source->remaining = strlen(json);
+  lonejson_error_init(&lj_error);
+  status = lonejson_json_value_set_reader(value, lc_engine_json_memory_reader,
+                                          source, &lj_error);
+  if (status != LONEJSON_STATUS_OK) {
+    lonejson_json_value_cleanup(value);
+    return lc_engine_lonejson_error_from_status(
+        error, status, &lj_error, "failed to configure JSON value reader");
+  }
+  return LC_ENGINE_OK;
 }
 
 static int lc_engine_append_hex_escape(lc_engine_buffer *buffer,
@@ -905,9 +929,11 @@ static void lc_engine_json_http_state_cleanup(lc_engine_json_http_state *state) 
     return;
   }
   lonejson_curl_parse_cleanup(&state->parse);
-  if (state->parser_is_error && state->parser_initialized) {
+  if (state->parser_is_error) {
     lonejson_cleanup(&lc_engine_http_error_map, &state->error_body);
   }
+  state->parser_initialized = 0;
+  state->parser_is_error = 0;
 }
 
 static char *lc_engine_join_endpoints(const lc_engine_client *client) {
@@ -1174,7 +1200,6 @@ int lc_engine_http_json_request(
     CURLcode curl_code;
     int should_retry;
     lc_engine_json_http_state state;
-
     lc_engine_http_result_cleanup(result);
     lc_engine_buffer_init(&url);
     lc_engine_build_url(client, client->endpoints[endpoint_index], path, &url);
@@ -1210,7 +1235,9 @@ int lc_engine_http_json_request(
       attempt_fields[4] = lc_log_u64_field("total", client->endpoint_count);
       lc_log_trace(client->logger, "client.http.attempt", attempt_fields, 5U);
     }
-    curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, method);
+    if (strcmp(method, "POST") != 0) {
+      curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, method);
+    }
     curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,
                      lc_engine_json_http_write_callback);
@@ -1259,6 +1286,9 @@ int lc_engine_http_json_request(
       }
     }
 
+    if (strcmp(method, "POST") == 0) {
+      curl_easy_setopt(easy, CURLOPT_POST, 1L);
+    }
     if (body != NULL) {
       curl_easy_setopt(easy, CURLOPT_POSTFIELDS, body);
       curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, (long)body_length);
@@ -1289,8 +1319,11 @@ int lc_engine_http_json_request(
             error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
         should_retry = 0;
       } else if (state.parser_initialized != 0 &&
-                 (error == NULL || error->code != LC_ENGINE_OK)) {
-        return_code = error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+                 (state.parse.error.code != LONEJSON_STATUS_OK ||
+                  (error != NULL && error->code != LC_ENGINE_OK))) {
+        return_code = error != NULL && error->code != LC_ENGINE_OK
+                          ? error->code
+                          : LC_ENGINE_ERROR_PROTOCOL;
         should_retry = 0;
       } else if (result->header_parse_failed) {
         lc_engine_set_protocol_error(error,
@@ -1398,6 +1431,328 @@ int lc_engine_http_json_request(
       }
     }
     if (should_retry) {
+      result->server_error_code = NULL;
+      result->detail = NULL;
+      result->leader_endpoint = NULL;
+      result->current_etag = NULL;
+      lc_engine_http_result_cleanup(result);
+      continue;
+    }
+    return LC_ENGINE_OK;
+  }
+
+  {
+    pslog_field failure_fields[3];
+
+    failure_fields[0] = lc_log_str_field("method", method);
+    failure_fields[1] = lc_log_str_field("path", path);
+    failure_fields[2] =
+        lc_log_str_field("error", error != NULL ? error->message : NULL);
+    lc_log_debug(client->logger, "client.http.unreachable", failure_fields, 3U);
+  }
+  return lc_engine_set_transport_error(error,
+                                       "all configured endpoints failed");
+}
+
+int lc_engine_http_json_request_stream(
+    lc_engine_client *client, const char *method, const char *path,
+    const lonejson_map *body_map, const void *body_src,
+    const lonejson_write_options *body_options,
+    const lc_engine_header_pair *headers, size_t header_count,
+    const lonejson_map *response_map, void *response,
+    lc_engine_http_result *result, lc_engine_error *error) {
+  size_t endpoint_index;
+  char *endpoint_list;
+
+  if (client == NULL || method == NULL || path == NULL || result == NULL) {
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "client, method, path, and result are required");
+  }
+  if ((body_map == NULL) != (body_src == NULL)) {
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "body map and source must either both be provided or both be null");
+  }
+
+  memset(result, 0, sizeof(*result));
+  endpoint_list = lc_engine_join_endpoints(client);
+  if (endpoint_list != NULL) {
+    pslog_field order_fields[3];
+
+    order_fields[0] = lc_log_str_field("method", method);
+    order_fields[1] = lc_log_str_field("path", path);
+    order_fields[2] = lc_log_str_field("endpoints", endpoint_list);
+    lc_log_trace(client->logger, "client.http.order", order_fields, 3U);
+    free(endpoint_list);
+  }
+
+  for (endpoint_index = 0U; endpoint_index < client->endpoint_count;
+       ++endpoint_index) {
+    CURL *easy;
+    struct curl_slist *curl_headers;
+    lc_engine_buffer url;
+    size_t header_index;
+    char error_buffer[CURL_ERROR_SIZE];
+    CURLcode curl_code;
+    int should_retry;
+    lc_engine_json_http_state state;
+    lonejson_curl_upload body_upload;
+
+    lc_engine_http_result_cleanup(result);
+    lc_engine_buffer_init(&url);
+    lc_engine_build_url(client, client->endpoints[endpoint_index], path, &url);
+
+    easy = curl_easy_init();
+    curl_headers = NULL;
+    memset(&body_upload, 0, sizeof(body_upload));
+    memset(error_buffer, 0, sizeof(error_buffer));
+    memset(&state, 0, sizeof(state));
+    state.result = result;
+    state.error = error;
+    state.response_map = response_map;
+    state.response_dst = response;
+    state.byte_limit = client->http_json_response_limit_bytes > 0U
+                           ? client->http_json_response_limit_bytes
+                           : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
+    state.error_byte_limit =
+        (size_t)LC_ENGINE_HTTP_ERROR_BODY_LIMIT_DEFAULT;
+
+    if (easy == NULL) {
+      lc_engine_buffer_cleanup(&url);
+      return lc_engine_set_transport_error(error, "curl_easy_init failed");
+    }
+
+    curl_easy_setopt(easy, CURLOPT_URL, url.data);
+    {
+      pslog_field attempt_fields[5];
+
+      attempt_fields[0] = lc_log_str_field("method", method);
+      attempt_fields[1] = lc_log_str_field("path", path);
+      attempt_fields[2] =
+          lc_log_str_field("endpoint", client->endpoints[endpoint_index]);
+      attempt_fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
+      attempt_fields[4] = lc_log_u64_field("total", client->endpoint_count);
+      lc_log_trace(client->logger, "client.http.attempt", attempt_fields, 5U);
+    }
+    if (strcmp(method, "POST") != 0) {
+      curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, method);
+    }
+    curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,
+                     lc_engine_json_http_write_callback);
+    curl_easy_setopt(easy, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION,
+                     lc_engine_json_http_header_callback);
+    curl_easy_setopt(easy, CURLOPT_HEADERDATA, &state);
+    curl_easy_setopt(easy, CURLOPT_ERRORBUFFER, error_buffer);
+    curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
+                     client->prefer_http_2 ? CURL_HTTP_VERSION_2TLS
+                                           : CURL_HTTP_VERSION_1_1);
+    curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,
+                     client->timeout_ms > 0L ? client->timeout_ms : 30000L);
+    if (client->unix_socket_path != NULL &&
+        client->unix_socket_path[0] != '\0') {
+      curl_easy_setopt(easy, CURLOPT_UNIX_SOCKET_PATH,
+                       client->unix_socket_path);
+    }
+
+    if (!client->disable_mtls) {
+      curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER,
+                       client->insecure_skip_verify ? 0L : 1L);
+      curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST,
+                       client->insecure_skip_verify ? 0L : 2L);
+      curl_easy_setopt(easy, CURLOPT_SSL_CTX_FUNCTION,
+                       lc_engine_ssl_ctx_callback);
+      curl_easy_setopt(easy, CURLOPT_SSL_CTX_DATA, client);
+    }
+
+    for (header_index = 0U; header_index < header_count; ++header_index) {
+      lc_engine_buffer line;
+
+      lc_engine_buffer_init(&line);
+      lc_engine_buffer_append_cstr(&line, headers[header_index].name);
+      lc_engine_buffer_append_cstr(&line, ": ");
+      lc_engine_buffer_append_cstr(&line, headers[header_index].value);
+      curl_headers = curl_slist_append(curl_headers, line.data);
+      lc_engine_buffer_cleanup(&line);
+      if (curl_headers == NULL) {
+        curl_easy_cleanup(easy);
+        lc_engine_buffer_cleanup(&url);
+        return lc_engine_set_client_error(
+            error, LC_ENGINE_ERROR_NO_MEMORY,
+            "failed to allocate curl header list");
+      }
+    }
+
+    if (body_map != NULL) {
+      lonejson_status upload_status;
+
+      upload_status = lonejson_curl_upload_init(&body_upload, body_map,
+                                                body_src, body_options);
+      if (upload_status != LONEJSON_STATUS_OK) {
+        curl_slist_free_all(curl_headers);
+        curl_easy_cleanup(easy);
+        lc_engine_buffer_cleanup(&url);
+        return lc_engine_lonejson_error_from_status(
+            error, upload_status, NULL,
+            "failed to initialize JSON upload");
+      }
+      if (strcmp(method, "POST") == 0) {
+        curl_easy_setopt(easy, CURLOPT_POST, 1L);
+      } else {
+        curl_easy_setopt(easy, CURLOPT_UPLOAD, 1L);
+      }
+      curl_easy_setopt(easy, CURLOPT_READFUNCTION,
+                       lonejson_curl_read_callback);
+      curl_easy_setopt(easy, CURLOPT_READDATA, &body_upload);
+    }
+
+    if (curl_headers != NULL) {
+      curl_easy_setopt(easy, CURLOPT_HTTPHEADER, curl_headers);
+    }
+
+    curl_code = curl_easy_perform(easy);
+    if (body_map != NULL) {
+      lonejson_curl_upload_cleanup(&body_upload);
+    }
+    if (curl_code != CURLE_OK) {
+      pslog_field error_fields[6];
+      const char *error_text;
+      int return_code;
+
+      error_text = error_buffer[0] != '\0' ? error_buffer
+                                           : curl_easy_strerror(curl_code);
+      error_fields[0] = lc_log_str_field("method", method);
+      error_fields[1] = lc_log_str_field("path", path);
+      error_fields[2] =
+          lc_log_str_field("endpoint", client->endpoints[endpoint_index]);
+      error_fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
+      error_fields[4] = lc_log_u64_field("total", client->endpoint_count);
+      error_fields[5] = lc_log_str_field("error", error_text);
+      lc_log_trace(client->logger, "client.http.error", error_fields, 6U);
+      if (state.limit_exceeded) {
+        return_code =
+            error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+        should_retry = 0;
+      } else if (state.parser_initialized != 0 &&
+                 (state.parse.error.code != LONEJSON_STATUS_OK ||
+                  (error != NULL && error->code != LC_ENGINE_OK))) {
+        return_code = error != NULL && error->code != LC_ENGINE_OK
+                          ? error->code
+                          : LC_ENGINE_ERROR_PROTOCOL;
+        should_retry = 0;
+      } else if (result->header_parse_failed) {
+        lc_engine_set_protocol_error(error,
+                                     result->header_parse_error_message != NULL
+                                         ? result->header_parse_error_message
+                                         : "response header is invalid");
+        return_code = error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+        should_retry = 0;
+      } else if (endpoint_index + 1U < client->endpoint_count) {
+        should_retry = 1;
+        return_code = LC_ENGINE_OK;
+      } else {
+        if (error_buffer[0] != '\0') {
+          lc_engine_set_transport_error(error, error_buffer);
+        } else {
+          lc_engine_set_transport_error(error, curl_easy_strerror(curl_code));
+        }
+        return_code =
+            error != NULL ? error->code : LC_ENGINE_ERROR_TRANSPORT;
+        should_retry = 0;
+      }
+      curl_slist_free_all(curl_headers);
+      curl_easy_cleanup(easy);
+      lc_engine_buffer_cleanup(&url);
+      if (state.parser_initialized != 0 && state.parser_is_error == 0 &&
+          state.response_map != NULL && state.response_dst != NULL) {
+        lonejson_cleanup(state.response_map, state.response_dst);
+      }
+      lc_engine_json_http_state_cleanup(&state);
+      lc_engine_http_result_cleanup(result);
+      if (should_retry) {
+        continue;
+      }
+      return return_code;
+    }
+
+    curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &result->http_status);
+    if (state.parser_initialized && state.parser_is_error) {
+      lonejson_status parse_status;
+
+      parse_status = lonejson_curl_parse_finish(&state.parse);
+      if (parse_status != LONEJSON_STATUS_OK) {
+        lc_engine_lonejson_error_from_status(
+            error, parse_status, &state.parse.error,
+            "failed to finish typed JSON error response");
+        curl_slist_free_all(curl_headers);
+        curl_easy_cleanup(easy);
+        lc_engine_buffer_cleanup(&url);
+        lc_engine_json_http_state_cleanup(&state);
+        lc_engine_http_result_cleanup(result);
+        return error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+      }
+      result->server_error_code = state.error_body.server_error_code;
+      result->detail = state.error_body.detail;
+      result->leader_endpoint = state.error_body.leader_endpoint;
+      result->current_etag = state.error_body.current_etag;
+      result->current_version = (long)state.error_body.current_version;
+      result->retry_after_seconds =
+          (long)state.error_body.retry_after_seconds;
+      state.error_body.server_error_code = NULL;
+      state.error_body.detail = NULL;
+      state.error_body.leader_endpoint = NULL;
+      state.error_body.current_etag = NULL;
+    }
+    if (state.parser_initialized) {
+      lonejson_status parse_status;
+
+      parse_status = lonejson_curl_parse_finish(&state.parse);
+      if (parse_status != LONEJSON_STATUS_OK) {
+        lc_engine_lonejson_error_from_status(
+            error, parse_status, &state.parse.error,
+            "failed to finish typed JSON response");
+        curl_slist_free_all(curl_headers);
+        curl_easy_cleanup(easy);
+        lc_engine_buffer_cleanup(&url);
+        lc_engine_json_http_state_cleanup(&state);
+        lc_engine_http_result_cleanup(result);
+        return error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
+      }
+    }
+    {
+      pslog_field success_fields[7];
+
+      success_fields[0] = lc_log_str_field("method", method);
+      success_fields[1] = lc_log_str_field("path", path);
+      success_fields[2] =
+          lc_log_str_field("endpoint", client->endpoints[endpoint_index]);
+      success_fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
+      success_fields[4] = lc_log_u64_field("total", client->endpoint_count);
+      success_fields[5] = pslog_i64("status", (pslog_int64)result->http_status);
+      success_fields[6] = lc_log_str_field("cid", result->correlation_id);
+      lc_log_trace(client->logger, "client.http.success", success_fields, 7U);
+    }
+    curl_slist_free_all(curl_headers);
+    curl_easy_cleanup(easy);
+    lc_engine_buffer_cleanup(&url);
+    lc_engine_json_http_state_cleanup(&state);
+
+    should_retry = 0;
+    if (result->http_status == 503L &&
+        endpoint_index + 1U < client->endpoint_count) {
+      if (result->server_error_code != NULL &&
+          strcmp(result->server_error_code, "node_passive") == 0) {
+        should_retry = 1;
+      }
+    }
+    if (should_retry) {
+      result->server_error_code = NULL;
+      result->detail = NULL;
+      result->leader_endpoint = NULL;
+      result->current_etag = NULL;
       lc_engine_http_result_cleanup(result);
       continue;
     }
@@ -1596,7 +1951,7 @@ int lc_engine_set_server_error_from_result(
 
   rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_SERVER,
                                   "lockd returned a non-success status");
-  if (rc != LC_ENGINE_OK) {
+  if (rc == LC_ENGINE_ERROR_NO_MEMORY) {
     return rc;
   }
 

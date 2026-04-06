@@ -28,6 +28,11 @@ typedef struct lc_engine_header_pair {
   const char *value;
 } lc_engine_header_pair;
 
+typedef struct lc_engine_json_reader_source {
+  const unsigned char *cursor;
+  size_t remaining;
+} lc_engine_json_reader_source;
+
 typedef struct lc_engine_http_result {
   long http_status;
   char *correlation_id;
@@ -102,7 +107,7 @@ int lc_engine_json_end_object(lc_engine_buffer *buffer);
 int lc_engine_json_add_string_field(lc_engine_buffer *buffer, int *first_field,
                                     const char *name, const char *value);
 int lc_engine_json_add_long_field(lc_engine_buffer *buffer, int *first_field,
-                                  const char *name, long value);
+                                  const char *name, lonejson_int64 value);
 int lc_engine_json_add_bool_field(lc_engine_buffer *buffer, int *first_field,
                                   const char *name, int value);
 int lc_engine_json_add_raw_field(lc_engine_buffer *buffer, int *first_field,
@@ -118,6 +123,9 @@ int lc_engine_lonejson_error_from_status(lc_engine_error *error,
                                          lonejson_status status,
                                          const lonejson_error *lj_error,
                                          const char *message);
+int lc_engine_json_value_init_from_cstr(
+    lonejson_json_value *value, lc_engine_json_reader_source *source,
+    const char *json, lc_engine_error *error);
 int lc_engine_buffer_append_limited(lc_engine_buffer *buffer,
                                     const char *bytes, size_t count,
                                     size_t limit);
@@ -129,6 +137,18 @@ int lc_engine_http_json_request(
     lc_engine_client *client, const char *method, const char *path,
     const void *body, size_t body_length, const lc_engine_header_pair *headers,
     size_t header_count, const lonejson_map *response_map, void *response,
+    lc_engine_http_result *result, lc_engine_error *error);
+int lc_engine_client_update_stream(
+    lc_engine_client *client, const lc_engine_update_request *request,
+    const lonejson_map *body_map, const void *body_src,
+    const lonejson_write_options *body_options,
+    lc_engine_update_response *response, lc_engine_error *error);
+int lc_engine_http_json_request_stream(
+    lc_engine_client *client, const char *method, const char *path,
+    const lonejson_map *body_map, const void *body_src,
+    const lonejson_write_options *body_options,
+    const lc_engine_header_pair *headers, size_t header_count,
+    const lonejson_map *response_map, void *response,
     lc_engine_http_result *result, lc_engine_error *error);
 int lc_engine_set_server_error_from_json(lc_engine_error *error,
                                          long http_status,

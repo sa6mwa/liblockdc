@@ -404,7 +404,6 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
                          const lonejson_write_options *write_options,
                          lc_error *error) {
   lc_lease_handle *lease;
-  lonejson_curl_upload upload;
   lc_engine_update_request legacy_req;
   lc_engine_update_response legacy_res;
   lc_engine_error legacy_error;
@@ -417,11 +416,6 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
                         NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
-  rc = lonejson_curl_upload_init(&upload, map, src, write_options);
-  if (rc != LC_OK) {
-    return lc_lonejson_error_from_status(
-        error, rc, &upload.error, "failed to serialize mapped lease state");
-  }
   memset(&legacy_req, 0, sizeof(legacy_req));
   memset(&legacy_res, 0, sizeof(legacy_res));
   lc_engine_error_init(&legacy_error);
@@ -440,11 +434,9 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
     legacy_req.has_if_version = 1;
   }
   legacy_req.content_type = update_opts.content_type;
-  legacy_req.body = upload.json;
-  legacy_req.body_length = upload.length;
-  rc = lc_engine_client_update(lease->client->legacy, &legacy_req, &legacy_res,
-                               &legacy_error);
-  lonejson_curl_upload_cleanup(&upload);
+  rc = lc_engine_client_update_stream(lease->client->legacy, &legacy_req, map,
+                                      src, write_options, &legacy_res,
+                                      &legacy_error);
   if (rc != LC_OK) {
     rc = lc_error_from_legacy(error, &legacy_error);
     {

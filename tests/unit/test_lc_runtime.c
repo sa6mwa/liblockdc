@@ -9,6 +9,27 @@
 #include "lc/lc.h"
 #include "lc_api_internal.h"
 
+typedef struct lc_engine_http_result {
+  long http_status;
+  char *correlation_id;
+  char *etag;
+  long key_version;
+  long fencing_token;
+  char *content_type;
+  char *header_parse_error_message;
+  char *server_error_code;
+  char *detail;
+  char *leader_endpoint;
+  char *current_etag;
+  long current_version;
+  long retry_after_seconds;
+  int header_parse_failed;
+} lc_engine_http_result;
+
+int lc_engine_set_server_error_from_result(lc_engine_error *error,
+                                           const lc_engine_http_result *result);
+void lc_engine_http_result_cleanup(lc_engine_http_result *result);
+
 static char *dup_cstr(const char *value) {
   size_t len;
   char *copy;
@@ -104,6 +125,41 @@ static void test_error_from_legacy_maps_transport_and_fields(void **state) {
 
   lc_engine_error_cleanup(&legacy);
   lc_error_cleanup(&error);
+}
+
+static void test_set_server_error_from_result_copies_server_fields(void **state) {
+  lc_engine_http_result result;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  memset(&result, 0, sizeof(result));
+  memset(&error, 0, sizeof(error));
+
+  result.http_status = 503L;
+  result.correlation_id = dup_cstr("corr-503");
+  result.server_error_code = dup_cstr("node_passive");
+  result.detail = dup_cstr("detail");
+  result.leader_endpoint = dup_cstr("leader-1");
+  result.current_etag = dup_cstr("etag-1");
+  result.current_version = 41L;
+  result.retry_after_seconds = 7L;
+
+  rc = lc_engine_set_server_error_from_result(&error, &result);
+  assert_int_equal(rc, LC_ENGINE_ERROR_SERVER);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_SERVER);
+  assert_int_equal(error.http_status, 503L);
+  assert_string_equal(error.message, "lockd returned a non-success status");
+  assert_string_equal(error.correlation_id, "corr-503");
+  assert_string_equal(error.server_error_code, "node_passive");
+  assert_string_equal(error.detail, "detail");
+  assert_string_equal(error.leader_endpoint, "leader-1");
+  assert_string_equal(error.current_etag, "etag-1");
+  assert_int_equal(error.current_version, 41L);
+  assert_int_equal(error.retry_after_seconds, 7L);
+
+  lc_engine_http_result_cleanup(&result);
+  lc_engine_error_cleanup(&error);
 }
 
 static void test_error_set_duplicates_message_fields(void **state) {
@@ -407,6 +463,8 @@ int main(void) {
       cmocka_unit_test(test_allocator_init_clears_allocator),
       cmocka_unit_test(test_error_cleanup_resets_allocated_fields),
       cmocka_unit_test(test_error_from_legacy_maps_transport_and_fields),
+      cmocka_unit_test(
+          test_set_server_error_from_result_copies_server_fields),
       cmocka_unit_test(test_error_set_duplicates_message_fields),
       cmocka_unit_test(test_error_set_returns_code_without_error_object),
       cmocka_unit_test(test_error_from_legacy_maps_protocol_and_server_codes),

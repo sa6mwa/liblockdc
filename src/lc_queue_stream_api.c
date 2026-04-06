@@ -124,17 +124,15 @@ static const lonejson_field lc_engine_subscribe_meta_fields[] = {
 LONEJSON_MAP_DEFINE(lc_engine_subscribe_meta_map, lc_engine_subscribe_meta_json,
                     lc_engine_subscribe_meta_fields);
 
-static int lc_engine_i64_to_long_checked(lonejson_int64 value, const char *label,
-                                         long *out_value,
-                                         lc_engine_error *error) {
+static int lc_engine_i64_to_int64_checked(lonejson_int64 value,
+                                          const char *label,
+                                          lonejson_int64 *out_value,
+                                          lc_engine_error *error) {
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "missing destination for long conversion");
+                                      "missing destination for i64 conversion");
   }
-  if (value < (lonejson_int64)LONG_MIN || value > (lonejson_int64)LONG_MAX) {
-    return lc_engine_set_protocol_error(error, label);
-  }
-  *out_value = (long)value;
+  *out_value = value;
   return LC_ENGINE_OK;
 }
 
@@ -462,30 +460,36 @@ static int lc_engine_watch_dispatch_event(lc_engine_watch_state *state) {
     return rc;
   }
 
-  event.namespace_name = parsed.namespace_name;
-  event.queue = parsed.queue;
+  event.namespace_name = lc_engine_strdup_local(parsed.namespace_name);
+  event.queue = lc_engine_strdup_local(parsed.queue);
   event.available = parsed.available ? 1 : 0;
-  event.head_message_id = parsed.head_message_id;
-  rc = lc_engine_i64_to_long_checked(parsed.changed_at_unix,
-                                     "queue watch changed_at_unix is out of range",
-                                     &event.changed_at_unix, state->error);
+  event.head_message_id = lc_engine_strdup_local(parsed.head_message_id);
+  if ((parsed.namespace_name != NULL && event.namespace_name == NULL) ||
+      (parsed.queue != NULL && event.queue == NULL) ||
+      (parsed.head_message_id != NULL && event.head_message_id == NULL)) {
+    lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
+    return lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
+                                      "failed to copy queue watch event");
+  }
+  rc = lc_engine_i64_to_int64_checked(parsed.changed_at_unix,
+                                      "queue watch changed_at_unix is out of range",
+                                      &event.changed_at_unix, state->error);
   if (rc != LC_ENGINE_OK) {
-    parsed.namespace_name = NULL;
-    parsed.queue = NULL;
-    parsed.head_message_id = NULL;
-    parsed.correlation_id = NULL;
     lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
     return rc;
   }
   if (parsed.correlation_id != NULL) {
-    event.correlation_id = parsed.correlation_id;
+    event.correlation_id = lc_engine_strdup_local(parsed.correlation_id);
+    if (event.correlation_id == NULL) {
+      lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
+      lc_engine_queue_watch_event_cleanup(&event);
+      return lc_engine_set_client_error(
+          state->error, LC_ENGINE_ERROR_NO_MEMORY,
+          "failed to allocate queue watch correlation_id");
+    }
   } else if (state->correlation_id != NULL) {
     event.correlation_id = lc_engine_strdup_local(state->correlation_id);
     if (event.correlation_id == NULL) {
-      parsed.namespace_name = NULL;
-      parsed.queue = NULL;
-      parsed.head_message_id = NULL;
-      parsed.correlation_id = NULL;
       lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
       lc_engine_queue_watch_event_cleanup(&event);
       return lc_engine_set_client_error(
@@ -495,10 +499,6 @@ static int lc_engine_watch_dispatch_event(lc_engine_watch_state *state) {
   }
 
   if (!state->handler(state->handler_context, &event, state->error)) {
-    parsed.namespace_name = NULL;
-    parsed.queue = NULL;
-    parsed.head_message_id = NULL;
-    parsed.correlation_id = NULL;
     lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
     lc_engine_queue_watch_event_cleanup(&event);
     if (state->error->code == LC_ENGINE_OK) {
@@ -508,10 +508,6 @@ static int lc_engine_watch_dispatch_event(lc_engine_watch_state *state) {
     return state->error->code;
   }
 
-  parsed.namespace_name = NULL;
-  parsed.queue = NULL;
-  parsed.head_message_id = NULL;
-  parsed.correlation_id = NULL;
   lonejson_cleanup(&lc_engine_watch_event_map, &parsed);
   lc_engine_queue_watch_event_cleanup(&event);
   state->data_buffer.length = 0U;
@@ -838,18 +834,86 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
   }
 
   message = &parsed.message;
-  response->namespace_name = message->namespace_name;
-  response->queue = message->queue;
-  response->message_id = message->message_id;
-  response->payload_content_type = message->payload_content_type;
-  response->correlation_id = message->correlation_id;
-  response->lease_id = message->lease_id;
-  response->txn_id = message->txn_id;
-  response->meta_etag = message->meta_etag;
-  response->state_etag = message->state_etag;
-  response->state_lease_id = message->state_lease_id;
-  response->state_txn_id = message->state_txn_id;
-  response->next_cursor = parsed.next_cursor;
+  response->namespace_name = lc_engine_strdup_local(message->namespace_name);
+  if (message->namespace_name != NULL && response->namespace_name == NULL) {
+    rc = LC_ENGINE_ERROR_NO_MEMORY;
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->queue = lc_engine_strdup_local(message->queue);
+    if (message->queue != NULL && response->queue == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->message_id = lc_engine_strdup_local(message->message_id);
+    if (message->message_id != NULL && response->message_id == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->payload_content_type =
+        lc_engine_strdup_local(message->payload_content_type);
+    if (message->payload_content_type != NULL &&
+        response->payload_content_type == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->correlation_id = lc_engine_strdup_local(message->correlation_id);
+    if (message->correlation_id != NULL && response->correlation_id == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->lease_id = lc_engine_strdup_local(message->lease_id);
+    if (message->lease_id != NULL && response->lease_id == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->txn_id = lc_engine_strdup_local(message->txn_id);
+    if (message->txn_id != NULL && response->txn_id == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->meta_etag = lc_engine_strdup_local(message->meta_etag);
+    if (message->meta_etag != NULL && response->meta_etag == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->state_etag = lc_engine_strdup_local(message->state_etag);
+    if (message->state_etag != NULL && response->state_etag == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->state_lease_id =
+        lc_engine_strdup_local(message->state_lease_id);
+    if (message->state_lease_id != NULL && response->state_lease_id == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->state_txn_id = lc_engine_strdup_local(message->state_txn_id);
+    if (message->state_txn_id != NULL && response->state_txn_id == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc == LC_ENGINE_OK) {
+    response->next_cursor = lc_engine_strdup_local(parsed.next_cursor);
+    if (parsed.next_cursor != NULL && response->next_cursor == NULL) {
+      rc = LC_ENGINE_ERROR_NO_MEMORY;
+    }
+  }
+  if (rc != LC_ENGINE_OK) {
+    lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
+    lc_engine_dequeue_response_cleanup(response);
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_NO_MEMORY,
+        "failed to copy subscribe meta response");
+  }
   rc = lc_engine_i64_to_int_checked(message->attempts,
                                     "queue attempts is out of range",
                                     &response->attempts, error);
@@ -864,13 +928,13 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
                                       &response->failure_attempts, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(
+    rc = lc_engine_i64_to_int64_checked(
         message->not_visible_until_unix,
         "queue not_visible_until_unix is out of range",
         &response->not_visible_until_unix, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(
+    rc = lc_engine_i64_to_int64_checked(
         message->visibility_timeout_seconds,
         "queue visibility_timeout_seconds is out of range",
         &response->visibility_timeout_seconds, error);
@@ -881,41 +945,29 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
                                        &response->payload_length, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(message->lease_expires_at_unix,
-                                       "queue lease_expires_at_unix is out of range",
-                                       &response->lease_expires_at_unix,
-                                       error);
+    rc = lc_engine_i64_to_int64_checked(message->lease_expires_at_unix,
+                                        "queue lease_expires_at_unix is out of range",
+                                        &response->lease_expires_at_unix,
+                                        error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(message->fencing_token,
-                                       "queue fencing_token is out of range",
-                                       &response->fencing_token, error);
+    rc = lc_engine_i64_to_int64_checked(message->fencing_token,
+                                        "queue fencing_token is out of range",
+                                        &response->fencing_token, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(
+    rc = lc_engine_i64_to_int64_checked(
         message->state_lease_expires_at_unix,
         "queue state_lease_expires_at_unix is out of range",
         &response->state_lease_expires_at_unix, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(
+    rc = lc_engine_i64_to_int64_checked(
         message->state_fencing_token,
         "queue state_fencing_token is out of range",
         &response->state_fencing_token, error);
   }
   if (rc != LC_ENGINE_OK) {
-    message->namespace_name = NULL;
-    message->queue = NULL;
-    message->message_id = NULL;
-    message->payload_content_type = NULL;
-    message->correlation_id = NULL;
-    message->lease_id = NULL;
-    message->txn_id = NULL;
-    message->meta_etag = NULL;
-    message->state_etag = NULL;
-    message->state_lease_id = NULL;
-    message->state_txn_id = NULL;
-    parsed.next_cursor = NULL;
     lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
     lc_engine_dequeue_response_cleanup(response);
     return rc;
@@ -923,18 +975,6 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
   if (response->correlation_id == NULL && fallback_correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(fallback_correlation_id);
     if (response->correlation_id == NULL) {
-      message->namespace_name = NULL;
-      message->queue = NULL;
-      message->message_id = NULL;
-      message->payload_content_type = NULL;
-      message->correlation_id = NULL;
-      message->lease_id = NULL;
-      message->txn_id = NULL;
-      message->meta_etag = NULL;
-      message->state_etag = NULL;
-      message->state_lease_id = NULL;
-      message->state_txn_id = NULL;
-      parsed.next_cursor = NULL;
       lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
       lc_engine_dequeue_response_cleanup(response);
       return lc_engine_set_client_error(
@@ -943,18 +983,6 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
     }
   }
 
-  message->namespace_name = NULL;
-  message->queue = NULL;
-  message->message_id = NULL;
-  message->payload_content_type = NULL;
-  message->correlation_id = NULL;
-  message->lease_id = NULL;
-  message->txn_id = NULL;
-  message->meta_etag = NULL;
-  message->state_etag = NULL;
-  message->state_lease_id = NULL;
-  message->state_txn_id = NULL;
-  parsed.next_cursor = NULL;
   lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
   return LC_ENGINE_OK;
 }

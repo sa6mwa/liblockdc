@@ -63,7 +63,10 @@ foreach(symbol IN ITEMS
     lonejson_curl_upload_init
     lonejson_curl_read_callback
     lonejson_curl_upload_size
-    lonejson_curl_upload_cleanup)
+    lonejson_curl_upload_cleanup
+    lonejson_generator_init
+    lonejson_generator_read
+    lonejson_generator_cleanup)
     assert_contains("${static_symbols}" "${symbol}" "${symbol} in liblonejson.a")
     assert_contains("${shared_symbols}" "${symbol}" "${symbol} in liblonejson.so.0")
 endforeach()
@@ -76,7 +79,10 @@ foreach(alias_symbol IN ITEMS
     lj_curl_upload_init
     lj_curl_read_callback
     lj_curl_upload_size
-    lj_curl_upload_cleanup)
+    lj_curl_upload_cleanup
+    lj_generator_init
+    lj_generator_read
+    lj_generator_cleanup)
     assert_not_contains("${static_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.a")
     assert_not_contains("${shared_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.so.0")
 endforeach()
