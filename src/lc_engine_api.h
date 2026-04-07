@@ -269,8 +269,6 @@ typedef struct lc_engine_query_stream_response {
 typedef struct lc_engine_enqueue_request {
   const char *namespace_name;
   const char *queue;
-  const void *payload;
-  size_t payload_length;
   lonejson_int64 delay_seconds;
   lonejson_int64 visibility_timeout_seconds;
   lonejson_int64 ttl_seconds;
@@ -840,10 +838,6 @@ int lc_engine_client_query_into(lc_engine_client *client,
                                 void *writer_context,
                                 lc_engine_query_stream_response *response,
                                 lc_engine_error *error);
-int lc_engine_client_enqueue(lc_engine_client *client,
-                             const lc_engine_enqueue_request *request,
-                             lc_engine_enqueue_response *response,
-                             lc_engine_error *error);
 int lc_engine_client_enqueue_from(lc_engine_client *client,
                                   const lc_engine_enqueue_request *request,
                                   lc_engine_read_callback reader,

@@ -87,6 +87,83 @@ typedef struct subscribe_capture {
   size_t payload_length;
 } subscribe_capture;
 
+typedef struct test_enqueue_source {
+  lc_source pub;
+  const unsigned char *bytes;
+  size_t length;
+  size_t offset;
+  size_t read_count;
+  size_t reset_count;
+  size_t max_chunk;
+} test_enqueue_source;
+
+static size_t test_enqueue_source_read(lc_source *self, void *buffer,
+                                       size_t count, lc_error *error) {
+  test_enqueue_source *source;
+  size_t remaining;
+  size_t chunk;
+
+  (void)error;
+  source = (test_enqueue_source *)self;
+  if (source == NULL || buffer == NULL || count == 0U) {
+    return 0U;
+  }
+  if (source->offset >= source->length) {
+    return 0U;
+  }
+  ++source->read_count;
+  remaining = source->length - source->offset;
+  chunk = count < remaining ? count : remaining;
+  if (source->max_chunk > 0U && chunk > source->max_chunk) {
+    chunk = source->max_chunk;
+  }
+  memcpy(buffer, source->bytes + source->offset, chunk);
+  source->offset += chunk;
+  return chunk;
+}
+
+static int test_enqueue_source_reset(lc_source *self, lc_error *error) {
+  test_enqueue_source *source;
+
+  (void)error;
+  source = (test_enqueue_source *)self;
+  if (source == NULL) {
+    return 0;
+  }
+  ++source->reset_count;
+  source->offset = 0U;
+  return 1;
+}
+
+static void test_enqueue_source_close(lc_source *self) { free(self); }
+
+static int test_enqueue_source_new(const void *bytes, size_t length,
+                                   size_t max_chunk, lc_source **out,
+                                   test_enqueue_source **out_state,
+                                   lc_error *error) {
+  test_enqueue_source *source;
+
+  if (out == NULL || out_state == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "enqueue source output is required", NULL, NULL, NULL);
+  }
+  source = (test_enqueue_source *)calloc(1, sizeof(*source));
+  if (source == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate enqueue source", NULL, NULL,
+                        NULL);
+  }
+  source->pub.read = test_enqueue_source_read;
+  source->pub.reset = test_enqueue_source_reset;
+  source->pub.close = test_enqueue_source_close;
+  source->bytes = (const unsigned char *)bytes;
+  source->length = length;
+  source->max_chunk = max_chunk;
+  *out = &source->pub;
+  *out_state = source;
+  return LC_OK;
+}
+
 static int watch_event_sink(void *context,
                             const lc_engine_queue_watch_event *event,
                             lc_engine_error *error) {
@@ -3768,6 +3845,75 @@ static void test_public_enqueue_emits_logs(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+static void test_public_enqueue_streams_payload_from_source(void **state) {
+  static const unsigned char payload[] =
+      "{\"kind\":\"enqueue\",\"streamed\":true,\"payload\":1}";
+  static const char *enqueue_response_headers[] = {
+      "X-Correlation-Id: corr-enqueue", "Content-Type: application/json"};
+  static const char *const required_headers[] = {
+      "Accept: application/json",
+      "Content-Type: multipart/related; boundary=lockdc-stream-boundary-7e4dbe2f",
+      "Transfer-Encoding: chunked"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/queue/enqueue", required_headers, 3U, NULL, 0U, 0, 200,
+       enqueue_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+       "\"message_id\":\"msg-enqueue\",\"attempts\":0,\"max_attempts\":5,"
+       "\"failure_attempts\":0,\"not_visible_until_unix\":123,"
+       "\"visibility_timeout_seconds\":30,\"payload_bytes\":46}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_enqueue_req req;
+  lc_enqueue_res out;
+  lc_source *src;
+  test_enqueue_source *src_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  src = NULL;
+  src_state = NULL;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&out, 0, sizeof(out));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = test_enqueue_source_new(payload, sizeof(payload) - 1U, 4U, &src,
+                               &src_state, &error);
+  assert_int_equal(rc, LC_OK);
+
+  req.queue = "jobs";
+  req.content_type = "application/json";
+  req.max_attempts = 5L;
+  req.visibility_timeout_seconds = 30L;
+  rc = lc_enqueue(client, &req, src, &out, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(out.payload_bytes, (long)(sizeof(payload) - 1U));
+  assert_true(src_state->read_count > 1U);
+  assert_int_equal(src_state->offset, sizeof(payload) - 1U);
+
+  lc_enqueue_res_cleanup(&out);
+  lc_source_close(src);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
 static void test_public_queue_nack_rejects_invalid_intent(void **state) {
   https_tls_material material;
   lc_client_config config;
@@ -4249,6 +4395,8 @@ int main(void) {
       cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path),
       cmocka_unit_test(test_public_management_methods_emit_logs),
       cmocka_unit_test(test_public_enqueue_emits_logs),
+      cmocka_unit_test(
+          test_public_enqueue_streams_payload_from_source),
       cmocka_unit_test(test_public_dequeue_emits_stream_transport_logs),
       cmocka_unit_test(test_public_query_stream_captures_headers_and_body),
       cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq),
