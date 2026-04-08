@@ -67,7 +67,7 @@ help:
 		'make clean-dist         Reset dist/ release artifacts.' \
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host debug/asan cross-preset packaging-isolation check.' \
-		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests.' \
+		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
 		'make release            Run the full Linux release matrix and package generation.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
 

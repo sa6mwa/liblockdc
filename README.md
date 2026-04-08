@@ -291,6 +291,8 @@ scripts/deps.sh deps-host-debug
 scripts/build.sh debug
 scripts/build.sh e2e
 scripts/build.sh x86_64-linux-gnu-release
+scripts/cross_build.sh
+scripts/cross_test.sh release
 scripts/test.sh unit
 scripts/test.sh e2e
 scripts/fuzz.sh
@@ -298,6 +300,6 @@ scripts/package.sh all
 scripts/package-verify.sh
 ```
 
-Unlike the primary Makefile workflow, these lower-level scripts do not generally provision dependency roots implicitly. Use them when you want direct preset control and are prepared to manage the prerequisite dependency tree yourself.
+Unlike the primary Makefile workflow, these lower-level scripts do not generally provision dependency roots implicitly. `scripts/cross_build.sh` prepares the non-host release build trees, and `scripts/cross_test.sh release` runs the cross release tests against those existing build trees. Use them when you want direct preset control and are prepared to manage the prerequisite dependency tree yourself.
 
 See <https://github.com/sa6mwa/liblockdc> for the full source code.

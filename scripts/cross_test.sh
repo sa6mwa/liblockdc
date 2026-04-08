@@ -35,6 +35,17 @@ wait_for_pid() {
   fi
 }
 
+require_release_build_tree() {
+  local preset="$1"
+  local build_dir="$repo_root/build/$preset"
+  local cache_file="$build_dir/CMakeCache.txt"
+
+  if [ ! -f "$cache_file" ]; then
+    printf '%s\n' "missing build tree for $preset at $build_dir; run scripts/cross_build.sh first" >&2
+    return 1
+  fi
+}
+
 run_cross_preset_package_isolation() {
   local debug_pid
   local asan_pid
@@ -56,7 +67,7 @@ run_cross_release_matrix() {
   local preset
 
   for preset in "${cross_release_presets[@]}"; do
-    "$script_dir/build.sh" "$preset"
+    require_release_build_tree "$preset"
     ctest --preset "$preset" --output-on-failure
   done
 }

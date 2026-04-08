@@ -535,6 +535,14 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(package_script_targeting_test PROPERTIES RUN_SERIAL TRUE)
 
+    add_test(NAME cross_test_targeting_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cross_test_targeting_test.cmake
+    )
+    set_tests_properties(cross_test_targeting_test PROPERTIES RUN_SERIAL TRUE)
+
     add_test(NAME runtime_license_fallback_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
