@@ -102,31 +102,13 @@ void lc_engine_buffer_cleanup(lc_engine_buffer *buffer);
 int lc_engine_buffer_append(lc_engine_buffer *buffer, const char *bytes,
                             size_t count);
 int lc_engine_buffer_append_cstr(lc_engine_buffer *buffer, const char *value);
-int lc_engine_json_begin_object(lc_engine_buffer *buffer);
-int lc_engine_json_end_object(lc_engine_buffer *buffer);
-int lc_engine_json_add_string_field(lc_engine_buffer *buffer, int *first_field,
-                                    const char *name, const char *value);
-int lc_engine_json_add_long_field(lc_engine_buffer *buffer, int *first_field,
-                                  const char *name, lonejson_int64 value);
-int lc_engine_json_add_bool_field(lc_engine_buffer *buffer, int *first_field,
-                                  const char *name, int value);
-int lc_engine_json_add_raw_field(lc_engine_buffer *buffer, int *first_field,
-                                 const char *name, const char *value);
-
-int lc_engine_json_get_string(const char *json, const char *field_name,
-                              char **out_value);
-int lc_engine_json_get_long(const char *json, const char *field_name,
-                            long *out_value);
-int lc_engine_json_get_bool(const char *json, const char *field_name,
-                            int *out_value);
 int lc_engine_lonejson_error_from_status(lc_engine_error *error,
                                          lonejson_status status,
                                          const lonejson_error *lj_error,
                                          const char *message);
-int lc_engine_json_value_init_from_cstr(lonejson_json_value *value,
-                                        lc_engine_json_reader_source *source,
-                                        const char *json,
-                                        lc_engine_error *error);
+lonejson_read_result lc_engine_json_memory_reader(void *user,
+                                                  unsigned char *buffer,
+                                                  size_t capacity);
 int lc_engine_buffer_append_limited(lc_engine_buffer *buffer, const char *bytes,
                                     size_t count, size_t limit);
 int lc_engine_buffer_append_cstr_limited(lc_engine_buffer *buffer,

@@ -235,6 +235,84 @@ static void test_disk_lease_state_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_s3_lease_state_roundtrip(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_get_res get_res;
+  lc_get_opts get_opts;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  char key[96];
+  static const char json_text[] =
+      "{\"kind\":\"e2e\",\"value\":1,\"tags\":[\"s3\"]}";
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
+  bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
+                               "./devenv/volumes/lockd-s3-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&get_opts, 0, sizeof(get_opts));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("s3-state", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  save_json_text_or_die(lease, json_text, &error);
+  assert_true(lease->version >= 1L);
+  assert_non_null(lease->state_etag);
+
+  rc = lease->describe(lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(lease->key, key);
+  assert_string_equal(lease->namespace_name, "default");
+  assert_non_null(lease->owner);
+  assert_true(lease->owner[0] != '\0');
+  assert_non_null(lease->lease_id);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  get_opts.public_read = 1;
+  rc = client->get(client, key, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(get_res.no_content, 0);
+  assert_true(get_res.version >= 1L);
+
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(buffer_contains(bytes, length, "\"kind\":\"e2e\""));
+  assert_true(buffer_contains(bytes, length, "\"tags\":[\"s3\"]"));
+
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 static void test_s3_attachment_roundtrip(void **state) {
   const char *endpoint;
   const char *bundle_path;
@@ -402,7 +480,9 @@ static void test_mem_uds_queue_roundtrip(void **state) {
   assert_memory_equal(bytes, payload, sizeof(payload));
 
   rc = message->rewind_payload(message, &error);
-  assert_lc_ok(rc, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
   rc = message->ack(message, &error);
   assert_lc_ok(rc, &error);
   message = NULL;
@@ -591,6 +671,91 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_s3_local_mutate_stream_roundtrip(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_sink *sink;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_get_res get_res;
+  lc_mutate_local_req mutate_req;
+  const void *bytes;
+  size_t length;
+  char key[96];
+  char file_template[] = "/tmp/liblockdc-s3-local-mutate-XXXXXX";
+  int fd;
+  FILE *fp;
+  const char *mutations[2];
+  char mutation_buffer[512];
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
+  bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
+                               "./devenv/volumes/lockd-s3-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_mutate_local_req_init(&mutate_req);
+
+  fd = mkstemp(file_template);
+  assert_true(fd >= 0);
+  fp = fdopen(fd, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fwrite("hello\\nlockd", 1U, 11U, fp), 11);
+  assert_int_equal(fclose(fp), 0);
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("s3-local-mutate", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  save_json_text_or_die(lease, "{\"kind\":\"e2e-local\"}", &error);
+
+  mutations[0] = "/filename=\"blob.txt\"";
+  snprintf(mutation_buffer, sizeof(mutation_buffer), "textfile:/blob=%s",
+           file_template);
+  mutations[1] = mutation_buffer;
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 2U;
+  rc = lease->mutate_local(lease, &mutate_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease->state_etag);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(buffer_contains(bytes, length, "\"filename\":\"blob.txt\""));
+  assert_true(buffer_contains(bytes, length, "\"blob\":"));
+
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  unlink(file_template);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 typedef struct e2e_consumer_backend {
   const char *label;
   const char *endpoint_env;
@@ -608,13 +773,19 @@ typedef struct e2e_consumer_context {
   int error_events;
   int start_events;
   int stop_events;
-  int fail_first_delivery;
+  int first_delivery_mode;
   int expect_state;
   int saw_state;
   char payload[64];
   char state_json[128];
   char state_key[160];
 } e2e_consumer_context;
+
+enum {
+  E2E_CONSUMER_FIRST_DELIVERY_NONE = 0,
+  E2E_CONSUMER_FIRST_DELIVERY_FAIL = 1,
+  E2E_CONSUMER_FIRST_DELIVERY_DEFER = 2
+};
 
 static const e2e_consumer_backend e2e_backend_disk = {
     "disk",
@@ -730,6 +901,7 @@ static int e2e_consumer_handle(void *context, lc_consumer_message *delivery,
   int handled_count;
   lc_lease *state_lease;
   int rc;
+  lc_nack_req nack_req;
 
   consumer_context = (e2e_consumer_context *)context;
   sink = NULL;
@@ -770,11 +942,20 @@ static int e2e_consumer_handle(void *context, lc_consumer_message *delivery,
   pthread_mutex_lock(&consumer_context->mutex);
   handled_count = consumer_context->handled;
   pthread_mutex_unlock(&consumer_context->mutex);
-  if (consumer_context->fail_first_delivery && handled_count == 1) {
-    return LC_ERR_INVALID;
+  if (consumer_context->first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL &&
+      handled_count == 1) {
+    return LC_ERR_TRANSPORT;
+  }
+  if (consumer_context->first_delivery_mode ==
+          E2E_CONSUMER_FIRST_DELIVERY_DEFER &&
+      handled_count == 1) {
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_DEFER;
+    nack_req.delay_seconds = 0L;
+    return delivery->message->nack(delivery->message, &nack_req, error);
   }
 
-  return delivery->message->ack(delivery->message, error);
+  return LC_OK;
 }
 
 static int e2e_consumer_on_error(void *context, const lc_consumer_error *event,
@@ -814,8 +995,13 @@ static void e2e_consumer_on_stop(void *context,
 
 static void wait_for_consumer_handled(e2e_consumer_context *consumer_context,
                                       int minimum_count) {
+  int maximum_retries;
   int retries;
 
+  maximum_retries = 120;
+  if (minimum_count > 1) {
+    maximum_retries = 600;
+  }
   retries = 0;
   for (;;) {
     pthread_mutex_lock(&consumer_context->mutex);
@@ -824,8 +1010,11 @@ static void wait_for_consumer_handled(e2e_consumer_context *consumer_context,
       return;
     }
     pthread_mutex_unlock(&consumer_context->mutex);
-    if (retries++ > 120) {
-      fail();
+    if (retries++ > maximum_retries) {
+      fail_msg("consumer retry timed out: handled=%d start_events=%d "
+               "stop_events=%d error_events=%d",
+               consumer_context->handled, consumer_context->start_events,
+               consumer_context->stop_events, consumer_context->error_events);
     }
     usleep(100000);
   }
@@ -834,7 +1023,7 @@ static void wait_for_consumer_handled(e2e_consumer_context *consumer_context,
 static void run_consumer_service_variant(const e2e_consumer_backend *backend,
                                          const char *name_prefix,
                                          int enqueue_count,
-                                         int fail_first_delivery,
+                                         int first_delivery_mode,
                                          int expect_state,
                                          size_t worker_count) {
   lc_client *client;
@@ -859,7 +1048,7 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
   lc_consumer_config_init(&consumer);
   lc_consumer_service_config_init(&service_config);
   memset(&consumer_context, 0, sizeof(consumer_context));
-  consumer_context.fail_first_delivery = fail_first_delivery;
+  consumer_context.first_delivery_mode = first_delivery_mode;
   consumer_context.expect_state = expect_state;
   assert_int_equal(pthread_mutex_init(&consumer_context.mutex, NULL), 0);
 
@@ -868,7 +1057,8 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
 
   consumer.name = backend->label;
   consumer.request.queue = queue_name;
-  consumer.request.visibility_timeout_seconds = fail_first_delivery ? 1L : 30L;
+  consumer.request.visibility_timeout_seconds =
+      first_delivery_mode != E2E_CONSUMER_FIRST_DELIVERY_NONE ? 1L : 30L;
   consumer.request.wait_seconds = 1L;
   consumer.worker_count = worker_count;
   consumer.with_state = expect_state;
@@ -909,9 +1099,11 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
     memset(&enqueue_res, 0, sizeof(enqueue_res));
   }
 
-  wait_for_consumer_handled(&consumer_context, fail_first_delivery
-                                                   ? enqueue_count + 1
-                                                   : enqueue_count);
+  wait_for_consumer_handled(&consumer_context,
+                            first_delivery_mode !=
+                                    E2E_CONSUMER_FIRST_DELIVERY_NONE
+                                ? enqueue_count + 1
+                                : enqueue_count);
 
   rc = (service->stop)(service);
   assert_int_equal(rc, LC_OK);
@@ -919,15 +1111,21 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
   assert_lc_ok(rc, &error);
 
   pthread_mutex_lock(&consumer_context.mutex);
-  assert_true(consumer_context.start_events >= 1);
-  assert_true(consumer_context.stop_events >= 1);
-  if (fail_first_delivery) {
-    assert_true(consumer_context.handled >= enqueue_count + 1);
+  assert_true(consumer_context.start_events >= (int)worker_count);
+  assert_true(consumer_context.stop_events >= (int)worker_count);
+  if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL) {
+    assert_int_equal(consumer_context.handled, enqueue_count + 1);
     assert_true(consumer_context.error_events >= 1);
-    assert_true(consumer_context.start_events >= 2);
+    assert_true(consumer_context.start_events >= (int)worker_count + 1);
+  } else if (first_delivery_mode ==
+             E2E_CONSUMER_FIRST_DELIVERY_DEFER) {
+    assert_int_equal(consumer_context.handled, enqueue_count + 1);
+    assert_int_equal(consumer_context.error_events, 0);
+    assert_int_equal(consumer_context.start_events, (int)worker_count);
   } else {
     assert_int_equal(consumer_context.handled, enqueue_count);
     assert_int_equal(consumer_context.error_events, 0);
+    assert_int_equal(consumer_context.start_events, (int)worker_count);
   }
   assert_string_equal(consumer_context.payload, "consumer-ok");
   if (expect_state) {
@@ -950,77 +1148,95 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
 
 static void test_disk_consumer_service_happy(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-happy", 1, 0,
-                               0, 1U);
+  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-happy", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
 static void test_disk_consumer_service_multi_delivery(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-multi", 2, 0,
-                               0, 1U);
+  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-multi", 2,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
 static void test_disk_consumer_service_with_state(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-state", 1, 0,
-                               1, 1U);
+  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-state", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 1, 1U);
 }
 
 static void
 test_disk_consumer_service_restart_after_handler_failure(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-retry", 1, 1,
-                               0, 1U);
+  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-retry", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_FAIL, 0, 1U);
+}
+
+static void test_disk_consumer_service_defer_then_redeliver(void **state) {
+  (void)state;
+  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-defer", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
 }
 
 static void test_s3_consumer_service_happy(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-happy", 1, 0, 0,
-                               1U);
+  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-happy", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
 static void test_s3_consumer_service_multi_delivery(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-multi", 2, 0, 0,
-                               1U);
+  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-multi", 2,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
 static void test_s3_consumer_service_with_state(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-state", 1, 0, 1,
-                               1U);
+  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-state", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 1, 1U);
 }
 
 static void
 test_s3_consumer_service_restart_after_handler_failure(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-retry", 1, 1, 0,
-                               1U);
+  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-retry", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_FAIL, 0, 1U);
+}
+
+static void test_s3_consumer_service_defer_then_redeliver(void **state) {
+  (void)state;
+  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-defer", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
 }
 
 static void test_mem_uds_consumer_service_happy(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-happy", 1, 0, 0,
-                               1U);
+  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-happy", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
 static void test_mem_uds_consumer_service_multi_delivery(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-multi", 2, 0, 0,
-                               1U);
+  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-multi", 2,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
 static void test_mem_uds_consumer_service_with_state(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-state", 1, 0, 1,
-                               1U);
+  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-state", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NONE, 1, 1U);
 }
 
 static void
 test_mem_uds_consumer_service_restart_after_handler_failure(void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-retry", 1, 1, 0,
-                               1U);
+  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-retry", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_FAIL, 0, 1U);
+}
+
+static void test_mem_uds_consumer_service_defer_then_redeliver(void **state) {
+  (void)state;
+  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-defer", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
 }
 
 static void test_mem_uds_consumer_service_multi_worker(void **state) {
@@ -1119,27 +1335,126 @@ static void test_mem_uds_dequeue_with_state_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_s3_dequeue_with_state_roundtrip(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_source *src;
+  lc_message *message;
+  lc_lease *state_lease;
+  lc_error error;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_get_res get_res;
+  char queue_name[96];
+  char expected_state_key[160];
+  static const unsigned char payload[] = {'s', 't', 'a', 't', 'e',
+                                          '-', 's', '3'};
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
+  bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
+                               "./devenv/volumes/lockd-s3-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  src = NULL;
+  message = NULL;
+  state_lease = NULL;
+  lc_error_init(&error);
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("s3-state-queue", queue_name, sizeof(queue_name));
+  rc = lc_source_from_memory(payload, sizeof(payload), &src, &error);
+  assert_lc_ok(rc, &error);
+
+  enqueue_req.queue = queue_name;
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 300L;
+  enqueue_req.max_attempts = 5;
+  rc = client->enqueue(client, &enqueue_req, src, &enqueue_res, &error);
+  assert_lc_ok(rc, &error);
+
+  dequeue_req.queue = queue_name;
+  dequeue_req.owner = "lc-e2e-state-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.wait_seconds = 2L;
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+
+  state_lease = message->state(message);
+  assert_non_null(state_lease);
+  snprintf(expected_state_key, sizeof(expected_state_key), "q/%s/state/%s",
+           queue_name, message->message_id);
+  assert_string_equal(state_lease->key, expected_state_key);
+
+  {
+    e2e_status_doc doc;
+
+    doc.status = "from-s3-direct-state";
+    rc = state_lease->save(state_lease, &e2e_status_map, &doc, NULL, &error);
+  }
+  assert_lc_ok(rc, &error);
+  {
+    e2e_status_doc doc;
+
+    memset(&doc, 0, sizeof(doc));
+    rc = state_lease->load(state_lease, &e2e_status_map, &doc, NULL, NULL,
+                           &get_res, &error);
+    assert_lc_ok(rc, &error);
+    assert_non_null(doc.status);
+    assert_string_equal(doc.status, "from-s3-direct-state");
+    lonejson_cleanup(&e2e_status_map, &doc);
+  }
+  assert_lc_ok(rc, &error);
+
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  lc_get_res_cleanup(&get_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_source_close(src);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
+      cmocka_unit_test(test_s3_lease_state_roundtrip),
       cmocka_unit_test(test_disk_local_mutate_stream_roundtrip),
+      cmocka_unit_test(test_s3_local_mutate_stream_roundtrip),
       cmocka_unit_test(test_s3_attachment_roundtrip),
       cmocka_unit_test(test_disk_consumer_service_happy),
       cmocka_unit_test(test_disk_consumer_service_multi_delivery),
       cmocka_unit_test(test_disk_consumer_service_with_state),
       cmocka_unit_test(
           test_disk_consumer_service_restart_after_handler_failure),
+      cmocka_unit_test(test_disk_consumer_service_defer_then_redeliver),
       cmocka_unit_test(test_s3_consumer_service_happy),
       cmocka_unit_test(test_s3_consumer_service_multi_delivery),
       cmocka_unit_test(test_s3_consumer_service_with_state),
       cmocka_unit_test(test_s3_consumer_service_restart_after_handler_failure),
+      cmocka_unit_test(test_s3_consumer_service_defer_then_redeliver),
       cmocka_unit_test(test_mem_uds_consumer_service_happy),
       cmocka_unit_test(test_mem_uds_consumer_service_multi_delivery),
       cmocka_unit_test(test_mem_uds_consumer_service_multi_worker),
       cmocka_unit_test(test_mem_uds_consumer_service_with_state),
       cmocka_unit_test(
           test_mem_uds_consumer_service_restart_after_handler_failure),
+      cmocka_unit_test(test_mem_uds_consumer_service_defer_then_redeliver),
       cmocka_unit_test(test_mem_uds_dequeue_with_state_roundtrip),
+      cmocka_unit_test(test_s3_dequeue_with_state_roundtrip),
       cmocka_unit_test(test_mem_uds_dequeue_batch_roundtrip),
       cmocka_unit_test(test_mem_uds_queue_roundtrip)};
 

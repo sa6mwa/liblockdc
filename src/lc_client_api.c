@@ -2110,6 +2110,8 @@ static int lc_subscribe_end(void *context,
 
 static void *lc_subscribe_handler_main(void *context) {
   lc_subscribe_bridge *bridge;
+  lc_nack_req nack_req;
+  lc_error nack_error;
   int rc;
 
   bridge = (lc_subscribe_bridge *)context;
@@ -2123,6 +2125,23 @@ static void *lc_subscribe_handler_main(void *context) {
   } else if (rc != LC_OK && bridge->error->code == LC_OK) {
     rc = lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
                       "consumer callback failed", NULL, NULL, NULL);
+  }
+  if (rc != LC_OK && bridge->message != NULL && !bridge->terminal) {
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_FAILURE;
+    nack_req.delay_seconds = 0L;
+    lc_error_init(&nack_error);
+    if (bridge->message->nack(bridge->message, &nack_req, &nack_error) ==
+        LC_OK) {
+      bridge->terminal = 1;
+      bridge->message = NULL;
+    } else {
+      lc_error_set(bridge->error, nack_error.code, nack_error.http_status,
+                   nack_error.message, nack_error.detail,
+                   nack_error.server_code, nack_error.correlation_id);
+      rc = bridge->error->code;
+    }
+    lc_error_cleanup(&nack_error);
   }
   if (bridge->message != NULL && !bridge->terminal) {
     bridge->message->close(bridge->message);

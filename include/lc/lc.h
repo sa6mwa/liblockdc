@@ -904,9 +904,12 @@ typedef struct lc_consumer_restart_policy {
  * Delivery object passed to managed consumer callbacks.
  *
  * All pointers are borrowed for the duration of the callback only. The handler
- * should terminate the delivery with `message->ack()` or `message->nack()`.
- * When `state` is non-NULL, it is the lease handle associated with the
- * delivery and is owned by `message`.
+ * may leave the delivery open and return `LC_OK`; the managed consumer will
+ * then acknowledge it automatically on success and negatively acknowledge it
+ * on failure. Explicit `message->ack()`/`message->nack()` are still available
+ * for handlers that want to terminalize the delivery themselves. When `state`
+ * is non-NULL, it is the lease handle associated with the delivery and is
+ * owned by `message`.
  */
 typedef struct lc_consumer_message {
   /** Active SDK client for this consumer loop. Safe to reuse inside the
@@ -992,9 +995,12 @@ typedef struct lc_consumer_config {
   /**
    * Handles one delivery.
    *
-   * Return `LC_OK` after successfully terminating the message with `ack()` or
-   * `nack()`. Returning a non-`LC_OK` code marks the attempt as failed and
-   * enters the restart/error path.
+   * Return `LC_OK` after successfully processing the delivery. If the handler
+   * leaves the delivery open, the managed consumer acknowledges it
+   * automatically on success and negatively acknowledges it automatically on
+   * failure before entering the restart/error path. Explicit
+   * `message->nack()`/`message->ack()` are still available when a handler wants
+   * to terminalize the delivery itself before returning.
    */
   int (*handle)(void *context, lc_consumer_message *message, lc_error *error);
   /**

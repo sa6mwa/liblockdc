@@ -96,6 +96,34 @@ typedef struct lc_engine_delete_all_attachments_response_json {
   lonejson_int64 version;
 } lc_engine_delete_all_attachments_response_json;
 
+typedef struct lc_engine_enqueue_meta_json {
+  char *namespace_name;
+  char *queue;
+  lonejson_int64 delay_seconds;
+  lonejson_int64 visibility_timeout_seconds;
+  lonejson_int64 ttl_seconds;
+  lonejson_int64 max_attempts;
+  char *payload_content_type;
+} lc_engine_enqueue_meta_json;
+
+static const lonejson_field lc_engine_enqueue_meta_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, queue, "queue"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, delay_seconds,
+                       "delay_seconds"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json,
+                       visibility_timeout_seconds,
+                       "visibility_timeout_seconds"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, ttl_seconds, "ttl_seconds"),
+    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, max_attempts,
+                       "max_attempts"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json,
+                                payload_content_type, "payload_content_type")};
+
+LONEJSON_MAP_DEFINE(lc_engine_enqueue_meta_map, lc_engine_enqueue_meta_json,
+                    lc_engine_enqueue_meta_fields);
+
 static const lonejson_field lc_engine_attachment_info_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, id, "id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_attachment_info_json, name, "name"),
@@ -1512,11 +1540,13 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   lc_engine_buffer prefix;
   lc_engine_buffer suffix;
   lc_engine_buffer content_type;
+  lc_engine_enqueue_meta_json meta_src;
+  lonejson_owned_buffer meta_owned;
+  lonejson_error lj_error;
   struct curl_slist *headers;
   lc_engine_enqueue_response_json parsed;
   const char *boundary;
   const char *payload_content_type;
-  int first_field;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL ||
@@ -1533,47 +1563,33 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
                              : "application/octet-stream";
 
   lc_engine_enqueue_response_cleanup(response);
+  memset(&meta_src, 0, sizeof(meta_src));
+  meta_src.namespace_name =
+      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  meta_src.queue = (char *)request->queue;
+  meta_src.delay_seconds = request->delay_seconds;
+  meta_src.visibility_timeout_seconds = request->visibility_timeout_seconds;
+  meta_src.ttl_seconds = request->ttl_seconds;
+  meta_src.max_attempts = request->max_attempts;
+  meta_src.payload_content_type = (char *)payload_content_type;
+  meta_owned = lonejson_default_owned_buffer();
+  lonejson_error_init(&lj_error);
+  rc = lonejson_serialize_owned(&lc_engine_enqueue_meta_map, &meta_src,
+                                &meta_owned, NULL, &lj_error);
+  if (rc != LONEJSON_STATUS_OK) {
+    lonejson_owned_buffer_free(&meta_owned);
+    return lc_engine_lonejson_error_from_status(
+        error, rc, &lj_error, "failed to build enqueue_from metadata");
+  }
   lc_engine_buffer_init(&meta);
-  rc = lc_engine_json_begin_object(&meta);
-  first_field = 1;
-  if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_json_add_string_field(
-        &meta, &first_field, "namespace",
-        lc_engine_effective_namespace(client, request->namespace_name));
-  }
-  if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_json_add_string_field(&meta, &first_field, "queue",
-                                         request->queue);
-  }
-  if (rc == LC_ENGINE_OK && request->delay_seconds > 0L) {
-    rc = lc_engine_json_add_long_field(&meta, &first_field, "delay_seconds",
-                                       request->delay_seconds);
-  }
-  if (rc == LC_ENGINE_OK && request->visibility_timeout_seconds > 0L) {
-    rc = lc_engine_json_add_long_field(&meta, &first_field,
-                                       "visibility_timeout_seconds",
-                                       request->visibility_timeout_seconds);
-  }
-  if (rc == LC_ENGINE_OK && request->ttl_seconds > 0L) {
-    rc = lc_engine_json_add_long_field(&meta, &first_field, "ttl_seconds",
-                                       request->ttl_seconds);
-  }
-  if (rc == LC_ENGINE_OK && request->max_attempts > 0) {
-    rc = lc_engine_json_add_long_field(&meta, &first_field, "max_attempts",
-                                       (long)request->max_attempts);
-  }
-  if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_json_add_string_field(
-        &meta, &first_field, "payload_content_type", payload_content_type);
-  }
-  if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_json_end_object(&meta);
-  }
-  if (rc != LC_ENGINE_OK) {
+  if (lc_engine_buffer_append(&meta, meta_owned.data, meta_owned.len) !=
+      LC_ENGINE_OK) {
+    lonejson_owned_buffer_free(&meta_owned);
     lc_engine_buffer_cleanup(&meta);
-    return lc_engine_set_client_error(error, rc,
-                                      "failed to build enqueue_from metadata");
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                      "failed to copy enqueue_from metadata");
   }
+  lonejson_owned_buffer_free(&meta_owned);
 
   lc_engine_buffer_init(&prefix);
   rc = lc_engine_buffer_append_cstr(&prefix, "--");
@@ -1869,6 +1885,7 @@ int lc_engine_client_list_attachments(
     }
   }
   memset(&result, 0, sizeof(result));
+  memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_http_json_request(
       client, "GET", path.data, NULL, 0U, headers, header_count,
       &lc_engine_list_attachments_response_map, &parsed, &result, error);
@@ -2039,6 +2056,7 @@ int lc_engine_client_delete_attachment(
            (long long)request->fencing_token);
   headers[2].value = token_buf;
   memset(&result, 0, sizeof(result));
+  memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_http_json_request(
       client, "DELETE", path.data, NULL, 0U, headers,
       request->fencing_token > 0L ? 3U : 2U,
@@ -2101,6 +2119,7 @@ int lc_engine_client_delete_all_attachments(
            (long long)request->fencing_token);
   headers[2].value = token_buf;
   memset(&result, 0, sizeof(result));
+  memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_http_json_request(
       client, "DELETE", path.data, NULL, 0U, headers,
       request->fencing_token > 0L ? 3U : 2U,

@@ -2820,7 +2820,7 @@ test_public_bound_lease_methods_cover_state_and_attachments(void **state) {
       "ETag: etag-1", "X-Key-Version: 4", "X-Fencing-Token: 11"};
   static const char *update_headers[] = {
       "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
+      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
   static const char *mutate_headers[] = {
       "Content-Type: application/json", "X-Fencing-Token: 11",
       "X-Txn-ID: txn-acquire", "X-If-Version: 5"};
@@ -3508,6 +3508,7 @@ test_public_lease_mutate_local_covers_no_content_path(void **state) {
                                       "Content-Type: application/json"};
   static const char *update_headers[] = {"Content-Type: application/json",
                                          "X-Fencing-Token: 22",
+                                         "X-Lease-ID: lease-2",
                                          "X-Txn-ID: txn-local"};
   static const char *update_response_headers[] = {
       "X-Correlation-Id: corr-local-update", "Content-Type: application/json"};
@@ -4149,7 +4150,7 @@ static void test_public_lease_save_uses_mapped_lonejson_upload(void **state) {
       "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
   static const char *update_headers[] = {
       "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
+      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
   static const char *update_response_headers[] = {
       "X-Correlation-Id: corr-update", "Content-Type: application/json"};
   static const char *update_body[] = {"{\"value\":2}"};

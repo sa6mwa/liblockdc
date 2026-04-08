@@ -861,9 +861,13 @@ static int lc_consumer_delivery_end(void *context,
 
 static void *lc_consumer_delivery_handler_main(void *context) {
   lc_consumer_delivery_bridge *bridge;
+  lc_nack_req nack_req;
+  lc_error terminal_error;
   lc_error handler_error;
   lc_consumer_message consumer_message;
   int rc;
+  int final_rc;
+  int auto_finalize_failed;
 
   bridge = (lc_consumer_delivery_bridge *)context;
   memset(&consumer_message, 0, sizeof(consumer_message));
@@ -880,27 +884,61 @@ static void *lc_consumer_delivery_handler_main(void *context) {
   lc_error_init(&handler_error);
   rc = bridge->worker->config.handle(bridge->worker->config.context,
                                      &consumer_message, &handler_error);
-  if (rc == LC_OK && !bridge->terminal) {
-    rc = lc_error_set(&handler_error, LC_ERR_TRANSPORT, 0L,
-                      "consumer handler must ack() or nack() before returning "
-                      "LC_OK",
-                      NULL, NULL, NULL);
-  } else if (rc != LC_OK && handler_error.code == LC_OK) {
-    lc_error_set(&handler_error, LC_ERR_TRANSPORT, 0L,
-                 "consumer handler failed", NULL, NULL, NULL);
+  final_rc = rc;
+  auto_finalize_failed = 0;
+  if (rc == LC_OK) {
+    if (bridge->message != NULL && !bridge->terminal) {
+      lc_error_init(&terminal_error);
+      if (bridge->message->ack(bridge->message, &terminal_error) == LC_OK) {
+        bridge->terminal = 1;
+        bridge->message = NULL;
+      } else {
+        auto_finalize_failed = 1;
+        final_rc = terminal_error.code != LC_OK ? terminal_error.code
+                                                : LC_ERR_TRANSPORT;
+        if (handler_error.code == LC_OK) {
+          lc_error_set(&handler_error, final_rc, terminal_error.http_status,
+                       terminal_error.message, terminal_error.detail,
+                       terminal_error.server_code,
+                       terminal_error.correlation_id);
+        }
+      }
+      lc_error_cleanup(&terminal_error);
+    }
+  } else {
+    if (handler_error.code == LC_OK) {
+      lc_error_set(&handler_error, LC_ERR_TRANSPORT, 0L,
+                   "consumer handler failed", NULL, NULL, NULL);
+    }
+    if (bridge->message != NULL && !bridge->terminal) {
+      lc_nack_req_init(&nack_req);
+      nack_req.intent = LC_NACK_INTENT_FAILURE;
+      nack_req.delay_seconds =
+          bridge->worker->config.request.visibility_timeout_seconds > 0L
+              ? bridge->worker->config.request.visibility_timeout_seconds
+              : 1L;
+      if (bridge->message->nack(bridge->message, &nack_req, &handler_error) ==
+          LC_OK) {
+        bridge->terminal = 1;
+        bridge->message = NULL;
+      } else if (handler_error.code == LC_OK) {
+        lc_error_set(&handler_error, LC_ERR_TRANSPORT, 0L,
+                     "consumer handler failed to nack delivery", NULL, NULL,
+                     NULL);
+      }
+    }
   }
-  if (rc != LC_OK) {
-    lc_consumer_copy_error(bridge->error, &handler_error, handler_error.code,
+  if (rc != LC_OK || auto_finalize_failed) {
+    lc_consumer_copy_error(bridge->error, &handler_error,
+                           handler_error.code != LC_OK ? handler_error.code
+                                                       : final_rc,
                            "consumer handler failed");
   }
-  lc_error_cleanup(&handler_error);
-  if (bridge->message != NULL && !bridge->terminal) {
-    bridge->message->close(bridge->message);
-    bridge->message = NULL;
-  } else if (bridge->terminal) {
+  if (bridge->message != NULL && bridge->terminal) {
     bridge->message = NULL;
   }
-  bridge->handler_rc = rc;
+  lc_error_cleanup(&handler_error);
+  bridge->handler_rc = final_rc;
   return NULL;
 }
 
