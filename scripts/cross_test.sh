@@ -4,7 +4,6 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 mode=${1:-all}
-ctest_parallel_level=${CTEST_PARALLEL_LEVEL:-$(nproc)}
 
 cross_release_presets=(
   aarch64-linux-gnu-release
@@ -22,7 +21,7 @@ run_ctest_background() {
   local preset="$2"
   local regex="$3"
 
-  ctest --preset "$preset" --output-on-failure --parallel "$ctest_parallel_level" -R "$regex" &
+  ctest --preset "$preset" --output-on-failure -R "$regex" &
   printf -v "$out_var" '%s' "$!"
 }
 
@@ -58,7 +57,7 @@ run_cross_release_matrix() {
 
   for preset in "${cross_release_presets[@]}"; do
     "$script_dir/build.sh" "$preset"
-    ctest --preset "$preset" --output-on-failure --parallel "$ctest_parallel_level"
+    ctest --preset "$preset" --output-on-failure
   done
 }
 
