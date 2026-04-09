@@ -100,6 +100,18 @@ esac
 manifest_path="$deps_root/manifest.txt"
 mkdir -p "$deps_root"
 
+zlib_version=${LOCKDC_ZLIB_VERSION:-}
+if [ -z "$zlib_version" ]; then
+  zlib_version=$(
+    sed -n 's/^set(LOCKDC_ZLIB_VERSION "\(.*\)" CACHE STRING.*/\1/p' \
+      "$repo_root/CMakeLists.txt" | head -n1
+  )
+fi
+if [ -z "$zlib_version" ]; then
+  printf '%s\n' "failed to resolve LOCKDC_ZLIB_VERSION from CMakeLists.txt" >&2
+  exit 1
+fi
+
 compiler=${CC:-cc}
 compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
 compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
@@ -122,7 +134,8 @@ manifest="compiler=$compiler
 machine=$compiler_machine
 version=$compiler_version
 fingerprint=$fingerprint
-preset=$preset"
+preset=$preset
+zlib_version=$zlib_version"
 
 stage_dependency_license() {
   local install_subdir=$1
@@ -186,7 +199,7 @@ required_paths=(
   "$deps_root/zlib/install/lib/libz.a"
   "$deps_root/zlib/install/lib/libz.so"
   "$deps_root/zlib/install/lib/libz.so.1"
-  "$deps_root/zlib/install/lib/libz.so.1.3.2"
+  "$deps_root/zlib/install/lib/libz.so.$zlib_version"
   "$deps_root/zlib/install/include/zlib.h"
   "$deps_root/zlib/install/include/zconf.h"
   "$deps_root/curl-static/install/lib/libcurl.a"
@@ -212,6 +225,7 @@ if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ] && [ "$(cat "$manifest_pat
 fi
 
 reset_dependency_build_root
+cmake_extra_args+=("-DLOCKDC_ZLIB_VERSION=$zlib_version")
 cmake --preset "$cmake_preset" --fresh "${cmake_extra_args[@]}"
 cmake --build --preset "$cmake_preset" --target lc_deps
 stage_dependency_license "openssl-shared" "openssl" "$deps_build_root/openssl-shared/src/LICENSE.txt"

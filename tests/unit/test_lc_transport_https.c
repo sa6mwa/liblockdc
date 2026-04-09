@@ -62,10 +62,12 @@ typedef struct https_expectation {
 typedef struct https_tls_material {
   char temp_dir[PATH_MAX];
   char client_bundle_path[PATH_MAX];
+  char client_bundle_without_ca_path[PATH_MAX];
   X509 *ca_cert;
   EVP_PKEY *ca_key;
   X509 *server_cert;
   EVP_PKEY *server_key;
+  int uses_shared_state;
 } https_tls_material;
 
 typedef struct https_testserver {
@@ -96,6 +98,9 @@ typedef struct test_enqueue_source {
   size_t reset_count;
   size_t max_chunk;
 } test_enqueue_source;
+
+static https_tls_material shared_tls_material;
+static int shared_tls_material_initialized;
 
 static size_t test_enqueue_source_read(lc_source *self, void *buffer,
                                        size_t count, lc_error *error) {
@@ -838,12 +843,16 @@ static int write_bundle_file(const char *path, X509 *ca_cert, X509 *client_cert,
   return 1;
 }
 
-static int https_tls_material_init(https_tls_material *material,
-                                   int include_ca_in_bundle) {
+static int https_tls_material_init_shared(void) {
   char template_path[] = "/tmp/liblockdc-transport-XXXXXX";
   EVP_PKEY *client_key;
   X509 *client_cert;
+  https_tls_material *material;
 
+  if (shared_tls_material_initialized) {
+    return 1;
+  }
+  material = &shared_tls_material;
   memset(material, 0, sizeof(*material));
   if (mkdtemp(template_path) == NULL) {
     return 0;
@@ -852,7 +861,12 @@ static int https_tls_material_init(https_tls_material *material,
                template_path) >= (int)sizeof(material->temp_dir) ||
       snprintf(material->client_bundle_path,
                sizeof(material->client_bundle_path), "%s/client-bundle.pem",
-               template_path) >= (int)sizeof(material->client_bundle_path)) {
+               template_path) >= (int)sizeof(material->client_bundle_path) ||
+      snprintf(material->client_bundle_without_ca_path,
+               sizeof(material->client_bundle_without_ca_path),
+               "%s/client-bundle-no-ca.pem",
+               template_path) >=
+          (int)sizeof(material->client_bundle_without_ca_path)) {
     return 0;
   }
 
@@ -880,8 +894,9 @@ static int https_tls_material_init(https_tls_material *material,
     return 0;
   }
 
-  if (!write_bundle_file(material->client_bundle_path,
-                         include_ca_in_bundle ? material->ca_cert : NULL,
+  if (!write_bundle_file(material->client_bundle_path, material->ca_cert,
+                         client_cert, client_key) ||
+      !write_bundle_file(material->client_bundle_without_ca_path, NULL,
                          client_cert, client_key)) {
     X509_free(client_cert);
     EVP_PKEY_free(client_key);
@@ -890,6 +905,39 @@ static int https_tls_material_init(https_tls_material *material,
 
   X509_free(client_cert);
   EVP_PKEY_free(client_key);
+  shared_tls_material_initialized = 1;
+  return 1;
+}
+
+static int https_tls_material_init(https_tls_material *material,
+                                   int include_ca_in_bundle) {
+  if (material == NULL) {
+    return 0;
+  }
+  if (!https_tls_material_init_shared()) {
+    return 0;
+  }
+  memset(material, 0, sizeof(*material));
+  if (snprintf(material->temp_dir, sizeof(material->temp_dir), "%s",
+               shared_tls_material.temp_dir) >=
+          (int)sizeof(material->temp_dir) ||
+      snprintf(material->client_bundle_path,
+               sizeof(material->client_bundle_path), "%s",
+               include_ca_in_bundle ? shared_tls_material.client_bundle_path
+                                    : shared_tls_material
+                                          .client_bundle_without_ca_path) >=
+          (int)sizeof(material->client_bundle_path) ||
+      snprintf(material->client_bundle_without_ca_path,
+               sizeof(material->client_bundle_without_ca_path), "%s",
+               shared_tls_material.client_bundle_without_ca_path) >=
+          (int)sizeof(material->client_bundle_without_ca_path)) {
+    return 0;
+  }
+  material->ca_cert = shared_tls_material.ca_cert;
+  material->ca_key = shared_tls_material.ca_key;
+  material->server_cert = shared_tls_material.server_cert;
+  material->server_key = shared_tls_material.server_key;
+  material->uses_shared_state = 1;
   return 1;
 }
 
@@ -900,7 +948,12 @@ static void unlink_if_exists(const char *path) {
 }
 
 static void https_tls_material_cleanup(https_tls_material *material) {
+  if (material->uses_shared_state) {
+    memset(material, 0, sizeof(*material));
+    return;
+  }
   unlink_if_exists(material->client_bundle_path);
+  unlink_if_exists(material->client_bundle_without_ca_path);
   if (material->temp_dir[0] != '\0') {
     rmdir(material->temp_dir);
   }
@@ -909,6 +962,21 @@ static void https_tls_material_cleanup(https_tls_material *material) {
   X509_free(material->server_cert);
   EVP_PKEY_free(material->server_key);
   memset(material, 0, sizeof(*material));
+}
+
+static int https_tls_material_teardown_shared(void **state) {
+  (void)state;
+  if (!shared_tls_material_initialized) {
+    return 0;
+  }
+  https_tls_material_cleanup(&shared_tls_material);
+  shared_tls_material_initialized = 0;
+  return 0;
+}
+
+static int https_tls_material_setup_shared(void **state) {
+  (void)state;
+  return https_tls_material_init_shared() ? 0 : -1;
 }
 
 static int https_testserver_start(https_testserver *server,
@@ -4591,5 +4659,6 @@ int main(void) {
       cmocka_unit_test(test_public_queue_nack_rejects_invalid_intent),
   };
 
-  return cmocka_run_group_tests(tests, NULL, NULL);
+  return cmocka_run_group_tests(tests, https_tls_material_setup_shared,
+                                https_tls_material_teardown_shared);
 }
