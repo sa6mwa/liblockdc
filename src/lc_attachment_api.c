@@ -112,8 +112,7 @@ static const lonejson_field lc_engine_enqueue_meta_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, queue, "queue"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, delay_seconds,
                        "delay_seconds"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json,
-                       visibility_timeout_seconds,
+    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, visibility_timeout_seconds,
                        "visibility_timeout_seconds"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, ttl_seconds, "ttl_seconds"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, max_attempts,
@@ -1030,8 +1029,7 @@ static int lc_engine_attachment_build_query(
     lc_engine_buffer_append_cstr(path, "&prevent_overwrite=1");
   }
   if (has_max_bytes) {
-    if (lc_i64_format_base10((lc_i64)max_bytes, scratch, sizeof(scratch)) <
-        0) {
+    if (lc_i64_format_base10((lc_i64)max_bytes, scratch, sizeof(scratch)) < 0) {
       lc_engine_buffer_cleanup(path);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to format max_bytes");

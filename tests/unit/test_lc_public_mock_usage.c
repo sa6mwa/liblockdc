@@ -75,8 +75,8 @@ static void test_public_mocks_support_happy_path_flow(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_public_mocks_model_managed_consumer_terminal_actions(
-    void **state) {
+static void
+test_public_mocks_model_managed_consumer_terminal_actions(void **state) {
   lc_public_mock_message message;
   lc_nack_req nack_req;
   lc_error error;

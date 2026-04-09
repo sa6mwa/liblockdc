@@ -262,7 +262,8 @@ static void consumer_test_sleep_ms(long delay_ms) {
   usleep((useconds_t)(delay_ms * 1000L));
 }
 
-static void fake_delivery_message_close_internal(fake_delivery_message *message) {
+static void
+fake_delivery_message_close_internal(fake_delivery_message *message) {
   if (message == NULL || message->closed) {
     return;
   }
@@ -320,8 +321,8 @@ static int fake_delivery_message_extend(lc_message *self,
   message->state->extend_calls += 1U;
   pthread_mutex_unlock(&message->state->mutex);
   if (message->state->extend_should_fail) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "synthetic extend failure", NULL, NULL, NULL);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L, "synthetic extend failure",
+                        NULL, NULL, NULL);
   }
   return LC_OK;
 }
@@ -400,10 +401,11 @@ static void fake_delivery_message_close(lc_message *self) {
   fake_delivery_message_close_internal((fake_delivery_message *)self);
 }
 
-static lc_message *fake_delivery_message_factory(
-    lc_consumer_service_handle *service, lc_client_handle *client,
-    const lc_engine_dequeue_response *delivery, lc_source *payload,
-    int *terminal_flag) {
+static lc_message *
+fake_delivery_message_factory(lc_consumer_service_handle *service,
+                              lc_client_handle *client,
+                              const lc_engine_dequeue_response *delivery,
+                              lc_source *payload, int *terminal_flag) {
   fake_delivery_message *message;
 
   (void)service;
@@ -432,7 +434,8 @@ static lc_message *fake_delivery_message_factory(
   message->pub.max_attempts = delivery->max_attempts;
   message->pub.failure_attempts = delivery->failure_attempts;
   message->pub.not_visible_until_unix = delivery->not_visible_until_unix;
-  message->pub.visibility_timeout_seconds = delivery->visibility_timeout_seconds;
+  message->pub.visibility_timeout_seconds =
+      delivery->visibility_timeout_seconds;
   message->pub.lease_expires_at_unix = delivery->lease_expires_at_unix;
   message->pub.fencing_token = delivery->fencing_token;
   message->pub.payload = payload;
@@ -1133,14 +1136,10 @@ static void test_consumer_service_multi_worker_failure_cleans_up(void **state) {
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
-static void run_consumer_terminal_scenario_unit_test(int handler_mode,
-                                                     int expected_run_rc,
-                                                     size_t expected_ack_calls,
-                                                     size_t expected_nack_calls,
-                                                     size_t expected_extend_calls,
-                                                     int expected_nack_intent,
-                                                     int extend_should_fail,
-                                                     long handler_delay_ms) {
+static void run_consumer_terminal_scenario_unit_test(
+    int handler_mode, int expected_run_rc, size_t expected_ack_calls,
+    size_t expected_nack_calls, size_t expected_extend_calls,
+    int expected_nack_intent, int extend_should_fail, long handler_delay_ms) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
   lc_client_handle client;
@@ -1210,19 +1209,19 @@ static void run_consumer_terminal_scenario_unit_test(int handler_mode,
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
-static void test_consumer_service_auto_acks_open_delivery_on_success(
-    void **state) {
+static void
+test_consumer_service_auto_acks_open_delivery_on_success(void **state) {
   (void)state;
   run_consumer_terminal_scenario_unit_test(CONSUMER_HANDLER_MODE_AUTO_ACK,
                                            LC_OK, 1U, 0U, 0U, -1, 0, 0L);
 }
 
-static void test_consumer_service_preserves_explicit_failure_nack_on_success(
-    void **state) {
+static void
+test_consumer_service_preserves_explicit_failure_nack_on_success(void **state) {
   (void)state;
   run_consumer_terminal_scenario_unit_test(
-      CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK, LC_OK, 0U, 1U,
-      0U, LC_NACK_INTENT_FAILURE, 0, 0L);
+      CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK, LC_OK, 0U, 1U, 0U,
+      LC_NACK_INTENT_FAILURE, 0, 0L);
 }
 
 static void
@@ -1230,8 +1229,8 @@ test_consumer_service_does_not_double_nack_explicit_failure_handler_error(
     void **state) {
   (void)state;
   run_consumer_terminal_scenario_unit_test(
-      CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR, LC_OK, 0U,
-      1U, 0U, LC_NACK_INTENT_FAILURE, 0, 0L);
+      CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR, LC_OK, 0U, 1U, 0U,
+      LC_NACK_INTENT_FAILURE, 0, 0L);
 }
 
 static void
@@ -1243,8 +1242,8 @@ test_consumer_service_does_not_double_nack_explicit_defer_handler_error(
       LC_NACK_INTENT_DEFER, 0, 0L);
 }
 
-static void test_consumer_service_skips_auto_ack_after_extend_failure(
-    void **state) {
+static void
+test_consumer_service_skips_auto_ack_after_extend_failure(void **state) {
   (void)state;
   run_consumer_terminal_scenario_unit_test(
       CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY, LC_OK, 0U, 1U, 1U,

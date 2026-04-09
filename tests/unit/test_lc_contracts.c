@@ -235,8 +235,8 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_txn_replay(&client.pub, &txn_replay_req, &txn_replay_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_txn_prepare(&client.pub, &txn_decision_req, &txn_decision_res,
-                      &error);
+  rc =
+      lc_txn_prepare(&client.pub, &txn_decision_req, &txn_decision_res, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_txn_commit(&client.pub, &txn_decision_req, &txn_decision_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -393,8 +393,7 @@ static void test_lease_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_lease_get(&lease.pub, &sink.pub, &get_opts, &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_lease_load(&lease.pub, NULL, NULL, NULL, &get_opts, &get_res,
-                     &error);
+  rc = lc_lease_load(&lease.pub, NULL, NULL, NULL, &get_opts, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_lease_save(&lease.pub, NULL, NULL, NULL, &error);
   assert_int_equal(rc, LC_OK);
@@ -450,8 +449,8 @@ static void test_lease_wrappers_delegate_full_public_surface(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_message_and_service_wrappers_delegate_full_public_surface(
-    void **state) {
+static void
+test_message_and_service_wrappers_delegate_full_public_surface(void **state) {
   lc_public_mock_message message;
   lc_public_mock_lease lease;
   lc_public_mock_source source;

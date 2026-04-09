@@ -997,7 +997,8 @@ int lc_engine_http_json_request(
       result->detail = lc_engine_strdup_local(state.error_body.detail);
       result->leader_endpoint =
           lc_engine_strdup_local(state.error_body.leader_endpoint);
-      result->current_etag = lc_engine_strdup_local(state.error_body.current_etag);
+      result->current_etag =
+          lc_engine_strdup_local(state.error_body.current_etag);
       result->current_version = (long)state.error_body.current_version;
       result->retry_after_seconds = (long)state.error_body.retry_after_seconds;
       if ((state.error_body.server_error_code != NULL &&
@@ -1320,7 +1321,8 @@ int lc_engine_http_json_request_stream(
       result->detail = lc_engine_strdup_local(state.error_body.detail);
       result->leader_endpoint =
           lc_engine_strdup_local(state.error_body.leader_endpoint);
-      result->current_etag = lc_engine_strdup_local(state.error_body.current_etag);
+      result->current_etag =
+          lc_engine_strdup_local(state.error_body.current_etag);
       result->current_version = (long)state.error_body.current_version;
       result->retry_after_seconds = (long)state.error_body.retry_after_seconds;
       if ((state.error_body.server_error_code != NULL &&

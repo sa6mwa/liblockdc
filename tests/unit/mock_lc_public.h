@@ -155,6 +155,7 @@ void lc_public_mock_json_init(lc_public_mock_json *mock);
 void lc_public_mock_client_init(lc_public_mock_client *mock);
 void lc_public_mock_lease_init(lc_public_mock_lease *mock);
 void lc_public_mock_message_init(lc_public_mock_message *mock);
-void lc_public_mock_consumer_service_init(lc_public_mock_consumer_service *mock);
+void lc_public_mock_consumer_service_init(
+    lc_public_mock_consumer_service *mock);
 
 #endif

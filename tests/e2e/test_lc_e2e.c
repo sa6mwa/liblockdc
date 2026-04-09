@@ -969,7 +969,8 @@ static int e2e_consumer_handle(void *context, lc_consumer_message *delivery,
   pthread_mutex_lock(&consumer_context->mutex);
   handled_count = consumer_context->handled;
   pthread_mutex_unlock(&consumer_context->mutex);
-  if (consumer_context->first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL &&
+  if (consumer_context->first_delivery_mode ==
+          E2E_CONSUMER_FIRST_DELIVERY_FAIL &&
       handled_count == 1) {
     e2e_sleep_ms(1500L);
     return LC_ERR_TRANSPORT;
@@ -1021,15 +1022,13 @@ static int e2e_consumer_on_error(void *context, const lc_consumer_error *event,
          sizeof(consumer_context->last_error_server_code));
   if (event != NULL && event->cause != NULL &&
       event->cause->server_code != NULL) {
-    strncpy(consumer_context->last_error_server_code,
-            event->cause->server_code,
+    strncpy(consumer_context->last_error_server_code, event->cause->server_code,
             sizeof(consumer_context->last_error_server_code) - 1U);
   }
   memset(consumer_context->last_error_message, 0,
          sizeof(consumer_context->last_error_message));
   if (event != NULL && event->cause != NULL && event->cause->message != NULL) {
-    strncpy(consumer_context->last_error_message,
-            event->cause->message,
+    strncpy(consumer_context->last_error_message, event->cause->message,
             sizeof(consumer_context->last_error_message) - 1U);
   }
   pthread_mutex_unlock(&consumer_context->mutex);
@@ -1173,11 +1172,10 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
     memset(&enqueue_res, 0, sizeof(enqueue_res));
   }
 
-  wait_for_consumer_handled(&consumer_context,
-                            first_delivery_mode !=
-                                    E2E_CONSUMER_FIRST_DELIVERY_NONE
-                                ? enqueue_count + 1
-                                : enqueue_count);
+  wait_for_consumer_handled(
+      &consumer_context, first_delivery_mode != E2E_CONSUMER_FIRST_DELIVERY_NONE
+                             ? enqueue_count + 1
+                             : enqueue_count);
 
   rc = (service->stop)(service);
   assert_int_equal(rc, LC_OK);
@@ -1188,15 +1186,12 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
   assert_true(consumer_context.start_events >= (int)worker_count);
   assert_true(consumer_context.stop_events >= (int)worker_count);
   if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL ||
-      first_delivery_mode ==
-          E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR) {
+      first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR) {
     assert_int_equal(consumer_context.handled, enqueue_count + 1);
     assert_true(consumer_context.error_events >= 1);
     assert_true(consumer_context.start_events >= (int)worker_count + 1);
-  } else if (first_delivery_mode ==
-                 E2E_CONSUMER_FIRST_DELIVERY_DEFER ||
-             first_delivery_mode ==
-                 E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE) {
+  } else if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_DEFER ||
+             first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE) {
     assert_int_equal(consumer_context.handled, enqueue_count + 1);
     assert_int_equal(consumer_context.error_events, 0);
     assert_int_equal(consumer_context.start_events, (int)worker_count);
@@ -1258,12 +1253,10 @@ static void test_disk_consumer_service_defer_then_redeliver(void **state) {
 static void test_disk_consumer_service_explicit_failure_nack(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-fail-nack", 1,
-                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0,
-                               1U);
+                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0, 1U);
 }
 
-static void
-test_disk_consumer_service_explicit_failure_nack_then_handler_error(
+static void test_disk_consumer_service_explicit_failure_nack_then_handler_error(
     void **state) {
   (void)state;
   run_consumer_service_variant(
@@ -1305,18 +1298,15 @@ static void test_s3_consumer_service_defer_then_redeliver(void **state) {
 static void test_s3_consumer_service_explicit_failure_nack(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-fail-nack", 1,
-                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0,
-                               1U);
+                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0, 1U);
 }
 
-static void
-test_s3_consumer_service_explicit_failure_nack_then_handler_error(
+static void test_s3_consumer_service_explicit_failure_nack_then_handler_error(
     void **state) {
   (void)state;
-  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-fail-nack-error",
-                               1,
-                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR,
-                               0, 1U);
+  run_consumer_service_variant(
+      &e2e_backend_s3, "s3-consumer-fail-nack-error", 1,
+      E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR, 0, 1U);
 }
 
 static void test_mem_uds_consumer_service_happy(void **state) {
@@ -1353,8 +1343,7 @@ static void test_mem_uds_consumer_service_defer_then_redeliver(void **state) {
 static void test_mem_uds_consumer_service_explicit_failure_nack(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-fail-nack", 1,
-                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0,
-                               1U);
+                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0, 1U);
 }
 
 static void
@@ -1476,8 +1465,8 @@ static void test_s3_dequeue_with_state_roundtrip(void **state) {
   lc_get_res get_res;
   char queue_name[96];
   char expected_state_key[160];
-  static const unsigned char payload[] = {'s', 't', 'a', 't', 'e',
-                                          '-', 's', '3'};
+  static const unsigned char payload[] = {'s', 't', 'a', 't',
+                                          'e', '-', 's', '3'};
   int rc;
 
   (void)state;

@@ -122,8 +122,7 @@ static int mock_consumer_service_start(lc_consumer_service *self,
   lc_public_mock_consumer_service *mock;
 
   mock = (lc_public_mock_consumer_service *)self;
-  lc_public_mock_record(&mock->start_call, self, error, NULL, NULL, NULL,
-                        NULL);
+  lc_public_mock_record(&mock->start_call, self, error, NULL, NULL, NULL, NULL);
   return mock->rc;
 }
 
@@ -209,8 +208,7 @@ static int mock_lease_mutate(lc_lease *self, const lc_mutate_req *req,
   lc_public_mock_lease *mock;
 
   mock = (lc_public_mock_lease *)self;
-  lc_public_mock_record(&mock->mutate_call, self, req, error, NULL, NULL,
-                        NULL);
+  lc_public_mock_record(&mock->mutate_call, self, req, error, NULL, NULL, NULL);
   return mock->rc;
 }
 
@@ -240,8 +238,7 @@ static int mock_lease_remove(lc_lease *self, const lc_remove_req *req,
   lc_public_mock_lease *mock;
 
   mock = (lc_public_mock_lease *)self;
-  lc_public_mock_record(&mock->remove_call, self, req, error, NULL, NULL,
-                        NULL);
+  lc_public_mock_record(&mock->remove_call, self, req, error, NULL, NULL, NULL);
   return mock->rc;
 }
 
@@ -287,8 +284,7 @@ static int mock_lease_list_attachments(lc_lease *self, lc_attachment_list *out,
 
 static int mock_lease_get_attachment(lc_lease *self,
                                      const lc_attachment_get_req *req,
-                                     lc_sink *dst,
-                                     lc_attachment_get_res *out,
+                                     lc_sink *dst, lc_attachment_get_res *out,
                                      lc_error *error) {
   lc_public_mock_lease *mock;
 
@@ -354,8 +350,7 @@ static int mock_message_extend(lc_message *self, const lc_extend_req *req,
   lc_public_mock_message *mock;
 
   mock = (lc_public_mock_message *)self;
-  lc_public_mock_record(&mock->extend_call, self, req, error, NULL, NULL,
-                        NULL);
+  lc_public_mock_record(&mock->extend_call, self, req, error, NULL, NULL, NULL);
   return mock->rc;
 }
 
@@ -423,8 +418,7 @@ static int mock_client_acquire(lc_client *self, const lc_acquire_req *req,
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->acquire_call, self, req, out, error, NULL,
-                        NULL);
+  lc_public_mock_record(&mock->acquire_call, self, req, out, error, NULL, NULL);
   if (out != NULL) {
     *out = mock->lease_to_return;
   }
@@ -518,8 +512,7 @@ static int mock_client_release(lc_client *self, const lc_release_op *req,
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->release_call, self, req, out, error, NULL,
-                        NULL);
+  lc_public_mock_record(&mock->release_call, self, req, out, error, NULL, NULL);
   return mock->rc;
 }
 
@@ -547,8 +540,7 @@ static int mock_client_list_attachments(lc_client *self,
 
 static int mock_client_get_attachment(lc_client *self,
                                       const lc_attachment_get_op *req,
-                                      lc_sink *dst,
-                                      lc_attachment_get_res *out,
+                                      lc_sink *dst, lc_attachment_get_res *out,
                                       lc_error *error) {
   lc_public_mock_client *mock;
 
@@ -572,9 +564,10 @@ static int mock_client_delete_attachment(lc_client *self,
   return mock->rc;
 }
 
-static int mock_client_delete_all_attachments(
-    lc_client *self, const lc_attachment_delete_all_op *req,
-    int *deleted_count, lc_error *error) {
+static int
+mock_client_delete_all_attachments(lc_client *self,
+                                   const lc_attachment_delete_all_op *req,
+                                   int *deleted_count, lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
@@ -636,9 +629,10 @@ static int mock_client_query(lc_client *self, const lc_query_req *req,
   return mock->rc;
 }
 
-static int mock_client_get_namespace_config(
-    lc_client *self, const lc_namespace_config_req *req,
-    lc_namespace_config_res *out, lc_error *error) {
+static int mock_client_get_namespace_config(lc_client *self,
+                                            const lc_namespace_config_req *req,
+                                            lc_namespace_config_res *out,
+                                            lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
@@ -703,8 +697,7 @@ static int mock_client_txn_commit(lc_client *self,
 
 static int mock_client_txn_rollback(lc_client *self,
                                     const lc_txn_decision_req *req,
-                                    lc_txn_decision_res *out,
-                                    lc_error *error) {
+                                    lc_txn_decision_res *out, lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
@@ -713,9 +706,10 @@ static int mock_client_txn_rollback(lc_client *self,
   return mock->rc;
 }
 
-static int mock_client_tc_lease_acquire(
-    lc_client *self, const lc_tc_lease_acquire_req *req,
-    lc_tc_lease_acquire_res *out, lc_error *error) {
+static int mock_client_tc_lease_acquire(lc_client *self,
+                                        const lc_tc_lease_acquire_req *req,
+                                        lc_tc_lease_acquire_res *out,
+                                        lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
@@ -731,14 +725,15 @@ static int mock_client_tc_lease_renew(lc_client *self,
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->tc_lease_renew_call, self, req, out, error,
-                        NULL, NULL);
+  lc_public_mock_record(&mock->tc_lease_renew_call, self, req, out, error, NULL,
+                        NULL);
   return mock->rc;
 }
 
-static int mock_client_tc_lease_release(
-    lc_client *self, const lc_tc_lease_release_req *req,
-    lc_tc_lease_release_res *out, lc_error *error) {
+static int mock_client_tc_lease_release(lc_client *self,
+                                        const lc_tc_lease_release_req *req,
+                                        lc_tc_lease_release_res *out,
+                                        lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
@@ -757,9 +752,10 @@ static int mock_client_tc_leader(lc_client *self, lc_tc_leader_res *out,
   return mock->rc;
 }
 
-static int mock_client_tc_cluster_announce(
-    lc_client *self, const lc_tc_cluster_announce_req *req,
-    lc_tc_cluster_res *out, lc_error *error) {
+static int
+mock_client_tc_cluster_announce(lc_client *self,
+                                const lc_tc_cluster_announce_req *req,
+                                lc_tc_cluster_res *out, lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
@@ -794,14 +790,14 @@ static int mock_client_tc_rm_register(lc_client *self,
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->tc_rm_register_call, self, req, out, error,
-                        NULL, NULL);
+  lc_public_mock_record(&mock->tc_rm_register_call, self, req, out, error, NULL,
+                        NULL);
   return mock->rc;
 }
 
-static int mock_client_tc_rm_unregister(
-    lc_client *self, const lc_tc_rm_unregister_req *req, lc_tc_rm_res *out,
-    lc_error *error) {
+static int mock_client_tc_rm_unregister(lc_client *self,
+                                        const lc_tc_rm_unregister_req *req,
+                                        lc_tc_rm_res *out, lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
@@ -835,8 +831,7 @@ static int mock_client_dequeue(lc_client *self, const lc_dequeue_req *req,
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->dequeue_call, self, req, out, error, NULL,
-                        NULL);
+  lc_public_mock_record(&mock->dequeue_call, self, req, out, error, NULL, NULL);
   if (out != NULL) {
     *out = mock->message_to_return;
   }
@@ -869,13 +864,12 @@ static int mock_client_dequeue_with_state(lc_client *self,
 }
 
 static int mock_client_subscribe(lc_client *self, const lc_dequeue_req *req,
-                                 const lc_consumer *consumer,
-                                 lc_error *error) {
+                                 const lc_consumer *consumer, lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->subscribe_call, self, req, consumer, error,
-                        NULL, NULL);
+  lc_public_mock_record(&mock->subscribe_call, self, req, consumer, error, NULL,
+                        NULL);
   return mock->rc;
 }
 
@@ -891,9 +885,10 @@ static int mock_client_subscribe_with_state(lc_client *self,
   return mock->rc;
 }
 
-static int mock_client_new_consumer_service(
-    lc_client *self, const lc_consumer_service_config *config,
-    lc_consumer_service **out, lc_error *error) {
+static int
+mock_client_new_consumer_service(lc_client *self,
+                                 const lc_consumer_service_config *config,
+                                 lc_consumer_service **out, lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
@@ -1036,7 +1031,8 @@ void lc_public_mock_message_init(lc_public_mock_message *mock) {
   mock->pub.close = mock_message_close;
 }
 
-void lc_public_mock_consumer_service_init(lc_public_mock_consumer_service *mock) {
+void lc_public_mock_consumer_service_init(
+    lc_public_mock_consumer_service *mock) {
   memset(mock, 0, sizeof(*mock));
   mock->rc = LC_OK;
   mock->pub.run = mock_consumer_service_run;

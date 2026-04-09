@@ -128,8 +128,7 @@ LONEJSON_MAP_DEFINE(lc_engine_subscribe_meta_map, lc_engine_subscribe_meta_json,
 static const lonejson_field lc_engine_watch_queue_request_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_queue_request, namespace_name,
                                 "namespace"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_queue_request, queue,
-                                "queue")};
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_queue_request, queue, "queue")};
 
 static const lonejson_field lc_engine_subscribe_request_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_dequeue_request, namespace_name,
@@ -138,8 +137,7 @@ static const lonejson_field lc_engine_subscribe_request_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_dequeue_request, owner, "owner"),
     LONEJSON_FIELD_I64(lc_engine_dequeue_request, visibility_timeout_seconds,
                        "visibility_timeout_seconds"),
-    LONEJSON_FIELD_I64(lc_engine_dequeue_request, wait_seconds,
-                       "wait_seconds"),
+    LONEJSON_FIELD_I64(lc_engine_dequeue_request, wait_seconds, "wait_seconds"),
     LONEJSON_FIELD_I64(lc_engine_dequeue_request, page_size, "page_size"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_dequeue_request, start_after,
                                 "start_after")};
@@ -1576,8 +1574,8 @@ static int lc_engine_client_subscribe_internal(
       int rc;
 
       memset(&body_upload, 0, sizeof(body_upload));
-      if (lonejson_curl_upload_init(&body_upload, &body_map, &body_src,
-                                    NULL) != LONEJSON_STATUS_OK) {
+      if (lonejson_curl_upload_init(&body_upload, &body_map, &body_src, NULL) !=
+          LONEJSON_STATUS_OK) {
         curl_slist_free_all(headers);
         return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                           "failed to prepare subscribe body");

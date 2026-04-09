@@ -791,8 +791,7 @@ int lc_engine_client_acquire(lc_engine_client *client,
     body_fields[body_field_count++] = lc_engine_acquire_body_fields[6];
   }
   lc_engine_lonejson_map_init(&body_map, "lc_engine_acquire_request",
-                              body_fields, body_field_count,
-                              sizeof(body_src));
+                              body_fields, body_field_count, sizeof(body_src));
   headers[0].name = "Content-Type";
   headers[0].value = "application/json";
   memset(&result, 0, sizeof(result));
@@ -981,8 +980,7 @@ int lc_engine_client_keepalive(lc_engine_client *client,
     body_fields[body_field_count++] = lc_engine_keepalive_body_fields[3];
   }
   lc_engine_lonejson_map_init(&body_map, "lc_engine_keepalive_request",
-                              body_fields, body_field_count,
-                              sizeof(body_src));
+                              body_fields, body_field_count, sizeof(body_src));
   rc = lc_engine_set_fencing_header(request->fencing_token, &fence_value,
                                     &headers[1]);
   if (rc != LC_ENGINE_OK) {
@@ -994,8 +992,8 @@ int lc_engine_client_keepalive(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/keepalive", &body_map, &body_src, NULL, headers,
-      2U, &lc_engine_keepalive_response_map, &response_json, &result, error);
+      client, "POST", "/v1/keepalive", &body_map, &body_src, NULL, headers, 2U,
+      &lc_engine_keepalive_response_map, &response_json, &result, error);
   lc_engine_buffer_cleanup(&fence_value);
   if (rc != LC_ENGINE_OK) {
     return rc;
@@ -1065,8 +1063,7 @@ int lc_engine_client_release(lc_engine_client *client,
     body_fields[body_field_count++] = lc_engine_release_body_fields[5];
   }
   lc_engine_lonejson_map_init(&body_map, "lc_engine_release_request",
-                              body_fields, body_field_count,
-                              sizeof(body_src));
+                              body_fields, body_field_count, sizeof(body_src));
   rc = lc_engine_set_fencing_header(request->fencing_token, &fence_value,
                                     &headers[1]);
   if (rc != LC_ENGINE_OK) {
@@ -1153,8 +1150,8 @@ int lc_engine_client_update(lc_engine_client *client,
   rc = lc_engine_apply_common_mutation_headers(
       request->content_type != NULL ? request->content_type
                                     : "application/octet-stream",
-      request->lease_id, request->txn_id, request->if_state_etag,
-      &fence_value, headers, &header_count, request->fencing_token);
+      request->lease_id, request->txn_id, request->if_state_etag, &fence_value,
+      headers, &header_count, request->fencing_token);
   if (rc != LC_ENGINE_OK) {
     lc_engine_buffer_cleanup(&path);
     return lc_engine_set_client_error(error, rc,
@@ -1264,8 +1261,8 @@ int lc_engine_client_update_stream(lc_engine_client *client,
   rc = lc_engine_apply_common_mutation_headers(
       request->content_type != NULL ? request->content_type
                                     : "application/octet-stream",
-      request->lease_id, request->txn_id, request->if_state_etag,
-      &fence_value, headers, &header_count, request->fencing_token);
+      request->lease_id, request->txn_id, request->if_state_etag, &fence_value,
+      headers, &header_count, request->fencing_token);
   if (rc != LC_ENGINE_OK) {
     lc_engine_buffer_cleanup(&path);
     return lc_engine_set_client_error(error, rc,
@@ -1382,8 +1379,7 @@ int lc_engine_client_mutate(lc_engine_client *client,
   }
   body_fields[body_field_count++] = lc_engine_mutate_body_fields[1];
   lc_engine_lonejson_map_init(&body_map, "lc_engine_mutate_body_json",
-                              body_fields, body_field_count,
-                              sizeof(body_src));
+                              body_fields, body_field_count, sizeof(body_src));
   rc = lc_engine_apply_common_mutation_headers(
       "application/json", request->lease_id, request->txn_id,
       request->if_state_etag, &fence_value, headers, &header_count,
@@ -1529,8 +1525,7 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   }
 
   body_field_count = 0U;
-  if (request->namespace_name != NULL &&
-      request->namespace_name[0] != '\0') {
+  if (request->namespace_name != NULL && request->namespace_name[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_metadata_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_metadata_body_fields[1];
@@ -1542,13 +1537,12 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
     body_fields[body_field_count++] = lc_engine_metadata_body_fields[7];
   }
   lc_engine_lonejson_map_init(&body_map, "lc_engine_metadata_request",
-                              body_fields, body_field_count,
-                              sizeof(*request));
+                              body_fields, body_field_count, sizeof(*request));
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_json_request_stream(
-      client, "POST", path.data, &body_map, request, NULL, headers,
-      header_count, &lc_engine_metadata_response_map, &response_json, &result,
-      error);
+  rc = lc_engine_http_json_request_stream(client, "POST", path.data, &body_map,
+                                          request, NULL, headers, header_count,
+                                          &lc_engine_metadata_response_map,
+                                          &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&version_value);
@@ -1886,8 +1880,7 @@ int lc_engine_client_query(lc_engine_client *client,
     body_fields[body_field_count++] = lc_engine_query_body_fields[5];
   }
   lc_engine_lonejson_map_init(&body_map, "lc_engine_query_body_json",
-                              body_fields, body_field_count,
-                              sizeof(body_src));
+                              body_fields, body_field_count, sizeof(body_src));
 
   headers[0].name = "Content-Type";
   headers[0].value = "application/json";
@@ -1932,10 +1925,10 @@ int lc_engine_client_query(lc_engine_client *client,
 }
 
 int lc_engine_dequeue_internal(lc_engine_client *client,
-                                      const lc_engine_dequeue_request *request,
-                                      int with_state,
-                                      lc_engine_dequeue_response *response,
-                                      lc_engine_error *error) {
+                               const lc_engine_dequeue_request *request,
+                               int with_state,
+                               lc_engine_dequeue_response *response,
+                               lc_engine_error *error) {
   lc_engine_queue_stream_handler handler;
   lc_engine_dequeue_capture_state capture;
   int rc;

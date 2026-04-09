@@ -307,8 +307,9 @@ lc_engine_mgmt_request_headers(const lc_engine_header_pair **out_headers,
 static int lc_engine_mgmt_call_json_stream(
     lc_engine_client *client, const char *method, const char *path,
     const lonejson_map *body_map, const void *body_src,
-    const lonejson_write_options *body_options, const lonejson_map *response_map,
-    void *response_json, void *response, lc_engine_error *error,
+    const lonejson_write_options *body_options,
+    const lonejson_map *response_map, void *response_json, void *response,
+    lc_engine_error *error,
     int (*copy_fn)(const void *, const lc_engine_http_result *, void *,
                    lc_engine_error *)) {
   lc_engine_http_result result;
@@ -980,8 +981,9 @@ static int lc_engine_mgmt_build_txn_decision_body(
                                       "txn decision body inputs are required");
   }
   if (body_field_capacity < 6U) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "txn decision body field capacity too small");
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "txn decision body field capacity too small");
   }
 
   memset(body_src, 0, sizeof(*body_src));
@@ -1012,8 +1014,7 @@ static int lc_engine_mgmt_build_txn_decision_body(
   if (request->expires_at_unix > 0L) {
     body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[3];
   }
-  if (request->tc_term > 0 &&
-      request->tc_term <= (lonejson_int64)LONG_MAX) {
+  if (request->tc_term > 0 && request->tc_term <= (lonejson_int64)LONG_MAX) {
     body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[4];
   }
   if (request->target_backend_hash != NULL &&
@@ -1045,11 +1046,10 @@ int lc_engine_client_txn_decide(lc_engine_client *client,
                                       "txn_decide requires client, request, "
                                       "response, error, txn_id, and state");
   }
-  rc = lc_engine_mgmt_build_txn_decision_body(request, &body_src, body_fields,
-                                              sizeof(body_fields) /
-                                                  sizeof(body_fields[0]),
-                                              &body_field_count, &body_map,
-                                              error);
+  rc = lc_engine_mgmt_build_txn_decision_body(
+      request, &body_src, body_fields,
+      sizeof(body_fields) / sizeof(body_fields[0]), &body_field_count,
+      &body_map, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }

@@ -231,10 +231,10 @@ static size_t lc_engine_stream_write_callback(char *ptr, size_t size,
   return total;
 }
 
-static int lc_engine_stream_perform_query(lc_engine_client *client,
-                                          const char *url,
-                                          const lonejson_curl_upload *body_upload,
-                                          lc_engine_stream_query_state *state) {
+static int
+lc_engine_stream_perform_query(lc_engine_client *client, const char *url,
+                               const lonejson_curl_upload *body_upload,
+                               lc_engine_stream_query_state *state) {
   CURL *curl;
   CURLcode curl_rc;
   struct curl_slist *headers;

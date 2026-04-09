@@ -409,8 +409,8 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
   body_map.field_count = body_field_count;
   rc = lc_engine_http_json_request_stream(
       client, "POST", "/v1/queue/stats", &body_map, &body_src, NULL, headers,
-      header_count,
-      &lc_engine_queue_stats_response_map, &parsed, &result, error);
+      header_count, &lc_engine_queue_stats_response_map, &parsed, &result,
+      error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -496,8 +496,7 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
   body_map.field_count = body_field_count;
   rc = lc_engine_http_json_request_stream(
       client, "POST", "/v1/queue/ack", &body_map, &body_src, NULL, headers,
-      header_count, &lc_engine_queue_ack_response_map, &parsed, &result,
-      error);
+      header_count, &lc_engine_queue_ack_response_map, &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -591,8 +590,7 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   last_error_source.cursor = (const unsigned char *)"";
   last_error_source.remaining = 0U;
   if (request->last_error_json != NULL && request->last_error_json[0] != '\0') {
-    last_error_source.cursor =
-        (const unsigned char *)request->last_error_json;
+    last_error_source.cursor = (const unsigned char *)request->last_error_json;
     last_error_source.remaining = strlen(request->last_error_json);
     rc = lonejson_json_value_set_reader(&body_src.last_error,
                                         lc_engine_json_memory_reader,
@@ -621,9 +619,9 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   body_map.field_count = body_field_count;
   if (rc == LC_ENGINE_OK) {
     rc = lc_engine_http_json_request_stream(
-        client, "POST", "/v1/queue/nack", &body_map, &body_src, NULL,
-        headers, header_count, &lc_engine_queue_nack_response_map, &parsed,
-        &result, error);
+        client, "POST", "/v1/queue/nack", &body_map, &body_src, NULL, headers,
+        header_count, &lc_engine_queue_nack_response_map, &parsed, &result,
+        error);
   }
   lonejson_json_value_cleanup(&body_src.last_error);
   if (rc != LC_ENGINE_OK) {
@@ -710,8 +708,8 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
   body_map.field_count = body_field_count;
   rc = lc_engine_http_json_request_stream(
       client, "POST", "/v1/queue/extend", &body_map, &body_src, NULL, headers,
-      header_count,
-      &lc_engine_queue_extend_response_map, &parsed, &result, error);
+      header_count, &lc_engine_queue_extend_response_map, &parsed, &result,
+      error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }

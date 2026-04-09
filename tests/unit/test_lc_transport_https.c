@@ -155,8 +155,7 @@ static int test_enqueue_source_new(const void *bytes, size_t length,
   source = (test_enqueue_source *)calloc(1, sizeof(*source));
   if (source == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate enqueue source", NULL, NULL,
-                        NULL);
+                        "failed to allocate enqueue source", NULL, NULL, NULL);
   }
   source->pub.read = test_enqueue_source_read;
   source->pub.reset = test_enqueue_source_reset;
@@ -864,8 +863,7 @@ static int https_tls_material_init_shared(void) {
                template_path) >= (int)sizeof(material->client_bundle_path) ||
       snprintf(material->client_bundle_without_ca_path,
                sizeof(material->client_bundle_without_ca_path),
-               "%s/client-bundle-no-ca.pem",
-               template_path) >=
+               "%s/client-bundle-no-ca.pem", template_path) >=
           (int)sizeof(material->client_bundle_without_ca_path)) {
     return 0;
   }
@@ -923,9 +921,9 @@ static int https_tls_material_init(https_tls_material *material,
           (int)sizeof(material->temp_dir) ||
       snprintf(material->client_bundle_path,
                sizeof(material->client_bundle_path), "%s",
-               include_ca_in_bundle ? shared_tls_material.client_bundle_path
-                                    : shared_tls_material
-                                          .client_bundle_without_ca_path) >=
+               include_ca_in_bundle
+                   ? shared_tls_material.client_bundle_path
+                   : shared_tls_material.client_bundle_without_ca_path) >=
           (int)sizeof(material->client_bundle_path) ||
       snprintf(material->client_bundle_without_ca_path,
                sizeof(material->client_bundle_without_ca_path), "%s",
@@ -3679,7 +3677,8 @@ test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
   https_tls_material_cleanup(&material);
 }
 
-static void test_enqueue_from_rejects_non_rewindable_retry_source(void **state) {
+static void
+test_enqueue_from_rejects_non_rewindable_retry_source(void **state) {
   static const char *queue_headers[] = {"Content-Type: application/json"};
   static const char *enqueue_response_headers[] = {
       "X-Correlation-Id: corr-enqueue-passive-1",
@@ -3756,10 +3755,9 @@ test_public_lease_mutate_local_covers_no_content_path(void **state) {
       "X-Correlation-Id: corr-acquire-local", "Content-Type: application/json"};
   static const char *get_headers[] = {"X-Correlation-Id: corr-local-get",
                                       "Content-Type: application/json"};
-  static const char *update_headers[] = {"Content-Type: application/json",
-                                         "X-Fencing-Token: 22",
-                                         "X-Lease-ID: lease-2",
-                                         "X-Txn-ID: txn-local"};
+  static const char *update_headers[] = {
+      "Content-Type: application/json", "X-Fencing-Token: 22",
+      "X-Lease-ID: lease-2", "X-Txn-ID: txn-local"};
   static const char *update_response_headers[] = {
       "X-Correlation-Id: corr-local-update", "Content-Type: application/json"};
   static const https_expectation expectations[] = {
@@ -4103,7 +4101,8 @@ static void test_public_enqueue_streams_payload_from_source(void **state) {
       "X-Correlation-Id: corr-enqueue", "Content-Type: application/json"};
   static const char *const required_headers[] = {
       "Accept: application/json",
-      "Content-Type: multipart/related; boundary=lockdc-stream-boundary-7e4dbe2f",
+      "Content-Type: multipart/related; "
+      "boundary=lockdc-stream-boundary-7e4dbe2f",
       "Transfer-Encoding: chunked"};
   static const https_expectation expectations[] = {
       {"POST", "/v1/queue/enqueue", required_headers, 3U, NULL, 0U, 0, 200,
@@ -4642,16 +4641,14 @@ int main(void) {
           test_queue_transport_retries_node_passive_and_cleans_parser_state),
       cmocka_unit_test(
           test_enqueue_from_retries_node_passive_and_cleans_parser_state),
-      cmocka_unit_test(
-          test_enqueue_from_rejects_non_rewindable_retry_source),
+      cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source),
       cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),
       cmocka_unit_test(
           test_public_lease_load_respects_configured_json_response_limit),
       cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path),
       cmocka_unit_test(test_public_management_methods_emit_logs),
       cmocka_unit_test(test_public_enqueue_emits_logs),
-      cmocka_unit_test(
-          test_public_enqueue_streams_payload_from_source),
+      cmocka_unit_test(test_public_enqueue_streams_payload_from_source),
       cmocka_unit_test(test_public_dequeue_emits_stream_transport_logs),
       cmocka_unit_test(test_public_query_stream_captures_headers_and_body),
       cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq),

@@ -121,16 +121,16 @@ static long lc_consumer_auto_extend_delay_ms(long visibility_timeout_seconds) {
   return delay_ms;
 }
 
-static void lc_consumer_delivery_mark_terminal(
-    lc_consumer_delivery_bridge *bridge) {
+static void
+lc_consumer_delivery_mark_terminal(lc_consumer_delivery_bridge *bridge) {
   pthread_mutex_lock(&bridge->state_mutex);
   bridge->terminal = 1;
   pthread_cond_broadcast(&bridge->state_cond);
   pthread_mutex_unlock(&bridge->state_mutex);
 }
 
-static void lc_consumer_delivery_mark_handler_done(
-    lc_consumer_delivery_bridge *bridge) {
+static void
+lc_consumer_delivery_mark_handler_done(lc_consumer_delivery_bridge *bridge) {
   pthread_mutex_lock(&bridge->state_mutex);
   bridge->handler_done = 1;
   pthread_cond_broadcast(&bridge->state_cond);
@@ -1012,7 +1012,8 @@ static void *lc_consumer_delivery_handler_main(void *context) {
     lc_consumer_delivery_stop_extender(bridge);
   }
   if (rc == LC_OK && bridge->handler_failed) {
-    final_rc = bridge->handler_rc != LC_OK ? bridge->handler_rc : LC_ERR_TRANSPORT;
+    final_rc =
+        bridge->handler_rc != LC_OK ? bridge->handler_rc : LC_ERR_TRANSPORT;
     if (handler_error.code == LC_OK) {
       if (bridge->error != NULL && bridge->error->code != LC_OK) {
         lc_error_set(&handler_error, bridge->error->code,
@@ -1064,9 +1065,8 @@ static void *lc_consumer_delivery_handler_main(void *context) {
         final_rc = terminal_error.code != LC_OK ? terminal_error.code
                                                 : LC_ERR_TRANSPORT;
         if (bridge->error != NULL && bridge->error->code == LC_OK) {
-          lc_consumer_copy_error(
-              bridge->error, &terminal_error, final_rc,
-              "consumer handler failed to nack delivery");
+          lc_consumer_copy_error(bridge->error, &terminal_error, final_rc,
+                                 "consumer handler failed to nack delivery");
         }
       }
       lc_error_cleanup(&terminal_error);
@@ -1143,15 +1143,15 @@ static void *lc_consumer_delivery_extend_main(void *context) {
     if (rc != LC_OK) {
       pthread_mutex_lock(&bridge->state_mutex);
       if (bridge->error != NULL && bridge->error->code == LC_OK) {
-        lc_consumer_copy_error(
-            bridge->error, &extend_error,
-            extend_error.code != LC_OK ? extend_error.code : LC_ERR_TRANSPORT,
-            "consumer auto-extend failed");
+        lc_consumer_copy_error(bridge->error, &extend_error,
+                               extend_error.code != LC_OK ? extend_error.code
+                                                          : LC_ERR_TRANSPORT,
+                               "consumer auto-extend failed");
       }
       bridge->handler_failed = 1;
       if (bridge->handler_rc == LC_OK) {
-        bridge->handler_rc = extend_error.code != LC_OK ? extend_error.code
-                                                        : LC_ERR_TRANSPORT;
+        bridge->handler_rc =
+            extend_error.code != LC_OK ? extend_error.code : LC_ERR_TRANSPORT;
       }
       pthread_cond_broadcast(&bridge->state_cond);
       pthread_mutex_unlock(&bridge->state_mutex);
