@@ -1008,9 +1008,25 @@ static void *lc_consumer_delivery_handler_main(void *context) {
   rc = bridge->worker->config.handle(bridge->worker->config.context,
                                      &consumer_message, &handler_error);
   final_rc = rc;
-  if (rc == LC_OK) {
+  if (rc == LC_OK && bridge->message != NULL && !bridge->terminal) {
+    lc_consumer_delivery_stop_extender(bridge);
+  }
+  if (rc == LC_OK && bridge->handler_failed) {
+    final_rc = bridge->handler_rc != LC_OK ? bridge->handler_rc : LC_ERR_TRANSPORT;
+    if (handler_error.code == LC_OK) {
+      if (bridge->error != NULL && bridge->error->code != LC_OK) {
+        lc_error_set(&handler_error, bridge->error->code,
+                     bridge->error->http_status, bridge->error->message,
+                     bridge->error->detail, bridge->error->server_code,
+                     bridge->error->correlation_id);
+      } else {
+        lc_error_set(&handler_error, final_rc, 0L,
+                     "consumer auto-extend failed", NULL, NULL, NULL);
+      }
+    }
+  }
+  if (final_rc == LC_OK) {
     if (bridge->message != NULL && !bridge->terminal) {
-      lc_consumer_delivery_stop_extender(bridge);
       lc_error_init(&terminal_error);
       if (bridge->message->ack(bridge->message, &terminal_error) == LC_OK) {
         lc_consumer_delivery_mark_terminal(bridge);

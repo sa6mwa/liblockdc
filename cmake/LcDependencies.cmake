@@ -251,7 +251,7 @@ function(lc_add_zlib)
   lc_append_common_external_cmake_args(common_cmake_args)
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
-  set(zlib_shared_library "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.1.3.2")
+  set(zlib_shared_library "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.${LOCKDC_ZLIB_VERSION}")
   set(zlib_shared_soname "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.1")
   set(zlib_shared_link "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}")
   set(zlib_static_library "${install_dir}/lib/libz${CMAKE_STATIC_LIBRARY_SUFFIX}")
@@ -379,7 +379,7 @@ function(lc_add_libssh2)
         -DZLIB_ROOT=${LOCKDC_ZLIB_PREFIX}
         -DZLIB_DIR=${LOCKDC_ZLIB_PREFIX}/lib/cmake/zlib
         -DZLIB_INCLUDE_DIRS=${LOCKDC_ZLIB_PREFIX}/include
-        -DZLIB_LIBRARIES=${LOCKDC_ZLIB_PREFIX}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.1.3.2
+        -DZLIB_LIBRARIES=${LOCKDC_ZLIB_PREFIX}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.${LOCKDC_ZLIB_VERSION}
         ${common_cmake_args}
       DEPENDS
         ${openssl_project}

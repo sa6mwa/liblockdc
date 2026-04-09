@@ -30,12 +30,15 @@ typedef struct consumer_test_state {
   size_t subscribe_calls;
   size_t ack_calls;
   size_t nack_calls;
+  size_t extend_calls;
   size_t close_calls;
   int saw_logger;
   int fail_subscribe;
   int stop_requested;
   int last_nack_intent;
   int handler_mode;
+  int extend_should_fail;
+  long handler_delay_ms;
   FILE *log_fp;
 } consumer_test_state;
 
@@ -43,7 +46,8 @@ enum {
   CONSUMER_HANDLER_MODE_AUTO_ACK = 0,
   CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK = 1,
   CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR = 2,
-  CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR = 3
+  CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR = 3,
+  CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY = 4
 };
 
 typedef struct fake_delivery_message {
@@ -251,6 +255,13 @@ static void stop_test_service(consumer_test_state *state) {
   stop_fn(state->service);
 }
 
+static void consumer_test_sleep_ms(long delay_ms) {
+  if (delay_ms <= 0L) {
+    return;
+  }
+  usleep((useconds_t)(delay_ms * 1000L));
+}
+
 static void fake_delivery_message_close_internal(fake_delivery_message *message) {
   if (message == NULL || message->closed) {
     return;
@@ -301,9 +312,17 @@ static int fake_delivery_message_nack(lc_message *self, const lc_nack_req *req,
 static int fake_delivery_message_extend(lc_message *self,
                                         const lc_extend_req *req,
                                         lc_error *error) {
-  (void)self;
+  fake_delivery_message *message;
+
   (void)req;
-  (void)error;
+  message = (fake_delivery_message *)self;
+  pthread_mutex_lock(&message->state->mutex);
+  message->state->extend_calls += 1U;
+  pthread_mutex_unlock(&message->state->mutex);
+  if (message->state->extend_should_fail) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "synthetic extend failure", NULL, NULL, NULL);
+  }
   return LC_OK;
 }
 
@@ -459,6 +478,10 @@ static int handle_terminal_scenario(void *context, lc_consumer_message *message,
 
   switch (state->handler_mode) {
   case CONSUMER_HANDLER_MODE_AUTO_ACK:
+    stop_test_service(state);
+    return LC_OK;
+  case CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY:
+    consumer_test_sleep_ms(state->handler_delay_ms);
     stop_test_service(state);
     return LC_OK;
   case CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK:
@@ -1114,7 +1137,10 @@ static void run_consumer_terminal_scenario_unit_test(int handler_mode,
                                                      int expected_run_rc,
                                                      size_t expected_ack_calls,
                                                      size_t expected_nack_calls,
-                                                     int expected_nack_intent) {
+                                                     size_t expected_extend_calls,
+                                                     int expected_nack_intent,
+                                                     int extend_should_fail,
+                                                     long handler_delay_ms) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
   lc_client_handle client;
@@ -1137,6 +1163,8 @@ static void run_consumer_terminal_scenario_unit_test(int handler_mode,
   pthread_mutex_init(&runtime_state.mutex, NULL);
   runtime_state.handler_mode = handler_mode;
   runtime_state.last_nack_intent = -1;
+  runtime_state.extend_should_fail = extend_should_fail;
+  runtime_state.handler_delay_ms = handler_delay_ms;
 
   consumer.name = "worker-test";
   consumer.request.queue = "jobs";
@@ -1169,6 +1197,7 @@ static void run_consumer_terminal_scenario_unit_test(int handler_mode,
   }
   assert_int_equal(runtime_state.ack_calls, expected_ack_calls);
   assert_int_equal(runtime_state.nack_calls, expected_nack_calls);
+  assert_int_equal(runtime_state.extend_calls, expected_extend_calls);
   assert_int_equal(runtime_state.close_calls,
                    expected_ack_calls + expected_nack_calls);
   assert_int_equal(runtime_state.handled_messages, 1U);
@@ -1185,7 +1214,7 @@ static void test_consumer_service_auto_acks_open_delivery_on_success(
     void **state) {
   (void)state;
   run_consumer_terminal_scenario_unit_test(CONSUMER_HANDLER_MODE_AUTO_ACK,
-                                           LC_OK, 1U, 0U, -1);
+                                           LC_OK, 1U, 0U, 0U, -1, 0, 0L);
 }
 
 static void test_consumer_service_preserves_explicit_failure_nack_on_success(
@@ -1193,7 +1222,7 @@ static void test_consumer_service_preserves_explicit_failure_nack_on_success(
   (void)state;
   run_consumer_terminal_scenario_unit_test(
       CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK, LC_OK, 0U, 1U,
-      LC_NACK_INTENT_FAILURE);
+      0U, LC_NACK_INTENT_FAILURE, 0, 0L);
 }
 
 static void
@@ -1202,7 +1231,7 @@ test_consumer_service_does_not_double_nack_explicit_failure_handler_error(
   (void)state;
   run_consumer_terminal_scenario_unit_test(
       CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR, LC_OK, 0U,
-      1U, LC_NACK_INTENT_FAILURE);
+      1U, 0U, LC_NACK_INTENT_FAILURE, 0, 0L);
 }
 
 static void
@@ -1210,8 +1239,16 @@ test_consumer_service_does_not_double_nack_explicit_defer_handler_error(
     void **state) {
   (void)state;
   run_consumer_terminal_scenario_unit_test(
-      CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR, LC_OK, 0U, 1U,
-      LC_NACK_INTENT_DEFER);
+      CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR, LC_OK, 0U, 1U, 0U,
+      LC_NACK_INTENT_DEFER, 0, 0L);
+}
+
+static void test_consumer_service_skips_auto_ack_after_extend_failure(
+    void **state) {
+  (void)state;
+  run_consumer_terminal_scenario_unit_test(
+      CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY, LC_OK, 0U, 1U, 1U,
+      LC_NACK_INTENT_FAILURE, 1, 1500L);
 }
 
 int main(void) {
@@ -1232,6 +1269,8 @@ int main(void) {
           test_consumer_service_does_not_double_nack_explicit_failure_handler_error),
       cmocka_unit_test(
           test_consumer_service_does_not_double_nack_explicit_defer_handler_error),
+      cmocka_unit_test(
+          test_consumer_service_skips_auto_ack_after_extend_failure),
       cmocka_unit_test(
           test_consumer_service_retains_owned_logger_after_root_client_close),
       cmocka_unit_test(

@@ -164,6 +164,19 @@ static int test_enqueue_source_new(const void *bytes, size_t length,
   return LC_OK;
 }
 
+static int test_enqueue_source_new_non_rewindable(
+    const void *bytes, size_t length, size_t max_chunk, lc_source **out,
+    test_enqueue_source **out_state, lc_error *error) {
+  int rc;
+
+  rc = test_enqueue_source_new(bytes, length, max_chunk, out, out_state, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  (*out)->reset = NULL;
+  return LC_OK;
+}
+
 static int watch_event_sink(void *context,
                             const lc_engine_queue_watch_event *event,
                             lc_engine_error *error) {
@@ -3338,6 +3351,108 @@ test_public_lease_attach_retries_node_passive_and_cleans_parser_state(
   https_tls_material_cleanup(&material);
 }
 
+static void
+test_public_lease_attach_rejects_non_rewindable_retry_source(void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *attach_headers[] = {
+      "Content-Type: text/plain", "X-Lease-ID: lease-1",
+      "X-Txn-ID: txn-acquire", "X-Fencing-Token: 11"};
+  static const char *first_attach_response_headers[] = {
+      "X-Correlation-Id: corr-attach-passive-1",
+      "Content-Type: application/json"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"},
+      {"POST",
+       "/v1/attachments?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
+       "content_type=text%2Fplain",
+       attach_headers, sizeof(attach_headers) / sizeof(attach_headers[0]), NULL,
+       0U, 0, 503, first_attach_response_headers, 2U,
+       "{\"error\":\"node_passive\"}", "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_source *src;
+  test_enqueue_source *src_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  src = NULL;
+  src_state = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&attach_req, 0, sizeof(attach_req));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  {
+    static char endpoint_a[128];
+    static char endpoint_b[128];
+    static const char *endpoints[2];
+
+    snprintf(endpoint_a, sizeof(endpoint_a), "https://127.0.0.1:%u",
+             (unsigned)server.port);
+    snprintf(endpoint_b, sizeof(endpoint_b), "https://127.0.0.1:%u",
+             (unsigned)server.port);
+    endpoints[0] = endpoint_a;
+    endpoints[1] = endpoint_b;
+    config.endpoints = endpoints;
+    config.endpoint_count = 2U;
+  }
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = test_enqueue_source_new_non_rewindable("hello world", 11U, 0U, &src,
+                                              &src_state, &error);
+  assert_int_equal(rc, LC_OK);
+  attach_req.name = "blob.txt";
+  attach_req.content_type = "text/plain";
+  rc = lc_lease_attach(lease, &attach_req, src, &attach_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(error.message);
+  assert_non_null(strstr(error.message, "not rewindable"));
+  assert_int_equal(src_state->reset_count, 0U);
+
+  lc_attach_res_cleanup(&attach_res);
+  lc_source_close(src);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
 static void test_queue_transport_retries_node_passive_and_cleans_parser_state(
     void **state) {
   static const char *queue_headers[] = {"Content-Type: application/json"};
@@ -3488,6 +3603,73 @@ test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
   assert_string_equal(res.correlation_id, "corr-enqueue-passive-2");
   assert_int_equal(res.payload_bytes, 0L);
 
+  lc_engine_enqueue_response_cleanup(&res);
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_enqueue_from_rejects_non_rewindable_retry_source(void **state) {
+  static const char *queue_headers[] = {"Content-Type: application/json"};
+  static const char *enqueue_response_headers[] = {
+      "X-Correlation-Id: corr-enqueue-passive-1",
+      "Content-Type: application/json"};
+  static const char *const request_body_substrings[] = {
+      "\"namespace\":\"transport-ns\"", "\"queue\":\"jobs\"", "name=\"meta\"",
+      "name=\"payload\""};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/queue/enqueue", queue_headers, 1U, request_body_substrings,
+       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]), 0,
+       503, enqueue_response_headers,
+       sizeof(enqueue_response_headers) / sizeof(enqueue_response_headers[0]),
+       "{\"error\":\"node_passive\"}", "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_enqueue_request req;
+  lc_engine_enqueue_response res;
+  lc_engine_error error;
+  lc_source *src;
+  lc_read_bridge bridge;
+  test_enqueue_source *src_state;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  src = NULL;
+  src_state = NULL;
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  init_client_config_two_endpoints(&config, server.port,
+                                   material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  rc = test_enqueue_source_new_non_rewindable("hello world", 11U, 0U, &src,
+                                              &src_state, NULL);
+  assert_int_equal(rc, LC_OK);
+  req.namespace_name = "transport-ns";
+  req.queue = "jobs";
+  req.payload_content_type = "application/json";
+  bridge.source = src;
+  rc = lc_engine_client_enqueue_from(client, &req, lc_engine_read_bridge,
+                                     &bridge, &res, &error);
+  assert_int_equal(rc, LC_ENGINE_ERROR_INVALID_ARGUMENT);
+  assert_non_null(error.message);
+  assert_non_null(strstr(error.message, "not rewindable"));
+  assert_int_equal(src_state->reset_count, 0U);
+
+  lc_source_close(src);
   lc_engine_enqueue_response_cleanup(&res);
   lc_engine_client_close(client);
   https_testserver_stop(&server);
@@ -4387,9 +4569,13 @@ int main(void) {
       cmocka_unit_test(
           test_public_lease_attach_retries_node_passive_and_cleans_parser_state),
       cmocka_unit_test(
+          test_public_lease_attach_rejects_non_rewindable_retry_source),
+      cmocka_unit_test(
           test_queue_transport_retries_node_passive_and_cleans_parser_state),
       cmocka_unit_test(
           test_enqueue_from_retries_node_passive_and_cleans_parser_state),
+      cmocka_unit_test(
+          test_enqueue_from_rejects_non_rewindable_retry_source),
       cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),
       cmocka_unit_test(
           test_public_lease_load_respects_configured_json_response_limit),

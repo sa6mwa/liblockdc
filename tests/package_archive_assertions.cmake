@@ -93,7 +93,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?lib/libssh2\\.so\\.1\\.0\\.1" "libssh2 versioned shared library")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?lib/libz\\.so" "bundled zlib shared library")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?lib/libz\\.so\\.1" "zlib shared-library SONAME symlink")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?lib/libz\\.so\\.1\\.3\\.2" "zlib versioned shared library")
+    string(REPLACE "." "\\." zlib_version_regex "${LOCKDC_ZLIB_VERSION}")
+    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?lib/libz\\.so\\.${zlib_version_regex}" "zlib versioned shared library")
 
     string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef extract_suffix)
     get_filename_component(archive_name "${archive_path}" NAME_WE)
@@ -128,3 +129,6 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
         message(FATAL_ERROR "archive is not using gzip maximum compression header: ${archive_path}")
     endif()
 endfunction()
+if(NOT DEFINED LOCKDC_ZLIB_VERSION OR LOCKDC_ZLIB_VERSION STREQUAL "")
+  set(LOCKDC_ZLIB_VERSION "1.3.2")
+endif()

@@ -644,6 +644,30 @@ int lc_engine_reset_bridge(void *context, lc_engine_error *error) {
   int rc;
 
   bridge = (lc_read_bridge *)context;
+  if (bridge == NULL || bridge->source == NULL) {
+    if (error != NULL) {
+      if (error->message != NULL) {
+        free(error->message);
+        error->message = NULL;
+      }
+      error->code = LC_ENGINE_ERROR_INVALID_ARGUMENT;
+      error->http_status = 0L;
+      error->message = lc_strdup_local("payload reset requires source");
+    }
+    return LC_ENGINE_ERROR_INVALID_ARGUMENT;
+  }
+  if (bridge->source->reset == NULL) {
+    if (error != NULL) {
+      if (error->message != NULL) {
+        free(error->message);
+        error->message = NULL;
+      }
+      error->code = LC_ENGINE_ERROR_INVALID_ARGUMENT;
+      error->http_status = 0L;
+      error->message = lc_strdup_local("payload source is not rewindable");
+    }
+    return LC_ENGINE_ERROR_INVALID_ARGUMENT;
+  }
   lc_error_init(&public_error);
   rc = bridge->source->reset(bridge->source, &public_error);
   if (rc != LC_OK && public_error.code != LC_OK) {

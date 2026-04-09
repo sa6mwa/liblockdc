@@ -151,13 +151,13 @@ __test-debug: __build-debug
 test-host:
 	$(TIMED) test-host $(MAKE) __test-host
 
-__test-host:
+__test-host: __deps-release
 	bash ./scripts/host_test.sh
 
 test-cross:
 	$(TIMED) test-cross $(MAKE) __test-cross
 
-__test-cross:
+__test-cross: __cross-build
 	bash ./scripts/cross_test.sh release
 
 test-e2e:
