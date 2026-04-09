@@ -17,6 +17,15 @@ function(lc_add_unit_test target_name)
     )
   endif()
   add_test(NAME ${target_name} COMMAND ${target_name})
+  set_tests_properties(${target_name} PROPERTIES TIMEOUT 60)
+endfunction()
+
+function(lc_add_cmocka_filtered_test test_name target_name filter)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${CMAKE_COMMAND} -E env CMOCKA_TEST_FILTER=${filter} $<TARGET_FILE:${target_name}>
+  )
+  set_tests_properties(${test_name} PROPERTIES TIMEOUT 60)
 endfunction()
 
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)
@@ -53,4 +62,68 @@ if(LOCKDC_ENABLE_COVERAGE)
     $<$<LINK_LANGUAGE:C>:--coverage>
   )
 endif()
-add_test(NAME lc_unit_transport_https COMMAND lc_unit_transport_https)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_client_open
+  lc_unit_transport_https
+  test_client_open_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_state
+  lc_unit_transport_https
+  test_state_transport_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_management
+  lc_unit_transport_https
+  test_management_transport_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_queue
+  lc_unit_transport_https
+  test_queue_transport_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_subscribe
+  lc_unit_transport_https
+  test_subscribe_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_public_client
+  lc_unit_transport_https
+  test_public_client_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_public_bound_lease
+  lc_unit_transport_https
+  test_public_bound_lease_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_public_lease
+  lc_unit_transport_https
+  test_public_lease_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_public_management
+  lc_unit_transport_https
+  test_public_management_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_public_enqueue
+  lc_unit_transport_https
+  test_public_enqueue_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_public_dequeue
+  lc_unit_transport_https
+  test_public_dequeue_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_public_query_stream
+  lc_unit_transport_https
+  test_public_query_stream_*
+)
+lc_add_cmocka_filtered_test(
+  lc_unit_transport_https_public_queue_nack
+  lc_unit_transport_https
+  test_public_queue_nack_*
+)

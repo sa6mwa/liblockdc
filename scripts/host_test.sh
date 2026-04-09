@@ -11,9 +11,11 @@ presets=(
 
 unset LD_LIBRARY_PATH
 
+ctest_timeout=${LOCKDC_CTEST_TIMEOUT:-300}
+
 cd "$repo_root"
 
 for preset in "${presets[@]}"; do
   "$script_dir/build.sh" "$preset"
-  ctest --preset "$preset" --output-on-failure
+  ctest --preset "$preset" --output-on-failure --progress --timeout "$ctest_timeout"
 done

@@ -16,12 +16,14 @@ cross_preset_package_regex='dist_dir_configure_test|package_archives_test|packag
 
 unset LD_LIBRARY_PATH
 
+ctest_timeout=${LOCKDC_CTEST_TIMEOUT:-300}
+
 run_ctest_background() {
   local out_var="$1"
   local preset="$2"
   local regex="$3"
 
-  ctest --preset "$preset" --output-on-failure -R "$regex" &
+  ctest --preset "$preset" --output-on-failure --progress --timeout "$ctest_timeout" -R "$regex" &
   printf -v "$out_var" '%s' "$!"
 }
 
@@ -68,7 +70,7 @@ run_cross_release_matrix() {
 
   for preset in "${cross_release_presets[@]}"; do
     require_release_build_tree "$preset"
-    ctest --preset "$preset" --output-on-failure
+    ctest --preset "$preset" --output-on-failure --progress --timeout "$ctest_timeout"
   done
 }
 
