@@ -1332,7 +1332,6 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
   lc_engine_watch_queue_request body_src;
   lonejson_field body_fields[2];
   lonejson_map body_map;
-  lonejson_curl_upload body_upload;
   const char *namespace_name;
   struct curl_slist *headers;
   size_t endpoint_index;
@@ -1359,18 +1358,10 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
   body_map.struct_size = sizeof(body_src);
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
-  memset(&body_upload, 0, sizeof(body_upload));
-  if (lonejson_curl_upload_init(&body_upload, &body_map, &body_src, NULL) !=
-      LONEJSON_STATUS_OK) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to prepare watch_queue body");
-  }
-
   headers = NULL;
   headers = curl_slist_append(headers, "Content-Type: application/json");
   headers = curl_slist_append(headers, "Accept: text/event-stream");
   if (headers == NULL) {
-    lonejson_curl_upload_cleanup(&body_upload);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate watch_queue headers");
   }
@@ -1379,11 +1370,19 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
        ++endpoint_index) {
     CURL *curl;
     CURLcode curl_rc;
+    lonejson_curl_upload body_upload;
     lc_engine_watch_state state;
     char *url;
     size_t url_length;
     int rc;
 
+    memset(&body_upload, 0, sizeof(body_upload));
+    if (lonejson_curl_upload_init(&body_upload, &body_map, &body_src, NULL) !=
+        LONEJSON_STATUS_OK) {
+      curl_slist_free_all(headers);
+      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                        "failed to prepare watch_queue body");
+    }
     memset(&state, 0, sizeof(state));
     state.handler = handler;
     state.handler_context = handler_context;
@@ -1454,12 +1453,12 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
     curl_rc = curl_easy_perform(curl);
     free(url);
     curl_easy_cleanup(curl);
+    lonejson_curl_upload_cleanup(&body_upload);
 
     if (curl_rc == CURLE_WRITE_ERROR && state.callback_failed) {
       rc = error->code;
       lc_engine_watch_state_cleanup(&state);
       curl_slist_free_all(headers);
-      lonejson_curl_upload_cleanup(&body_upload);
       return rc;
     }
     if (curl_rc != CURLE_OK) {
@@ -1469,7 +1468,6 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
       rc = lc_engine_set_transport_error(error, curl_easy_strerror(curl_rc));
       lc_engine_watch_state_cleanup(&state);
       curl_slist_free_all(headers);
-      lonejson_curl_upload_cleanup(&body_upload);
       return rc;
     }
     if (state.http_status >= 200L && state.http_status < 300L) {
@@ -1488,14 +1486,12 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
     if (error->server_error_code == NULL ||
         strcmp(error->server_error_code, "node_passive") != 0) {
       curl_slist_free_all(headers);
-      lonejson_curl_upload_cleanup(&body_upload);
       return rc;
     }
     lc_engine_error_reset(error);
   }
 
   curl_slist_free_all(headers);
-  lonejson_curl_upload_cleanup(&body_upload);
   return LC_ENGINE_OK;
 }
 
@@ -1506,7 +1502,6 @@ static int lc_engine_client_subscribe_internal(
   lc_engine_dequeue_request body_src;
   lonejson_field body_fields[7];
   lonejson_map body_map;
-  lonejson_curl_upload body_upload;
   const char *namespace_name;
   struct curl_slist *headers;
   long wait_seconds;
@@ -1557,18 +1552,10 @@ static int lc_engine_client_subscribe_internal(
   body_map.struct_size = sizeof(body_src);
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
-  memset(&body_upload, 0, sizeof(body_upload));
-  if (lonejson_curl_upload_init(&body_upload, &body_map, &body_src, NULL) !=
-      LONEJSON_STATUS_OK) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to prepare subscribe body");
-  }
-
   headers = NULL;
   headers = curl_slist_append(headers, "Content-Type: application/json");
   headers = curl_slist_append(headers, "Accept: multipart/related");
   if (headers == NULL) {
-    lonejson_curl_upload_cleanup(&body_upload);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate subscribe headers");
   }
@@ -1582,11 +1569,19 @@ static int lc_engine_client_subscribe_internal(
          ++endpoint_index) {
       CURL *curl;
       CURLcode curl_rc;
+      lonejson_curl_upload body_upload;
       lc_engine_subscribe_state state;
       char *url;
       size_t url_length;
       int rc;
 
+      memset(&body_upload, 0, sizeof(body_upload));
+      if (lonejson_curl_upload_init(&body_upload, &body_map, &body_src,
+                                    NULL) != LONEJSON_STATUS_OK) {
+        curl_slist_free_all(headers);
+        return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                          "failed to prepare subscribe body");
+      }
       memset(&state, 0, sizeof(state));
       state.handler = *handler;
       state.handler_context = handler_context;
@@ -1666,13 +1661,13 @@ static int lc_engine_client_subscribe_internal(
       curl_rc = curl_easy_perform(curl);
       free(url);
       curl_easy_cleanup(curl);
+      lonejson_curl_upload_cleanup(&body_upload);
 
       if (curl_rc == CURLE_ABORTED_BY_CALLBACK &&
           client->cancel_check != NULL &&
           client->cancel_check(client->cancel_context)) {
         lc_engine_subscribe_state_cleanup(&state);
         curl_slist_free_all(headers);
-        lonejson_curl_upload_cleanup(&body_upload);
         return LC_ENGINE_OK;
       }
       if (curl_rc == CURLE_WRITE_ERROR && state.callback_failed) {
@@ -1683,7 +1678,6 @@ static int lc_engine_client_subscribe_internal(
         rc = error->code;
         lc_engine_subscribe_state_cleanup(&state);
         curl_slist_free_all(headers);
-        lonejson_curl_upload_cleanup(&body_upload);
         return rc;
       }
       if (curl_rc != CURLE_OK) {
@@ -1692,7 +1686,6 @@ static int lc_engine_client_subscribe_internal(
         rc = lc_engine_set_transport_error(error, curl_easy_strerror(curl_rc));
         lc_engine_subscribe_state_cleanup(&state);
         curl_slist_free_all(headers);
-        lonejson_curl_upload_cleanup(&body_upload);
         return rc;
       }
       if (state.http_status >= 200L && state.http_status < 300L) {
@@ -1701,7 +1694,6 @@ static int lc_engine_client_subscribe_internal(
                                            state.correlation_id);
         lc_engine_subscribe_state_cleanup(&state);
         curl_slist_free_all(headers);
-        lonejson_curl_upload_cleanup(&body_upload);
         return LC_ENGINE_OK;
       }
 
@@ -1724,7 +1716,6 @@ static int lc_engine_client_subscribe_internal(
         continue;
       }
       curl_slist_free_all(headers);
-      lonejson_curl_upload_cleanup(&body_upload);
       return rc;
     }
 
@@ -1741,7 +1732,6 @@ static int lc_engine_client_subscribe_internal(
   }
 
   curl_slist_free_all(headers);
-  lonejson_curl_upload_cleanup(&body_upload);
   return lc_engine_set_transport_error(
       error, "all endpoints rejected the subscribe request");
 }
