@@ -694,7 +694,9 @@ static int lc_engine_append_long_header(struct curl_slist **headers,
                                         lonejson_int64 value) {
   char scratch[64];
 
-  snprintf(scratch, sizeof(scratch), "%lld", (long long)value);
+  if (lc_i64_format_base10((lc_i64)value, scratch, sizeof(scratch)) < 0) {
+    return 0;
+  }
   return lc_engine_append_header(headers, name, scratch);
 }
 
@@ -1028,7 +1030,12 @@ static int lc_engine_attachment_build_query(
     lc_engine_buffer_append_cstr(path, "&prevent_overwrite=1");
   }
   if (has_max_bytes) {
-    snprintf(scratch, sizeof(scratch), "%lld", (long long)max_bytes);
+    if (lc_i64_format_base10((lc_i64)max_bytes, scratch, sizeof(scratch)) <
+        0) {
+      lc_engine_buffer_cleanup(path);
+      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                        "failed to format max_bytes");
+    }
     lc_engine_buffer_append_cstr(path, "&max_bytes=");
     lc_engine_buffer_append_cstr(path, scratch);
   }
@@ -1101,6 +1108,7 @@ static int lc_engine_i64_to_long_checked(lonejson_int64 value,
                                          const char *label,
                                          lonejson_int64 *out_value,
                                          lc_engine_error *error) {
+  (void)label;
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "missing i64 destination");
@@ -1477,8 +1485,8 @@ int lc_engine_client_update_from(lc_engine_client *client,
     }
   }
   if (request->has_if_version) {
-    if (snprintf(if_version_buffer, sizeof(if_version_buffer), "%lld",
-                 (long long)request->if_version) < 0 ||
+    if (lc_i64_format_base10((lc_i64)request->if_version, if_version_buffer,
+                             sizeof(if_version_buffer)) < 0 ||
         !lc_engine_append_header(&headers, "X-If-Version", if_version_buffer)) {
       curl_slist_free_all(headers);
       lc_engine_buffer_cleanup(&path);
@@ -1877,8 +1885,12 @@ int lc_engine_client_list_attachments(
     ++header_count;
     if (request->fencing_token > 0L) {
       static char token_buf[64];
-      snprintf(token_buf, sizeof(token_buf), "%lld",
-               (long long)request->fencing_token);
+      if (lc_i64_format_base10((lc_i64)request->fencing_token, token_buf,
+                               sizeof(token_buf)) < 0) {
+        lc_engine_buffer_cleanup(&path);
+        return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                          "failed to format fencing token");
+      }
       headers[header_count].name = "X-Fencing-Token";
       headers[header_count].value = token_buf;
       ++header_count;
@@ -2052,8 +2064,12 @@ int lc_engine_client_delete_attachment(
   headers[1].name = "X-Txn-ID";
   headers[1].value = request->txn_id;
   headers[2].name = "X-Fencing-Token";
-  snprintf(token_buf, sizeof(token_buf), "%lld",
-           (long long)request->fencing_token);
+  if (lc_i64_format_base10((lc_i64)request->fencing_token, token_buf,
+                           sizeof(token_buf)) < 0) {
+    lc_engine_buffer_cleanup(&path);
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                      "failed to format fencing token");
+  }
   headers[2].value = token_buf;
   memset(&result, 0, sizeof(result));
   memset(&parsed, 0, sizeof(parsed));
@@ -2115,8 +2131,12 @@ int lc_engine_client_delete_all_attachments(
   headers[1].name = "X-Txn-ID";
   headers[1].value = request->txn_id;
   headers[2].name = "X-Fencing-Token";
-  snprintf(token_buf, sizeof(token_buf), "%lld",
-           (long long)request->fencing_token);
+  if (lc_i64_format_base10((lc_i64)request->fencing_token, token_buf,
+                           sizeof(token_buf)) < 0) {
+    lc_engine_buffer_cleanup(&path);
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
+                                      "failed to format fencing token");
+  }
   headers[2].value = token_buf;
   memset(&result, 0, sizeof(result));
   memset(&parsed, 0, sizeof(parsed));

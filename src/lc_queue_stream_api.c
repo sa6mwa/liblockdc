@@ -148,6 +148,7 @@ static int lc_engine_i64_to_int64_checked(lonejson_int64 value,
                                           const char *label,
                                           lonejson_int64 *out_value,
                                           lc_engine_error *error) {
+  (void)label;
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "missing destination for i64 conversion");

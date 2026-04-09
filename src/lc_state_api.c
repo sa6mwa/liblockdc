@@ -117,28 +117,6 @@ typedef struct lc_engine_dequeue_capture_state {
   lc_stream_pipe *pipe;
   size_t payload_length;
 } lc_engine_dequeue_capture_state;
-typedef struct lc_engine_enqueue_meta_json {
-  char *namespace_name;
-  char *queue;
-  lonejson_int64 delay_seconds;
-  lonejson_int64 visibility_timeout_seconds;
-  lonejson_int64 ttl_seconds;
-  lonejson_int64 max_attempts;
-  char *payload_content_type;
-} lc_engine_enqueue_meta_json;
-static const lonejson_field lc_engine_enqueue_meta_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, namespace_name,
-                                "namespace"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, queue, "queue"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, delay_seconds,
-                       "delay_seconds"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, visibility_timeout_seconds,
-                       "visibility_timeout_seconds"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, ttl_seconds, "ttl_seconds"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, max_attempts,
-                       "max_attempts"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json,
-                                payload_content_type, "payload_content_type")};
 typedef struct lc_engine_query_hidden_json {
   int query_hidden;
 } lc_engine_query_hidden_json;
@@ -187,17 +165,6 @@ typedef struct lc_engine_describe_response_json {
   lonejson_int64 updated_at_unix;
   lc_engine_query_hidden_json metadata;
 } lc_engine_describe_response_json;
-typedef struct lc_engine_enqueue_response_json {
-  char *namespace_name;
-  char *queue;
-  char *message_id;
-  lonejson_int64 attempts;
-  lonejson_int64 max_attempts;
-  lonejson_int64 failure_attempts;
-  lonejson_int64 not_visible_until_unix;
-  lonejson_int64 visibility_timeout_seconds;
-  lonejson_int64 payload_bytes;
-} lc_engine_enqueue_response_json;
 typedef struct lc_engine_queue_stats_response_json {
   char *namespace_name;
   char *queue;
@@ -289,25 +256,6 @@ static const lonejson_field lc_engine_query_hidden_fields[] = {
                         "query_hidden")};
 LONEJSON_MAP_DEFINE(lc_engine_query_hidden_map, lc_engine_query_hidden_json,
                     lc_engine_query_hidden_fields);
-static const lonejson_field lc_engine_enqueue_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, namespace_name,
-                                "namespace"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, queue,
-                                "queue"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, message_id,
-                                "message_id"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, attempts, "attempts"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, max_attempts,
-                       "max_attempts"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, failure_attempts,
-                       "failure_attempts"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, not_visible_until_unix,
-                       "not_visible_until_unix"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json,
-                       visibility_timeout_seconds,
-                       "visibility_timeout_seconds"),
-    LONEJSON_FIELD_I64(lc_engine_enqueue_response_json, payload_bytes,
-                       "payload_bytes")};
 LONEJSON_MAP_DEFINE(lc_engine_acquire_response_map,
                     lc_engine_acquire_response_json,
                     lc_engine_acquire_response_fields);
@@ -329,9 +277,6 @@ LONEJSON_MAP_DEFINE(lc_engine_remove_response_map,
 LONEJSON_MAP_DEFINE(lc_engine_describe_response_map,
                     lc_engine_describe_response_json,
                     lc_engine_describe_response_fields);
-LONEJSON_MAP_DEFINE(lc_engine_enqueue_response_map,
-                    lc_engine_enqueue_response_json,
-                    lc_engine_enqueue_response_fields);
 static int lc_engine_copy_bytes(unsigned char **out_bytes, size_t *out_length,
                                 const char *bytes, size_t count);
 static int lc_engine_capture_body_writer(void *context, const void *bytes,
@@ -360,8 +305,6 @@ static int lc_engine_apply_common_mutation_headers(
     lonejson_int64 fencing_token);
 static int lc_engine_buffer_append_long_decimal(lc_engine_buffer *buffer,
                                                 lonejson_int64 value);
-static int lc_engine_buffer_append_json_string_literal(lc_engine_buffer *buffer,
-                                                       const char *value);
 
 static void lc_engine_lonejson_map_init(lonejson_map *map, const char *name,
                                         const lonejson_field *fields,
@@ -378,81 +321,14 @@ static void lc_engine_lonejson_map_init(lonejson_map *map, const char *name,
 
 static int lc_engine_buffer_append_long_decimal(lc_engine_buffer *buffer,
                                                 lonejson_int64 value) {
-  char digits[32];
-  unsigned long long magnitude;
-  size_t index;
-  int negative;
+  char scratch[32];
+  int length;
 
-  negative = value < 0 ? 1 : 0;
-  if (negative) {
-    magnitude = (unsigned long long)(-(value + 1LL)) + 1ULL;
-  } else {
-    magnitude = (unsigned long long)value;
+  length = lc_i64_format_base10((lc_i64)value, scratch, sizeof(scratch));
+  if (length < 0) {
+    return LC_ENGINE_ERROR_NO_MEMORY;
   }
-
-  index = 0U;
-  do {
-    digits[index++] = (char)('0' + (magnitude % 10ULL));
-    magnitude /= 10ULL;
-  } while (magnitude > 0UL && index < sizeof(digits));
-
-  if (negative) {
-    if (lc_engine_buffer_append_cstr(buffer, "-") != LC_ENGINE_OK) {
-      return LC_ENGINE_ERROR_NO_MEMORY;
-    }
-  }
-
-  while (index > 0U) {
-    if (lc_engine_buffer_append(buffer, &digits[index - 1U], 1U) !=
-        LC_ENGINE_OK) {
-      return LC_ENGINE_ERROR_NO_MEMORY;
-    }
-    --index;
-  }
-
-  return LC_ENGINE_OK;
-}
-
-static int lc_engine_buffer_append_json_string_literal(lc_engine_buffer *buffer,
-                                                       const char *value) {
-  const char *cursor;
-  int rc;
-
-  if (value == NULL) {
-    value = "";
-  }
-  rc = lc_engine_buffer_append_cstr(buffer, "\"");
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  cursor = value;
-  while (*cursor != '\0') {
-    switch (*cursor) {
-    case '\\':
-      rc = lc_engine_buffer_append_cstr(buffer, "\\\\");
-      break;
-    case '"':
-      rc = lc_engine_buffer_append_cstr(buffer, "\\\"");
-      break;
-    case '\n':
-      rc = lc_engine_buffer_append_cstr(buffer, "\\n");
-      break;
-    case '\r':
-      rc = lc_engine_buffer_append_cstr(buffer, "\\r");
-      break;
-    case '\t':
-      rc = lc_engine_buffer_append_cstr(buffer, "\\t");
-      break;
-    default:
-      rc = lc_engine_buffer_append(buffer, cursor, 1U);
-      break;
-    }
-    if (rc != LC_ENGINE_OK) {
-      return rc;
-    }
-    ++cursor;
-  }
-  return lc_engine_buffer_append_cstr(buffer, "\"");
+  return lc_engine_buffer_append(buffer, scratch, (size_t)length);
 }
 
 static int lc_engine_build_get_path(lc_engine_client *client,

@@ -9,7 +9,6 @@
 #include <cmocka.h>
 
 #include "lc/lc.h"
-#include "lc_api_internal.h"
 
 typedef struct fake_source {
   lc_source pub;
@@ -35,9 +34,10 @@ static size_t fake_source_read(lc_source *self, void *buffer, size_t capacity,
   (void)capacity;
   source = (fake_source *)self;
   source->read_count += 1U;
-  if (source->error_code != LC_OK) {
-    lc_error_set(error, source->error_code, 0L, "fake source read failed", NULL,
-                 NULL, NULL);
+  if (source->error_code != LC_OK && error != NULL) {
+    lc_error_cleanup(error);
+    error->code = source->error_code;
+    error->message = strdup("fake source read failed");
   }
   return 0U;
 }
@@ -48,8 +48,12 @@ static int fake_source_reset(lc_source *self, lc_error *error) {
   source = (fake_source *)self;
   source->reset_count += 1U;
   if (source->error_code != LC_OK) {
-    return lc_error_set(error, source->error_code, 0L,
-                        "fake source reset failed", NULL, NULL, NULL);
+    if (error != NULL) {
+      lc_error_cleanup(error);
+      error->code = source->error_code;
+      error->message = strdup("fake source reset failed");
+    }
+    return source->error_code;
   }
   return LC_OK;
 }
@@ -69,9 +73,10 @@ static int fake_sink_write(lc_sink *self, const void *bytes, size_t count,
   (void)count;
   sink = (fake_sink *)self;
   sink->write_count += 1U;
-  if (!sink->write_result && sink->error_code != LC_OK) {
-    lc_error_set(error, sink->error_code, 0L, "fake sink write failed", NULL,
-                 NULL, NULL);
+  if (!sink->write_result && sink->error_code != LC_OK && error != NULL) {
+    lc_error_cleanup(error);
+    error->code = sink->error_code;
+    error->message = strdup("fake sink write failed");
   }
   return sink->write_result;
 }

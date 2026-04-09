@@ -16,6 +16,12 @@ if(LOCKDC_EXTERNAL_ROOT)
   )
 endif()
 
+add_test(NAME public_api_boundary
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/public_api_boundary_test.cmake"
+)
+
 add_subdirectory(unit)
 if(LOCKDC_BUILD_E2E_TESTS)
   add_subdirectory(e2e)

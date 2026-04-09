@@ -270,6 +270,7 @@ static int lc_engine_mgmt_i64_to_long_checked(lonejson_int64 value,
                                               const char *label,
                                               lonejson_int64 *out_value,
                                               lc_engine_error *error) {
+  (void)label;
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "missing i64 output");
@@ -282,6 +283,7 @@ static int lc_engine_mgmt_i64_to_int64_checked(lonejson_int64 value,
                                                const char *label,
                                                lonejson_int64 *out_value,
                                                lc_engine_error *error) {
+  (void)label;
 
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
@@ -1010,7 +1012,8 @@ static int lc_engine_mgmt_build_txn_decision_body(
   if (request->expires_at_unix > 0L) {
     body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[3];
   }
-  if (request->tc_term > 0UL && request->tc_term <= (unsigned long)LONG_MAX) {
+  if (request->tc_term > 0 &&
+      request->tc_term <= (lonejson_int64)LONG_MAX) {
     body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[4];
   }
   if (request->target_backend_hash != NULL &&
