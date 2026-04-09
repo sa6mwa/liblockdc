@@ -28,11 +28,32 @@ typedef struct consumer_test_state {
   size_t expected_messages;
   size_t handled_messages;
   size_t subscribe_calls;
+  size_t ack_calls;
+  size_t nack_calls;
+  size_t close_calls;
   int saw_logger;
   int fail_subscribe;
   int stop_requested;
+  int last_nack_intent;
+  int handler_mode;
   FILE *log_fp;
 } consumer_test_state;
+
+enum {
+  CONSUMER_HANDLER_MODE_AUTO_ACK = 0,
+  CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK = 1,
+  CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR = 2,
+  CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR = 3
+};
+
+typedef struct fake_delivery_message {
+  lc_message pub;
+  consumer_test_state *state;
+  lc_source *payload;
+  const lc_allocator *allocator;
+  int *terminal_flag;
+  int closed;
+} fake_delivery_message;
 
 typedef struct fake_service {
   lc_consumer_service pub;
@@ -220,6 +241,185 @@ static int fake_clone_client(lc_consumer_service_handle *service,
   return LC_OK;
 }
 
+static void stop_test_service(consumer_test_state *state) {
+  int (*stop_fn)(lc_consumer_service *);
+
+  if (state == NULL || state->service == NULL) {
+    return;
+  }
+  stop_fn = state->service->stop;
+  stop_fn(state->service);
+}
+
+static void fake_delivery_message_close_internal(fake_delivery_message *message) {
+  if (message == NULL || message->closed) {
+    return;
+  }
+  message->closed = 1;
+  pthread_mutex_lock(&message->state->mutex);
+  message->state->close_calls += 1U;
+  pthread_mutex_unlock(&message->state->mutex);
+  if (message->payload != NULL) {
+    message->payload->close(message->payload);
+    message->payload = NULL;
+  }
+  lc_free_with_allocator(message->allocator, message);
+}
+
+static int fake_delivery_message_ack(lc_message *self, lc_error *error) {
+  fake_delivery_message *message;
+
+  (void)error;
+  message = (fake_delivery_message *)self;
+  pthread_mutex_lock(&message->state->mutex);
+  message->state->ack_calls += 1U;
+  pthread_mutex_unlock(&message->state->mutex);
+  if (message->terminal_flag != NULL) {
+    *message->terminal_flag = 1;
+  }
+  fake_delivery_message_close_internal(message);
+  return LC_OK;
+}
+
+static int fake_delivery_message_nack(lc_message *self, const lc_nack_req *req,
+                                      lc_error *error) {
+  fake_delivery_message *message;
+
+  (void)error;
+  message = (fake_delivery_message *)self;
+  pthread_mutex_lock(&message->state->mutex);
+  message->state->nack_calls += 1U;
+  message->state->last_nack_intent = req != NULL ? req->intent : -1;
+  pthread_mutex_unlock(&message->state->mutex);
+  if (message->terminal_flag != NULL) {
+    *message->terminal_flag = 1;
+  }
+  fake_delivery_message_close_internal(message);
+  return LC_OK;
+}
+
+static int fake_delivery_message_extend(lc_message *self,
+                                        const lc_extend_req *req,
+                                        lc_error *error) {
+  (void)self;
+  (void)req;
+  (void)error;
+  return LC_OK;
+}
+
+static lc_lease *fake_delivery_message_state(lc_message *self) {
+  (void)self;
+  return NULL;
+}
+
+static lc_source *fake_delivery_message_payload(lc_message *self) {
+  fake_delivery_message *message;
+
+  message = (fake_delivery_message *)self;
+  return message->payload;
+}
+
+static int fake_delivery_message_payload_json(lc_message *self, lc_json **out,
+                                              lc_error *error) {
+  (void)self;
+  (void)out;
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "fake delivery message does not support payload_json",
+                      NULL, NULL, NULL);
+}
+
+static int fake_delivery_message_rewind(lc_message *self, lc_error *error) {
+  fake_delivery_message *message;
+
+  message = (fake_delivery_message *)self;
+  if (message->payload == NULL || message->payload->reset == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "fake delivery payload is not rewindable", NULL, NULL,
+                        NULL);
+  }
+  return message->payload->reset(message->payload, error);
+}
+
+static int fake_delivery_message_write_payload(lc_message *self, lc_sink *dst,
+                                               size_t *written,
+                                               lc_error *error) {
+  fake_delivery_message *message;
+  unsigned char buffer[256];
+  size_t total_written;
+  size_t chunk_size;
+  int rc;
+
+  message = (fake_delivery_message *)self;
+  if (message->payload == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "fake delivery payload is not available", NULL, NULL,
+                        NULL);
+  }
+  total_written = 0U;
+  for (;;) {
+    chunk_size =
+        message->payload->read(message->payload, buffer, sizeof(buffer), error);
+    if (error != NULL && error->code != LC_OK) {
+      return error->code;
+    }
+    if (chunk_size == 0U) {
+      break;
+    }
+    rc = dst->write(dst, buffer, chunk_size, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    total_written += chunk_size;
+  }
+  if (written != NULL) {
+    *written = total_written;
+  }
+  return LC_OK;
+}
+
+static void fake_delivery_message_close(lc_message *self) {
+  fake_delivery_message_close_internal((fake_delivery_message *)self);
+}
+
+static lc_message *fake_delivery_message_factory(
+    lc_consumer_service_handle *service, lc_client_handle *client,
+    const lc_engine_dequeue_response *delivery, lc_source *payload,
+    int *terminal_flag) {
+  fake_delivery_message *message;
+
+  (void)service;
+  message = (fake_delivery_message *)lc_calloc_with_allocator(
+      &client->allocator, 1U, sizeof(*message));
+  if (message == NULL) {
+    return NULL;
+  }
+  message->state = g_consumer_test_state;
+  message->payload = payload;
+  message->allocator = &client->allocator;
+  message->terminal_flag = terminal_flag;
+  message->pub.ack = fake_delivery_message_ack;
+  message->pub.nack = fake_delivery_message_nack;
+  message->pub.extend = fake_delivery_message_extend;
+  message->pub.state = fake_delivery_message_state;
+  message->pub.payload_reader = fake_delivery_message_payload;
+  message->pub.payload_json = fake_delivery_message_payload_json;
+  message->pub.rewind_payload = fake_delivery_message_rewind;
+  message->pub.write_payload = fake_delivery_message_write_payload;
+  message->pub.close = fake_delivery_message_close;
+  message->pub.namespace_name = delivery->namespace_name;
+  message->pub.queue = delivery->queue;
+  message->pub.message_id = delivery->message_id;
+  message->pub.attempts = delivery->attempts;
+  message->pub.max_attempts = delivery->max_attempts;
+  message->pub.failure_attempts = delivery->failure_attempts;
+  message->pub.not_visible_until_unix = delivery->not_visible_until_unix;
+  message->pub.visibility_timeout_seconds = delivery->visibility_timeout_seconds;
+  message->pub.lease_expires_at_unix = delivery->lease_expires_at_unix;
+  message->pub.fencing_token = delivery->fencing_token;
+  message->pub.payload = payload;
+  return &message->pub;
+}
+
 static int handle_consumer_message(void *context, lc_consumer_message *message,
                                    lc_error *error) {
   consumer_test_state *state;
@@ -244,6 +444,58 @@ static int handle_consumer_message(void *context, lc_consumer_message *message,
   }
   pthread_mutex_unlock(&state->mutex);
   return LC_OK;
+}
+
+static int handle_terminal_scenario(void *context, lc_consumer_message *message,
+                                    lc_error *error) {
+  consumer_test_state *state;
+  lc_nack_req nack_req;
+  int rc;
+
+  state = (consumer_test_state *)context;
+  pthread_mutex_lock(&state->mutex);
+  state->handled_messages += 1U;
+  pthread_mutex_unlock(&state->mutex);
+
+  switch (state->handler_mode) {
+  case CONSUMER_HANDLER_MODE_AUTO_ACK:
+    stop_test_service(state);
+    return LC_OK;
+  case CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK:
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_FAILURE;
+    nack_req.delay_seconds = 0L;
+    rc = message->message->nack(message->message, &nack_req, error);
+    if (rc == LC_OK) {
+      stop_test_service(state);
+    }
+    return rc;
+  case CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR:
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_FAILURE;
+    nack_req.delay_seconds = 0L;
+    rc = message->message->nack(message->message, &nack_req, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    stop_test_service(state);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "synthetic handler failure", NULL, NULL, NULL);
+  case CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR:
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_DEFER;
+    nack_req.delay_seconds = 0L;
+    rc = message->message->nack(message->message, &nack_req, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    stop_test_service(state);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "synthetic handler failure", NULL, NULL, NULL);
+  default:
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "unknown consumer handler mode", NULL, NULL, NULL);
+  }
 }
 
 static pslog_logger *open_test_logger(FILE **out_fp) {
@@ -858,6 +1110,110 @@ static void test_consumer_service_multi_worker_failure_cleans_up(void **state) {
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
+static void run_consumer_terminal_scenario_unit_test(int handler_mode,
+                                                     int expected_run_rc,
+                                                     size_t expected_ack_calls,
+                                                     size_t expected_nack_calls,
+                                                     int expected_nack_intent) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.handler_mode = handler_mode;
+  runtime_state.last_nack_intent = -1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.visibility_timeout_seconds = 1L;
+  consumer.handle = handle_terminal_scenario;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+  lc_consumer_service_set_test_hooks(service, fake_clone_client,
+                                     fake_subscribe);
+  lc_consumer_service_set_test_message_factory_hook(
+      service, fake_delivery_message_factory);
+
+  rc = service->run(service, &error);
+  if (expected_run_rc == LC_OK) {
+    assert_int_equal(rc, LC_OK);
+  } else {
+    assert_int_not_equal(rc, LC_OK);
+  }
+  assert_int_equal(runtime_state.ack_calls, expected_ack_calls);
+  assert_int_equal(runtime_state.nack_calls, expected_nack_calls);
+  assert_int_equal(runtime_state.close_calls,
+                   expected_ack_calls + expected_nack_calls);
+  assert_int_equal(runtime_state.handled_messages, 1U);
+  assert_int_equal(runtime_state.last_nack_intent, expected_nack_intent);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void test_consumer_service_auto_acks_open_delivery_on_success(
+    void **state) {
+  (void)state;
+  run_consumer_terminal_scenario_unit_test(CONSUMER_HANDLER_MODE_AUTO_ACK,
+                                           LC_OK, 1U, 0U, -1);
+}
+
+static void test_consumer_service_preserves_explicit_failure_nack_on_success(
+    void **state) {
+  (void)state;
+  run_consumer_terminal_scenario_unit_test(
+      CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK, LC_OK, 0U, 1U,
+      LC_NACK_INTENT_FAILURE);
+}
+
+static void
+test_consumer_service_does_not_double_nack_explicit_failure_handler_error(
+    void **state) {
+  (void)state;
+  run_consumer_terminal_scenario_unit_test(
+      CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR, LC_OK, 0U,
+      1U, LC_NACK_INTENT_FAILURE);
+}
+
+static void
+test_consumer_service_does_not_double_nack_explicit_defer_handler_error(
+    void **state) {
+  (void)state;
+  run_consumer_terminal_scenario_unit_test(
+      CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR, LC_OK, 0U, 1U,
+      LC_NACK_INTENT_DEFER);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_consumer_restart_policy_init_sets_defaults),
@@ -868,6 +1224,14 @@ int main(void) {
       cmocka_unit_test(
           test_consumer_service_multi_worker_runs_without_transport),
       cmocka_unit_test(test_consumer_service_multi_worker_failure_cleans_up),
+      cmocka_unit_test(
+          test_consumer_service_auto_acks_open_delivery_on_success),
+      cmocka_unit_test(
+          test_consumer_service_preserves_explicit_failure_nack_on_success),
+      cmocka_unit_test(
+          test_consumer_service_does_not_double_nack_explicit_failure_handler_error),
+      cmocka_unit_test(
+          test_consumer_service_does_not_double_nack_explicit_defer_handler_error),
       cmocka_unit_test(
           test_consumer_service_retains_owned_logger_after_root_client_close),
       cmocka_unit_test(

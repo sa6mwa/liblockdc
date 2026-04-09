@@ -7,6 +7,27 @@
 #include "lc/lc.h"
 #include "mock_lc_public.h"
 
+static int public_mock_managed_terminal_action(lc_message *message,
+                                               int handler_rc,
+                                               int already_terminal,
+                                               lc_error *error) {
+  lc_nack_req nack_req;
+
+  if (handler_rc == LC_OK) {
+    if (!already_terminal) {
+      return lc_message_ack(message, error);
+    }
+    return LC_OK;
+  }
+  if (!already_terminal) {
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_FAILURE;
+    nack_req.delay_seconds = 0L;
+    return lc_message_nack(message, &nack_req, error);
+  }
+  return handler_rc;
+}
+
 static void test_public_mocks_support_happy_path_flow(void **state) {
   lc_public_mock_client client;
   lc_public_mock_lease lease;
@@ -54,9 +75,50 @@ static void test_public_mocks_support_happy_path_flow(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_public_mocks_model_managed_consumer_terminal_actions(
+    void **state) {
+  lc_public_mock_message message;
+  lc_nack_req nack_req;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  lc_public_mock_message_init(&message);
+  lc_nack_req_init(&nack_req);
+  lc_error_init(&error);
+
+  rc = public_mock_managed_terminal_action(&message.pub, LC_OK, 0, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(message.ack_call.count, 1);
+  assert_int_equal(message.nack_call.count, 0);
+
+  lc_public_mock_message_init(&message);
+  rc = lc_message_nack(&message.pub, &nack_req, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = public_mock_managed_terminal_action(&message.pub, LC_ERR_TRANSPORT, 1,
+                                           &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_int_equal(message.ack_call.count, 0);
+  assert_int_equal(message.nack_call.count, 1);
+
+  lc_public_mock_message_init(&message);
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  rc = lc_message_nack(&message.pub, &nack_req, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = public_mock_managed_terminal_action(&message.pub, LC_ERR_TRANSPORT, 1,
+                                           &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_int_equal(message.ack_call.count, 0);
+  assert_int_equal(message.nack_call.count, 1);
+
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_public_mocks_support_happy_path_flow),
+      cmocka_unit_test(
+          test_public_mocks_model_managed_consumer_terminal_actions),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

@@ -34,6 +34,13 @@ typedef int (*lc_consumer_subscribe_fn)(
     int with_state, lc_client_handle *client,
     const lc_engine_queue_stream_handler *handler, void *handler_context,
     lc_engine_error *engine_error);
+/* Private test-only seam used by unit tests to inject a synthetic lc_message
+ * into the managed consumer runtime. This is not part of the public SDK
+ * contract and must not be used by end-to-end/integration paths. */
+typedef lc_message *(*lc_consumer_test_message_factory_fn)(
+    lc_consumer_service_handle *service, lc_client_handle *client,
+    const lc_engine_dequeue_response *delivery, lc_source *payload,
+    int *terminal_flag);
 
 struct lc_client_handle {
   lc_client pub;
@@ -383,5 +390,7 @@ void lc_consumer_service_close_method(lc_consumer_service *self);
 void lc_consumer_service_set_test_hooks(lc_consumer_service *self,
                                         lc_consumer_clone_client_fn clone_fn,
                                         lc_consumer_subscribe_fn subscribe_fn);
+void lc_consumer_service_set_test_message_factory_hook(
+    lc_consumer_service *self, lc_consumer_test_message_factory_fn factory_fn);
 
 #endif

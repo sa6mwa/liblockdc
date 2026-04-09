@@ -65,6 +65,7 @@ struct lc_consumer_service_handle {
   lc_allocator allocator;
   lc_consumer_clone_client_fn clone_client_fn;
   lc_consumer_subscribe_fn subscribe_fn;
+  lc_consumer_test_message_factory_fn test_message_factory_hook;
   lc_consumer_worker_state *workers;
   size_t worker_count;
   pthread_mutex_t mutex;
@@ -792,11 +793,13 @@ lc_consumer_delivery_begin(void *context,
                            const lc_engine_dequeue_response *delivery,
                            lc_engine_error *engine_error) {
   lc_consumer_delivery_bridge *bridge;
+  lc_consumer_service_handle *service;
   lc_source *payload;
   int rc;
 
   (void)engine_error;
   bridge = (lc_consumer_delivery_bridge *)context;
+  service = bridge->worker->service;
   lc_consumer_delivery_meta_copy(&bridge->meta, delivery);
   {
     pslog_field fields[8];
@@ -847,8 +850,12 @@ lc_consumer_delivery_begin(void *context,
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
-  bridge->message =
-      lc_message_new(bridge->client, &bridge->meta, payload, &bridge->terminal);
+  bridge->message = service->test_message_factory_hook != NULL
+                        ? service->test_message_factory_hook(
+                              service, bridge->client, &bridge->meta, payload,
+                              &bridge->terminal)
+                        : lc_message_new(bridge->client, &bridge->meta, payload,
+                                         &bridge->terminal);
   if (bridge->message == NULL) {
     payload->close(payload);
     lc_stream_pipe_fail(bridge->pipe, LC_ERR_NOMEM,
@@ -1021,6 +1028,8 @@ static void *lc_consumer_delivery_handler_main(void *context) {
       lc_error_cleanup(&terminal_error);
     }
   } else {
+    /* A non-OK handler return is a managed consumer failure. The runtime,
+     * not the user callback, owns the failure nack and restart semantics. */
     if (handler_error.code == LC_OK) {
       lc_error_set(&handler_error, LC_ERR_TRANSPORT, 0L,
                    "consumer handler failed", NULL, NULL, NULL);
@@ -1233,6 +1242,8 @@ static void *lc_consumer_worker_main(void *context) {
       bridge.extend_thread_started = 0;
     }
     if (bridge.message != NULL) {
+      /* Cleanup only closes any still-open delivery handle. Terminal queue
+       * actions must already have been decided before we reach this point. */
       bridge.message->close(bridge.message);
       bridge.message = NULL;
     }
@@ -1529,6 +1540,7 @@ int lc_client_new_consumer_service_method(
   service->pub.close = lc_consumer_service_close_method;
   service->clone_client_fn = lc_consumer_clone_client;
   service->subscribe_fn = NULL;
+  service->test_message_factory_hook = NULL;
   *out = &service->pub;
   return LC_OK;
 }
@@ -1545,4 +1557,15 @@ void lc_consumer_service_set_test_hooks(lc_consumer_service *self,
   service->clone_client_fn =
       clone_fn != NULL ? clone_fn : lc_consumer_clone_client;
   service->subscribe_fn = subscribe_fn;
+}
+
+void lc_consumer_service_set_test_message_factory_hook(
+    lc_consumer_service *self, lc_consumer_test_message_factory_fn factory_fn) {
+  lc_consumer_service_handle *service;
+
+  if (self == NULL) {
+    return;
+  }
+  service = (lc_consumer_service_handle *)self;
+  service->test_message_factory_hook = factory_fn;
 }

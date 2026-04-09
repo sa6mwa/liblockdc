@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -776,6 +777,11 @@ typedef struct e2e_consumer_context {
   int first_delivery_mode;
   int expect_state;
   int saw_state;
+  long last_visibility_timeout_seconds;
+  int last_error_code;
+  long last_error_http_status;
+  char last_error_server_code[96];
+  char last_error_message[192];
   char payload[64];
   char state_json[128];
   char state_key[160];
@@ -784,7 +790,9 @@ typedef struct e2e_consumer_context {
 enum {
   E2E_CONSUMER_FIRST_DELIVERY_NONE = 0,
   E2E_CONSUMER_FIRST_DELIVERY_FAIL = 1,
-  E2E_CONSUMER_FIRST_DELIVERY_DEFER = 2
+  E2E_CONSUMER_FIRST_DELIVERY_DEFER = 2,
+  E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE = 3,
+  E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR = 4
 };
 
 static const e2e_consumer_backend e2e_backend_disk = {
@@ -847,6 +855,18 @@ static int e2e_consumer_record_payload(e2e_consumer_context *consumer_context,
   consumer_context->handled += 1;
   pthread_mutex_unlock(&consumer_context->mutex);
   return LC_OK;
+}
+
+static void e2e_sleep_ms(long delay_ms) {
+  struct timespec ts;
+
+  if (delay_ms <= 0L) {
+    return;
+  }
+  ts.tv_sec = delay_ms / 1000L;
+  ts.tv_nsec = (delay_ms % 1000L) * 1000000L;
+  while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+  }
 }
 
 static int e2e_consumer_persist_state(e2e_consumer_context *consumer_context,
@@ -926,6 +946,13 @@ static int e2e_consumer_handle(void *context, lc_consumer_message *delivery,
     return rc;
   }
 
+  pthread_mutex_lock(&consumer_context->mutex);
+  consumer_context->last_visibility_timeout_seconds =
+      delivery != NULL && delivery->message != NULL
+          ? delivery->message->visibility_timeout_seconds
+          : 0L;
+  pthread_mutex_unlock(&consumer_context->mutex);
+
   state_lease = delivery->state;
   if (state_lease == NULL && delivery->message != NULL &&
       delivery->message->state != NULL) {
@@ -944,6 +971,7 @@ static int e2e_consumer_handle(void *context, lc_consumer_message *delivery,
   pthread_mutex_unlock(&consumer_context->mutex);
   if (consumer_context->first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL &&
       handled_count == 1) {
+    e2e_sleep_ms(1500L);
     return LC_ERR_TRANSPORT;
   }
   if (consumer_context->first_delivery_mode ==
@@ -954,6 +982,26 @@ static int e2e_consumer_handle(void *context, lc_consumer_message *delivery,
     nack_req.delay_seconds = 0L;
     return delivery->message->nack(delivery->message, &nack_req, error);
   }
+  if (consumer_context->first_delivery_mode ==
+          E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE &&
+      handled_count == 1) {
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_FAILURE;
+    nack_req.delay_seconds = 0L;
+    return delivery->message->nack(delivery->message, &nack_req, error);
+  }
+  if (consumer_context->first_delivery_mode ==
+          E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR &&
+      handled_count == 1) {
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_FAILURE;
+    nack_req.delay_seconds = 0L;
+    rc = delivery->message->nack(delivery->message, &nack_req, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    return LC_ERR_TRANSPORT;
+  }
 
   return LC_OK;
 }
@@ -962,12 +1010,30 @@ static int e2e_consumer_on_error(void *context, const lc_consumer_error *event,
                                  lc_error *error) {
   e2e_consumer_context *consumer_context;
 
-  (void)event;
-  (void)error;
   consumer_context = (e2e_consumer_context *)context;
   pthread_mutex_lock(&consumer_context->mutex);
   consumer_context->error_events += 1;
+  consumer_context->last_error_code =
+      event != NULL && event->cause != NULL ? event->cause->code : LC_OK;
+  consumer_context->last_error_http_status =
+      event != NULL && event->cause != NULL ? event->cause->http_status : 0L;
+  memset(consumer_context->last_error_server_code, 0,
+         sizeof(consumer_context->last_error_server_code));
+  if (event != NULL && event->cause != NULL &&
+      event->cause->server_code != NULL) {
+    strncpy(consumer_context->last_error_server_code,
+            event->cause->server_code,
+            sizeof(consumer_context->last_error_server_code) - 1U);
+  }
+  memset(consumer_context->last_error_message, 0,
+         sizeof(consumer_context->last_error_message));
+  if (event != NULL && event->cause != NULL && event->cause->message != NULL) {
+    strncpy(consumer_context->last_error_message,
+            event->cause->message,
+            sizeof(consumer_context->last_error_message) - 1U);
+  }
   pthread_mutex_unlock(&consumer_context->mutex);
+  (void)error;
   return LC_OK;
 }
 
@@ -1012,9 +1078,17 @@ static void wait_for_consumer_handled(e2e_consumer_context *consumer_context,
     pthread_mutex_unlock(&consumer_context->mutex);
     if (retries++ > maximum_retries) {
       fail_msg("consumer retry timed out: handled=%d start_events=%d "
-               "stop_events=%d error_events=%d",
+               "stop_events=%d error_events=%d last_error_code=%d "
+               "last_error_http_status=%ld last_error_server_code=%s "
+               "last_error_message=%s "
+               "last_visibility_timeout_seconds=%ld",
                consumer_context->handled, consumer_context->start_events,
-               consumer_context->stop_events, consumer_context->error_events);
+               consumer_context->stop_events, consumer_context->error_events,
+               consumer_context->last_error_code,
+               consumer_context->last_error_http_status,
+               consumer_context->last_error_server_code,
+               consumer_context->last_error_message,
+               consumer_context->last_visibility_timeout_seconds);
     }
     usleep(100000);
   }
@@ -1113,12 +1187,16 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
   pthread_mutex_lock(&consumer_context.mutex);
   assert_true(consumer_context.start_events >= (int)worker_count);
   assert_true(consumer_context.stop_events >= (int)worker_count);
-  if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL) {
+  if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL ||
+      first_delivery_mode ==
+          E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR) {
     assert_int_equal(consumer_context.handled, enqueue_count + 1);
     assert_true(consumer_context.error_events >= 1);
     assert_true(consumer_context.start_events >= (int)worker_count + 1);
   } else if (first_delivery_mode ==
-             E2E_CONSUMER_FIRST_DELIVERY_DEFER) {
+                 E2E_CONSUMER_FIRST_DELIVERY_DEFER ||
+             first_delivery_mode ==
+                 E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE) {
     assert_int_equal(consumer_context.handled, enqueue_count + 1);
     assert_int_equal(consumer_context.error_events, 0);
     assert_int_equal(consumer_context.start_events, (int)worker_count);
@@ -1177,6 +1255,22 @@ static void test_disk_consumer_service_defer_then_redeliver(void **state) {
                                E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
 }
 
+static void test_disk_consumer_service_explicit_failure_nack(void **state) {
+  (void)state;
+  run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-fail-nack", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0,
+                               1U);
+}
+
+static void
+test_disk_consumer_service_explicit_failure_nack_then_handler_error(
+    void **state) {
+  (void)state;
+  run_consumer_service_variant(
+      &e2e_backend_disk, "disk-consumer-fail-nack-error", 1,
+      E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR, 0, 1U);
+}
+
 static void test_s3_consumer_service_happy(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-happy", 1,
@@ -1208,6 +1302,23 @@ static void test_s3_consumer_service_defer_then_redeliver(void **state) {
                                E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
 }
 
+static void test_s3_consumer_service_explicit_failure_nack(void **state) {
+  (void)state;
+  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-fail-nack", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0,
+                               1U);
+}
+
+static void
+test_s3_consumer_service_explicit_failure_nack_then_handler_error(
+    void **state) {
+  (void)state;
+  run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-fail-nack-error",
+                               1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR,
+                               0, 1U);
+}
+
 static void test_mem_uds_consumer_service_happy(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-happy", 1,
@@ -1237,6 +1348,22 @@ static void test_mem_uds_consumer_service_defer_then_redeliver(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-defer", 1,
                                E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
+}
+
+static void test_mem_uds_consumer_service_explicit_failure_nack(void **state) {
+  (void)state;
+  run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-fail-nack", 1,
+                               E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0,
+                               1U);
+}
+
+static void
+test_mem_uds_consumer_service_explicit_failure_nack_then_handler_error(
+    void **state) {
+  (void)state;
+  run_consumer_service_variant(
+      &e2e_backend_mem, "mem-consumer-fail-nack-error", 1,
+      E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR, 0, 1U);
 }
 
 static void test_mem_uds_consumer_service_multi_worker(void **state) {
@@ -1441,11 +1568,17 @@ int main(void) {
       cmocka_unit_test(
           test_disk_consumer_service_restart_after_handler_failure),
       cmocka_unit_test(test_disk_consumer_service_defer_then_redeliver),
+      cmocka_unit_test(test_disk_consumer_service_explicit_failure_nack),
+      cmocka_unit_test(
+          test_disk_consumer_service_explicit_failure_nack_then_handler_error),
       cmocka_unit_test(test_s3_consumer_service_happy),
       cmocka_unit_test(test_s3_consumer_service_multi_delivery),
       cmocka_unit_test(test_s3_consumer_service_with_state),
       cmocka_unit_test(test_s3_consumer_service_restart_after_handler_failure),
       cmocka_unit_test(test_s3_consumer_service_defer_then_redeliver),
+      cmocka_unit_test(test_s3_consumer_service_explicit_failure_nack),
+      cmocka_unit_test(
+          test_s3_consumer_service_explicit_failure_nack_then_handler_error),
       cmocka_unit_test(test_mem_uds_consumer_service_happy),
       cmocka_unit_test(test_mem_uds_consumer_service_multi_delivery),
       cmocka_unit_test(test_mem_uds_consumer_service_multi_worker),
@@ -1453,6 +1586,9 @@ int main(void) {
       cmocka_unit_test(
           test_mem_uds_consumer_service_restart_after_handler_failure),
       cmocka_unit_test(test_mem_uds_consumer_service_defer_then_redeliver),
+      cmocka_unit_test(test_mem_uds_consumer_service_explicit_failure_nack),
+      cmocka_unit_test(
+          test_mem_uds_consumer_service_explicit_failure_nack_then_handler_error),
       cmocka_unit_test(test_mem_uds_dequeue_with_state_roundtrip),
       cmocka_unit_test(test_s3_dequeue_with_state_roundtrip),
       cmocka_unit_test(test_mem_uds_dequeue_batch_roundtrip),
