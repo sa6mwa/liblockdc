@@ -905,11 +905,14 @@ typedef struct lc_consumer_restart_policy {
  *
  * All pointers are borrowed for the duration of the callback only. The handler
  * may leave the delivery open and return `LC_OK`; the managed consumer will
- * then acknowledge it automatically on success and negatively acknowledge it
- * on failure. Explicit `message->ack()`/`message->nack()` are still available
- * for handlers that want to terminalize the delivery themselves. When `state`
- * is non-NULL, it is the lease handle associated with the delivery and is
- * owned by `message`.
+ * then acknowledge it automatically on success. If the handler returns a
+ * non-`LC_OK` error, the managed consumer treats it as a failure, negatively
+ * acknowledges the open delivery after the callback unwinds, and restarts the
+ * loop according to the configured policy.
+ * Explicit `message->ack()`/`message->nack()` remain available for handlers
+ * that want to terminalize the delivery themselves. When `state` is non-NULL,
+ * it is the lease handle associated with the delivery and is owned by
+ * `message`.
  */
 typedef struct lc_consumer_message {
   /** Active SDK client for this consumer loop. Safe to reuse inside the
@@ -1326,6 +1329,14 @@ struct lc_message {
    * `reset()`.
    */
   lc_source *(*payload_reader)(lc_message *self);
+  /**
+   * Transfers the payload source into a rewindable JSON stream.
+   *
+   * Use this when the dequeue payload is itself JSON and you want to parse it
+   * through lonejson, including spool-backed fields for very large strings or
+   * byte arrays. After success, the message no longer owns the payload source.
+   */
+  int (*payload_json)(lc_message *self, lc_json **out, lc_error *error);
   /** Rewinds the payload stream when the underlying source supports it. */
   int (*rewind_payload)(lc_message *self, lc_error *error);
   /** Copies the payload stream into `dst`. */

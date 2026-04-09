@@ -77,9 +77,9 @@ static int lc_client_lonejson_load_write_callback(void *context,
 int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                              lc_lease **out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_acquire_request legacy_req;
-  lc_engine_acquire_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_acquire_request engine_req;
+  lc_engine_acquire_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -96,20 +96,20 @@ int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     fields[2] = pslog_i64("ttl_seconds", (pslog_int64)req->ttl_seconds);
     lc_log_trace(client->logger, "client.acquire.start", fields, 3U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.key = req->key;
-  legacy_req.owner = req->owner;
-  legacy_req.ttl_seconds = req->ttl_seconds;
-  legacy_req.block_seconds = req->block_seconds;
-  legacy_req.if_not_exists = req->if_not_exists;
-  legacy_req.txn_id = req->txn_id;
-  rc = lc_engine_client_acquire(client->legacy, &legacy_req, &legacy_res,
-                                &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.key = req->key;
+  engine_req.owner = req->owner;
+  engine_req.ttl_seconds = req->ttl_seconds;
+  engine_req.block_seconds = req->block_seconds;
+  engine_req.if_not_exists = req->if_not_exists;
+  engine_req.txn_id = req->txn_id;
+  rc = lc_engine_client_acquire(client->engine, &engine_req, &engine_res,
+                                &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -118,16 +118,16 @@ int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
       lc_client_log_operation_error(client, PSLOG_LEVEL_ERROR,
                                     "client.acquire.error", fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  *out = lc_lease_new(client, legacy_res.namespace_name, legacy_res.key,
-                      legacy_res.owner, legacy_res.lease_id, legacy_res.txn_id,
-                      legacy_res.fencing_token, legacy_res.version,
-                      legacy_res.state_etag, NULL);
+  *out = lc_lease_new(client, engine_res.namespace_name, engine_res.key,
+                      engine_res.owner, engine_res.lease_id, engine_res.txn_id,
+                      engine_res.fencing_token, engine_res.version,
+                      engine_res.state_etag, NULL);
   if (*out == NULL) {
-    lc_engine_acquire_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_acquire_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate lease handle", NULL, NULL, NULL);
   }
@@ -135,22 +135,22 @@ int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("key", req->key);
-    fields[1] = lc_log_str_field("lease_id", legacy_res.lease_id);
-    fields[2] = lc_log_str_field("txn_id", legacy_res.txn_id);
-    fields[3] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[1] = lc_log_str_field("lease_id", engine_res.lease_id);
+    fields[2] = lc_log_str_field("txn_id", engine_res.txn_id);
+    fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_info(client->logger, "client.acquire.success", fields, 4U);
   }
-  lc_engine_acquire_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_acquire_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_describe_method(lc_client *self, const lc_describe_req *req,
                               lc_describe_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_describe_request legacy_req;
-  lc_engine_describe_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_describe_request engine_req;
+  lc_engine_describe_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -165,15 +165,15 @@ int lc_client_describe_method(lc_client *self, const lc_describe_req *req,
     fields[0] = lc_log_str_field("key", req->key);
     lc_log_trace(client->logger, "client.describe.start", fields, 1U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.key = req->key;
-  rc = lc_engine_client_describe(client->legacy, &legacy_req, &legacy_res,
-                                 &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.key = req->key;
+  rc = lc_engine_client_describe(client->engine, &engine_req, &engine_res,
+                                 &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[1];
 
@@ -181,30 +181,30 @@ int lc_client_describe_method(lc_client *self, const lc_describe_req *req,
       lc_client_log_operation_error(client, PSLOG_LEVEL_WARN,
                                     "client.describe.error", fields, 1U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->namespace_name = lc_strdup_local(legacy_res.namespace_name);
-  out->key = lc_strdup_local(legacy_res.key);
-  out->owner = lc_strdup_local(legacy_res.owner);
-  out->lease_id = lc_strdup_local(legacy_res.lease_id);
-  out->lease_expires_at_unix = legacy_res.expires_at_unix;
-  out->version = legacy_res.version;
-  out->state_etag = lc_strdup_local(legacy_res.state_etag);
-  out->has_query_hidden = legacy_res.has_query_hidden;
-  out->query_hidden = legacy_res.query_hidden;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->namespace_name = lc_strdup_local(engine_res.namespace_name);
+  out->key = lc_strdup_local(engine_res.key);
+  out->owner = lc_strdup_local(engine_res.owner);
+  out->lease_id = lc_strdup_local(engine_res.lease_id);
+  out->lease_expires_at_unix = engine_res.expires_at_unix;
+  out->version = engine_res.version;
+  out->state_etag = lc_strdup_local(engine_res.state_etag);
+  out->has_query_hidden = engine_res.has_query_hidden;
+  out->query_hidden = engine_res.query_hidden;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("key", req->key);
-    fields[1] = pslog_i64("version", (pslog_int64)legacy_res.version);
-    fields[2] = lc_log_str_field("state_etag", legacy_res.state_etag);
-    fields[3] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[1] = pslog_i64("version", (pslog_int64)engine_res.version);
+    fields[2] = lc_log_str_field("state_etag", engine_res.state_etag);
+    fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.describe.success", fields, 4U);
   }
-  lc_engine_describe_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_describe_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -212,9 +212,9 @@ int lc_client_get_method(lc_client *self, const char *key,
                          const lc_get_opts *opts, lc_sink *dst, lc_get_res *out,
                          lc_error *error) {
   lc_client_handle *client;
-  lc_engine_get_request legacy_req;
-  lc_engine_get_stream_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_get_request engine_req;
+  lc_engine_get_stream_response engine_res;
+  lc_engine_error engine_error;
   lc_write_bridge bridge;
   int rc;
 
@@ -232,17 +232,17 @@ int lc_client_get_method(lc_client *self, const char *key,
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
     lc_log_trace(client->logger, "client.get.start", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
   bridge.sink = dst;
-  legacy_req.key = key;
-  legacy_req.public_read = opts != NULL ? opts->public_read : 0;
-  rc = lc_engine_client_get_into(client->legacy, &legacy_req,
-                                 lc_legacy_write_bridge, &bridge, &legacy_res,
-                                 &legacy_error);
+  engine_req.key = key;
+  engine_req.public_read = opts != NULL ? opts->public_read : 0;
+  rc = lc_engine_client_get_into(client->engine, &engine_req,
+                                 lc_engine_write_bridge, &bridge, &engine_res,
+                                 &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -258,29 +258,29 @@ int lc_client_get_method(lc_client *self, const char *key,
               : "client.get.error",
           fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->no_content = legacy_res.no_content;
-  out->content_type = lc_strdup_local(legacy_res.content_type);
-  out->etag = lc_strdup_local(legacy_res.etag);
-  out->version = legacy_res.version;
-  out->fencing_token = legacy_res.fencing_token;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->no_content = engine_res.no_content;
+  out->content_type = lc_strdup_local(engine_res.content_type);
+  out->etag = lc_strdup_local(engine_res.etag);
+  out->version = engine_res.version;
+  out->fencing_token = engine_res.fencing_token;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("key", key);
     fields[1] =
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
-    fields[2] = pslog_i64("version", (pslog_int64)legacy_res.version);
+    fields[2] = pslog_i64("version", (pslog_int64)engine_res.version);
     fields[3] =
-        pslog_i64("fencing_token", (pslog_int64)legacy_res.fencing_token);
-    fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
+        pslog_i64("fencing_token", (pslog_int64)engine_res.fencing_token);
+    fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.get.success", fields, 5U);
   }
-  lc_engine_get_stream_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_get_stream_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -290,9 +290,9 @@ int lc_client_load_method(lc_client *self, const char *key,
                           const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error) {
   lc_client_handle *client;
-  lc_engine_get_request legacy_req;
-  lc_engine_get_stream_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_get_request engine_req;
+  lc_engine_get_stream_response engine_res;
+  lc_engine_error engine_error;
   lc_client_lonejson_load_state load_state;
   lonejson_parse_options options;
   int no_content;
@@ -318,9 +318,9 @@ int lc_client_load_method(lc_client *self, const char *key,
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
     lc_log_trace(client->logger, "client.get.start", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
   memset(&load_state, 0, sizeof(load_state));
   options =
       parse_options != NULL ? *parse_options : lonejson_default_parse_options();
@@ -335,13 +335,13 @@ int lc_client_load_method(lc_client *self, const char *key,
         error, rc, &load_state.parse.error,
         "failed to initialize mapped load parser");
   }
-  legacy_req.key = key;
-  legacy_req.public_read = opts != NULL ? opts->public_read : 0;
-  rc = lc_engine_client_get_into(client->legacy, &legacy_req,
+  engine_req.key = key;
+  engine_req.public_read = opts != NULL ? opts->public_read : 0;
+  rc = lc_engine_client_get_into(client->engine, &engine_req,
                                  lc_client_lonejson_load_write_callback,
-                                 &load_state, &legacy_res, &legacy_error);
+                                 &load_state, &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -359,7 +359,7 @@ int lc_client_load_method(lc_client *self, const char *key,
     }
     lonejson_curl_parse_cleanup(&load_state.parse);
     lonejson_cleanup(map, dst);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
   {
@@ -368,20 +368,20 @@ int lc_client_load_method(lc_client *self, const char *key,
     fields[0] = lc_log_str_field("key", key);
     fields[1] =
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
-    fields[2] = pslog_i64("version", (pslog_int64)legacy_res.version);
+    fields[2] = pslog_i64("version", (pslog_int64)engine_res.version);
     fields[3] =
-        pslog_i64("fencing_token", (pslog_int64)legacy_res.fencing_token);
-    fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
+        pslog_i64("fencing_token", (pslog_int64)engine_res.fencing_token);
+    fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.get.success", fields, 5U);
   }
-  no_content = legacy_res.no_content;
-  version = legacy_res.version;
-  fencing_token = legacy_res.fencing_token;
-  if (!legacy_res.no_content) {
+  no_content = engine_res.no_content;
+  version = engine_res.version;
+  fencing_token = engine_res.fencing_token;
+  if (!engine_res.no_content) {
     rc = lonejson_curl_parse_finish(&load_state.parse);
     if (rc != LONEJSON_STATUS_OK) {
-      lc_engine_get_stream_response_cleanup(&legacy_res);
-      lc_engine_error_cleanup(&legacy_error);
+      lc_engine_get_stream_response_cleanup(&engine_res);
+      lc_engine_error_cleanup(&engine_error);
       lonejson_curl_parse_cleanup(&load_state.parse);
       lonejson_cleanup(map, dst);
       return lc_lonejson_error_from_status(error, rc, &load_state.parse.error,
@@ -389,17 +389,17 @@ int lc_client_load_method(lc_client *self, const char *key,
     }
   }
   lonejson_curl_parse_cleanup(&load_state.parse);
-  content_type = lc_strdup_local(legacy_res.content_type);
-  etag = lc_strdup_local(legacy_res.etag);
-  correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  content_type = lc_strdup_local(engine_res.content_type);
+  etag = lc_strdup_local(engine_res.etag);
+  correlation_id = lc_strdup_local(engine_res.correlation_id);
   out->no_content = no_content;
   out->content_type = content_type;
   out->etag = etag;
   out->version = version;
   out->fencing_token = fencing_token;
   out->correlation_id = correlation_id;
-  lc_engine_get_stream_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_get_stream_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -407,9 +407,9 @@ int lc_client_update_method(lc_client *self, const lc_update_req *req,
                             lc_json *json, lc_update_res *out,
                             lc_error *error) {
   lc_client_handle *client;
-  lc_engine_update_request legacy_req;
-  lc_engine_update_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_update_request engine_req;
+  lc_engine_update_response engine_res;
+  lc_engine_error engine_error;
   lc_read_bridge bridge;
   int rc;
 
@@ -429,25 +429,25 @@ int lc_client_update_method(lc_client *self, const lc_update_req *req,
         pslog_i64("fencing_token", (pslog_int64)req->lease.fencing_token);
     lc_log_trace(client->logger, "client.update.start", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
   bridge.source = (lc_source *)json;
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.if_state_etag = req->if_state_etag;
-  legacy_req.if_version = req->if_version;
-  legacy_req.has_if_version = req->has_if_version;
-  legacy_req.content_type =
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.if_state_etag = req->if_state_etag;
+  engine_req.if_version = req->if_version;
+  engine_req.has_if_version = req->has_if_version;
+  engine_req.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
-  rc = lc_engine_client_update_from(client->legacy, &legacy_req,
-                                    lc_legacy_read_bridge, &bridge, &legacy_res,
-                                    &legacy_error);
+  rc = lc_engine_client_update_from(client->engine, &engine_req,
+                                    lc_engine_read_bridge, &bridge, &engine_res,
+                                    &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
 
@@ -465,35 +465,35 @@ int lc_client_update_method(lc_client *self, const lc_update_req *req,
               : "client.update.error",
           fields, 4U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->new_version = legacy_res.new_version;
-  out->new_state_etag = lc_strdup_local(legacy_res.new_state_etag);
-  out->bytes = legacy_res.bytes;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->new_version = engine_res.new_version;
+  out->new_state_etag = lc_strdup_local(engine_res.new_state_etag);
+  out->bytes = engine_res.bytes;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
     fields[2] = lc_log_str_field("txn_id", req->lease.txn_id);
-    fields[3] = pslog_i64("new_version", (pslog_int64)legacy_res.new_version);
-    fields[4] = lc_log_str_field("new_etag", legacy_res.new_state_etag);
-    fields[5] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[3] = pslog_i64("new_version", (pslog_int64)engine_res.new_version);
+    fields[4] = lc_log_str_field("new_etag", engine_res.new_state_etag);
+    fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.update.success", fields, 6U);
   }
-  lc_engine_update_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_update_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_mutate_method(lc_client *self, const lc_mutate_op *req,
                             lc_mutate_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_mutate_request legacy_req;
-  lc_engine_mutate_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_mutate_request engine_req;
+  lc_engine_mutate_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -511,23 +511,23 @@ int lc_client_mutate_method(lc_client *self, const lc_mutate_op *req,
         pslog_i64("fencing_token", (pslog_int64)req->lease.fencing_token);
     lc_log_trace(client->logger, "client.mutate.start", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.if_state_etag = req->if_state_etag;
-  legacy_req.if_version = req->if_version;
-  legacy_req.has_if_version = req->has_if_version;
-  legacy_req.mutations = req->mutations;
-  legacy_req.mutation_count = req->mutation_count;
-  rc = lc_engine_client_mutate(client->legacy, &legacy_req, &legacy_res,
-                               &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.if_state_etag = req->if_state_etag;
+  engine_req.if_version = req->if_version;
+  engine_req.has_if_version = req->has_if_version;
+  engine_req.mutations = req->mutations;
+  engine_req.mutation_count = req->mutation_count;
+  rc = lc_engine_client_mutate(client->engine, &engine_req, &engine_res,
+                               &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
 
@@ -545,35 +545,35 @@ int lc_client_mutate_method(lc_client *self, const lc_mutate_op *req,
               : "client.mutate.error",
           fields, 4U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->new_version = legacy_res.new_version;
-  out->new_state_etag = lc_strdup_local(legacy_res.new_state_etag);
-  out->bytes = legacy_res.bytes;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->new_version = engine_res.new_version;
+  out->new_state_etag = lc_strdup_local(engine_res.new_state_etag);
+  out->bytes = engine_res.bytes;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
     fields[2] = lc_log_str_field("txn_id", req->lease.txn_id);
-    fields[3] = pslog_i64("new_version", (pslog_int64)legacy_res.new_version);
-    fields[4] = lc_log_str_field("new_etag", legacy_res.new_state_etag);
-    fields[5] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[3] = pslog_i64("new_version", (pslog_int64)engine_res.new_version);
+    fields[4] = lc_log_str_field("new_etag", engine_res.new_state_etag);
+    fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.mutate.success", fields, 6U);
   }
-  lc_engine_mutate_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_mutate_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
                               lc_metadata_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_metadata_request legacy_req;
-  lc_engine_metadata_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_metadata_request engine_req;
+  lc_engine_metadata_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -590,22 +590,22 @@ int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
     fields[2] = lc_log_str_field("txn_id", req->lease.txn_id);
     lc_log_trace(client->logger, "client.metadata.start", fields, 3U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.if_version = req->if_version;
-  legacy_req.has_if_version = req->has_if_version;
-  legacy_req.has_query_hidden = req->has_query_hidden;
-  legacy_req.query_hidden = req->query_hidden;
-  rc = lc_engine_client_update_metadata(client->legacy, &legacy_req,
-                                        &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.if_version = req->if_version;
+  engine_req.has_if_version = req->has_if_version;
+  engine_req.has_query_hidden = req->has_query_hidden;
+  engine_req.query_hidden = req->query_hidden;
+  rc = lc_engine_client_update_metadata(client->engine, &engine_req,
+                                        &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -621,35 +621,35 @@ int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
               : "client.metadata.error",
           fields, 3U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->namespace_name = lc_strdup_local(legacy_res.namespace_name);
-  out->key = lc_strdup_local(legacy_res.key);
-  out->version = legacy_res.version;
-  out->has_query_hidden = legacy_res.has_query_hidden;
-  out->query_hidden = legacy_res.query_hidden;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->namespace_name = lc_strdup_local(engine_res.namespace_name);
+  out->key = lc_strdup_local(engine_res.key);
+  out->version = engine_res.version;
+  out->has_query_hidden = engine_res.has_query_hidden;
+  out->query_hidden = engine_res.query_hidden;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
-    fields[1] = pslog_i64("version", (pslog_int64)legacy_res.version);
-    fields[2] = lc_log_bool_field("query_hidden", legacy_res.query_hidden);
-    fields[3] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[1] = pslog_i64("version", (pslog_int64)engine_res.version);
+    fields[2] = lc_log_bool_field("query_hidden", engine_res.query_hidden);
+    fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.metadata.success", fields, 4U);
   }
-  lc_engine_metadata_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_metadata_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_remove_method(lc_client *self, const lc_remove_op *req,
                             lc_remove_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_remove_request legacy_req;
-  lc_engine_remove_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_remove_request engine_req;
+  lc_engine_remove_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -667,21 +667,21 @@ int lc_client_remove_method(lc_client *self, const lc_remove_op *req,
         pslog_i64("fencing_token", (pslog_int64)req->lease.fencing_token);
     lc_log_trace(client->logger, "client.remove.start", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.if_state_etag = req->if_state_etag;
-  legacy_req.if_version = req->if_version;
-  legacy_req.has_if_version = req->has_if_version;
-  rc = lc_engine_client_remove(client->legacy, &legacy_req, &legacy_res,
-                               &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.if_state_etag = req->if_state_etag;
+  engine_req.if_version = req->if_version;
+  engine_req.has_if_version = req->has_if_version;
+  rc = lc_engine_client_remove(client->engine, &engine_req, &engine_res,
+                               &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
 
@@ -699,33 +699,33 @@ int lc_client_remove_method(lc_client *self, const lc_remove_op *req,
               : "client.remove.error",
           fields, 4U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->removed = legacy_res.removed;
-  out->new_version = legacy_res.new_version;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->removed = engine_res.removed;
+  out->new_version = engine_res.new_version;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
-    fields[1] = lc_log_bool_field("removed", legacy_res.removed);
-    fields[2] = pslog_i64("new_version", (pslog_int64)legacy_res.new_version);
+    fields[1] = lc_log_bool_field("removed", engine_res.removed);
+    fields[2] = pslog_i64("new_version", (pslog_int64)engine_res.new_version);
     fields[3] = lc_log_str_field("lease_id", req->lease.lease_id);
-    fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.remove.success", fields, 5U);
   }
-  lc_engine_remove_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_remove_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_keepalive_method(lc_client *self, const lc_keepalive_op *req,
                                lc_keepalive_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_keepalive_request legacy_req;
-  lc_engine_keepalive_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_keepalive_request engine_req;
+  lc_engine_keepalive_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -744,19 +744,19 @@ int lc_client_keepalive_method(lc_client *self, const lc_keepalive_op *req,
         pslog_i64("fencing_token", (pslog_int64)req->lease.fencing_token);
     lc_log_trace(client->logger, "client.keepalive.start", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.ttl_seconds = req->ttl_seconds;
-  rc = lc_engine_client_keepalive(client->legacy, &legacy_req, &legacy_res,
-                                  &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.ttl_seconds = req->ttl_seconds;
+  rc = lc_engine_client_keepalive(client->engine, &engine_req, &engine_res,
+                                  &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -768,34 +768,34 @@ int lc_client_keepalive_method(lc_client *self, const lc_keepalive_op *req,
                                     "client.keepalive.error", fields, 3U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->lease_expires_at_unix = legacy_res.lease_expires_at_unix;
-  out->version = legacy_res.version;
-  out->state_etag = lc_strdup_local(legacy_res.state_etag);
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->lease_expires_at_unix = engine_res.lease_expires_at_unix;
+  out->version = engine_res.version;
+  out->state_etag = lc_strdup_local(engine_res.state_etag);
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
     fields[2] =
-        pslog_i64("expires_at", (pslog_int64)legacy_res.lease_expires_at_unix);
-    fields[3] = lc_log_str_field("cid", legacy_res.correlation_id);
+        pslog_i64("expires_at", (pslog_int64)engine_res.lease_expires_at_unix);
+    fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.keepalive.success", fields, 4U);
   }
-  lc_engine_keepalive_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_keepalive_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_release_method(lc_client *self, const lc_release_op *req,
                              lc_release_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_release_request legacy_req;
-  lc_engine_release_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_release_request engine_req;
+  lc_engine_release_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -812,19 +812,19 @@ int lc_client_release_method(lc_client *self, const lc_release_op *req,
     fields[2] = lc_log_str_field("txn_id", req->lease.txn_id);
     lc_log_trace(client->logger, "client.release.start", fields, 3U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.rollback = req->rollback;
-  rc = lc_engine_client_release(client->legacy, &legacy_req, &legacy_res,
-                                &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.rollback = req->rollback;
+  rc = lc_engine_client_release(client->engine, &engine_req, &engine_res,
+                                &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -834,22 +834,22 @@ int lc_client_release_method(lc_client *self, const lc_release_op *req,
       lc_client_log_operation_error(client, PSLOG_LEVEL_ERROR,
                                     "client.release.error", fields, 3U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->released = legacy_res.released;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->released = engine_res.released;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
-    fields[2] = lc_log_bool_field("released", legacy_res.released);
-    fields[3] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[2] = lc_log_bool_field("released", engine_res.released);
+    fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.release.success", fields, 4U);
   }
-  lc_engine_release_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_release_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -857,9 +857,9 @@ int lc_client_attach_method(lc_client *self, const lc_attach_op *req,
                             lc_source *src, lc_attach_res *out,
                             lc_error *error) {
   lc_client_handle *client;
-  lc_engine_attach_request legacy_req;
-  lc_engine_attach_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_attach_request engine_req;
+  lc_engine_attach_response engine_res;
+  lc_engine_error engine_error;
   lc_read_bridge bridge;
   int rc;
 
@@ -878,25 +878,25 @@ int lc_client_attach_method(lc_client *self, const lc_attach_op *req,
     fields[3] = lc_log_str_field("content_type", req->content_type);
     lc_log_trace(client->logger, "client.attachment.attach.start", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
   bridge.source = src;
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.name = req->name;
-  legacy_req.content_type = req->content_type;
-  legacy_req.max_bytes = req->max_bytes;
-  legacy_req.has_max_bytes = req->has_max_bytes;
-  legacy_req.prevent_overwrite = req->prevent_overwrite;
-  rc = lc_engine_client_attach_from(client->legacy, &legacy_req,
-                                    lc_legacy_read_bridge, &bridge, &legacy_res,
-                                    &legacy_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.name = req->name;
+  engine_req.content_type = req->content_type;
+  engine_req.max_bytes = req->max_bytes;
+  engine_req.has_max_bytes = req->has_max_bytes;
+  engine_req.prevent_overwrite = req->prevent_overwrite;
+  rc = lc_engine_client_attach_from(client->engine, &engine_req,
+                                    lc_engine_read_bridge, &bridge, &engine_res,
+                                    &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -907,27 +907,27 @@ int lc_client_attach_method(lc_client *self, const lc_attach_op *req,
                                     "client.attachment.attach.error", fields,
                                     3U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  lc_attachment_info_copy(&out->attachment, &legacy_res.attachment);
-  out->noop = legacy_res.noop;
-  out->version = legacy_res.version;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  lc_attachment_info_copy(&out->attachment, &engine_res.attachment);
+  out->noop = engine_res.noop;
+  out->version = engine_res.version;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
-    fields[2] = lc_log_str_field("name", legacy_res.attachment.name);
-    fields[3] = lc_log_bool_field("noop", legacy_res.noop);
-    fields[4] = pslog_i64("version", (pslog_int64)legacy_res.version);
-    fields[5] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[2] = lc_log_str_field("name", engine_res.attachment.name);
+    fields[3] = lc_log_bool_field("noop", engine_res.noop);
+    fields[4] = pslog_i64("version", (pslog_int64)engine_res.version);
+    fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.attachment.attach.success", fields,
                  6U);
   }
-  lc_engine_attach_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_attach_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -936,9 +936,9 @@ int lc_client_list_attachments_method(lc_client *self,
                                       lc_attachment_list *out,
                                       lc_error *error) {
   lc_client_handle *client;
-  lc_engine_list_attachments_request legacy_req;
-  lc_engine_list_attachments_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_list_attachments_request engine_req;
+  lc_engine_list_attachments_response engine_res;
+  lc_engine_error engine_error;
   size_t index;
   int rc;
 
@@ -956,19 +956,19 @@ int lc_client_list_attachments_method(lc_client *self,
     fields[2] = lc_log_bool_field("public", req->public_read);
     lc_log_trace(client->logger, "client.attachment.list.start", fields, 3U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.public_read = req->public_read;
-  rc = lc_engine_client_list_attachments(client->legacy, &legacy_req,
-                                         &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.public_read = req->public_read;
+  rc = lc_engine_client_list_attachments(client->engine, &engine_req,
+                                         &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -979,37 +979,37 @@ int lc_client_list_attachments_method(lc_client *self,
                                     "client.attachment.list.error", fields, 3U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->count = legacy_res.attachment_count;
+  out->count = engine_res.attachment_count;
   if (out->count > 0U) {
     out->items =
         (lc_attachment_info *)calloc(out->count, sizeof(lc_attachment_info));
     if (out->items == NULL) {
-      lc_engine_list_attachments_response_cleanup(&legacy_res);
-      lc_engine_error_cleanup(&legacy_error);
+      lc_engine_list_attachments_response_cleanup(&engine_res);
+      lc_engine_error_cleanup(&engine_error);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate attachment list", NULL, NULL,
                           NULL);
     }
     for (index = 0U; index < out->count; ++index) {
       lc_attachment_info_copy(&out->items[index],
-                              &legacy_res.attachments[index]);
+                              &engine_res.attachments[index]);
     }
   }
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
     fields[2] = lc_log_u64_field("count", out->count);
-    fields[3] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.attachment.list.success", fields, 4U);
   }
-  lc_engine_list_attachments_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_list_attachments_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1018,9 +1018,9 @@ int lc_client_get_attachment_method(lc_client *self,
                                     lc_sink *dst, lc_attachment_get_res *out,
                                     lc_error *error) {
   lc_client_handle *client;
-  lc_engine_get_attachment_request legacy_req;
-  lc_engine_get_attachment_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_get_attachment_request engine_req;
+  lc_engine_get_attachment_response engine_res;
+  lc_engine_error engine_error;
   lc_write_bridge bridge;
   int rc;
 
@@ -1039,23 +1039,23 @@ int lc_client_get_attachment_method(lc_client *self,
     fields[3] = lc_log_str_field("name", req->selector.name);
     lc_log_trace(client->logger, "client.attachment.get.start", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
   bridge.sink = dst;
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.public_read = req->public_read;
-  legacy_req.selector.id = req->selector.id;
-  legacy_req.selector.name = req->selector.name;
-  rc = lc_engine_client_get_attachment_into(client->legacy, &legacy_req,
-                                            lc_legacy_write_bridge, &bridge,
-                                            &legacy_res, &legacy_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.public_read = req->public_read;
+  engine_req.selector.id = req->selector.id;
+  engine_req.selector.name = req->selector.name;
+  rc = lc_engine_client_get_attachment_into(client->engine, &engine_req,
+                                            lc_engine_write_bridge, &bridge,
+                                            &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
 
@@ -1067,23 +1067,23 @@ int lc_client_get_attachment_method(lc_client *self,
                                     "client.attachment.get.error", fields, 4U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  lc_attachment_info_copy(&out->attachment, &legacy_res.attachment);
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  lc_attachment_info_copy(&out->attachment, &engine_res.attachment);
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
-    fields[2] = lc_log_str_field("attachment_id", legacy_res.attachment.id);
-    fields[3] = lc_log_str_field("name", legacy_res.attachment.name);
-    fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[2] = lc_log_str_field("attachment_id", engine_res.attachment.id);
+    fields[3] = lc_log_str_field("name", engine_res.attachment.name);
+    fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.attachment.get.success", fields, 5U);
   }
-  lc_engine_get_attachment_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_get_attachment_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1091,9 +1091,9 @@ int lc_client_delete_attachment_method(lc_client *self,
                                        const lc_attachment_delete_op *req,
                                        int *deleted, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_delete_attachment_request legacy_req;
-  lc_engine_delete_attachment_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_delete_attachment_request engine_req;
+  lc_engine_delete_attachment_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || deleted == NULL) {
@@ -1111,20 +1111,20 @@ int lc_client_delete_attachment_method(lc_client *self,
     fields[3] = lc_log_str_field("name", req->selector.name);
     lc_log_trace(client->logger, "client.attachment.delete.start", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  legacy_req.selector.id = req->selector.id;
-  legacy_req.selector.name = req->selector.name;
-  rc = lc_engine_client_delete_attachment(client->legacy, &legacy_req,
-                                          &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  engine_req.selector.id = req->selector.id;
+  engine_req.selector.name = req->selector.name;
+  rc = lc_engine_client_delete_attachment(client->engine, &engine_req,
+                                          &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
 
@@ -1136,23 +1136,23 @@ int lc_client_delete_attachment_method(lc_client *self,
                                     "client.attachment.delete.error", fields,
                                     4U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  *deleted = legacy_res.deleted;
+  *deleted = engine_res.deleted;
   {
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
     fields[2] = lc_log_str_field("attachment_id", req->selector.id);
-    fields[3] = lc_log_bool_field("deleted", legacy_res.deleted);
-    fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[3] = lc_log_bool_field("deleted", engine_res.deleted);
+    fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.attachment.delete.success", fields,
                  5U);
   }
-  lc_engine_delete_attachment_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_delete_attachment_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1160,9 +1160,9 @@ int lc_client_delete_all_attachments_method(
     lc_client *self, const lc_attachment_delete_all_op *req, int *deleted_count,
     lc_error *error) {
   lc_client_handle *client;
-  lc_engine_delete_all_attachments_request legacy_req;
-  lc_engine_delete_all_attachments_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_delete_all_attachments_request engine_req;
+  lc_engine_delete_all_attachments_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || deleted_count == NULL) {
@@ -1180,18 +1180,18 @@ int lc_client_delete_all_attachments_method(
     lc_log_trace(client->logger, "client.attachment.delete_all.start", fields,
                  2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->lease.namespace_name;
-  legacy_req.key = req->lease.key;
-  legacy_req.lease_id = req->lease.lease_id;
-  legacy_req.txn_id = req->lease.txn_id;
-  legacy_req.fencing_token = req->lease.fencing_token;
-  rc = lc_engine_client_delete_all_attachments(client->legacy, &legacy_req,
-                                               &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.key = req->lease.key;
+  engine_req.lease_id = req->lease.lease_id;
+  engine_req.txn_id = req->lease.txn_id;
+  engine_req.fencing_token = req->lease.fencing_token;
+  rc = lc_engine_client_delete_all_attachments(client->engine, &engine_req,
+                                               &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -1201,31 +1201,31 @@ int lc_client_delete_all_attachments_method(
                                     "client.attachment.delete_all.error",
                                     fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  *deleted_count = legacy_res.deleted;
+  *deleted_count = engine_res.deleted;
   {
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("key", req->lease.key);
     fields[1] = lc_log_str_field("lease_id", req->lease.lease_id);
-    fields[2] = pslog_i64("deleted", (pslog_int64)legacy_res.deleted);
-    fields[3] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[2] = pslog_i64("deleted", (pslog_int64)engine_res.deleted);
+    fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.attachment.delete_all.success", fields,
                  4U);
   }
-  lc_engine_delete_all_attachments_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_delete_all_attachments_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_queue_stats_method(lc_client *self, const lc_queue_stats_req *req,
                                  lc_queue_stats_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_queue_stats_request legacy_req;
-  lc_engine_queue_stats_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_queue_stats_request engine_req;
+  lc_engine_queue_stats_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1241,15 +1241,15 @@ int lc_client_queue_stats_method(lc_client *self, const lc_queue_stats_req *req,
     fields[1] = lc_log_str_field("namespace", req->namespace_name);
     lc_log_trace(client->logger, "client.queue.stats.start", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.queue = req->queue;
-  rc = lc_engine_client_queue_stats(client->legacy, &legacy_req, &legacy_res,
-                                    &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.queue = req->queue;
+  rc = lc_engine_client_queue_stats(client->engine, &engine_req, &engine_res,
+                                    &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -1259,42 +1259,42 @@ int lc_client_queue_stats_method(lc_client *self, const lc_queue_stats_req *req,
                                     "client.queue.stats.error", fields, 2U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->namespace_name = lc_strdup_local(legacy_res.namespace_name);
-  out->queue = lc_strdup_local(legacy_res.queue);
-  out->waiting_consumers = legacy_res.waiting_consumers;
-  out->pending_candidates = legacy_res.pending_candidates;
-  out->total_consumers = legacy_res.total_consumers;
-  out->has_active_watcher = legacy_res.has_active_watcher;
-  out->available = legacy_res.available;
-  out->head_message_id = lc_strdup_local(legacy_res.head_message_id);
-  out->head_enqueued_at_unix = legacy_res.head_enqueued_at_unix;
-  out->head_not_visible_until_unix = legacy_res.head_not_visible_until_unix;
-  out->head_age_seconds = legacy_res.head_age_seconds;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->namespace_name = lc_strdup_local(engine_res.namespace_name);
+  out->queue = lc_strdup_local(engine_res.queue);
+  out->waiting_consumers = engine_res.waiting_consumers;
+  out->pending_candidates = engine_res.pending_candidates;
+  out->total_consumers = engine_res.total_consumers;
+  out->has_active_watcher = engine_res.has_active_watcher;
+  out->available = engine_res.available;
+  out->head_message_id = lc_strdup_local(engine_res.head_message_id);
+  out->head_enqueued_at_unix = engine_res.head_enqueued_at_unix;
+  out->head_not_visible_until_unix = engine_res.head_not_visible_until_unix;
+  out->head_age_seconds = engine_res.head_age_seconds;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("queue", req->queue);
     fields[1] = lc_log_str_field("namespace", req->namespace_name);
-    fields[2] = pslog_i64("available", (pslog_int64)legacy_res.available);
-    fields[3] = lc_log_str_field("head_message_id", legacy_res.head_message_id);
-    fields[4] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[2] = pslog_i64("available", (pslog_int64)engine_res.available);
+    fields[3] = lc_log_str_field("head_message_id", engine_res.head_message_id);
+    fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.queue.stats.success", fields, 5U);
   }
-  lc_engine_queue_stats_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_queue_stats_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
                                lc_ack_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_queue_ack_request legacy_req;
-  lc_engine_queue_ack_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_queue_ack_request engine_req;
+  lc_engine_queue_ack_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1313,23 +1313,23 @@ int lc_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
     fields[4] = lc_log_str_field("txn_id", req->message.txn_id);
     lc_log_trace(client->logger, "client.queue.ack.start", fields, 5U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->message.namespace_name;
-  legacy_req.queue = req->message.queue;
-  legacy_req.message_id = req->message.message_id;
-  legacy_req.lease_id = req->message.lease_id;
-  legacy_req.txn_id = req->message.txn_id;
-  legacy_req.fencing_token = req->message.fencing_token;
-  legacy_req.meta_etag = req->message.meta_etag;
-  legacy_req.state_etag = req->message.state_etag;
-  legacy_req.state_lease_id = req->message.state_lease_id;
-  legacy_req.state_fencing_token = req->message.state_fencing_token;
-  rc = lc_engine_client_queue_ack(client->legacy, &legacy_req, &legacy_res,
-                                  &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->message.namespace_name;
+  engine_req.queue = req->message.queue;
+  engine_req.message_id = req->message.message_id;
+  engine_req.lease_id = req->message.lease_id;
+  engine_req.txn_id = req->message.txn_id;
+  engine_req.fencing_token = req->message.fencing_token;
+  engine_req.meta_etag = req->message.meta_etag;
+  engine_req.state_etag = req->message.state_etag;
+  engine_req.state_lease_id = req->message.state_lease_id;
+  engine_req.state_fencing_token = req->message.state_fencing_token;
+  rc = lc_engine_client_queue_ack(client->engine, &engine_req, &engine_res,
+                                  &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[5];
 
@@ -1342,11 +1342,11 @@ int lc_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
                                     "client.queue.ack.error", fields, 5U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->acked = legacy_res.acked;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->acked = engine_res.acked;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[6];
 
@@ -1354,21 +1354,21 @@ int lc_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
     fields[1] = lc_log_str_field("namespace", req->message.namespace_name);
     fields[2] = lc_log_str_field("message_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
-    fields[4] = lc_log_bool_field("acked", legacy_res.acked);
-    fields[5] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[4] = lc_log_bool_field("acked", engine_res.acked);
+    fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.queue.ack.success", fields, 6U);
   }
-  lc_engine_queue_ack_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_queue_ack_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
                                 lc_nack_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_queue_nack_request legacy_req;
-  lc_engine_queue_nack_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_queue_nack_request engine_req;
+  lc_engine_queue_nack_response engine_res;
+  lc_engine_error engine_error;
   const char *wire_intent;
   int rc;
 
@@ -1395,26 +1395,26 @@ int lc_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
         lc_log_str_field("intent", lc_nack_intent_to_string(req->intent));
     lc_log_trace(client->logger, "client.queue.nack.start", fields, 6U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->message.namespace_name;
-  legacy_req.queue = req->message.queue;
-  legacy_req.message_id = req->message.message_id;
-  legacy_req.lease_id = req->message.lease_id;
-  legacy_req.txn_id = req->message.txn_id;
-  legacy_req.fencing_token = req->message.fencing_token;
-  legacy_req.meta_etag = req->message.meta_etag;
-  legacy_req.state_etag = req->message.state_etag;
-  legacy_req.state_lease_id = req->message.state_lease_id;
-  legacy_req.state_fencing_token = req->message.state_fencing_token;
-  legacy_req.delay_seconds = req->delay_seconds;
-  legacy_req.intent = wire_intent;
-  legacy_req.last_error_json = req->last_error_json;
-  rc = lc_engine_client_queue_nack(client->legacy, &legacy_req, &legacy_res,
-                                   &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->message.namespace_name;
+  engine_req.queue = req->message.queue;
+  engine_req.message_id = req->message.message_id;
+  engine_req.lease_id = req->message.lease_id;
+  engine_req.txn_id = req->message.txn_id;
+  engine_req.fencing_token = req->message.fencing_token;
+  engine_req.meta_etag = req->message.meta_etag;
+  engine_req.state_etag = req->message.state_etag;
+  engine_req.state_lease_id = req->message.state_lease_id;
+  engine_req.state_fencing_token = req->message.state_fencing_token;
+  engine_req.delay_seconds = req->delay_seconds;
+  engine_req.intent = wire_intent;
+  engine_req.last_error_json = req->last_error_json;
+  rc = lc_engine_client_queue_nack(client->engine, &engine_req, &engine_res,
+                                   &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[6];
 
@@ -1429,12 +1429,12 @@ int lc_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
                                     "client.queue.nack.error", fields, 6U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->requeued = legacy_res.requeued;
-  out->meta_etag = lc_strdup_local(legacy_res.meta_etag);
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->requeued = engine_res.requeued;
+  out->meta_etag = lc_strdup_local(engine_res.meta_etag);
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[7];
 
@@ -1442,22 +1442,22 @@ int lc_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
     fields[1] = lc_log_str_field("namespace", req->message.namespace_name);
     fields[2] = lc_log_str_field("message_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
-    fields[4] = lc_log_bool_field("requeued", legacy_res.requeued);
-    fields[5] = lc_log_str_field("meta_etag", legacy_res.meta_etag);
-    fields[6] = lc_log_str_field("cid", legacy_res.correlation_id);
+    fields[4] = lc_log_bool_field("requeued", engine_res.requeued);
+    fields[5] = lc_log_str_field("meta_etag", engine_res.meta_etag);
+    fields[6] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.queue.nack.success", fields, 7U);
   }
-  lc_engine_queue_nack_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_queue_nack_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
                                   lc_extend_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_queue_extend_request legacy_req;
-  lc_engine_queue_extend_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_queue_extend_request engine_req;
+  lc_engine_queue_extend_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1477,23 +1477,23 @@ int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
         pslog_i64("extend_by_seconds", (pslog_int64)req->extend_by_seconds);
     lc_log_trace(client->logger, "client.queue.extend.start", fields, 5U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->message.namespace_name;
-  legacy_req.queue = req->message.queue;
-  legacy_req.message_id = req->message.message_id;
-  legacy_req.lease_id = req->message.lease_id;
-  legacy_req.txn_id = req->message.txn_id;
-  legacy_req.fencing_token = req->message.fencing_token;
-  legacy_req.meta_etag = req->message.meta_etag;
-  legacy_req.state_lease_id = req->message.state_lease_id;
-  legacy_req.state_fencing_token = req->message.state_fencing_token;
-  legacy_req.extend_by_seconds = req->extend_by_seconds;
-  rc = lc_engine_client_queue_extend(client->legacy, &legacy_req, &legacy_res,
-                                     &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->message.namespace_name;
+  engine_req.queue = req->message.queue;
+  engine_req.message_id = req->message.message_id;
+  engine_req.lease_id = req->message.lease_id;
+  engine_req.txn_id = req->message.txn_id;
+  engine_req.fencing_token = req->message.fencing_token;
+  engine_req.meta_etag = req->message.meta_etag;
+  engine_req.state_lease_id = req->message.state_lease_id;
+  engine_req.state_fencing_token = req->message.state_fencing_token;
+  engine_req.extend_by_seconds = req->extend_by_seconds;
+  rc = lc_engine_client_queue_extend(client->engine, &engine_req, &engine_res,
+                                     &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[5];
 
@@ -1507,14 +1507,14 @@ int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
                                     "client.queue.extend.error", fields, 5U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->lease_expires_at_unix = legacy_res.lease_expires_at_unix;
-  out->visibility_timeout_seconds = legacy_res.visibility_timeout_seconds;
-  out->meta_etag = lc_strdup_local(legacy_res.meta_etag);
-  out->state_lease_expires_at_unix = legacy_res.state_lease_expires_at_unix;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->lease_expires_at_unix = engine_res.lease_expires_at_unix;
+  out->visibility_timeout_seconds = engine_res.visibility_timeout_seconds;
+  out->meta_etag = lc_strdup_local(engine_res.meta_etag);
+  out->state_lease_expires_at_unix = engine_res.state_lease_expires_at_unix;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[7];
 
@@ -1523,23 +1523,23 @@ int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
     fields[2] = lc_log_str_field("message_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
     fields[4] = pslog_i64("lease_expires_at",
-                          (pslog_int64)legacy_res.lease_expires_at_unix);
+                          (pslog_int64)engine_res.lease_expires_at_unix);
     fields[5] = pslog_i64("visibility_timeout_seconds",
-                          (pslog_int64)legacy_res.visibility_timeout_seconds);
-    fields[6] = lc_log_str_field("cid", legacy_res.correlation_id);
+                          (pslog_int64)engine_res.visibility_timeout_seconds);
+    fields[6] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(client->logger, "client.queue.extend.success", fields, 7U);
   }
-  lc_engine_queue_extend_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_queue_extend_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_query_method(lc_client *self, const lc_query_req *req,
                            lc_sink *dst, lc_query_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_query_request legacy_req;
-  lc_engine_query_stream_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_query_request engine_req;
+  lc_engine_query_stream_response engine_res;
+  lc_engine_error engine_error;
   lc_write_bridge bridge;
   int rc;
 
@@ -1558,21 +1558,21 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
     fields[3] = lc_log_str_field("cursor", req->cursor);
     lc_log_trace(client->logger, "client.query.start", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
   bridge.sink = dst;
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.selector_json = req->selector_json;
-  legacy_req.limit = req->limit;
-  legacy_req.cursor = req->cursor;
-  legacy_req.fields_json = req->fields_json;
-  legacy_req.return_mode = req->return_mode;
-  rc = lc_engine_client_query_into(client->legacy, &legacy_req,
-                                   lc_legacy_write_bridge, &bridge, &legacy_res,
-                                   &legacy_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.selector_json = req->selector_json;
+  engine_req.limit = req->limit;
+  engine_req.cursor = req->cursor;
+  engine_req.fields_json = req->fields_json;
+  engine_req.return_mode = req->return_mode;
+  rc = lc_engine_client_query_into(client->engine, &engine_req,
+                                   lc_engine_write_bridge, &bridge, &engine_res,
+                                   &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
 
@@ -1589,14 +1589,14 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
               : "client.query.error",
           fields, 4U, error);
     }
-    lc_engine_query_stream_response_cleanup(client->legacy, &legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->cursor = lc_strdup_local(legacy_res.cursor);
-  out->return_mode = lc_strdup_local(legacy_res.return_mode);
-  out->index_seq = legacy_res.index_seq;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->cursor = lc_strdup_local(engine_res.cursor);
+  out->return_mode = lc_strdup_local(engine_res.return_mode);
+  out->index_seq = engine_res.index_seq;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[5];
 
@@ -1607,8 +1607,8 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
     fields[4] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.query.success", fields, 5U);
   }
-  lc_engine_query_stream_response_cleanup(client->legacy, &legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1616,9 +1616,9 @@ int lc_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
                              lc_source *src, lc_enqueue_res *out,
                              lc_error *error) {
   lc_client_handle *client;
-  lc_engine_enqueue_request legacy_req;
-  lc_engine_enqueue_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_enqueue_request engine_req;
+  lc_engine_enqueue_response engine_res;
+  lc_engine_error engine_error;
   lc_read_bridge bridge;
   int rc;
 
@@ -1635,22 +1635,22 @@ int lc_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
     fields[1] = lc_log_str_field("namespace", req->namespace_name);
     lc_log_info(client->logger, "client.queue.enqueue.begin", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
   bridge.source = src;
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.queue = req->queue;
-  legacy_req.delay_seconds = req->delay_seconds;
-  legacy_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
-  legacy_req.ttl_seconds = req->ttl_seconds;
-  legacy_req.max_attempts = req->max_attempts;
-  legacy_req.payload_content_type = req->content_type;
-  rc = lc_engine_client_enqueue_from(client->legacy, &legacy_req,
-                                     lc_legacy_read_bridge, &bridge,
-                                     &legacy_res, &legacy_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.queue = req->queue;
+  engine_req.delay_seconds = req->delay_seconds;
+  engine_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
+  engine_req.ttl_seconds = req->ttl_seconds;
+  engine_req.max_attempts = req->max_attempts;
+  engine_req.payload_content_type = req->content_type;
+  rc = lc_engine_client_enqueue_from(client->engine, &engine_req,
+                                     lc_engine_read_bridge, &bridge,
+                                     &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -1665,34 +1665,34 @@ int lc_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
               : "client.queue.enqueue.error",
           fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->namespace_name = lc_strdup_local(legacy_res.namespace_name);
-  out->queue = lc_strdup_local(legacy_res.queue);
-  out->message_id = lc_strdup_local(legacy_res.message_id);
-  out->attempts = legacy_res.attempts;
-  out->max_attempts = legacy_res.max_attempts;
-  out->failure_attempts = legacy_res.failure_attempts;
-  out->not_visible_until_unix = legacy_res.not_visible_until_unix;
-  out->visibility_timeout_seconds = legacy_res.visibility_timeout_seconds;
-  out->payload_bytes = legacy_res.payload_bytes;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
+  out->namespace_name = lc_strdup_local(engine_res.namespace_name);
+  out->queue = lc_strdup_local(engine_res.queue);
+  out->message_id = lc_strdup_local(engine_res.message_id);
+  out->attempts = engine_res.attempts;
+  out->max_attempts = engine_res.max_attempts;
+  out->failure_attempts = engine_res.failure_attempts;
+  out->not_visible_until_unix = engine_res.not_visible_until_unix;
+  out->visibility_timeout_seconds = engine_res.visibility_timeout_seconds;
+  out->payload_bytes = engine_res.payload_bytes;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", req->queue);
     fields[1] = lc_log_str_field("namespace", req->namespace_name);
-    fields[2] = lc_log_str_field("message_id", legacy_res.message_id);
+    fields[2] = lc_log_str_field("message_id", engine_res.message_id);
     fields[3] =
-        pslog_i64("payload_bytes", (pslog_int64)legacy_res.payload_bytes);
+        pslog_i64("payload_bytes", (pslog_int64)engine_res.payload_bytes);
     fields[4] = pslog_i64("visibility_timeout_seconds",
-                          (pslog_int64)legacy_res.visibility_timeout_seconds);
-    fields[5] = lc_log_str_field("cid", legacy_res.correlation_id);
+                          (pslog_int64)engine_res.visibility_timeout_seconds);
+    fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_info(client->logger, "client.queue.enqueue.success", fields, 6U);
   }
-  lc_engine_enqueue_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_enqueue_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1807,10 +1807,10 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
                                     lc_message **out, lc_error *error,
                                     int with_state) {
   lc_client_handle *client;
-  lc_engine_dequeue_request legacy_req;
+  lc_engine_dequeue_request engine_req;
   lc_engine_queue_stream_handler handler;
   lc_single_delivery_bridge bridge;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1828,32 +1828,32 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
     fields[3] = lc_log_bool_field("with_state", with_state);
     lc_log_info(client->logger, "client.queue.dequeue.begin", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
+  memset(&engine_req, 0, sizeof(engine_req));
   memset(&handler, 0, sizeof(handler));
   memset(&bridge, 0, sizeof(bridge));
-  lc_engine_error_init(&legacy_error);
+  lc_engine_error_init(&engine_error);
   bridge.client = client;
   bridge.out = out;
   bridge.batch = NULL;
   bridge.error = error;
   *out = NULL;
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.queue = req->queue;
-  legacy_req.owner = req->owner;
-  legacy_req.txn_id = req->txn_id;
-  legacy_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
-  legacy_req.wait_seconds = req->wait_seconds;
-  legacy_req.page_size = 1;
-  legacy_req.start_after = req->start_after;
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.queue = req->queue;
+  engine_req.owner = req->owner;
+  engine_req.txn_id = req->txn_id;
+  engine_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
+  engine_req.wait_seconds = req->wait_seconds;
+  engine_req.page_size = 1;
+  engine_req.start_after = req->start_after;
   handler.begin = lc_dequeue_begin;
   handler.chunk = lc_dequeue_chunk;
   handler.end = lc_dequeue_end;
   if (with_state) {
     rc = lc_engine_client_dequeue_with_state_into(
-        client->legacy, &legacy_req, &handler, &bridge, &legacy_error);
+        client->engine, &engine_req, &handler, &bridge, &engine_error);
   } else {
-    rc = lc_engine_client_dequeue_into(client->legacy, &legacy_req, &handler,
-                                       &bridge, &legacy_error);
+    rc = lc_engine_client_dequeue_into(client->engine, &engine_req, &handler,
+                                       &bridge, &engine_error);
   }
   if (rc != LC_ENGINE_OK) {
     if (bridge.pipe != NULL) {
@@ -1867,7 +1867,7 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
     }
     lc_engine_dequeue_response_cleanup(&bridge.meta);
     if (error != NULL && error->code != LC_OK) {
-      lc_engine_error_cleanup(&legacy_error);
+      lc_engine_error_cleanup(&engine_error);
       {
         pslog_field fields[4];
 
@@ -1881,7 +1881,7 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
       }
       return error->code;
     }
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
 
@@ -1893,7 +1893,7 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
                                     "client.queue.dequeue.error", fields, 4U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
   if (*out != NULL) {
@@ -1907,17 +1907,17 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
     fields[5] = lc_log_str_field("cid", (*out)->correlation_id);
     lc_log_info(client->logger, "client.queue.dequeue.success", fields, 6U);
   }
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
                                    lc_dequeue_batch_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_dequeue_request legacy_req;
+  lc_engine_dequeue_request engine_req;
   lc_engine_queue_stream_handler handler;
   lc_single_delivery_bridge bridge;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1937,27 +1937,27 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
         "page_size", (pslog_int64)(req->page_size > 0 ? req->page_size : 1));
     lc_log_info(client->logger, "client.queue.dequeue.begin", fields, 4U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
+  memset(&engine_req, 0, sizeof(engine_req));
   memset(&handler, 0, sizeof(handler));
   memset(&bridge, 0, sizeof(bridge));
-  lc_engine_error_init(&legacy_error);
+  lc_engine_error_init(&engine_error);
   bridge.client = client;
   bridge.batch = out;
   bridge.error = error;
   bridge.mode_batch = 1;
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.queue = req->queue;
-  legacy_req.owner = req->owner;
-  legacy_req.txn_id = req->txn_id;
-  legacy_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
-  legacy_req.wait_seconds = req->wait_seconds;
-  legacy_req.page_size = req->page_size > 0 ? req->page_size : 1;
-  legacy_req.start_after = req->start_after;
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.queue = req->queue;
+  engine_req.owner = req->owner;
+  engine_req.txn_id = req->txn_id;
+  engine_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
+  engine_req.wait_seconds = req->wait_seconds;
+  engine_req.page_size = req->page_size > 0 ? req->page_size : 1;
+  engine_req.start_after = req->start_after;
   handler.begin = lc_dequeue_begin;
   handler.chunk = lc_dequeue_chunk;
   handler.end = lc_dequeue_end;
-  rc = lc_engine_client_dequeue_into(client->legacy, &legacy_req, &handler,
-                                     &bridge, &legacy_error);
+  rc = lc_engine_client_dequeue_into(client->engine, &engine_req, &handler,
+                                     &bridge, &engine_error);
   if (rc != LC_ENGINE_OK) {
     if (bridge.pipe != NULL) {
       lc_stream_pipe_fail(bridge.pipe, LC_ERR_TRANSPORT,
@@ -1971,7 +1971,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
     lc_engine_dequeue_response_cleanup(&bridge.meta);
     lc_dequeue_batch_cleanup(out);
     if (error != NULL && error->code != LC_OK) {
-      lc_engine_error_cleanup(&legacy_error);
+      lc_engine_error_cleanup(&engine_error);
       {
         pslog_field fields[3];
 
@@ -1984,7 +1984,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
       }
       return error->code;
     }
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -1995,7 +1995,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
                                     "client.queue.dequeue.error", fields, 3U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
   {
@@ -2007,7 +2007,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
     fields[3] = lc_log_u64_field("count", out->count);
     lc_log_info(client->logger, "client.queue.dequeue.success", fields, 4U);
   }
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -2158,10 +2158,10 @@ static int lc_client_subscribe_common(lc_client *self,
                                       const lc_consumer *consumer,
                                       lc_error *error, int with_state) {
   lc_client_handle *client;
-  lc_engine_dequeue_request legacy_req;
+  lc_engine_dequeue_request engine_req;
   lc_engine_queue_stream_handler handler;
   lc_subscribe_bridge bridge;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || consumer == NULL ||
@@ -2171,7 +2171,7 @@ static int lc_client_subscribe_common(lc_client *self,
                         NULL, NULL);
   }
   client = (lc_client_handle *)self;
-  memset(&legacy_req, 0, sizeof(legacy_req));
+  memset(&engine_req, 0, sizeof(engine_req));
   memset(&handler, 0, sizeof(handler));
   memset(&bridge, 0, sizeof(bridge));
   bridge.client = client;
@@ -2186,24 +2186,24 @@ static int lc_client_subscribe_common(lc_client *self,
     fields[3] = lc_log_bool_field("with_state", with_state);
     lc_log_info(client->logger, "client.queue.subscribe.begin", fields, 4U);
   }
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.queue = req->queue;
-  legacy_req.owner = req->owner;
-  legacy_req.txn_id = req->txn_id;
-  legacy_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
-  legacy_req.wait_seconds = req->wait_seconds;
-  legacy_req.page_size = req->page_size > 0 ? req->page_size : 1;
-  legacy_req.start_after = req->start_after;
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.queue = req->queue;
+  engine_req.owner = req->owner;
+  engine_req.txn_id = req->txn_id;
+  engine_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
+  engine_req.wait_seconds = req->wait_seconds;
+  engine_req.page_size = req->page_size > 0 ? req->page_size : 1;
+  engine_req.start_after = req->start_after;
   handler.begin = lc_subscribe_begin;
   handler.chunk = lc_subscribe_chunk;
   handler.end = lc_subscribe_end;
   if (with_state) {
     rc = lc_engine_client_subscribe_with_state(
-        client->legacy, &legacy_req, &handler, &bridge, &legacy_error);
+        client->engine, &engine_req, &handler, &bridge, &engine_error);
   } else {
-    rc = lc_engine_client_subscribe(client->legacy, &legacy_req, &handler,
-                                    &bridge, &legacy_error);
+    rc = lc_engine_client_subscribe(client->engine, &engine_req, &handler,
+                                    &bridge, &engine_error);
   }
   if (rc != LC_ENGINE_OK) {
     if (bridge.pipe != NULL) {
@@ -2221,7 +2221,7 @@ static int lc_client_subscribe_common(lc_client *self,
     }
     lc_engine_dequeue_response_cleanup(&bridge.meta);
     if (error != NULL && error->code != LC_OK) {
-      lc_engine_error_cleanup(&legacy_error);
+      lc_engine_error_cleanup(&engine_error);
       {
         pslog_field fields[4];
 
@@ -2235,7 +2235,7 @@ static int lc_client_subscribe_common(lc_client *self,
       }
       return error->code;
     }
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
 
@@ -2247,7 +2247,7 @@ static int lc_client_subscribe_common(lc_client *self,
                                     "client.queue.subscribe.error", fields, 4U,
                                     error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
   {
@@ -2259,7 +2259,7 @@ static int lc_client_subscribe_common(lc_client *self,
     fields[3] = lc_log_bool_field("with_state", with_state);
     lc_log_info(client->logger, "client.queue.subscribe.complete", fields, 4U);
   }
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -2307,8 +2307,8 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                                  const lc_watch_handler *handler,
                                  lc_error *error) {
   lc_client_handle *client;
-  lc_engine_watch_queue_request legacy_req;
-  lc_engine_error legacy_error;
+  lc_engine_watch_queue_request engine_req;
+  lc_engine_error engine_error;
   lc_watch_bridge bridge;
   int rc;
 
@@ -2319,19 +2319,19 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                         NULL, NULL);
   }
   client = (lc_client_handle *)self;
-  memset(&legacy_req, 0, sizeof(legacy_req));
+  memset(&engine_req, 0, sizeof(engine_req));
   bridge.handler = handler;
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.queue = req->queue;
-  rc = lc_engine_client_watch_queue(client->legacy, &legacy_req,
-                                    lc_watch_adapter, &bridge, &legacy_error);
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.queue = req->queue;
+  rc = lc_engine_client_watch_queue(client->engine, &engine_req,
+                                    lc_watch_adapter, &bridge, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
-    lc_engine_error_cleanup(&legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -2343,8 +2343,8 @@ void lc_client_close_method(lc_client *self) {
     return;
   }
   client = (lc_client_handle *)self;
-  if (client->legacy != NULL) {
-    lc_engine_client_close(client->legacy);
+  if (client->engine != NULL) {
+    lc_engine_client_close(client->engine);
   }
   if (client->endpoints != NULL) {
     for (i = 0U; i < client->endpoint_count; ++i) {

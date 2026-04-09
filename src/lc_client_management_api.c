@@ -69,20 +69,20 @@ static int lc_copy_string_list(lc_string_list *dst,
 }
 
 static int lc_copy_tc_rm_res(lc_tc_rm_res *out,
-                             const lc_engine_tcrm_register_response *legacy) {
+                             const lc_engine_tcrm_register_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->backend_hash = lc_strdup_local(legacy->backend_hash);
-  if (legacy->backend_hash != NULL && out->backend_hash == NULL) {
+  out->backend_hash = lc_strdup_local(engine->backend_hash);
+  if (engine->backend_hash != NULL && out->backend_hash == NULL) {
     return 0;
   }
-  if (!lc_copy_string_list(&out->endpoints, &legacy->endpoints)) {
+  if (!lc_copy_string_list(&out->endpoints, &engine->endpoints)) {
     free(out->backend_hash);
     memset(out, 0, sizeof(*out));
     return 0;
   }
-  out->updated_at_unix = legacy->updated_at_unix;
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if (legacy->correlation_id != NULL && out->correlation_id == NULL) {
+  out->updated_at_unix = engine->updated_at_unix;
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if (engine->correlation_id != NULL && out->correlation_id == NULL) {
     lc_tc_rm_res_cleanup(out);
     return 0;
   }
@@ -116,43 +116,43 @@ lc_copy_txn_participants(const lc_txn_decision_req *req,
 
 static int lc_fill_txn_request(const lc_txn_decision_req *req,
                                const char *state,
-                               lc_engine_txn_decision_request *legacy_req,
+                               lc_engine_txn_decision_request *engine_req,
                                lc_engine_txn_participant **participants,
                                lc_error *error) {
-  if (req == NULL || legacy_req == NULL || participants == NULL) {
+  if (req == NULL || engine_req == NULL || participants == NULL) {
     return lc_error_set(
         error, LC_ERR_INVALID, 0L,
-        "txn request requires req, legacy_req, and participants", NULL, NULL,
+        "txn request requires req, engine_req, and participants", NULL, NULL,
         NULL);
   }
-  memset(legacy_req, 0, sizeof(*legacy_req));
+  memset(engine_req, 0, sizeof(*engine_req));
   if (!lc_copy_txn_participants(req, participants)) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate txn participants", NULL, NULL,
                         NULL);
   }
-  legacy_req->txn_id = req->txn_id;
-  legacy_req->state = state;
-  legacy_req->participants = *participants;
-  legacy_req->participant_count = req->participant_count;
-  legacy_req->expires_at_unix = req->expires_at_unix;
-  legacy_req->tc_term = req->tc_term;
-  legacy_req->target_backend_hash = req->target_backend_hash;
+  engine_req->txn_id = req->txn_id;
+  engine_req->state = state;
+  engine_req->participants = *participants;
+  engine_req->participant_count = req->participant_count;
+  engine_req->expires_at_unix = req->expires_at_unix;
+  engine_req->tc_term = req->tc_term;
+  engine_req->target_backend_hash = req->target_backend_hash;
   return LC_OK;
 }
 
 static int lc_copy_namespace_config_res(
     lc_namespace_config_res *out,
-    const lc_engine_namespace_config_response *legacy) {
+    const lc_engine_namespace_config_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->namespace_name = lc_strdup_local(legacy->namespace_name);
-  out->preferred_engine = lc_strdup_local(legacy->preferred_engine);
-  out->fallback_engine = lc_strdup_local(legacy->fallback_engine);
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if ((legacy->namespace_name != NULL && out->namespace_name == NULL) ||
-      (legacy->preferred_engine != NULL && out->preferred_engine == NULL) ||
-      (legacy->fallback_engine != NULL && out->fallback_engine == NULL) ||
-      (legacy->correlation_id != NULL && out->correlation_id == NULL)) {
+  out->namespace_name = lc_strdup_local(engine->namespace_name);
+  out->preferred_engine = lc_strdup_local(engine->preferred_engine);
+  out->fallback_engine = lc_strdup_local(engine->fallback_engine);
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if ((engine->namespace_name != NULL && out->namespace_name == NULL) ||
+      (engine->preferred_engine != NULL && out->preferred_engine == NULL) ||
+      (engine->fallback_engine != NULL && out->fallback_engine == NULL) ||
+      (engine->correlation_id != NULL && out->correlation_id == NULL)) {
     lc_namespace_config_res_cleanup(out);
     return 0;
   }
@@ -161,20 +161,20 @@ static int lc_copy_namespace_config_res(
 
 static int
 lc_copy_index_flush_res(lc_index_flush_res *out,
-                        const lc_engine_index_flush_response *legacy) {
+                        const lc_engine_index_flush_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->namespace_name = lc_strdup_local(legacy->namespace_name);
-  out->mode = lc_strdup_local(legacy->mode);
-  out->flush_id = lc_strdup_local(legacy->flush_id);
-  out->accepted = legacy->accepted;
-  out->flushed = legacy->flushed;
-  out->pending = legacy->pending;
-  out->index_seq = legacy->index_seq;
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if ((legacy->namespace_name != NULL && out->namespace_name == NULL) ||
-      (legacy->mode != NULL && out->mode == NULL) ||
-      (legacy->flush_id != NULL && out->flush_id == NULL) ||
-      (legacy->correlation_id != NULL && out->correlation_id == NULL)) {
+  out->namespace_name = lc_strdup_local(engine->namespace_name);
+  out->mode = lc_strdup_local(engine->mode);
+  out->flush_id = lc_strdup_local(engine->flush_id);
+  out->accepted = engine->accepted;
+  out->flushed = engine->flushed;
+  out->pending = engine->pending;
+  out->index_seq = engine->index_seq;
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if ((engine->namespace_name != NULL && out->namespace_name == NULL) ||
+      (engine->mode != NULL && out->mode == NULL) ||
+      (engine->flush_id != NULL && out->flush_id == NULL) ||
+      (engine->correlation_id != NULL && out->correlation_id == NULL)) {
     lc_index_flush_res_cleanup(out);
     return 0;
   }
@@ -182,14 +182,14 @@ lc_copy_index_flush_res(lc_index_flush_res *out,
 }
 
 static int lc_copy_txn_replay_res(lc_txn_replay_res *out,
-                                  const lc_engine_txn_replay_response *legacy) {
+                                  const lc_engine_txn_replay_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->txn_id = lc_strdup_local(legacy->txn_id);
-  out->state = lc_strdup_local(legacy->state);
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if ((legacy->txn_id != NULL && out->txn_id == NULL) ||
-      (legacy->state != NULL && out->state == NULL) ||
-      (legacy->correlation_id != NULL && out->correlation_id == NULL)) {
+  out->txn_id = lc_strdup_local(engine->txn_id);
+  out->state = lc_strdup_local(engine->state);
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if ((engine->txn_id != NULL && out->txn_id == NULL) ||
+      (engine->state != NULL && out->state == NULL) ||
+      (engine->correlation_id != NULL && out->correlation_id == NULL)) {
     lc_txn_replay_res_cleanup(out);
     return 0;
   }
@@ -198,14 +198,14 @@ static int lc_copy_txn_replay_res(lc_txn_replay_res *out,
 
 static int
 lc_copy_txn_decision_res(lc_txn_decision_res *out,
-                         const lc_engine_txn_decision_response *legacy) {
+                         const lc_engine_txn_decision_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->txn_id = lc_strdup_local(legacy->txn_id);
-  out->state = lc_strdup_local(legacy->state);
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if ((legacy->txn_id != NULL && out->txn_id == NULL) ||
-      (legacy->state != NULL && out->state == NULL) ||
-      (legacy->correlation_id != NULL && out->correlation_id == NULL)) {
+  out->txn_id = lc_strdup_local(engine->txn_id);
+  out->state = lc_strdup_local(engine->state);
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if ((engine->txn_id != NULL && out->txn_id == NULL) ||
+      (engine->state != NULL && out->state == NULL) ||
+      (engine->correlation_id != NULL && out->correlation_id == NULL)) {
     lc_txn_decision_res_cleanup(out);
     return 0;
   }
@@ -214,17 +214,17 @@ lc_copy_txn_decision_res(lc_txn_decision_res *out,
 
 static int lc_copy_tc_lease_acquire_res(
     lc_tc_lease_acquire_res *out,
-    const lc_engine_tc_lease_acquire_response *legacy) {
+    const lc_engine_tc_lease_acquire_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->granted = legacy->granted;
-  out->leader_id = lc_strdup_local(legacy->leader_id);
-  out->leader_endpoint = lc_strdup_local(legacy->leader_endpoint);
-  out->term = legacy->term;
-  out->expires_at_unix = legacy->expires_at_unix;
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if ((legacy->leader_id != NULL && out->leader_id == NULL) ||
-      (legacy->leader_endpoint != NULL && out->leader_endpoint == NULL) ||
-      (legacy->correlation_id != NULL && out->correlation_id == NULL)) {
+  out->granted = engine->granted;
+  out->leader_id = lc_strdup_local(engine->leader_id);
+  out->leader_endpoint = lc_strdup_local(engine->leader_endpoint);
+  out->term = engine->term;
+  out->expires_at_unix = engine->expires_at_unix;
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if ((engine->leader_id != NULL && out->leader_id == NULL) ||
+      (engine->leader_endpoint != NULL && out->leader_endpoint == NULL) ||
+      (engine->correlation_id != NULL && out->correlation_id == NULL)) {
     lc_tc_lease_acquire_res_cleanup(out);
     return 0;
   }
@@ -233,17 +233,17 @@ static int lc_copy_tc_lease_acquire_res(
 
 static int
 lc_copy_tc_lease_renew_res(lc_tc_lease_renew_res *out,
-                           const lc_engine_tc_lease_renew_response *legacy) {
+                           const lc_engine_tc_lease_renew_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->renewed = legacy->renewed;
-  out->leader_id = lc_strdup_local(legacy->leader_id);
-  out->leader_endpoint = lc_strdup_local(legacy->leader_endpoint);
-  out->term = legacy->term;
-  out->expires_at_unix = legacy->expires_at_unix;
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if ((legacy->leader_id != NULL && out->leader_id == NULL) ||
-      (legacy->leader_endpoint != NULL && out->leader_endpoint == NULL) ||
-      (legacy->correlation_id != NULL && out->correlation_id == NULL)) {
+  out->renewed = engine->renewed;
+  out->leader_id = lc_strdup_local(engine->leader_id);
+  out->leader_endpoint = lc_strdup_local(engine->leader_endpoint);
+  out->term = engine->term;
+  out->expires_at_unix = engine->expires_at_unix;
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if ((engine->leader_id != NULL && out->leader_id == NULL) ||
+      (engine->leader_endpoint != NULL && out->leader_endpoint == NULL) ||
+      (engine->correlation_id != NULL && out->correlation_id == NULL)) {
     lc_tc_lease_renew_res_cleanup(out);
     return 0;
   }
@@ -252,11 +252,11 @@ lc_copy_tc_lease_renew_res(lc_tc_lease_renew_res *out,
 
 static int lc_copy_tc_lease_release_res(
     lc_tc_lease_release_res *out,
-    const lc_engine_tc_lease_release_response *legacy) {
+    const lc_engine_tc_lease_release_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->released = legacy->released;
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if (legacy->correlation_id != NULL && out->correlation_id == NULL) {
+  out->released = engine->released;
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if (engine->correlation_id != NULL && out->correlation_id == NULL) {
     lc_tc_lease_release_res_cleanup(out);
     return 0;
   }
@@ -264,16 +264,16 @@ static int lc_copy_tc_lease_release_res(
 }
 
 static int lc_copy_tc_leader_res(lc_tc_leader_res *out,
-                                 const lc_engine_tc_leader_response *legacy) {
+                                 const lc_engine_tc_leader_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->leader_id = lc_strdup_local(legacy->leader_id);
-  out->leader_endpoint = lc_strdup_local(legacy->leader_endpoint);
-  out->term = legacy->term;
-  out->expires_at_unix = legacy->expires_at_unix;
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if ((legacy->leader_id != NULL && out->leader_id == NULL) ||
-      (legacy->leader_endpoint != NULL && out->leader_endpoint == NULL) ||
-      (legacy->correlation_id != NULL && out->correlation_id == NULL)) {
+  out->leader_id = lc_strdup_local(engine->leader_id);
+  out->leader_endpoint = lc_strdup_local(engine->leader_endpoint);
+  out->term = engine->term;
+  out->expires_at_unix = engine->expires_at_unix;
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if ((engine->leader_id != NULL && out->leader_id == NULL) ||
+      (engine->leader_endpoint != NULL && out->leader_endpoint == NULL) ||
+      (engine->correlation_id != NULL && out->correlation_id == NULL)) {
     lc_tc_leader_res_cleanup(out);
     return 0;
   }
@@ -281,15 +281,15 @@ static int lc_copy_tc_leader_res(lc_tc_leader_res *out,
 }
 
 static int lc_copy_tc_cluster_res(lc_tc_cluster_res *out,
-                                  const lc_engine_tc_cluster_response *legacy) {
+                                  const lc_engine_tc_cluster_response *engine) {
   memset(out, 0, sizeof(*out));
-  if (!lc_copy_string_list(&out->endpoints, &legacy->endpoints)) {
+  if (!lc_copy_string_list(&out->endpoints, &engine->endpoints)) {
     return 0;
   }
-  out->updated_at_unix = legacy->updated_at_unix;
-  out->expires_at_unix = legacy->expires_at_unix;
-  out->correlation_id = lc_strdup_local(legacy->correlation_id);
-  if (legacy->correlation_id != NULL && out->correlation_id == NULL) {
+  out->updated_at_unix = engine->updated_at_unix;
+  out->expires_at_unix = engine->expires_at_unix;
+  out->correlation_id = lc_strdup_local(engine->correlation_id);
+  if (engine->correlation_id != NULL && out->correlation_id == NULL) {
     lc_tc_cluster_res_cleanup(out);
     return 0;
   }
@@ -301,8 +301,8 @@ int lc_client_get_namespace_config_method(lc_client *self,
                                           lc_namespace_config_res *out,
                                           lc_error *error) {
   lc_client_handle *client;
-  lc_engine_namespace_config_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_namespace_config_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -317,12 +317,12 @@ int lc_client_get_namespace_config_method(lc_client *self,
     fields[0] = lc_log_str_field("namespace", req->namespace_name);
     lc_log_trace(client->logger, "client.namespace.get.start", fields, 1U);
   }
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
   rc = lc_engine_client_get_namespace_config(
-      client->legacy, req->namespace_name, &legacy_res, &legacy_error);
+      client->engine, req->namespace_name, &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[1];
 
@@ -336,12 +336,12 @@ int lc_client_get_namespace_config_method(lc_client *self,
               : "client.namespace.get.error",
           fields, 1U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_namespace_config_res(out, &legacy_res)) {
-    lc_engine_namespace_config_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_namespace_config_res(out, &engine_res)) {
+    lc_engine_namespace_config_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate namespace config response", NULL,
                         NULL, NULL);
@@ -355,8 +355,8 @@ int lc_client_get_namespace_config_method(lc_client *self,
     fields[3] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.namespace.get.success", fields, 4U);
   }
-  lc_engine_namespace_config_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_namespace_config_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -365,9 +365,9 @@ int lc_client_update_namespace_config_method(lc_client *self,
                                              lc_namespace_config_res *out,
                                              lc_error *error) {
   lc_client_handle *client;
-  lc_engine_namespace_config_request legacy_req;
-  lc_engine_namespace_config_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_namespace_config_request engine_req;
+  lc_engine_namespace_config_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -384,16 +384,16 @@ int lc_client_update_namespace_config_method(lc_client *self,
     fields[2] = lc_log_str_field("fallback_engine", req->fallback_engine);
     lc_log_trace(client->logger, "client.namespace.set.start", fields, 3U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.preferred_engine = req->preferred_engine;
-  legacy_req.fallback_engine = req->fallback_engine;
-  rc = lc_engine_client_update_namespace_config(client->legacy, &legacy_req,
-                                                &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.preferred_engine = req->preferred_engine;
+  engine_req.fallback_engine = req->fallback_engine;
+  rc = lc_engine_client_update_namespace_config(client->engine, &engine_req,
+                                                &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -409,12 +409,12 @@ int lc_client_update_namespace_config_method(lc_client *self,
               : "client.namespace.set.error",
           fields, 3U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_namespace_config_res(out, &legacy_res)) {
-    lc_engine_namespace_config_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_namespace_config_res(out, &engine_res)) {
+    lc_engine_namespace_config_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate namespace config response", NULL,
                         NULL, NULL);
@@ -428,17 +428,17 @@ int lc_client_update_namespace_config_method(lc_client *self,
     fields[3] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.namespace.set.success", fields, 4U);
   }
-  lc_engine_namespace_config_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_namespace_config_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_flush_index_method(lc_client *self, const lc_index_flush_req *req,
                                  lc_index_flush_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_index_flush_request legacy_req;
-  lc_engine_index_flush_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_index_flush_request engine_req;
+  lc_engine_index_flush_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -454,15 +454,15 @@ int lc_client_flush_index_method(lc_client *self, const lc_index_flush_req *req,
     fields[1] = lc_log_str_field("mode", req->mode);
     lc_log_trace(client->logger, "client.index.flush.start", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.namespace_name = req->namespace_name;
-  legacy_req.mode = req->mode;
-  rc = lc_engine_client_index_flush(client->legacy, &legacy_req, &legacy_res,
-                                    &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.mode = req->mode;
+  rc = lc_engine_client_index_flush(client->engine, &engine_req, &engine_res,
+                                    &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -477,12 +477,12 @@ int lc_client_flush_index_method(lc_client *self, const lc_index_flush_req *req,
               : "client.index.flush.error",
           fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_index_flush_res(out, &legacy_res)) {
-    lc_engine_index_flush_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_index_flush_res(out, &engine_res)) {
+    lc_engine_index_flush_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate index flush response", NULL, NULL,
                         NULL);
@@ -497,17 +497,17 @@ int lc_client_flush_index_method(lc_client *self, const lc_index_flush_req *req,
     fields[4] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.index.flush.success", fields, 5U);
   }
-  lc_engine_index_flush_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_index_flush_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_txn_replay_method(lc_client *self, const lc_txn_replay_req *req,
                                 lc_txn_replay_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_txn_replay_request legacy_req;
-  lc_engine_txn_replay_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_txn_replay_request engine_req;
+  lc_engine_txn_replay_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -522,14 +522,14 @@ int lc_client_txn_replay_method(lc_client *self, const lc_txn_replay_req *req,
     fields[0] = lc_log_str_field("txn_id", req->txn_id);
     lc_log_trace(client->logger, "client.txn.replay.start", fields, 1U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.txn_id = req->txn_id;
-  rc = lc_engine_client_txn_replay(client->legacy, &legacy_req, &legacy_res,
-                                   &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.txn_id = req->txn_id;
+  rc = lc_engine_client_txn_replay(client->engine, &engine_req, &engine_res,
+                                   &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[1];
 
@@ -538,12 +538,12 @@ int lc_client_txn_replay_method(lc_client *self, const lc_txn_replay_req *req,
           client, "client.txn.replay.transport_error",
           "client.txn.replay.error", fields, 1U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_txn_replay_res(out, &legacy_res)) {
-    lc_engine_txn_replay_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_txn_replay_res(out, &engine_res)) {
+    lc_engine_txn_replay_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate txn replay response", NULL, NULL,
                         NULL);
@@ -556,8 +556,8 @@ int lc_client_txn_replay_method(lc_client *self, const lc_txn_replay_req *req,
     fields[2] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.txn.replay.success", fields, 3U);
   }
-  lc_engine_txn_replay_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_txn_replay_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -565,10 +565,10 @@ int lc_client_txn_prepare_method(lc_client *self,
                                  const lc_txn_decision_req *req,
                                  lc_txn_decision_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_txn_decision_request legacy_req;
-  lc_engine_txn_decision_response legacy_res;
+  lc_engine_txn_decision_request engine_req;
+  lc_engine_txn_decision_response engine_res;
   lc_engine_txn_participant *participants;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -586,17 +586,17 @@ int lc_client_txn_prepare_method(lc_client *self,
     lc_log_trace(client->logger, "client.txn.prepare.start", fields, 3U);
   }
   participants = NULL;
-  rc = lc_fill_txn_request(req, "prepare", &legacy_req, &participants, error);
+  rc = lc_fill_txn_request(req, "prepare", &engine_req, &participants, error);
   if (rc != LC_OK) {
     return rc;
   }
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  rc = lc_engine_client_txn_decide(client->legacy, &legacy_req, &legacy_res,
-                                   &legacy_error);
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  rc = lc_engine_client_txn_decide(client->engine, &engine_req, &engine_res,
+                                   &engine_error);
   free(participants);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -607,12 +607,12 @@ int lc_client_txn_prepare_method(lc_client *self,
           client, "client.txn.prepare.transport_error",
           "client.txn.prepare.error", fields, 3U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_txn_decision_res(out, &legacy_res)) {
-    lc_engine_txn_decision_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_txn_decision_res(out, &engine_res)) {
+    lc_engine_txn_decision_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate txn prepare response", NULL, NULL,
                         NULL);
@@ -625,18 +625,18 @@ int lc_client_txn_prepare_method(lc_client *self,
     fields[2] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.txn.prepare.success", fields, 3U);
   }
-  lc_engine_txn_decision_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_txn_decision_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_txn_commit_method(lc_client *self, const lc_txn_decision_req *req,
                                 lc_txn_decision_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_txn_decision_request legacy_req;
-  lc_engine_txn_decision_response legacy_res;
+  lc_engine_txn_decision_request engine_req;
+  lc_engine_txn_decision_response engine_res;
   lc_engine_txn_participant *participants;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -653,17 +653,17 @@ int lc_client_txn_commit_method(lc_client *self, const lc_txn_decision_req *req,
     lc_log_trace(client->logger, "client.txn.commit.start", fields, 2U);
   }
   participants = NULL;
-  rc = lc_fill_txn_request(req, NULL, &legacy_req, &participants, error);
+  rc = lc_fill_txn_request(req, NULL, &engine_req, &participants, error);
   if (rc != LC_OK) {
     return rc;
   }
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  rc = lc_engine_client_txn_commit(client->legacy, &legacy_req, &legacy_res,
-                                   &legacy_error);
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  rc = lc_engine_client_txn_commit(client->engine, &engine_req, &engine_res,
+                                   &engine_error);
   free(participants);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -673,12 +673,12 @@ int lc_client_txn_commit_method(lc_client *self, const lc_txn_decision_req *req,
           client, "client.txn.commit.transport_error",
           "client.txn.commit.error", fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_txn_decision_res(out, &legacy_res)) {
-    lc_engine_txn_decision_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_txn_decision_res(out, &engine_res)) {
+    lc_engine_txn_decision_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate txn commit response", NULL, NULL,
                         NULL);
@@ -691,8 +691,8 @@ int lc_client_txn_commit_method(lc_client *self, const lc_txn_decision_req *req,
     fields[2] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.txn.commit.success", fields, 3U);
   }
-  lc_engine_txn_decision_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_txn_decision_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -700,10 +700,10 @@ int lc_client_txn_rollback_method(lc_client *self,
                                   const lc_txn_decision_req *req,
                                   lc_txn_decision_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_txn_decision_request legacy_req;
-  lc_engine_txn_decision_response legacy_res;
+  lc_engine_txn_decision_request engine_req;
+  lc_engine_txn_decision_response engine_res;
   lc_engine_txn_participant *participants;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -720,17 +720,17 @@ int lc_client_txn_rollback_method(lc_client *self,
     lc_log_trace(client->logger, "client.txn.rollback.start", fields, 2U);
   }
   participants = NULL;
-  rc = lc_fill_txn_request(req, NULL, &legacy_req, &participants, error);
+  rc = lc_fill_txn_request(req, NULL, &engine_req, &participants, error);
   if (rc != LC_OK) {
     return rc;
   }
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  rc = lc_engine_client_txn_rollback(client->legacy, &legacy_req, &legacy_res,
-                                     &legacy_error);
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  rc = lc_engine_client_txn_rollback(client->engine, &engine_req, &engine_res,
+                                     &engine_error);
   free(participants);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -740,12 +740,12 @@ int lc_client_txn_rollback_method(lc_client *self,
           client, "client.txn.rollback.transport_error",
           "client.txn.rollback.error", fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_txn_decision_res(out, &legacy_res)) {
-    lc_engine_txn_decision_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_txn_decision_res(out, &engine_res)) {
+    lc_engine_txn_decision_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate txn rollback response", NULL, NULL,
                         NULL);
@@ -758,8 +758,8 @@ int lc_client_txn_rollback_method(lc_client *self,
     fields[2] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.txn.rollback.success", fields, 3U);
   }
-  lc_engine_txn_decision_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_txn_decision_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -768,9 +768,9 @@ int lc_client_tc_lease_acquire_method(lc_client *self,
                                       lc_tc_lease_acquire_res *out,
                                       lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tc_lease_acquire_request legacy_req;
-  lc_engine_tc_lease_acquire_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tc_lease_acquire_request engine_req;
+  lc_engine_tc_lease_acquire_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -787,17 +787,17 @@ int lc_client_tc_lease_acquire_method(lc_client *self,
     fields[2] = lc_log_u64_field("term", req->term);
     lc_log_trace(client->logger, "client.tc.lease.acquire.start", fields, 3U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.candidate_id = req->candidate_id;
-  legacy_req.candidate_endpoint = req->candidate_endpoint;
-  legacy_req.term = req->term;
-  legacy_req.ttl_ms = req->ttl_ms;
-  rc = lc_engine_client_tc_lease_acquire(client->legacy, &legacy_req,
-                                         &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.candidate_id = req->candidate_id;
+  engine_req.candidate_endpoint = req->candidate_endpoint;
+  engine_req.term = req->term;
+  engine_req.ttl_ms = req->ttl_ms;
+  rc = lc_engine_client_tc_lease_acquire(client->engine, &engine_req,
+                                         &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
 
@@ -809,12 +809,12 @@ int lc_client_tc_lease_acquire_method(lc_client *self,
           client, "client.tc.lease.acquire.transport_error",
           "client.tc.lease.acquire.error", fields, 3U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_tc_lease_acquire_res(out, &legacy_res)) {
-    lc_engine_tc_lease_acquire_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_tc_lease_acquire_res(out, &engine_res)) {
+    lc_engine_tc_lease_acquire_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc lease acquire response", NULL,
                         NULL, NULL);
@@ -829,8 +829,8 @@ int lc_client_tc_lease_acquire_method(lc_client *self,
     fields[4] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.tc.lease.acquire.success", fields, 5U);
   }
-  lc_engine_tc_lease_acquire_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tc_lease_acquire_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -839,9 +839,9 @@ int lc_client_tc_lease_renew_method(lc_client *self,
                                     lc_tc_lease_renew_res *out,
                                     lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tc_lease_renew_request legacy_req;
-  lc_engine_tc_lease_renew_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tc_lease_renew_request engine_req;
+  lc_engine_tc_lease_renew_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -857,16 +857,16 @@ int lc_client_tc_lease_renew_method(lc_client *self,
     fields[1] = lc_log_u64_field("term", req->term);
     lc_log_trace(client->logger, "client.tc.lease.renew.start", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.leader_id = req->leader_id;
-  legacy_req.term = req->term;
-  legacy_req.ttl_ms = req->ttl_ms;
-  rc = lc_engine_client_tc_lease_renew(client->legacy, &legacy_req, &legacy_res,
-                                       &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.leader_id = req->leader_id;
+  engine_req.term = req->term;
+  engine_req.ttl_ms = req->ttl_ms;
+  rc = lc_engine_client_tc_lease_renew(client->engine, &engine_req, &engine_res,
+                                       &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -876,12 +876,12 @@ int lc_client_tc_lease_renew_method(lc_client *self,
           client, "client.tc.lease.renew.transport_error",
           "client.tc.lease.renew.error", fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_tc_lease_renew_res(out, &legacy_res)) {
-    lc_engine_tc_lease_renew_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_tc_lease_renew_res(out, &engine_res)) {
+    lc_engine_tc_lease_renew_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc lease renew response", NULL,
                         NULL, NULL);
@@ -896,8 +896,8 @@ int lc_client_tc_lease_renew_method(lc_client *self,
     fields[4] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.tc.lease.renew.success", fields, 5U);
   }
-  lc_engine_tc_lease_renew_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tc_lease_renew_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -906,9 +906,9 @@ int lc_client_tc_lease_release_method(lc_client *self,
                                       lc_tc_lease_release_res *out,
                                       lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tc_lease_release_request legacy_req;
-  lc_engine_tc_lease_release_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tc_lease_release_request engine_req;
+  lc_engine_tc_lease_release_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -924,15 +924,15 @@ int lc_client_tc_lease_release_method(lc_client *self,
     fields[1] = lc_log_u64_field("term", req->term);
     lc_log_trace(client->logger, "client.tc.lease.release.start", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.leader_id = req->leader_id;
-  legacy_req.term = req->term;
-  rc = lc_engine_client_tc_lease_release(client->legacy, &legacy_req,
-                                         &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.leader_id = req->leader_id;
+  engine_req.term = req->term;
+  rc = lc_engine_client_tc_lease_release(client->engine, &engine_req,
+                                         &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -942,12 +942,12 @@ int lc_client_tc_lease_release_method(lc_client *self,
           client, "client.tc.lease.release.transport_error",
           "client.tc.lease.release.error", fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_tc_lease_release_res(out, &legacy_res)) {
-    lc_engine_tc_lease_release_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_tc_lease_release_res(out, &engine_res)) {
+    lc_engine_tc_lease_release_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc lease release response", NULL,
                         NULL, NULL);
@@ -960,16 +960,16 @@ int lc_client_tc_lease_release_method(lc_client *self,
     fields[2] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.tc.lease.release.success", fields, 3U);
   }
-  lc_engine_tc_lease_release_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tc_lease_release_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_tc_leader_method(lc_client *self, lc_tc_leader_res *out,
                                lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tc_leader_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tc_leader_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || out == NULL) {
@@ -978,19 +978,19 @@ int lc_client_tc_leader_method(lc_client *self, lc_tc_leader_res *out,
   }
   client = (lc_client_handle *)self;
   lc_log_trace(client->logger, "client.tc.leader.start", NULL, 0U);
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  rc = lc_engine_client_tc_leader(client->legacy, &legacy_res, &legacy_error);
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  rc = lc_engine_client_tc_leader(client->engine, &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     lc_client_log_management_failure(client, "client.tc.leader.transport_error",
                                      "client.tc.leader.error", NULL, 0U, error);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_tc_leader_res(out, &legacy_res)) {
-    lc_engine_tc_leader_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_tc_leader_res(out, &engine_res)) {
+    lc_engine_tc_leader_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc leader response", NULL, NULL,
                         NULL);
@@ -1004,8 +1004,8 @@ int lc_client_tc_leader_method(lc_client *self, lc_tc_leader_res *out,
     fields[3] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.tc.leader.success", fields, 4U);
   }
-  lc_engine_tc_leader_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tc_leader_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1014,9 +1014,9 @@ int lc_client_tc_cluster_announce_method(lc_client *self,
                                          lc_tc_cluster_res *out,
                                          lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tc_cluster_announce_request legacy_req;
-  lc_engine_tc_cluster_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tc_cluster_announce_request engine_req;
+  lc_engine_tc_cluster_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1032,14 +1032,14 @@ int lc_client_tc_cluster_announce_method(lc_client *self,
     lc_log_trace(client->logger, "client.tc.cluster.announce.start", fields,
                  1U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.self_endpoint = req->self_endpoint;
-  rc = lc_engine_client_tc_cluster_announce(client->legacy, &legacy_req,
-                                            &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.self_endpoint = req->self_endpoint;
+  rc = lc_engine_client_tc_cluster_announce(client->engine, &engine_req,
+                                            &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[1];
 
@@ -1048,12 +1048,12 @@ int lc_client_tc_cluster_announce_method(lc_client *self,
           client, "client.tc.cluster.announce.transport_error",
           "client.tc.cluster.announce.error", fields, 1U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_tc_cluster_res(out, &legacy_res)) {
-    lc_engine_tc_cluster_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_tc_cluster_res(out, &engine_res)) {
+    lc_engine_tc_cluster_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc cluster response", NULL, NULL,
                         NULL);
@@ -1067,16 +1067,16 @@ int lc_client_tc_cluster_announce_method(lc_client *self,
     lc_log_trace(client->logger, "client.tc.cluster.announce.success", fields,
                  3U);
   }
-  lc_engine_tc_cluster_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tc_cluster_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_tc_cluster_leave_method(lc_client *self, lc_tc_cluster_res *out,
                                       lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tc_cluster_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tc_cluster_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || out == NULL) {
@@ -1086,21 +1086,21 @@ int lc_client_tc_cluster_leave_method(lc_client *self, lc_tc_cluster_res *out,
   }
   client = (lc_client_handle *)self;
   lc_log_trace(client->logger, "client.tc.cluster.leave.start", NULL, 0U);
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  rc = lc_engine_client_tc_cluster_leave(client->legacy, &legacy_res,
-                                         &legacy_error);
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  rc = lc_engine_client_tc_cluster_leave(client->engine, &engine_res,
+                                         &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     lc_client_log_management_failure(
         client, "client.tc.cluster.leave.transport_error",
         "client.tc.cluster.leave.error", NULL, 0U, error);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_tc_cluster_res(out, &legacy_res)) {
-    lc_engine_tc_cluster_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_tc_cluster_res(out, &engine_res)) {
+    lc_engine_tc_cluster_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc cluster response", NULL, NULL,
                         NULL);
@@ -1113,16 +1113,16 @@ int lc_client_tc_cluster_leave_method(lc_client *self, lc_tc_cluster_res *out,
     fields[2] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.tc.cluster.leave.success", fields, 3U);
   }
-  lc_engine_tc_cluster_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tc_cluster_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_tc_cluster_list_method(lc_client *self, lc_tc_cluster_res *out,
                                      lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tc_cluster_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tc_cluster_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || out == NULL) {
@@ -1132,21 +1132,21 @@ int lc_client_tc_cluster_list_method(lc_client *self, lc_tc_cluster_res *out,
   }
   client = (lc_client_handle *)self;
   lc_log_trace(client->logger, "client.tc.cluster.list.start", NULL, 0U);
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  rc = lc_engine_client_tc_cluster_list(client->legacy, &legacy_res,
-                                        &legacy_error);
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  rc = lc_engine_client_tc_cluster_list(client->engine, &engine_res,
+                                        &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     lc_client_log_management_failure(
         client, "client.tc.cluster.list.transport_error",
         "client.tc.cluster.list.error", NULL, 0U, error);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_tc_cluster_res(out, &legacy_res)) {
-    lc_engine_tc_cluster_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_tc_cluster_res(out, &engine_res)) {
+    lc_engine_tc_cluster_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc cluster response", NULL, NULL,
                         NULL);
@@ -1159,8 +1159,8 @@ int lc_client_tc_cluster_list_method(lc_client *self, lc_tc_cluster_res *out,
     fields[2] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.tc.cluster.list.success", fields, 3U);
   }
-  lc_engine_tc_cluster_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tc_cluster_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1168,9 +1168,9 @@ int lc_client_tc_rm_register_method(lc_client *self,
                                     const lc_tc_rm_register_req *req,
                                     lc_tc_rm_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tcrm_register_request legacy_req;
-  lc_engine_tcrm_register_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tcrm_register_request engine_req;
+  lc_engine_tcrm_register_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1186,15 +1186,15 @@ int lc_client_tc_rm_register_method(lc_client *self,
     fields[1] = lc_log_str_field("endpoint", req->endpoint);
     lc_log_trace(client->logger, "client.rm.register.start", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.backend_hash = req->backend_hash;
-  legacy_req.endpoint = req->endpoint;
-  rc = lc_engine_client_tcrm_register(client->legacy, &legacy_req, &legacy_res,
-                                      &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.backend_hash = req->backend_hash;
+  engine_req.endpoint = req->endpoint;
+  rc = lc_engine_client_tcrm_register(client->engine, &engine_req, &engine_res,
+                                      &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -1204,12 +1204,12 @@ int lc_client_tc_rm_register_method(lc_client *self,
           client, "client.rm.register.transport_error",
           "client.rm.register.error", fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (!lc_copy_tc_rm_res(out, &legacy_res)) {
-    lc_engine_tcrm_register_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  if (!lc_copy_tc_rm_res(out, &engine_res)) {
+    lc_engine_tcrm_register_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc rm register response", NULL,
                         NULL, NULL);
@@ -1223,8 +1223,8 @@ int lc_client_tc_rm_register_method(lc_client *self,
     fields[3] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.rm.register.success", fields, 4U);
   }
-  lc_engine_tcrm_register_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tcrm_register_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1232,9 +1232,9 @@ int lc_client_tc_rm_unregister_method(lc_client *self,
                                       const lc_tc_rm_unregister_req *req,
                                       lc_tc_rm_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tcrm_unregister_request legacy_req;
-  lc_engine_tcrm_unregister_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tcrm_unregister_request engine_req;
+  lc_engine_tcrm_unregister_response engine_res;
+  lc_engine_error engine_error;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1250,15 +1250,15 @@ int lc_client_tc_rm_unregister_method(lc_client *self,
     fields[1] = lc_log_str_field("endpoint", req->endpoint);
     lc_log_trace(client->logger, "client.rm.unregister.start", fields, 2U);
   }
-  memset(&legacy_req, 0, sizeof(legacy_req));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  legacy_req.backend_hash = req->backend_hash;
-  legacy_req.endpoint = req->endpoint;
-  rc = lc_engine_client_tcrm_unregister(client->legacy, &legacy_req,
-                                        &legacy_res, &legacy_error);
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  engine_req.backend_hash = req->backend_hash;
+  engine_req.endpoint = req->endpoint;
+  rc = lc_engine_client_tcrm_unregister(client->engine, &engine_req,
+                                        &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[2];
 
@@ -1268,25 +1268,25 @@ int lc_client_tc_rm_unregister_method(lc_client *self,
           client, "client.rm.unregister.transport_error",
           "client.rm.unregister.error", fields, 2U, error);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
   memset(out, 0, sizeof(*out));
-  out->backend_hash = lc_strdup_local(legacy_res.backend_hash);
-  if (!lc_copy_string_list(&out->endpoints, &legacy_res.endpoints)) {
-    lc_engine_tcrm_unregister_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+  out->backend_hash = lc_strdup_local(engine_res.backend_hash);
+  if (!lc_copy_string_list(&out->endpoints, &engine_res.endpoints)) {
+    lc_engine_tcrm_unregister_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc rm unregister response", NULL,
                         NULL, NULL);
   }
-  out->updated_at_unix = legacy_res.updated_at_unix;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
-  if ((legacy_res.backend_hash != NULL && out->backend_hash == NULL) ||
-      (legacy_res.correlation_id != NULL && out->correlation_id == NULL)) {
+  out->updated_at_unix = engine_res.updated_at_unix;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  if ((engine_res.backend_hash != NULL && out->backend_hash == NULL) ||
+      (engine_res.correlation_id != NULL && out->correlation_id == NULL)) {
     lc_tc_rm_res_cleanup(out);
-    lc_engine_tcrm_unregister_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_tcrm_unregister_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc rm unregister response", NULL,
                         NULL, NULL);
@@ -1300,16 +1300,16 @@ int lc_client_tc_rm_unregister_method(lc_client *self,
     fields[3] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.rm.unregister.success", fields, 4U);
   }
-  lc_engine_tcrm_unregister_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tcrm_unregister_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
 int lc_client_tc_rm_list_method(lc_client *self, lc_tc_rm_list_res *out,
                                 lc_error *error) {
   lc_client_handle *client;
-  lc_engine_tcrm_list_response legacy_res;
-  lc_engine_error legacy_error;
+  lc_engine_tcrm_list_response engine_res;
+  lc_engine_error engine_error;
   size_t index;
   int rc;
 
@@ -1320,51 +1320,51 @@ int lc_client_tc_rm_list_method(lc_client *self, lc_tc_rm_list_res *out,
   client = (lc_client_handle *)self;
   lc_log_trace(client->logger, "client.rm.list.start", NULL, 0U);
   memset(out, 0, sizeof(*out));
-  memset(&legacy_res, 0, sizeof(legacy_res));
-  lc_engine_error_init(&legacy_error);
-  rc = lc_engine_client_tcrm_list(client->legacy, &legacy_res, &legacy_error);
+  memset(&engine_res, 0, sizeof(engine_res));
+  lc_engine_error_init(&engine_error);
+  rc = lc_engine_client_tcrm_list(client->engine, &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     lc_client_log_management_failure(client, "client.rm.list.transport_error",
                                      "client.rm.list.error", NULL, 0U, error);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  if (legacy_res.backend_count > 0U) {
-    out->backends = (lc_tc_rm_backend *)calloc(legacy_res.backend_count,
+  if (engine_res.backend_count > 0U) {
+    out->backends = (lc_tc_rm_backend *)calloc(engine_res.backend_count,
                                                sizeof(*out->backends));
     if (out->backends == NULL) {
-      lc_engine_tcrm_list_response_cleanup(&legacy_res);
-      lc_engine_error_cleanup(&legacy_error);
+      lc_engine_tcrm_list_response_cleanup(&engine_res);
+      lc_engine_error_cleanup(&engine_error);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate tc rm list backends", NULL, NULL,
                           NULL);
     }
-    out->backend_count = legacy_res.backend_count;
-    for (index = 0U; index < legacy_res.backend_count; ++index) {
+    out->backend_count = engine_res.backend_count;
+    for (index = 0U; index < engine_res.backend_count; ++index) {
       out->backends[index].backend_hash =
-          lc_strdup_local(legacy_res.backends[index].backend_hash);
+          lc_strdup_local(engine_res.backends[index].backend_hash);
       out->backends[index].updated_at_unix =
-          legacy_res.backends[index].updated_at_unix;
-      if ((legacy_res.backends[index].backend_hash != NULL &&
+          engine_res.backends[index].updated_at_unix;
+      if ((engine_res.backends[index].backend_hash != NULL &&
            out->backends[index].backend_hash == NULL) ||
           !lc_copy_string_list(&out->backends[index].endpoints,
-                               &legacy_res.backends[index].endpoints)) {
+                               &engine_res.backends[index].endpoints)) {
         lc_tc_rm_list_res_cleanup(out);
-        lc_engine_tcrm_list_response_cleanup(&legacy_res);
-        lc_engine_error_cleanup(&legacy_error);
+        lc_engine_tcrm_list_response_cleanup(&engine_res);
+        lc_engine_error_cleanup(&engine_error);
         return lc_error_set(error, LC_ERR_NOMEM, 0L,
                             "failed to allocate tc rm backend list", NULL, NULL,
                             NULL);
       }
     }
   }
-  out->updated_at_unix = legacy_res.updated_at_unix;
-  out->correlation_id = lc_strdup_local(legacy_res.correlation_id);
-  if (legacy_res.correlation_id != NULL && out->correlation_id == NULL) {
+  out->updated_at_unix = engine_res.updated_at_unix;
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  if (engine_res.correlation_id != NULL && out->correlation_id == NULL) {
     lc_tc_rm_list_res_cleanup(out);
-    lc_engine_tcrm_list_response_cleanup(&legacy_res);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_tcrm_list_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate tc rm list correlation_id", NULL,
                         NULL, NULL);
@@ -1377,7 +1377,7 @@ int lc_client_tc_rm_list_method(lc_client *self, lc_tc_rm_list_res *out,
     fields[2] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.rm.list.success", fields, 3U);
   }
-  lc_engine_tcrm_list_response_cleanup(&legacy_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_tcrm_list_response_cleanup(&engine_res);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }

@@ -52,8 +52,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?include/zlib\\.h(\n|$)" "zlib header")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?include/zconf\\.h(\n|$)" "zlib configuration header")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?include/lonejson\\.h(\n|$)" "lonejson header")
-    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?share/liblockdc(/|\n|$)" "legacy share/liblockdc path")
-    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?liblockdc-[^/]+/" "legacy top-level archive prefix")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?share/liblockdc(/|\n|$)" "engine share/liblockdc path")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?liblockdc-[^/]+/" "engine top-level archive prefix")
     string(REPLACE "." "\\." shared_name_regex "${shared_lib_name}")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)(\\./)?lib/${shared_name_regex}(\n|$)" "versioned shared library")
     if(DEFINED shared_soname

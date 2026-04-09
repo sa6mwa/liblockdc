@@ -38,7 +38,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
   lc_lease_handle *lease;
   lc_engine_get_request get_req;
   lc_engine_get_stream_response get_res;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   lc_mutation_parse_options parse_options;
   lc_mutation_plan *plan;
   lc_update_opts update_opts;
@@ -70,7 +70,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
   memset(&get_res, 0, sizeof(get_res));
   memset(&parse_options, 0, sizeof(parse_options));
   lc_update_opts_init(&update_opts);
-  lc_engine_error_init(&legacy_error);
+  lc_engine_error_init(&engine_error);
   plan = NULL;
   source = NULL;
   json = NULL;
@@ -119,13 +119,13 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
   get_req.lease_id = lease->lease_id;
   get_req.fencing_token = lease->fencing_token;
   get_req.public_read = 0;
-  rc = lc_engine_client_get_into(lease->client->legacy, &get_req,
+  rc = lc_engine_client_get_into(lease->client->engine, &get_req,
                                  lc_local_mutate_writer, input_fp, &get_res,
-                                 &legacy_error);
+                                 &engine_error);
   if (rc != LC_ENGINE_OK) {
     fclose(input_fp);
     lc_mutation_plan_close(plan);
-    rc = lc_error_from_legacy(error, &legacy_error);
+    rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[6];
 
@@ -138,14 +138,14 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
       lc_log_warn(lease->client->logger, "client.mutate_local.error", fields,
                   6U);
     }
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return rc;
   }
   if (fflush(input_fp) != 0) {
     fclose(input_fp);
     lc_mutation_plan_close(plan);
     lc_engine_get_stream_response_cleanup(&get_res);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     {
       pslog_field fields[5];
 
@@ -168,7 +168,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
       fclose(input_fp);
       lc_mutation_plan_close(plan);
       lc_engine_get_stream_response_cleanup(&get_res);
-      lc_engine_error_cleanup(&legacy_error);
+      lc_engine_error_cleanup(&engine_error);
       {
         pslog_field fields[5];
 
@@ -190,7 +190,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
   lc_mutation_plan_close(plan);
   if (rc != LC_OK) {
     lc_engine_get_stream_response_cleanup(&get_res);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     {
       pslog_field fields[6];
 
@@ -226,7 +226,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
   if (source == NULL) {
     fclose(final_fp);
     lc_engine_get_stream_response_cleanup(&get_res);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     {
       pslog_field fields[5];
 
@@ -247,7 +247,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
     source->close(source);
     fclose(final_fp);
     lc_engine_get_stream_response_cleanup(&get_res);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     {
       pslog_field fields[6];
 
@@ -266,7 +266,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
   json->close(json);
   fclose(final_fp);
   lc_engine_get_stream_response_cleanup(&get_res);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
   if (rc != LC_OK) {
     pslog_field fields[6];
 

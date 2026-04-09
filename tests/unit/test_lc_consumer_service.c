@@ -292,7 +292,7 @@ static int fake_subscribe(lc_consumer_service_handle *service,
                           lc_client_handle *client,
                           const lc_engine_queue_stream_handler *handler,
                           void *handler_context,
-                          lc_engine_error *legacy_error) {
+                          lc_engine_error *engine_error) {
   consumer_test_state *state;
   lc_engine_dequeue_response delivery;
   char message_id[64];
@@ -309,9 +309,9 @@ static int fake_subscribe(lc_consumer_service_handle *service,
   pthread_mutex_unlock(&state->mutex);
 
   if (state->fail_subscribe) {
-    lc_engine_error_init(legacy_error);
-    legacy_error->code = LC_ENGINE_ERROR_TRANSPORT;
-    legacy_error->message = lc_strdup_local("synthetic subscribe failure");
+    lc_engine_error_init(engine_error);
+    engine_error->code = LC_ENGINE_ERROR_TRANSPORT;
+    engine_error->message = lc_strdup_local("synthetic subscribe failure");
     return LC_ENGINE_ERROR_TRANSPORT;
   }
 
@@ -330,16 +330,16 @@ static int fake_subscribe(lc_consumer_service_handle *service,
     delivery.state_fencing_token = 17L;
   }
 
-  accepted = handler->begin(handler_context, &delivery, legacy_error);
+  accepted = handler->begin(handler_context, &delivery, engine_error);
   if (!accepted) {
     return LC_ENGINE_ERROR_TRANSPORT;
   }
   completed =
-      handler->chunk(handler_context, "{\"ok\":true}", 11U, legacy_error);
+      handler->chunk(handler_context, "{\"ok\":true}", 11U, engine_error);
   if (!completed) {
     return LC_ENGINE_ERROR_TRANSPORT;
   }
-  if (!handler->end(handler_context, &delivery, legacy_error)) {
+  if (!handler->end(handler_context, &delivery, engine_error)) {
     return LC_ENGINE_ERROR_TRANSPORT;
   }
   return LC_ENGINE_OK;
@@ -349,7 +349,7 @@ static int fake_subscribe_until_stop(
     lc_consumer_service_handle *service, const lc_dequeue_req *request,
     int with_state, lc_client_handle *client,
     const lc_engine_queue_stream_handler *handler, void *handler_context,
-    lc_engine_error *legacy_error) {
+    lc_engine_error *engine_error) {
   consumer_test_state *state;
 
   (void)service;
@@ -358,7 +358,7 @@ static int fake_subscribe_until_stop(
   (void)client;
   (void)handler;
   (void)handler_context;
-  (void)legacy_error;
+  (void)engine_error;
   state = g_consumer_test_state;
   pthread_mutex_lock(&state->mutex);
   state->subscribe_calls += 1U;

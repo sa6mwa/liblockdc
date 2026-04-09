@@ -1495,7 +1495,7 @@ int lc_engine_client_update_from(lc_engine_client *client,
   rc = lc_engine_perform_streaming(
       client, "POST", path.data, headers,
       reader != NULL ? reader : lc_engine_empty_reader, reader_context,
-      reader != NULL ? lc_legacy_reset_bridge : NULL, reader_context,
+      reader != NULL ? lc_engine_reset_bridge : NULL, reader_context,
       &lc_engine_update_response_map, &parsed, &state);
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {
@@ -1665,7 +1665,7 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   upload_state.payload_reader =
       reader != NULL ? reader : lc_engine_empty_reader;
   upload_state.payload_context = reader_context;
-  upload_state.payload_reset = reader != NULL ? lc_legacy_reset_bridge : NULL;
+  upload_state.payload_reset = reader != NULL ? lc_engine_reset_bridge : NULL;
   upload_state.payload_reset_context = reader_context;
 
   memset(&state, 0, sizeof(state));
@@ -1794,7 +1794,7 @@ int lc_engine_client_attach_from(lc_engine_client *client,
   memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_perform_streaming(
       client, "POST", path.data, headers, reader, reader_context,
-      reader != NULL ? lc_legacy_reset_bridge : NULL, reader_context,
+      reader != NULL ? lc_engine_reset_bridge : NULL, reader_context,
       &lc_engine_attach_response_map, &parsed, &state);
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {

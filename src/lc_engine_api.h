@@ -1,5 +1,13 @@
-#ifndef LC_ENGINE_LEGACY_API_H
-#define LC_ENGINE_LEGACY_API_H
+#ifndef LC_ENGINE_INTERNAL_API_H
+#define LC_ENGINE_INTERNAL_API_H
+
+/*
+ * Private implementation interface for the built-in HTTP transport.
+ *
+ * This is not a second public API. The only supported public client contract is
+ * declared in include/lc/lc.h. Everything in this header is internal plumbing
+ * used by the concrete SDK implementation under src/.
+ */
 
 #include "lc/lc.h"
 

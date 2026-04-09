@@ -35,9 +35,15 @@ typedef struct lc_consumer_delivery_bridge {
   lc_engine_dequeue_response meta;
   lc_stream_pipe *pipe;
   pthread_t handler_thread;
+  pthread_t extend_thread;
   int handler_thread_started;
+  int extend_thread_started;
   int handler_rc;
+  int handler_failed;
   int terminal;
+  int handler_done;
+  pthread_mutex_t state_mutex;
+  pthread_cond_t state_cond;
   lc_message *message;
 } lc_consumer_delivery_bridge;
 
@@ -82,6 +88,51 @@ static pthread_mutex_t lc_consumer_owner_mutex = PTHREAD_MUTEX_INITIALIZER;
 static long lc_consumer_owner_seq = 0L;
 
 static void *lc_consumer_delivery_handler_main(void *context);
+static void *lc_consumer_delivery_extend_main(void *context);
+
+static void lc_consumer_timespec_add_ms(struct timespec *ts, long delay_ms) {
+  if (ts == NULL || delay_ms <= 0L) {
+    return;
+  }
+  ts->tv_sec += delay_ms / 1000L;
+  ts->tv_nsec += (delay_ms % 1000L) * 1000000L;
+  if (ts->tv_nsec >= 1000000000L) {
+    ts->tv_sec += ts->tv_nsec / 1000000000L;
+    ts->tv_nsec %= 1000000000L;
+  }
+}
+
+static long lc_consumer_auto_extend_delay_ms(long visibility_timeout_seconds) {
+  long delay_ms;
+
+  if (visibility_timeout_seconds <= 0L) {
+    return 0L;
+  }
+  delay_ms = (visibility_timeout_seconds * 1000L) / 2L;
+  if (delay_ms < 250L) {
+    delay_ms = 250L;
+  }
+  if (delay_ms > 30000L) {
+    delay_ms = 30000L;
+  }
+  return delay_ms;
+}
+
+static void lc_consumer_delivery_mark_terminal(
+    lc_consumer_delivery_bridge *bridge) {
+  pthread_mutex_lock(&bridge->state_mutex);
+  bridge->terminal = 1;
+  pthread_cond_broadcast(&bridge->state_cond);
+  pthread_mutex_unlock(&bridge->state_mutex);
+}
+
+static void lc_consumer_delivery_mark_handler_done(
+    lc_consumer_delivery_bridge *bridge) {
+  pthread_mutex_lock(&bridge->state_mutex);
+  bridge->handler_done = 1;
+  pthread_cond_broadcast(&bridge->state_cond);
+  pthread_mutex_unlock(&bridge->state_mutex);
+}
 
 static void lc_consumer_request_cleanup(const lc_allocator *allocator,
                                         lc_dequeue_req *request) {
@@ -589,8 +640,8 @@ static int lc_consumer_clone_client(lc_consumer_service_handle *service,
     return rc;
   }
   client = (lc_client_handle *)(*out);
-  client->legacy->cancel_check = lc_consumer_cancel_check;
-  client->legacy->cancel_context = service;
+  client->engine->cancel_check = lc_consumer_cancel_check;
+  client->engine->cancel_context = service;
   return LC_OK;
 }
 
@@ -725,12 +776,12 @@ lc_consumer_delivery_meta_copy(lc_engine_dequeue_response *dst,
 static int
 lc_consumer_delivery_begin(void *context,
                            const lc_engine_dequeue_response *delivery,
-                           lc_engine_error *legacy_error) {
+                           lc_engine_error *engine_error) {
   lc_consumer_delivery_bridge *bridge;
   lc_source *payload;
   int rc;
 
-  (void)legacy_error;
+  (void)engine_error;
   bridge = (lc_consumer_delivery_bridge *)context;
   lc_consumer_delivery_meta_copy(&bridge->meta, delivery);
   {
@@ -752,11 +803,34 @@ lc_consumer_delivery_begin(void *context,
   }
   bridge->terminal = 0;
   bridge->handler_rc = LC_OK;
+  bridge->handler_failed = 0;
+  bridge->handler_done = 0;
   bridge->message = NULL;
   bridge->handler_thread_started = 0;
+  bridge->extend_thread_started = 0;
+  rc = pthread_mutex_init(&bridge->state_mutex, NULL);
+  if (rc != 0) {
+    lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
+                 "failed to initialize consumer delivery state", NULL, NULL,
+                 NULL);
+    lc_engine_dequeue_response_cleanup(&bridge->meta);
+    return 0;
+  }
+  rc = pthread_cond_init(&bridge->state_cond, NULL);
+  if (rc != 0) {
+    pthread_mutex_destroy(&bridge->state_mutex);
+    lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
+                 "failed to initialize consumer delivery state", NULL, NULL,
+                 NULL);
+    lc_engine_dequeue_response_cleanup(&bridge->meta);
+    return 0;
+  }
   rc = lc_stream_pipe_open(65536U, &bridge->client->allocator, &payload,
                            &bridge->pipe, bridge->error);
   if (rc != LC_OK) {
+    pthread_cond_destroy(&bridge->state_cond);
+    pthread_mutex_destroy(&bridge->state_mutex);
+    lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
   bridge->message =
@@ -766,6 +840,9 @@ lc_consumer_delivery_begin(void *context,
     lc_stream_pipe_fail(bridge->pipe, LC_ERR_NOMEM,
                         "failed to allocate consumer message");
     bridge->pipe = NULL;
+    pthread_cond_destroy(&bridge->state_cond);
+    pthread_mutex_destroy(&bridge->state_mutex);
+    lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
   rc = pthread_create(&bridge->handler_thread, NULL,
@@ -778,19 +855,45 @@ lc_consumer_delivery_begin(void *context,
     bridge->pipe = NULL;
     lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
                  "failed to start consumer delivery thread", NULL, NULL, NULL);
+    pthread_cond_destroy(&bridge->state_cond);
+    pthread_mutex_destroy(&bridge->state_mutex);
+    lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
   bridge->handler_thread_started = 1;
+  rc = pthread_create(&bridge->extend_thread, NULL,
+                      lc_consumer_delivery_extend_main, bridge);
+  if (rc != 0) {
+    if (bridge->pipe != NULL) {
+      lc_stream_pipe_fail(bridge->pipe, LC_ERR_TRANSPORT,
+                          "failed to start consumer delivery extender");
+      bridge->pipe = NULL;
+    }
+    pthread_join(bridge->handler_thread, NULL);
+    bridge->handler_thread_started = 0;
+    if (bridge->message != NULL) {
+      bridge->message->close(bridge->message);
+      bridge->message = NULL;
+    }
+    lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
+                 "failed to start consumer delivery extender", NULL, NULL,
+                 NULL);
+    pthread_cond_destroy(&bridge->state_cond);
+    pthread_mutex_destroy(&bridge->state_mutex);
+    lc_engine_dequeue_response_cleanup(&bridge->meta);
+    return 0;
+  }
+  bridge->extend_thread_started = 1;
   return 1;
 }
 
 static int lc_consumer_delivery_chunk(void *context, const void *bytes,
                                       size_t count,
-                                      lc_engine_error *legacy_error) {
+                                      lc_engine_error *engine_error) {
   lc_consumer_delivery_bridge *bridge;
   int rc;
 
-  (void)legacy_error;
+  (void)engine_error;
   bridge = (lc_consumer_delivery_bridge *)context;
   rc = lc_stream_pipe_write(bridge->pipe, bytes, count, bridge->error);
   if (rc != LC_OK) {
@@ -804,12 +907,12 @@ static int lc_consumer_delivery_chunk(void *context, const void *bytes,
 
 static int lc_consumer_delivery_end(void *context,
                                     const lc_engine_dequeue_response *delivery,
-                                    lc_engine_error *legacy_error) {
+                                    lc_engine_error *engine_error) {
   lc_consumer_delivery_bridge *bridge;
   int rc;
 
   (void)delivery;
-  (void)legacy_error;
+  (void)engine_error;
   bridge = (lc_consumer_delivery_bridge *)context;
   if (lc_consumer_is_stop_requested(bridge->worker->service)) {
     if (bridge->pipe != NULL) {
@@ -832,8 +935,8 @@ static int lc_consumer_delivery_end(void *context,
   bridge->pipe = NULL;
   pthread_join(bridge->handler_thread, NULL);
   bridge->handler_thread_started = 0;
-  lc_engine_dequeue_response_cleanup(&bridge->meta);
   rc = bridge->handler_rc;
+  lc_engine_dequeue_response_cleanup(&bridge->meta);
   {
     pslog_field fields[7];
 
@@ -852,22 +955,16 @@ static int lc_consumer_delivery_end(void *context,
                              : "client.queue.delivery.handler_error",
                  fields, 7U);
   }
-  if (bridge->message != NULL) {
-    bridge->message->close(bridge->message);
-    bridge->message = NULL;
-  }
   return rc == LC_OK;
 }
 
 static void *lc_consumer_delivery_handler_main(void *context) {
   lc_consumer_delivery_bridge *bridge;
-  lc_nack_req nack_req;
   lc_error terminal_error;
   lc_error handler_error;
   lc_consumer_message consumer_message;
   int rc;
   int final_rc;
-  int auto_finalize_failed;
 
   bridge = (lc_consumer_delivery_bridge *)context;
   memset(&consumer_message, 0, sizeof(consumer_message));
@@ -885,15 +982,13 @@ static void *lc_consumer_delivery_handler_main(void *context) {
   rc = bridge->worker->config.handle(bridge->worker->config.context,
                                      &consumer_message, &handler_error);
   final_rc = rc;
-  auto_finalize_failed = 0;
   if (rc == LC_OK) {
     if (bridge->message != NULL && !bridge->terminal) {
       lc_error_init(&terminal_error);
       if (bridge->message->ack(bridge->message, &terminal_error) == LC_OK) {
-        bridge->terminal = 1;
+        lc_consumer_delivery_mark_terminal(bridge);
         bridge->message = NULL;
       } else {
-        auto_finalize_failed = 1;
         final_rc = terminal_error.code != LC_OK ? terminal_error.code
                                                 : LC_ERR_TRANSPORT;
         if (handler_error.code == LC_OK) {
@@ -905,30 +1000,12 @@ static void *lc_consumer_delivery_handler_main(void *context) {
       }
       lc_error_cleanup(&terminal_error);
     }
-  } else {
-    if (handler_error.code == LC_OK) {
-      lc_error_set(&handler_error, LC_ERR_TRANSPORT, 0L,
-                   "consumer handler failed", NULL, NULL, NULL);
-    }
-    if (bridge->message != NULL && !bridge->terminal) {
-      lc_nack_req_init(&nack_req);
-      nack_req.intent = LC_NACK_INTENT_FAILURE;
-      nack_req.delay_seconds =
-          bridge->worker->config.request.visibility_timeout_seconds > 0L
-              ? bridge->worker->config.request.visibility_timeout_seconds
-              : 1L;
-      if (bridge->message->nack(bridge->message, &nack_req, &handler_error) ==
-          LC_OK) {
-        bridge->terminal = 1;
-        bridge->message = NULL;
-      } else if (handler_error.code == LC_OK) {
-        lc_error_set(&handler_error, LC_ERR_TRANSPORT, 0L,
-                     "consumer handler failed to nack delivery", NULL, NULL,
-                     NULL);
-      }
-    }
+  } else if (handler_error.code == LC_OK) {
+    lc_error_set(&handler_error, LC_ERR_TRANSPORT, 0L,
+                 "consumer handler failed", NULL, NULL, NULL);
   }
-  if (rc != LC_OK || auto_finalize_failed) {
+  if (rc != LC_OK) {
+    bridge->handler_failed = 1;
     lc_consumer_copy_error(bridge->error, &handler_error,
                            handler_error.code != LC_OK ? handler_error.code
                                                        : final_rc,
@@ -939,7 +1016,82 @@ static void *lc_consumer_delivery_handler_main(void *context) {
   }
   lc_error_cleanup(&handler_error);
   bridge->handler_rc = final_rc;
+  lc_consumer_delivery_mark_handler_done(bridge);
   return NULL;
+}
+
+static void *lc_consumer_delivery_extend_main(void *context) {
+  lc_consumer_delivery_bridge *bridge;
+  lc_extend_req extend_req;
+  lc_error extend_error;
+  long delay_ms;
+  long visibility_timeout_seconds;
+  struct timespec deadline;
+  int rc;
+
+  bridge = (lc_consumer_delivery_bridge *)context;
+  for (;;) {
+    pthread_mutex_lock(&bridge->state_mutex);
+    if (bridge->handler_done || bridge->terminal ||
+        lc_consumer_is_stop_requested(bridge->worker->service)) {
+      pthread_mutex_unlock(&bridge->state_mutex);
+      return NULL;
+    }
+    visibility_timeout_seconds =
+        bridge->message != NULL ? bridge->message->visibility_timeout_seconds
+                                : 0L;
+    delay_ms = lc_consumer_auto_extend_delay_ms(visibility_timeout_seconds);
+    if (delay_ms <= 0L) {
+      pthread_mutex_unlock(&bridge->state_mutex);
+      return NULL;
+    }
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+      pthread_mutex_unlock(&bridge->state_mutex);
+      return NULL;
+    }
+    lc_consumer_timespec_add_ms(&deadline, delay_ms);
+    rc = pthread_cond_timedwait(&bridge->state_cond, &bridge->state_mutex,
+                                &deadline);
+    if (bridge->handler_done || bridge->terminal ||
+        lc_consumer_is_stop_requested(bridge->worker->service)) {
+      pthread_mutex_unlock(&bridge->state_mutex);
+      return NULL;
+    }
+    pthread_mutex_unlock(&bridge->state_mutex);
+    if (rc == 0) {
+      continue;
+    }
+    if (bridge->message == NULL) {
+      return NULL;
+    }
+    visibility_timeout_seconds = bridge->message->visibility_timeout_seconds;
+    if (visibility_timeout_seconds <= 0L) {
+      return NULL;
+    }
+    lc_extend_req_init(&extend_req);
+    extend_req.extend_by_seconds = visibility_timeout_seconds;
+    lc_error_init(&extend_error);
+    rc = bridge->message->extend(bridge->message, &extend_req, &extend_error);
+    if (rc != LC_OK) {
+      pthread_mutex_lock(&bridge->state_mutex);
+      if (bridge->error != NULL && bridge->error->code == LC_OK) {
+        lc_consumer_copy_error(
+            bridge->error, &extend_error,
+            extend_error.code != LC_OK ? extend_error.code : LC_ERR_TRANSPORT,
+            "consumer auto-extend failed");
+      }
+      bridge->handler_failed = 1;
+      if (bridge->handler_rc == LC_OK) {
+        bridge->handler_rc = extend_error.code != LC_OK ? extend_error.code
+                                                        : LC_ERR_TRANSPORT;
+      }
+      pthread_cond_broadcast(&bridge->state_cond);
+      pthread_mutex_unlock(&bridge->state_mutex);
+      lc_error_cleanup(&extend_error);
+      return NULL;
+    }
+    lc_error_cleanup(&extend_error);
+  }
 }
 
 static void *lc_consumer_worker_main(void *context) {
@@ -950,8 +1102,10 @@ static void *lc_consumer_worker_main(void *context) {
   lc_engine_dequeue_request request;
   lc_engine_queue_stream_handler handler;
   lc_consumer_delivery_bridge bridge;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   lc_error error;
+  lc_nack_req nack_req;
+  lc_error terminal_error;
   int rc;
   int attempt;
   int failures;
@@ -963,7 +1117,7 @@ static void *lc_consumer_worker_main(void *context) {
   attempt = 0;
   failures = 0;
   lc_error_init(&error);
-  lc_engine_error_init(&legacy_error);
+  lc_engine_error_init(&engine_error);
 
   rc = service->clone_client_fn != NULL
            ? service->clone_client_fn(service, &client, &error)
@@ -998,8 +1152,8 @@ static void *lc_consumer_worker_main(void *context) {
                                     "client.queue.subscribe.begin");
     lc_error_cleanup(&error);
     lc_error_init(&error);
-    lc_engine_error_cleanup(&legacy_error);
-    lc_engine_error_init(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
+    lc_engine_error_init(&engine_error);
     memset(&bridge, 0, sizeof(bridge));
     bridge.worker = worker;
     bridge.client = client_handle;
@@ -1009,19 +1163,19 @@ static void *lc_consumer_worker_main(void *context) {
       if (service->subscribe_fn != NULL) {
         rc = service->subscribe_fn(service, &worker->config.request, 1,
                                    client_handle, &handler, &bridge,
-                                   &legacy_error);
+                                   &engine_error);
       } else {
         rc = lc_engine_client_subscribe_with_state(
-            client_handle->legacy, &request, &handler, &bridge, &legacy_error);
+            client_handle->engine, &request, &handler, &bridge, &engine_error);
       }
     } else {
       if (service->subscribe_fn != NULL) {
         rc = service->subscribe_fn(service, &worker->config.request, 0,
                                    client_handle, &handler, &bridge,
-                                   &legacy_error);
+                                   &engine_error);
       } else {
-        rc = lc_engine_client_subscribe(client_handle->legacy, &request,
-                                        &handler, &bridge, &legacy_error);
+        rc = lc_engine_client_subscribe(client_handle->engine, &request,
+                                        &handler, &bridge, &engine_error);
       }
     }
     if (bridge.pipe != NULL) {
@@ -1033,13 +1187,52 @@ static void *lc_consumer_worker_main(void *context) {
       pthread_join(bridge.handler_thread, NULL);
       bridge.handler_thread_started = 0;
     }
+    if (bridge.extend_thread_started) {
+      pthread_join(bridge.extend_thread, NULL);
+      bridge.extend_thread_started = 0;
+    }
+    if (bridge.handler_failed && bridge.message != NULL && !bridge.terminal) {
+      lc_nack_req_init(&nack_req);
+      nack_req.intent = LC_NACK_INTENT_FAILURE;
+      nack_req.delay_seconds = 0L;
+      lc_error_init(&terminal_error);
+      if (bridge.message->nack(bridge.message, &nack_req, &terminal_error) ==
+          LC_OK) {
+        lc_consumer_delivery_mark_terminal(&bridge);
+        bridge.message = NULL;
+      } else {
+        if (terminal_error.code == LC_OK) {
+          lc_error_set(&terminal_error, LC_ERR_TRANSPORT, 0L,
+                       "consumer handler failed to nack delivery", NULL, NULL,
+                       NULL);
+        }
+        if (bridge.error != NULL) {
+          lc_consumer_copy_error(bridge.error, &terminal_error,
+                                 terminal_error.code != LC_OK
+                                     ? terminal_error.code
+                                     : LC_ERR_TRANSPORT,
+                                 "consumer handler failed to nack delivery");
+        }
+        if (error.code == LC_OK) {
+          lc_consumer_copy_error(&error, &terminal_error,
+                                 terminal_error.code != LC_OK
+                                     ? terminal_error.code
+                                     : LC_ERR_TRANSPORT,
+                                 "consumer handler failed to nack delivery");
+        }
+      }
+      lc_error_cleanup(&terminal_error);
+    }
     if (bridge.message != NULL) {
       bridge.message->close(bridge.message);
       bridge.message = NULL;
     }
     lc_engine_dequeue_response_cleanup(&bridge.meta);
+    pthread_cond_destroy(&bridge.state_cond);
+    pthread_mutex_destroy(&bridge.state_mutex);
 
-    if (rc == LC_ENGINE_OK) {
+    if (rc == LC_ENGINE_OK && bridge.handler_rc == LC_OK &&
+        !bridge.handler_failed) {
       lc_consumer_log_subscribe_event(service, &worker->config,
                                       "client.queue.subscribe.complete");
       if (lc_consumer_is_stop_requested(service)) {
@@ -1054,7 +1247,8 @@ static void *lc_consumer_worker_main(void *context) {
       lc_consumer_invoke_stop(&worker->config, attempt, NULL);
       break;
     }
-    if (error.code != LC_OK) {
+    if (bridge.handler_failed || bridge.handler_rc != LC_OK ||
+        error.code != LC_OK) {
       lc_consumer_log_subscribe_error(service, &worker->config, &error);
       lc_consumer_invoke_stop(&worker->config, attempt, &error);
       if (lc_consumer_handle_failure(service, &worker->config, &failures,
@@ -1065,7 +1259,7 @@ static void *lc_consumer_worker_main(void *context) {
       }
       continue;
     }
-    rc = lc_error_from_legacy(&error, &legacy_error);
+    rc = lc_error_from_engine(&error, &engine_error);
     lc_consumer_log_subscribe_error(service, &worker->config, &error);
     lc_consumer_invoke_stop(&worker->config, attempt, &error);
     if (lc_consumer_handle_failure(service, &worker->config, &failures, &error,
@@ -1080,7 +1274,7 @@ done:
   if (client != NULL) {
     client->close(client);
   }
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
   lc_error_cleanup(&error);
   pthread_mutex_lock(&service->mutex);
   service->active_workers -= 1U;

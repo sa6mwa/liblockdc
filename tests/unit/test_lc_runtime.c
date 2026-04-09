@@ -98,23 +98,23 @@ static void test_error_cleanup_resets_allocated_fields(void **state) {
   assert_null(error.correlation_id);
 }
 
-static void test_error_from_legacy_maps_transport_and_fields(void **state) {
+static void test_error_from_engine_maps_transport_and_fields(void **state) {
   lc_error error;
-  lc_engine_error legacy;
+  lc_engine_error engine;
   int rc;
 
   (void)state;
-  memset(&legacy, 0, sizeof(legacy));
+  memset(&engine, 0, sizeof(engine));
   lc_error_init(&error);
 
-  legacy.code = LC_ENGINE_ERROR_TRANSPORT;
-  legacy.http_status = 503L;
-  legacy.message = dup_cstr("transport failed");
-  legacy.detail = dup_cstr("detail");
-  legacy.server_error_code = dup_cstr("node_passive");
-  legacy.correlation_id = dup_cstr("corr-1");
+  engine.code = LC_ENGINE_ERROR_TRANSPORT;
+  engine.http_status = 503L;
+  engine.message = dup_cstr("transport failed");
+  engine.detail = dup_cstr("detail");
+  engine.server_error_code = dup_cstr("node_passive");
+  engine.correlation_id = dup_cstr("corr-1");
 
-  rc = lc_error_from_legacy(&error, &legacy);
+  rc = lc_error_from_engine(&error, &engine);
   assert_int_equal(rc, LC_ERR_TRANSPORT);
   assert_int_equal(error.code, LC_ERR_TRANSPORT);
   assert_int_equal(error.http_status, 503L);
@@ -123,7 +123,7 @@ static void test_error_from_legacy_maps_transport_and_fields(void **state) {
   assert_string_equal(error.server_code, "node_passive");
   assert_string_equal(error.correlation_id, "corr-1");
 
-  lc_engine_error_cleanup(&legacy);
+  lc_engine_error_cleanup(&engine);
   lc_error_cleanup(&error);
 }
 
@@ -193,37 +193,37 @@ static void test_error_set_returns_code_without_error_object(void **state) {
 }
 
 static void
-test_error_from_legacy_maps_protocol_and_server_codes(void **state) {
+test_error_from_engine_maps_protocol_and_server_codes(void **state) {
   lc_error error;
-  lc_engine_error legacy;
+  lc_engine_error engine;
   int rc;
 
   (void)state;
-  memset(&legacy, 0, sizeof(legacy));
+  memset(&engine, 0, sizeof(engine));
   lc_error_init(&error);
 
-  legacy.code = LC_ENGINE_ERROR_PROTOCOL;
-  legacy.http_status = 502L;
-  legacy.message = dup_cstr("protocol failed");
-  rc = lc_error_from_legacy(&error, &legacy);
+  engine.code = LC_ENGINE_ERROR_PROTOCOL;
+  engine.http_status = 502L;
+  engine.message = dup_cstr("protocol failed");
+  rc = lc_error_from_engine(&error, &engine);
   assert_int_equal(rc, LC_ERR_PROTOCOL);
   assert_int_equal(error.code, LC_ERR_PROTOCOL);
   assert_int_equal(error.http_status, 502L);
   assert_string_equal(error.message, "protocol failed");
-  lc_engine_error_cleanup(&legacy);
+  lc_engine_error_cleanup(&engine);
   lc_error_cleanup(&error);
 
-  memset(&legacy, 0, sizeof(legacy));
+  memset(&engine, 0, sizeof(engine));
   lc_error_init(&error);
-  legacy.code = 999;
-  legacy.http_status = 500L;
-  legacy.message = dup_cstr("server failed");
-  rc = lc_error_from_legacy(&error, &legacy);
+  engine.code = 999;
+  engine.http_status = 500L;
+  engine.message = dup_cstr("server failed");
+  rc = lc_error_from_engine(&error, &engine);
   assert_int_equal(rc, LC_ERR_SERVER);
   assert_int_equal(error.code, LC_ERR_SERVER);
   assert_int_equal(error.http_status, 500L);
   assert_string_equal(error.message, "server failed");
-  lc_engine_error_cleanup(&legacy);
+  lc_engine_error_cleanup(&engine);
   lc_error_cleanup(&error);
 }
 
@@ -240,21 +240,21 @@ static void test_dup_bytes_as_text_copies_and_terminates(void **state) {
 }
 
 static void test_attachment_info_copy_deep_copies_fields(void **state) {
-  lc_engine_attachment_info legacy;
+  lc_engine_attachment_info engine;
   lc_attachment_info pub;
 
   (void)state;
-  memset(&legacy, 0, sizeof(legacy));
+  memset(&engine, 0, sizeof(engine));
   memset(&pub, 0, sizeof(pub));
-  legacy.id = dup_cstr("att-1");
-  legacy.name = dup_cstr("photo.png");
-  legacy.size = 42L;
-  legacy.plaintext_sha256 = dup_cstr("abc123");
-  legacy.content_type = dup_cstr("image/png");
-  legacy.created_at_unix = 100L;
-  legacy.updated_at_unix = 200L;
+  engine.id = dup_cstr("att-1");
+  engine.name = dup_cstr("photo.png");
+  engine.size = 42L;
+  engine.plaintext_sha256 = dup_cstr("abc123");
+  engine.content_type = dup_cstr("image/png");
+  engine.created_at_unix = 100L;
+  engine.updated_at_unix = 200L;
 
-  lc_attachment_info_copy(&pub, &legacy);
+  lc_attachment_info_copy(&pub, &engine);
   assert_string_equal(pub.id, "att-1");
   assert_string_equal(pub.name, "photo.png");
   assert_int_equal(pub.size, 42L);
@@ -262,11 +262,11 @@ static void test_attachment_info_copy_deep_copies_fields(void **state) {
   assert_string_equal(pub.content_type, "image/png");
   assert_int_equal(pub.created_at_unix, 100L);
   assert_int_equal(pub.updated_at_unix, 200L);
-  assert_ptr_not_equal(pub.id, legacy.id);
-  assert_ptr_not_equal(pub.name, legacy.name);
+  assert_ptr_not_equal(pub.id, engine.id);
+  assert_ptr_not_equal(pub.name, engine.name);
 
   lc_attachment_info_cleanup(&pub);
-  lc_engine_attachment_info_cleanup(&legacy);
+  lc_engine_attachment_info_cleanup(&engine);
 }
 
 static void test_client_open_rejects_missing_config(void **state) {
@@ -390,7 +390,7 @@ static void test_subscribe_meta_builds_queue_state_handle(void **state) {
       "\"state_fencing_token\":7,\"state_txn_id\":\"txn-state\"},"
       "\"next_cursor\":\"cursor-1\"}";
   lc_engine_dequeue_response response;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   lc_source *payload;
   lc_message *message;
   lc_lease *state_lease;
@@ -398,13 +398,13 @@ static void test_subscribe_meta_builds_queue_state_handle(void **state) {
 
   (void)state;
   memset(&response, 0, sizeof(response));
-  memset(&legacy_error, 0, sizeof(legacy_error));
+  memset(&engine_error, 0, sizeof(engine_error));
   payload = NULL;
   message = NULL;
   state_lease = NULL;
 
   rc = lc_engine_parse_subscribe_meta_json(json, "fallback-correlation",
-                                           &response, &legacy_error);
+                                           &response, &engine_error);
   assert_int_equal(rc, LC_ENGINE_OK);
   assert_string_equal(response.state_lease_id, "lease-state");
 
@@ -421,7 +421,7 @@ static void test_subscribe_meta_builds_queue_state_handle(void **state) {
 
   message->close(message);
   lc_engine_dequeue_response_cleanup(&response);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
 }
 
 static void
@@ -433,19 +433,19 @@ test_subscribe_meta_without_state_has_no_state_handle(void **state) {
       "\"lease_id\":\"lease-msg\",\"txn_id\":\"txn-msg\","
       "\"meta_etag\":\"meta-etag\"}}";
   lc_engine_dequeue_response response;
-  lc_engine_error legacy_error;
+  lc_engine_error engine_error;
   lc_source *payload;
   lc_message *message;
   int rc;
 
   (void)state;
   memset(&response, 0, sizeof(response));
-  memset(&legacy_error, 0, sizeof(legacy_error));
+  memset(&engine_error, 0, sizeof(engine_error));
   payload = NULL;
   message = NULL;
 
   rc = lc_engine_parse_subscribe_meta_json(json, "fallback-correlation",
-                                           &response, &legacy_error);
+                                           &response, &engine_error);
   assert_int_equal(rc, LC_ENGINE_OK);
   rc = lc_source_from_memory("{}", 2U, &payload, NULL);
   assert_int_equal(rc, LC_OK);
@@ -455,7 +455,7 @@ test_subscribe_meta_without_state_has_no_state_handle(void **state) {
 
   message->close(message);
   lc_engine_dequeue_response_cleanup(&response);
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
 }
 
 int main(void) {
@@ -463,11 +463,11 @@ int main(void) {
       cmocka_unit_test(test_client_config_init_sets_expected_defaults),
       cmocka_unit_test(test_allocator_init_clears_allocator),
       cmocka_unit_test(test_error_cleanup_resets_allocated_fields),
-      cmocka_unit_test(test_error_from_legacy_maps_transport_and_fields),
+      cmocka_unit_test(test_error_from_engine_maps_transport_and_fields),
       cmocka_unit_test(test_set_server_error_from_result_copies_server_fields),
       cmocka_unit_test(test_error_set_duplicates_message_fields),
       cmocka_unit_test(test_error_set_returns_code_without_error_object),
-      cmocka_unit_test(test_error_from_legacy_maps_protocol_and_server_codes),
+      cmocka_unit_test(test_error_from_engine_maps_protocol_and_server_codes),
       cmocka_unit_test(test_dup_bytes_as_text_copies_and_terminates),
       cmocka_unit_test(test_attachment_info_copy_deep_copies_fields),
       cmocka_unit_test(test_client_open_rejects_missing_config),
