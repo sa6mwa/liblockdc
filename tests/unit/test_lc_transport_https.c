@@ -4609,52 +4609,124 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+#if defined(LC_HTTPS_TEST_GROUP_CLIENT_OPEN)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_client_open_rejects_bundle_without_ca)
+#elif defined(LC_HTTPS_TEST_GROUP_STATE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_state_transport_paths_use_mtls),                        \
+      cmocka_unit_test(                                                         \
+          test_state_transport_accepts_numeric_headers_with_trailing_ows),      \
+      cmocka_unit_test(                                                         \
+          test_state_transport_rejects_invalid_numeric_headers_as_protocol)
+#elif defined(LC_HTTPS_TEST_GROUP_MANAGEMENT)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_management_transport_paths_use_mtls)
+#elif defined(LC_HTTPS_TEST_GROUP_QUEUE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_queue_transport_paths_use_mtls),                        \
+      cmocka_unit_test(test_queue_transport_rejects_oversized_error_body),     \
+      cmocka_unit_test(test_watch_transport_rejects_oversized_error_body),     \
+      cmocka_unit_test(                                                         \
+          test_queue_transport_rejects_overflowing_numeric_fields),            \
+      cmocka_unit_test(test_queue_transport_preserves_typed_json_parse_errors)
+#elif defined(LC_HTTPS_TEST_GROUP_SUBSCRIBE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_subscribe_accepts_content_length_with_trailing_ows),    \
+      cmocka_unit_test(test_subscribe_respects_client_meta_limit),              \
+      cmocka_unit_test(test_subscribe_rejects_default_meta_overflow)
+#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_CLIENT)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_client_emits_pslog_messages),                    \
+      cmocka_unit_test(test_public_client_can_disable_sdk_sys_field)
+#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_BOUND_LEASE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_bound_lease_methods_emit_logs),                  \
+      cmocka_unit_test(                                                         \
+          test_public_bound_lease_methods_cover_state_and_attachments)
+#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_LEASE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_attach_rejects_malformed_json_response),   \
+      cmocka_unit_test(                                                         \
+          test_public_lease_attach_retries_node_passive_and_cleans_parser_state), \
+      cmocka_unit_test(                                                         \
+          test_public_lease_attach_rejects_non_rewindable_retry_source),        \
+      cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),     \
+      cmocka_unit_test(                                                         \
+          test_public_lease_load_respects_configured_json_response_limit),      \
+      cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path)
+#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_MANAGEMENT)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_management_methods_emit_logs)
+#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_ENQUEUE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(                                                             \
+      test_queue_transport_retries_node_passive_and_cleans_parser_state),       \
+      cmocka_unit_test(                                                         \
+          test_enqueue_from_retries_node_passive_and_cleans_parser_state),      \
+      cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source),  \
+      cmocka_unit_test(test_public_enqueue_emits_logs),                         \
+      cmocka_unit_test(test_public_enqueue_streams_payload_from_source)
+#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_DEQUEUE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_dequeue_emits_stream_transport_logs)
+#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_QUERY_STREAM)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_query_stream_captures_headers_and_body),         \
+      cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq)
+#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_QUEUE_NACK)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_queue_nack_maps_enum_intents),                   \
+      cmocka_unit_test(test_public_queue_nack_rejects_invalid_intent)
+#else
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_client_open_rejects_bundle_without_ca),                 \
+      cmocka_unit_test(test_state_transport_paths_use_mtls),                    \
+      cmocka_unit_test(                                                         \
+          test_state_transport_accepts_numeric_headers_with_trailing_ows),      \
+      cmocka_unit_test(                                                         \
+          test_state_transport_rejects_invalid_numeric_headers_as_protocol),    \
+      cmocka_unit_test(test_management_transport_paths_use_mtls),               \
+      cmocka_unit_test(test_queue_transport_paths_use_mtls),                    \
+      cmocka_unit_test(test_queue_transport_rejects_oversized_error_body),      \
+      cmocka_unit_test(test_watch_transport_rejects_oversized_error_body),      \
+      cmocka_unit_test(                                                         \
+          test_queue_transport_rejects_overflowing_numeric_fields),            \
+      cmocka_unit_test(test_queue_transport_preserves_typed_json_parse_errors), \
+      cmocka_unit_test(test_subscribe_accepts_content_length_with_trailing_ows), \
+      cmocka_unit_test(test_subscribe_respects_client_meta_limit),              \
+      cmocka_unit_test(test_subscribe_rejects_default_meta_overflow),           \
+      cmocka_unit_test(test_public_client_emits_pslog_messages),                \
+      cmocka_unit_test(test_public_client_can_disable_sdk_sys_field),           \
+      cmocka_unit_test(test_public_bound_lease_methods_emit_logs),              \
+      cmocka_unit_test(                                                         \
+          test_public_bound_lease_methods_cover_state_and_attachments),         \
+      cmocka_unit_test(test_public_lease_attach_rejects_malformed_json_response), \
+      cmocka_unit_test(                                                         \
+          test_public_lease_attach_retries_node_passive_and_cleans_parser_state), \
+      cmocka_unit_test(                                                         \
+          test_public_lease_attach_rejects_non_rewindable_retry_source),        \
+      cmocka_unit_test(                                                         \
+          test_queue_transport_retries_node_passive_and_cleans_parser_state),   \
+      cmocka_unit_test(                                                         \
+          test_enqueue_from_retries_node_passive_and_cleans_parser_state),      \
+      cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source),  \
+      cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),     \
+      cmocka_unit_test(                                                         \
+          test_public_lease_load_respects_configured_json_response_limit),      \
+      cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path),  \
+      cmocka_unit_test(test_public_management_methods_emit_logs),               \
+      cmocka_unit_test(test_public_enqueue_emits_logs),                         \
+      cmocka_unit_test(test_public_enqueue_streams_payload_from_source),        \
+      cmocka_unit_test(test_public_dequeue_emits_stream_transport_logs),        \
+      cmocka_unit_test(test_public_query_stream_captures_headers_and_body),     \
+      cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq),     \
+      cmocka_unit_test(test_public_queue_nack_maps_enum_intents),               \
+      cmocka_unit_test(test_public_queue_nack_rejects_invalid_intent)
+#endif
+
 int main(void) {
-  const struct CMUnitTest tests[] = {
-      cmocka_unit_test(test_client_open_rejects_bundle_without_ca),
-      cmocka_unit_test(test_state_transport_paths_use_mtls),
-      cmocka_unit_test(
-          test_state_transport_accepts_numeric_headers_with_trailing_ows),
-      cmocka_unit_test(
-          test_state_transport_rejects_invalid_numeric_headers_as_protocol),
-      cmocka_unit_test(test_management_transport_paths_use_mtls),
-      cmocka_unit_test(test_queue_transport_paths_use_mtls),
-      cmocka_unit_test(test_queue_transport_rejects_oversized_error_body),
-      cmocka_unit_test(test_watch_transport_rejects_oversized_error_body),
-      cmocka_unit_test(test_queue_transport_rejects_overflowing_numeric_fields),
-      cmocka_unit_test(test_queue_transport_preserves_typed_json_parse_errors),
-      cmocka_unit_test(test_subscribe_accepts_content_length_with_trailing_ows),
-      cmocka_unit_test(test_subscribe_respects_client_meta_limit),
-      cmocka_unit_test(test_subscribe_rejects_default_meta_overflow),
-      cmocka_unit_test(test_public_client_emits_pslog_messages),
-      cmocka_unit_test(test_public_client_can_disable_sdk_sys_field),
-      cmocka_unit_test(test_public_bound_lease_methods_emit_logs),
-      cmocka_unit_test(
-          test_public_bound_lease_methods_cover_state_and_attachments),
-      cmocka_unit_test(
-          test_public_lease_attach_rejects_malformed_json_response),
-      cmocka_unit_test(
-          test_public_lease_attach_retries_node_passive_and_cleans_parser_state),
-      cmocka_unit_test(
-          test_public_lease_attach_rejects_non_rewindable_retry_source),
-      cmocka_unit_test(
-          test_queue_transport_retries_node_passive_and_cleans_parser_state),
-      cmocka_unit_test(
-          test_enqueue_from_retries_node_passive_and_cleans_parser_state),
-      cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source),
-      cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),
-      cmocka_unit_test(
-          test_public_lease_load_respects_configured_json_response_limit),
-      cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path),
-      cmocka_unit_test(test_public_management_methods_emit_logs),
-      cmocka_unit_test(test_public_enqueue_emits_logs),
-      cmocka_unit_test(test_public_enqueue_streams_payload_from_source),
-      cmocka_unit_test(test_public_dequeue_emits_stream_transport_logs),
-      cmocka_unit_test(test_public_query_stream_captures_headers_and_body),
-      cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq),
-      cmocka_unit_test(test_public_queue_nack_maps_enum_intents),
-      cmocka_unit_test(test_public_queue_nack_rejects_invalid_intent),
-  };
+  const struct CMUnitTest tests[] = {LC_HTTPS_UNIT_TESTS};
 
   return cmocka_run_group_tests(tests, https_tls_material_setup_shared,
                                 https_tls_material_teardown_shared);
