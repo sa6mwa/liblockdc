@@ -23,7 +23,7 @@ run_ctest_background() {
   local preset="$2"
   local regex="$3"
 
-  ctest --preset "$preset" --output-on-failure --progress --timeout "$ctest_timeout" -R "$regex" &
+  ctest --preset "$preset" --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout" -R "$regex" &
   printf -v "$out_var" '%s' "$!"
 }
 
@@ -70,7 +70,7 @@ run_cross_release_matrix() {
 
   for preset in "${cross_release_presets[@]}"; do
     require_release_build_tree "$preset"
-    ctest --preset "$preset" --output-on-failure --progress --timeout "$ctest_timeout"
+    ctest --preset "$preset" --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout"
   done
 }
 

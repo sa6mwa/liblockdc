@@ -114,7 +114,7 @@ select_active_disk_endpoint() {
 case "$kind" in
   unit|debug)
     "$script_dir/build.sh" debug
-    ctest --preset debug --progress --timeout "$ctest_timeout"
+    ctest --preset debug --progress --stop-on-failure --timeout "$ctest_timeout"
     ;;
   e2e)
     "$script_dir/dev-reset.sh"
@@ -152,19 +152,19 @@ case "$kind" in
       "$LOCKDC_E2E_S3_BUNDLE" \
       "s3" \
       "$repo_root/build/e2e/examples/lc_example_acquire_lease_lifecycle"
-    ctest --preset e2e --progress --timeout "$ctest_timeout"
+    ctest --preset e2e --progress --stop-on-failure --timeout "$ctest_timeout"
     ;;
   release)
     "$script_dir/build.sh" release
-    ctest --preset x86_64-linux-gnu-release --progress --timeout "$ctest_timeout"
+    ctest --preset x86_64-linux-gnu-release --progress --stop-on-failure --timeout "$ctest_timeout"
     ;;
   asan)
     "$script_dir/build.sh" asan
-    ctest --preset asan --progress --timeout "$ctest_timeout"
+    ctest --preset asan --progress --stop-on-failure --timeout "$ctest_timeout"
     ;;
   coverage)
     "$script_dir/build.sh" coverage
-    ctest --preset coverage --progress --timeout "$ctest_timeout"
+    ctest --preset coverage --progress --stop-on-failure --timeout "$ctest_timeout"
     cmake --build --preset coverage-report
     ;;
   fuzz)

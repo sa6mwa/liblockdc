@@ -17,5 +17,5 @@ cd "$repo_root"
 
 for preset in "${presets[@]}"; do
   "$script_dir/build.sh" "$preset"
-  ctest --preset "$preset" --output-on-failure --progress --timeout "$ctest_timeout"
+  ctest --preset "$preset" --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout"
 done

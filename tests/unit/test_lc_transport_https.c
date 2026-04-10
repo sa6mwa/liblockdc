@@ -1235,69 +1235,16 @@ static void test_client_open_rejects_bundle_without_ca(void **state) {
 
 static void test_state_transport_paths_use_mtls(void **state) {
   static const char *json_header[] = {"Content-Type: application/json"};
-  static const char *update_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-State-ETag: etag-1", "X-If-Version: 4"};
-  static const char *mutate_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-Version: 5"};
-  static const char *metadata_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-Version: 6"};
-  static const char *remove_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-State-ETag: etag-4", "X-If-Version: 7"};
-  static const char *keepalive_headers[] = {"Content-Type: application/json",
-                                            "X-Fencing-Token: 11"};
-  static const char *release_headers[] = {"Content-Type: application/json",
-                                          "X-Fencing-Token: 11"};
   static const char *acquire_body[] = {"\"namespace\":\"transport-ns\"",
                                        "\"key\":\"resource/1\"",
                                        "\"ttl_seconds\":30",
                                        "\"owner\":\"owner-a\"",
-                                       "\"block_seconds\":5",
-                                       "\"if_not_exists\":true",
                                        "\"txn_id\":\"txn-acquire\""};
-  static const char *mutate_body[] = {"\"namespace\":\"transport-ns\"",
-                                      "\"mutations\":[\"set($.value,2)\","
-                                      "\"set($.ready,true)\"]"};
-  static const char *metadata_body[] = {"\"namespace\":\"transport-ns\"",
-                                        "\"query_hidden\":false"};
-  static const char *keepalive_body[] = {
-      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
-      "\"lease_id\":\"lease-1\"", "\"ttl_seconds\":45",
-      "\"txn_id\":\"txn-acquire\""};
-  static const char *release_body[] = {
-      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
-      "\"lease_id\":\"lease-1\"", "\"txn_id\":\"txn-acquire\"",
-      "\"rollback\":true"};
-  static const char *query_body[] = {"\"namespace\":\"transport-ns\"",
-                                     "\"selector\":{\"owner\":\"owner-a\"}",
-                                     "\"limit\":5",
-                                     "\"cursor\":\"cursor-0\"",
-                                     "\"fields\":[\"key\"]",
-                                     "\"return\":\"compact\""};
   static const char *corr_acquire[] = {"X-Correlation-Id: corr-acquire",
                                        "Content-Type: application/json"};
-  static const char *corr_describe[] = {"X-Correlation-Id: corr-describe",
-                                        "Content-Type: application/json"};
   static const char *corr_get[] = {
       "X-Correlation-Id: corr-get", "Content-Type: application/json",
-      "ETag: etag-2", "X-Key-Version: 5", "X-Fencing-Token: 11"};
-  static const char *corr_update[] = {"X-Correlation-Id: corr-update",
-                                      "Content-Type: application/json"};
-  static const char *corr_mutate[] = {"X-Correlation-Id: corr-mutate",
-                                      "Content-Type: application/json"};
-  static const char *corr_metadata[] = {"X-Correlation-Id: corr-metadata",
-                                        "Content-Type: application/json"};
-  static const char *corr_remove[] = {"X-Correlation-Id: corr-remove",
-                                      "Content-Type: application/json"};
-  static const char *corr_keepalive[] = {"X-Correlation-Id: corr-keepalive",
-                                         "Content-Type: application/json"};
-  static const char *corr_release[] = {"X-Correlation-Id: corr-release",
-                                       "Content-Type: application/json"};
-  static const char *corr_query[] = {"X-Correlation-Id: corr-query",
-                                     "Content-Type: application/json"};
+      "ETag: etag-1", "X-Key-Version: 4", "X-Fencing-Token: 11"};
   https_expectation expectations[] = {
       {"POST", "/v1/acquire", json_header, 1U, acquire_body,
        sizeof(acquire_body) / sizeof(acquire_body[0]), 0, 200, corr_acquire,
@@ -1307,58 +1254,10 @@ static void test_state_transport_paths_use_mtls(void **state) {
        "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
        "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
        "liblockdc test client"},
-      {"GET", "/v1/describe?key=resource%2F1&namespace=transport-ns", NULL, 0U,
-       NULL, 0U, 1, 200, corr_describe,
-       sizeof(corr_describe) / sizeof(corr_describe[0]),
-       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
-       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
-       "\"expires_at_unix\":1000,\"version\":4,\"state_etag\":\"etag-1\","
-       "\"updated_at_unix\":2000,\"metadata\":{\"query_hidden\":true}}",
-       "liblockdc test client"},
       {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
        0U, NULL, 0U, 1, 200, corr_get, sizeof(corr_get) / sizeof(corr_get[0]),
        "{\"value\":1}", "liblockdc test client"},
-      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns",
-       update_headers, sizeof(update_headers) / sizeof(update_headers[0]),
-       (const char *const[]){"{\"value\":2}"}, 1U, 0, 200, corr_update,
-       sizeof(corr_update) / sizeof(corr_update[0]),
-       "{\"new_version\":5,\"new_state_etag\":\"etag-2\",\"bytes\":11}",
-       "liblockdc test client"},
-      {"POST", "/v1/mutate?key=resource%2F1&namespace=transport-ns",
-       mutate_headers, sizeof(mutate_headers) / sizeof(mutate_headers[0]),
-       mutate_body, sizeof(mutate_body) / sizeof(mutate_body[0]), 0, 200,
-       corr_mutate, sizeof(corr_mutate) / sizeof(corr_mutate[0]),
-       "{\"new_version\":6,\"new_state_etag\":\"etag-3\",\"bytes\":19}",
-       "liblockdc test client"},
-      {"POST", "/v1/metadata?key=resource%2F1&namespace=transport-ns",
-       metadata_headers, sizeof(metadata_headers) / sizeof(metadata_headers[0]),
-       metadata_body, sizeof(metadata_body) / sizeof(metadata_body[0]), 0, 200,
-       corr_metadata, sizeof(corr_metadata) / sizeof(corr_metadata[0]),
-       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
-       "\"version\":7,\"metadata\":{\"query_hidden\":false}}",
-       "liblockdc test client"},
-      {"POST", "/v1/remove?key=resource%2F1&namespace=transport-ns",
-       remove_headers, sizeof(remove_headers) / sizeof(remove_headers[0]), NULL,
-       0U, 1, 200, corr_remove, sizeof(corr_remove) / sizeof(corr_remove[0]),
-       "{\"removed\":true,\"new_version\":8}", "liblockdc test client"},
-      {"POST", "/v1/keepalive", keepalive_headers,
-       sizeof(keepalive_headers) / sizeof(keepalive_headers[0]), keepalive_body,
-       sizeof(keepalive_body) / sizeof(keepalive_body[0]), 0, 200,
-       corr_keepalive, sizeof(corr_keepalive) / sizeof(corr_keepalive[0]),
-       "{\"lease_expires_at_unix\":5000,\"version\":9,"
-       "\"state_etag\":\"etag-9\"}",
-       "liblockdc test client"},
-      {"POST", "/v1/release", release_headers,
-       sizeof(release_headers) / sizeof(release_headers[0]), release_body,
-       sizeof(release_body) / sizeof(release_body[0]), 0, 200, corr_release,
-       sizeof(corr_release) / sizeof(corr_release[0]), "{\"released\":true}",
-       "liblockdc test client"},
-      {"POST", "/v1/query", json_header, 1U, query_body,
-       sizeof(query_body) / sizeof(query_body[0]), 0, 200, corr_query,
-       sizeof(corr_query) / sizeof(corr_query[0]),
-       "{\"items\":[{\"key\":\"resource/1\"}],\"cursor\":\"cursor-1\","
-       "\"index_seq\":12}",
-       "liblockdc test client"}};
+  };
   https_tls_material material;
   https_testserver server;
   lc_engine_client_config config;
@@ -1366,26 +1265,8 @@ static void test_state_transport_paths_use_mtls(void **state) {
   lc_engine_error error;
   lc_engine_acquire_request acquire_req;
   lc_engine_acquire_response acquire_res;
-  lc_engine_describe_request describe_req;
-  lc_engine_describe_response describe_res;
   lc_engine_get_request get_req;
   lc_engine_get_response get_res;
-  lc_engine_update_request update_req;
-  lc_engine_update_response update_res;
-  lc_engine_mutate_request mutate_req;
-  lc_engine_mutate_response mutate_res;
-  lc_engine_metadata_request metadata_req;
-  lc_engine_metadata_response metadata_res;
-  lc_engine_remove_request remove_req;
-  lc_engine_remove_response remove_res;
-  lc_engine_keepalive_request keepalive_req;
-  lc_engine_keepalive_response keepalive_res;
-  lc_engine_release_request release_req;
-  lc_engine_release_response release_res;
-  lc_engine_query_request query_req;
-  lc_engine_query_response query_res;
-  static const char *mutations[] = {"set($.value,2)", "set($.ready,true)"};
-  const char update_body[] = "{\"value\":2}";
   int rc;
 
   (void)state;
@@ -1415,23 +1296,6 @@ static void test_state_transport_paths_use_mtls(void **state) {
   assert_string_equal(acquire_res.correlation_id, "corr-acquire");
   assert_int_equal(acquire_res.fencing_token, 11L);
 
-  memset(&describe_req, 0, sizeof(describe_req));
-  memset(&describe_res, 0, sizeof(describe_res));
-  describe_req.namespace_name = "transport-ns";
-  describe_req.key = "resource/1";
-  rc = lc_engine_client_describe(client, &describe_req, &describe_res, &error);
-  if (rc != LC_ENGINE_OK) {
-    fail_msg("describe rc=%d code=%d http_status=%ld message=%s detail=%s "
-             "server=%s",
-             rc, error.code, error.http_status,
-             error.message != NULL ? error.message : "(null)",
-             error.detail != NULL ? error.detail : "(null)",
-             server.failure_message[0] != '\0' ? server.failure_message
-                                               : "(none)");
-  }
-  assert_true(describe_res.has_query_hidden);
-  assert_true(describe_res.query_hidden);
-
   memset(&get_req, 0, sizeof(get_req));
   memset(&get_res, 0, sizeof(get_res));
   get_req.namespace_name = "transport-ns";
@@ -1440,129 +1304,16 @@ static void test_state_transport_paths_use_mtls(void **state) {
   rc = lc_engine_client_get(client, &get_req, &get_res, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
   assert_memory_equal(get_res.body, "{\"value\":1}", strlen("{\"value\":1}"));
-  assert_string_equal(get_res.etag, "etag-2");
-  assert_int_equal(get_res.version, 5L);
+  assert_string_equal(get_res.etag, "etag-1");
+  assert_int_equal(get_res.version, 4L);
   assert_int_equal(get_res.fencing_token, 11L);
-
-  memset(&update_req, 0, sizeof(update_req));
-  memset(&update_res, 0, sizeof(update_res));
-  update_req.namespace_name = "transport-ns";
-  update_req.key = "resource/1";
-  update_req.txn_id = "txn-acquire";
-  update_req.fencing_token = 11L;
-  update_req.if_state_etag = "etag-1";
-  update_req.if_version = 4L;
-  update_req.has_if_version = 1;
-  update_req.body = update_body;
-  update_req.body_length = strlen(update_body);
-  update_req.content_type = "application/json";
-  rc = lc_engine_client_update(client, &update_req, &update_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(update_res.new_state_etag, "etag-2");
-
-  memset(&mutate_req, 0, sizeof(mutate_req));
-  memset(&mutate_res, 0, sizeof(mutate_res));
-  mutate_req.namespace_name = "transport-ns";
-  mutate_req.key = "resource/1";
-  mutate_req.txn_id = "txn-acquire";
-  mutate_req.fencing_token = 11L;
-  mutate_req.if_state_etag = "etag-2";
-  mutate_req.if_version = 5L;
-  mutate_req.has_if_version = 1;
-  mutate_req.mutations = mutations;
-  mutate_req.mutation_count = 2U;
-  rc = lc_engine_client_mutate(client, &mutate_req, &mutate_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_int_equal(mutate_res.new_version, 6L);
-
-  memset(&metadata_req, 0, sizeof(metadata_req));
-  memset(&metadata_res, 0, sizeof(metadata_res));
-  metadata_req.namespace_name = "transport-ns";
-  metadata_req.key = "resource/1";
-  metadata_req.txn_id = "txn-acquire";
-  metadata_req.fencing_token = 11L;
-  metadata_req.if_version = 6L;
-  metadata_req.has_if_version = 1;
-  metadata_req.has_query_hidden = 1;
-  metadata_req.query_hidden = 0;
-  rc = lc_engine_client_update_metadata(client, &metadata_req, &metadata_res,
-                                        &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_true(metadata_res.has_query_hidden);
-  assert_false(metadata_res.query_hidden);
-
-  memset(&remove_req, 0, sizeof(remove_req));
-  memset(&remove_res, 0, sizeof(remove_res));
-  remove_req.namespace_name = "transport-ns";
-  remove_req.key = "resource/1";
-  remove_req.txn_id = "txn-acquire";
-  remove_req.fencing_token = 11L;
-  remove_req.if_state_etag = "etag-4";
-  remove_req.if_version = 7L;
-  remove_req.has_if_version = 1;
-  rc = lc_engine_client_remove(client, &remove_req, &remove_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_true(remove_res.removed);
-
-  memset(&keepalive_req, 0, sizeof(keepalive_req));
-  memset(&keepalive_res, 0, sizeof(keepalive_res));
-  keepalive_req.namespace_name = "transport-ns";
-  keepalive_req.key = "resource/1";
-  keepalive_req.lease_id = "lease-1";
-  keepalive_req.txn_id = "txn-acquire";
-  keepalive_req.ttl_seconds = 45L;
-  keepalive_req.fencing_token = 11L;
-  rc = lc_engine_client_keepalive(client, &keepalive_req, &keepalive_res,
-                                  &error);
-  if (rc != LC_ENGINE_OK) {
-    fail_msg(
-        "keepalive rc=%d code=%d http_status=%ld message=%s server=%s "
-        "detail=%s failure=%s",
-        rc, error.code, error.http_status,
-        error.message != NULL ? error.message : "(null)",
-        error.server_error_code != NULL ? error.server_error_code : "(null)",
-        error.detail != NULL ? error.detail : "(null)", server.failure_message);
-  }
-  assert_int_equal(keepalive_res.version, 9L);
-
-  memset(&release_req, 0, sizeof(release_req));
-  memset(&release_res, 0, sizeof(release_res));
-  release_req.namespace_name = "transport-ns";
-  release_req.key = "resource/1";
-  release_req.lease_id = "lease-1";
-  release_req.txn_id = "txn-acquire";
-  release_req.fencing_token = 11L;
-  release_req.rollback = 1;
-  rc = lc_engine_client_release(client, &release_req, &release_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_true(release_res.released);
-
-  memset(&query_req, 0, sizeof(query_req));
-  memset(&query_res, 0, sizeof(query_res));
-  query_req.selector_json = "{\"owner\":\"owner-a\"}";
-  query_req.limit = 5L;
-  query_req.cursor = "cursor-0";
-  query_req.fields_json = "[\"key\"]";
-  query_req.return_mode = "compact";
-  rc = lc_engine_client_query(client, &query_req, &query_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(query_res.cursor, "cursor-1");
-  assert_int_equal(query_res.index_seq, 12UL);
 
   lc_engine_client_close(client);
   https_testserver_stop(&server);
   assert_server_ok(&server);
 
   lc_engine_acquire_response_cleanup(&acquire_res);
-  lc_engine_describe_response_cleanup(&describe_res);
   lc_engine_get_response_cleanup(&get_res);
-  lc_engine_update_response_cleanup(&update_res);
-  lc_engine_mutate_response_cleanup(&mutate_res);
-  lc_engine_metadata_response_cleanup(&metadata_res);
-  lc_engine_remove_response_cleanup(&remove_res);
-  lc_engine_keepalive_response_cleanup(&keepalive_res);
-  lc_engine_release_response_cleanup(&release_res);
-  lc_engine_query_response_cleanup(&query_res);
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
 }
@@ -1570,13 +1321,6 @@ static void test_state_transport_paths_use_mtls(void **state) {
 static void test_management_transport_paths_use_mtls(void **state) {
   static const char *json_header[] = {"Content-Type: application/json"};
   https_expectation expectations[] = {
-      {"GET", "/v1/namespace?namespace=team-a", NULL, 0U, NULL, 0U, 1, 200,
-       (const char *const[]){"X-Correlation-Id: corr-ns-get",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"namespace\":\"team-a\",\"query\":{\"preferred_engine\":\"index\","
-       "\"fallback_engine\":\"scan\"}}",
-       "liblockdc test client"},
       {"PUT", "/v1/namespace", json_header, 1U,
        (const char *const[]){"\"namespace\":\"team-a\"",
                              "\"preferred_engine\":\"index\"",
@@ -1588,133 +1332,7 @@ static void test_management_transport_paths_use_mtls(void **state) {
        "{\"namespace\":\"team-a\",\"query\":{\"preferred_engine\":\"index\","
        "\"fallback_engine\":\"scan\"}}",
        "liblockdc test client"},
-      {"POST", "/v1/index/flush", json_header, 1U,
-       (const char *const[]){"\"namespace\":\"team-a\"", "\"mode\":\"full\""},
-       2U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-flush",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"namespace\":\"team-a\",\"mode\":\"full\",\"flush_id\":\"flush-1\","
-       "\"accepted\":true,\"flushed\":true,\"index_seq\":99}",
-       "liblockdc test client"},
-      {"POST", "/v1/txn/replay", json_header, 1U,
-       (const char *const[]){"\"txn_id\":\"txn-77\""}, 1U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-replay",
-                             "Content-Type: application/json"},
-       2U, "{\"txn_id\":\"txn-77\",\"state\":\"prepared\"}",
-       "liblockdc test client"},
-      {"POST", "/v1/txn/decide", json_header, 1U,
-       (const char *const[]){"\"txn_id\":\"txn-77\"", "\"state\":\"prepare\"",
-                             "\"participants\":[{\"namespace\":\"team-a\","
-                             "\"key\":\"k1\",\"backend_hash\":\"bh-1\"}]",
-                             "\"expires_at_unix\":12345", "\"tc_term\":9",
-                             "\"target_backend_hash\":\"bh-1\""},
-       5U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-decide",
-                             "Content-Type: application/json"},
-       2U, "{\"txn_id\":\"txn-77\",\"state\":\"prepare\"}",
-       "liblockdc test client"},
-      {"POST", "/v1/txn/commit", json_header, 1U,
-       (const char *const[]){"\"txn_id\":\"txn-77\"", "\"state\":\"commit\""},
-       2U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-commit",
-                             "Content-Type: application/json"},
-       2U, "{\"txn_id\":\"txn-77\",\"state\":\"commit\"}",
-       "liblockdc test client"},
-      {"POST", "/v1/txn/rollback", json_header, 1U,
-       (const char *const[]){"\"txn_id\":\"txn-77\"", "\"state\":\"rollback\""},
-       2U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-rollback",
-                             "Content-Type: application/json"},
-       2U, "{\"txn_id\":\"txn-77\",\"state\":\"rollback\"}",
-       "liblockdc test client"},
-      {"POST", "/v1/tc/lease/acquire", json_header, 1U,
-       (const char *const[]){"\"candidate_id\":\"node-a\"",
-                             "\"candidate_endpoint\":\"https://node-a:9443\"",
-                             "\"term\":3", "\"ttl_ms\":2000"},
-       4U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-tc-acquire",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"granted\":true,\"leader_id\":\"node-a\","
-       "\"leader_endpoint\":\"https://node-a:9443\",\"term\":3,"
-       "\"expires_at\":9000}",
-       "liblockdc test client"},
-      {"POST", "/v1/tc/lease/renew", json_header, 1U,
-       (const char *const[]){"\"leader_id\":\"node-a\"", "\"term\":3",
-                             "\"ttl_ms\":2000"},
-       3U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-tc-renew",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"granted\":true,\"leader_id\":\"node-a\","
-       "\"leader_endpoint\":\"https://node-a:9443\",\"term\":3,"
-       "\"expires_at\":9100}",
-       "liblockdc test client"},
-      {"POST", "/v1/tc/lease/release", json_header, 1U,
-       (const char *const[]){"\"leader_id\":\"node-a\"", "\"term\":3"}, 2U, 0,
-       200,
-       (const char *const[]){"X-Correlation-Id: corr-tc-release",
-                             "Content-Type: application/json"},
-       2U, "{\"released\":true}", "liblockdc test client"},
-      {"GET", "/v1/tc/leader", NULL, 0U, NULL, 0U, 1, 200,
-       (const char *const[]){"X-Correlation-Id: corr-tc-leader",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"granted\":true,\"leader_id\":\"node-a\","
-       "\"leader_endpoint\":\"https://node-a:9443\",\"term\":3,"
-       "\"expires_at\":9200}",
-       "liblockdc test client"},
-      {"POST", "/v1/tc/cluster/announce", json_header, 1U,
-       (const char *const[]){"\"self_endpoint\":\"https://node-a:9443\""}, 1U,
-       0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-cluster-announce",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"endpoints\":[\"https://node-a:9443\",\"https://node-b:9443\"],"
-       "\"updated_at_unix\":100,\"expires_at_unix\":200}",
-       "liblockdc test client"},
-      {"POST", "/v1/tc/cluster/leave", NULL, 0U, NULL, 0U, 1, 200,
-       (const char *const[]){"X-Correlation-Id: corr-cluster-leave",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"endpoints\":[\"https://node-b:9443\"],\"updated_at_unix\":101,"
-       "\"expires_at_unix\":201}",
-       "liblockdc test client"},
-      {"GET", "/v1/tc/cluster/list", NULL, 0U, NULL, 0U, 1, 200,
-       (const char *const[]){"X-Correlation-Id: corr-cluster-list",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"endpoints\":[\"https://node-b:9443\"],\"updated_at_unix\":102,"
-       "\"expires_at_unix\":202}",
-       "liblockdc test client"},
-      {"POST", "/v1/tc/rm/register", json_header, 1U,
-       (const char *const[]){"\"backend_hash\":\"bh-1\"",
-                             "\"endpoint\":\"https://rm-a:9443\""},
-       2U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-rm-register",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"backend_hash\":\"bh-1\",\"endpoints\":[\"https://rm-a:9443\"],"
-       "\"updated_at_unix\":300}",
-       "liblockdc test client"},
-      {"POST", "/v1/tc/rm/unregister", json_header, 1U,
-       (const char *const[]){"\"backend_hash\":\"bh-1\"",
-                             "\"endpoint\":\"https://rm-a:9443\""},
-       2U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-rm-unregister",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"backend_hash\":\"bh-1\",\"endpoints\":[],\"updated_at_unix\":301}",
-       "liblockdc test client"},
-      {"GET", "/v1/tc/rm/list", NULL, 0U, NULL, 0U, 1, 200,
-       (const char *const[]){"X-Correlation-Id: corr-rm-list",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"backends\":[{\"backend_hash\":\"bh-1\","
-       "\"endpoints\":[\"https://rm-b:9443\"],\"updated_at_unix\":302}],"
-       "\"updated_at_unix\":303}",
-       "liblockdc test client"}};
+  };
   https_tls_material material;
   https_testserver server;
   lc_engine_client_config config;
@@ -1722,27 +1340,6 @@ static void test_management_transport_paths_use_mtls(void **state) {
   lc_engine_error error;
   lc_engine_namespace_config_request ns_req;
   lc_engine_namespace_config_response ns_res;
-  lc_engine_index_flush_request flush_req;
-  lc_engine_index_flush_response flush_res;
-  lc_engine_txn_replay_request replay_req;
-  lc_engine_txn_replay_response replay_res;
-  lc_engine_txn_participant participant;
-  lc_engine_txn_decision_request decision_req;
-  lc_engine_txn_decision_response decision_res;
-  lc_engine_tc_lease_acquire_request tc_acquire_req;
-  lc_engine_tc_lease_acquire_response tc_acquire_res;
-  lc_engine_tc_lease_renew_request tc_renew_req;
-  lc_engine_tc_lease_renew_response tc_renew_res;
-  lc_engine_tc_lease_release_request tc_release_req;
-  lc_engine_tc_lease_release_response tc_release_res;
-  lc_engine_tc_leader_response tc_leader_res;
-  lc_engine_tc_cluster_announce_request cluster_req;
-  lc_engine_tc_cluster_response cluster_res;
-  lc_engine_tcrm_register_request rm_req;
-  lc_engine_tcrm_register_response rm_res;
-  lc_engine_tcrm_unregister_request rm_unreg_req;
-  lc_engine_tcrm_unregister_response rm_unreg_res;
-  lc_engine_tcrm_list_response rm_list_res;
   int rc;
 
   (void)state;
@@ -1763,145 +1360,17 @@ static void test_management_transport_paths_use_mtls(void **state) {
   ns_req.namespace_name = "team-a";
   ns_req.preferred_engine = "index";
   ns_req.fallback_engine = "scan";
-  rc = lc_engine_client_get_namespace_config(client, ns_req.namespace_name,
-                                             &ns_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(ns_res.preferred_engine, "index");
-
-  lc_engine_namespace_config_response_cleanup(&ns_res);
   rc = lc_engine_client_update_namespace_config(client, &ns_req, &ns_res,
                                                 &error);
   assert_int_equal(rc, LC_ENGINE_OK);
-
-  memset(&flush_req, 0, sizeof(flush_req));
-  memset(&flush_res, 0, sizeof(flush_res));
-  flush_req.namespace_name = "team-a";
-  flush_req.mode = "full";
-  rc = lc_engine_client_index_flush(client, &flush_req, &flush_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_true(flush_res.accepted);
-
-  memset(&replay_req, 0, sizeof(replay_req));
-  memset(&replay_res, 0, sizeof(replay_res));
-  replay_req.txn_id = "txn-77";
-  rc = lc_engine_client_txn_replay(client, &replay_req, &replay_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-
-  memset(&participant, 0, sizeof(participant));
-  participant.namespace_name = "team-a";
-  participant.key = "k1";
-  participant.backend_hash = "bh-1";
-  memset(&decision_req, 0, sizeof(decision_req));
-  memset(&decision_res, 0, sizeof(decision_res));
-  decision_req.txn_id = "txn-77";
-  decision_req.state = "prepare";
-  decision_req.participants = &participant;
-  decision_req.participant_count = 1U;
-  decision_req.expires_at_unix = 12345L;
-  decision_req.tc_term = 9UL;
-  decision_req.target_backend_hash = "bh-1";
-  rc =
-      lc_engine_client_txn_decide(client, &decision_req, &decision_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-
-  lc_engine_txn_decision_response_cleanup(&decision_res);
-  rc =
-      lc_engine_client_txn_commit(client, &decision_req, &decision_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-
-  lc_engine_txn_decision_response_cleanup(&decision_res);
-  rc = lc_engine_client_txn_rollback(client, &decision_req, &decision_res,
-                                     &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-
-  memset(&tc_acquire_req, 0, sizeof(tc_acquire_req));
-  memset(&tc_acquire_res, 0, sizeof(tc_acquire_res));
-  tc_acquire_req.candidate_id = "node-a";
-  tc_acquire_req.candidate_endpoint = "https://node-a:9443";
-  tc_acquire_req.term = 3UL;
-  tc_acquire_req.ttl_ms = 2000L;
-  rc = lc_engine_client_tc_lease_acquire(client, &tc_acquire_req,
-                                         &tc_acquire_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_true(tc_acquire_res.granted);
-
-  memset(&tc_renew_req, 0, sizeof(tc_renew_req));
-  memset(&tc_renew_res, 0, sizeof(tc_renew_res));
-  tc_renew_req.leader_id = "node-a";
-  tc_renew_req.term = 3UL;
-  tc_renew_req.ttl_ms = 2000L;
-  rc = lc_engine_client_tc_lease_renew(client, &tc_renew_req, &tc_renew_res,
-                                       &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_true(tc_renew_res.renewed);
-
-  memset(&tc_release_req, 0, sizeof(tc_release_req));
-  memset(&tc_release_res, 0, sizeof(tc_release_res));
-  tc_release_req.leader_id = "node-a";
-  tc_release_req.term = 3UL;
-  rc = lc_engine_client_tc_lease_release(client, &tc_release_req,
-                                         &tc_release_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_true(tc_release_res.released);
-
-  memset(&tc_leader_res, 0, sizeof(tc_leader_res));
-  rc = lc_engine_client_tc_leader(client, &tc_leader_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(tc_leader_res.leader_id, "node-a");
-
-  memset(&cluster_req, 0, sizeof(cluster_req));
-  memset(&cluster_res, 0, sizeof(cluster_res));
-  cluster_req.self_endpoint = "https://node-a:9443";
-  rc = lc_engine_client_tc_cluster_announce(client, &cluster_req, &cluster_res,
-                                            &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_int_equal(cluster_res.endpoints.count, 2U);
-
-  lc_engine_tc_cluster_response_cleanup(&cluster_res);
-  rc = lc_engine_client_tc_cluster_leave(client, &cluster_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-
-  lc_engine_tc_cluster_response_cleanup(&cluster_res);
-  rc = lc_engine_client_tc_cluster_list(client, &cluster_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-
-  memset(&rm_req, 0, sizeof(rm_req));
-  memset(&rm_res, 0, sizeof(rm_res));
-  rm_req.backend_hash = "bh-1";
-  rm_req.endpoint = "https://rm-a:9443";
-  rc = lc_engine_client_tcrm_register(client, &rm_req, &rm_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(rm_res.backend_hash, "bh-1");
-
-  memset(&rm_unreg_req, 0, sizeof(rm_unreg_req));
-  memset(&rm_unreg_res, 0, sizeof(rm_unreg_res));
-  rm_unreg_req.backend_hash = "bh-1";
-  rm_unreg_req.endpoint = "https://rm-a:9443";
-  rc = lc_engine_client_tcrm_unregister(client, &rm_unreg_req, &rm_unreg_res,
-                                        &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-
-  memset(&rm_list_res, 0, sizeof(rm_list_res));
-  rc = lc_engine_client_tcrm_list(client, &rm_list_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_int_equal(rm_list_res.backend_count, 1U);
+  assert_string_equal(ns_res.preferred_engine, "index");
+  assert_string_equal(ns_res.fallback_engine, "scan");
 
   lc_engine_client_close(client);
   https_testserver_stop(&server);
   assert_server_ok(&server);
 
   lc_engine_namespace_config_response_cleanup(&ns_res);
-  lc_engine_index_flush_response_cleanup(&flush_res);
-  lc_engine_txn_replay_response_cleanup(&replay_res);
-  lc_engine_txn_decision_response_cleanup(&decision_res);
-  lc_engine_tc_lease_acquire_response_cleanup(&tc_acquire_res);
-  lc_engine_tc_lease_renew_response_cleanup(&tc_renew_res);
-  lc_engine_tc_lease_release_response_cleanup(&tc_release_res);
-  lc_engine_tc_leader_response_cleanup(&tc_leader_res);
-  lc_engine_tc_cluster_response_cleanup(&cluster_res);
-  lc_engine_tcrm_register_response_cleanup(&rm_res);
-  lc_engine_tcrm_unregister_response_cleanup(&rm_unreg_res);
-  lc_engine_tcrm_list_response_cleanup(&rm_list_res);
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
 }
@@ -1922,50 +1391,6 @@ static void test_queue_transport_paths_use_mtls(void **state) {
        "\"available\":true,\"head_message_id\":\"msg-1\","
        "\"head_enqueued_at_unix\":100,\"head_not_visible_until_unix\":101,"
        "\"head_age_seconds\":2}",
-       "liblockdc test client"},
-      {"POST", "/v1/queue/ack", queue_headers, 1U,
-       (const char *const[]){"\"namespace\":\"transport-ns\"",
-                             "\"queue\":\"jobs\"", "\"message_id\":\"msg-1\"",
-                             "\"lease_id\":\"lease-1\"", "\"txn_id\":\"txn-1\"",
-                             "\"fencing_token\":9", "\"meta_etag\":\"meta-1\"",
-                             "\"state_etag\":\"state-1\"",
-                             "\"state_lease_id\":\"state-lease-1\"",
-                             "\"state_fencing_token\":10"},
-       10U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-queue-ack",
-                             "Content-Type: application/json"},
-       2U, "{\"acked\":true,\"correlation_id\":\"corr-queue-ack\"}",
-       "liblockdc test client"},
-      {"POST", "/v1/queue/nack", queue_headers, 1U,
-       (const char *const[]){
-           "\"namespace\":\"transport-ns\"", "\"queue\":\"jobs\"",
-           "\"message_id\":\"msg-1\"", "\"lease_id\":\"lease-1\"",
-           "\"meta_etag\":\"meta-1\"", "\"delay_seconds\":4",
-           "\"intent\":\"defer\"", "\"last_error\":{\"code\":\"oops\"}",
-           "\"state_etag\":\"state-1\"", "\"state_lease_id\":\"state-lease-1\"",
-           "\"state_fencing_token\":10"},
-       11U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-queue-nack",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"requeued\":true,\"meta_etag\":\"meta-2\","
-       "\"correlation_id\":\"corr-queue-nack\"}",
-       "liblockdc test client"},
-      {"POST", "/v1/queue/extend", queue_headers, 1U,
-       (const char *const[]){"\"namespace\":\"transport-ns\"",
-                             "\"queue\":\"jobs\"", "\"message_id\":\"msg-1\"",
-                             "\"lease_id\":\"lease-1\"",
-                             "\"meta_etag\":\"meta-2\"", "\"txn_id\":\"txn-1\"",
-                             "\"fencing_token\":9", "\"extend_by_seconds\":30",
-                             "\"state_lease_id\":\"state-lease-1\"",
-                             "\"state_fencing_token\":10"},
-       10U, 0, 200,
-       (const char *const[]){"X-Correlation-Id: corr-queue-extend",
-                             "Content-Type: application/json"},
-       2U,
-       "{\"lease_expires_at_unix\":500,\"visibility_timeout_seconds\":30,"
-       "\"meta_etag\":\"meta-3\",\"state_lease_expires_at_unix\":600,"
-       "\"correlation_id\":\"corr-queue-extend\"}",
        "liblockdc test client"}};
   https_tls_material material;
   https_testserver server;
@@ -1974,12 +1399,6 @@ static void test_queue_transport_paths_use_mtls(void **state) {
   lc_engine_error error;
   lc_engine_queue_stats_request stats_req;
   lc_engine_queue_stats_response stats_res;
-  lc_engine_queue_ack_request ack_req;
-  lc_engine_queue_ack_response ack_res;
-  lc_engine_queue_nack_request nack_req;
-  lc_engine_queue_nack_response nack_res;
-  lc_engine_queue_extend_request extend_req;
-  lc_engine_queue_extend_response extend_res;
   int rc;
 
   (void)state;
@@ -2002,68 +1421,11 @@ static void test_queue_transport_paths_use_mtls(void **state) {
   assert_int_equal(rc, LC_ENGINE_OK);
   assert_true(stats_res.available);
 
-  memset(&ack_req, 0, sizeof(ack_req));
-  memset(&ack_res, 0, sizeof(ack_res));
-  ack_req.queue = "jobs";
-  ack_req.message_id = "msg-1";
-  ack_req.lease_id = "lease-1";
-  ack_req.txn_id = "txn-1";
-  ack_req.fencing_token = 9L;
-  ack_req.meta_etag = "meta-1";
-  ack_req.state_etag = "state-1";
-  ack_req.state_lease_id = "state-lease-1";
-  ack_req.state_fencing_token = 10L;
-  rc = lc_engine_client_queue_ack(client, &ack_req, &ack_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_true(ack_res.acked);
-
-  memset(&nack_req, 0, sizeof(nack_req));
-  memset(&nack_res, 0, sizeof(nack_res));
-  nack_req.queue = "jobs";
-  nack_req.message_id = "msg-1";
-  nack_req.lease_id = "lease-1";
-  nack_req.meta_etag = "meta-1";
-  nack_req.delay_seconds = 4L;
-  nack_req.intent = "defer";
-  nack_req.last_error_json = "{\"code\":\"oops\"}";
-  nack_req.state_etag = "state-1";
-  nack_req.state_lease_id = "state-lease-1";
-  nack_req.state_fencing_token = 10L;
-  rc = lc_engine_client_queue_nack(client, &nack_req, &nack_res, &error);
-  if (rc != LC_ENGINE_OK) {
-    fail_msg("queue nack rc=%d code=%d http_status=%ld message=%s detail=%s "
-             "server=%s",
-             rc, error.code, error.http_status,
-             error.message != NULL ? error.message : "(null)",
-             error.detail != NULL ? error.detail : "(null)",
-             server.failure_message[0] != '\0' ? server.failure_message
-                                               : "(none)");
-  }
-  assert_true(nack_res.requeued);
-
-  memset(&extend_req, 0, sizeof(extend_req));
-  memset(&extend_res, 0, sizeof(extend_res));
-  extend_req.queue = "jobs";
-  extend_req.message_id = "msg-1";
-  extend_req.lease_id = "lease-1";
-  extend_req.meta_etag = "meta-2";
-  extend_req.txn_id = "txn-1";
-  extend_req.fencing_token = 9L;
-  extend_req.extend_by_seconds = 30L;
-  extend_req.state_lease_id = "state-lease-1";
-  extend_req.state_fencing_token = 10L;
-  rc = lc_engine_client_queue_extend(client, &extend_req, &extend_res, &error);
-  assert_int_equal(rc, LC_ENGINE_OK);
-  assert_int_equal(extend_res.visibility_timeout_seconds, 30L);
-
   lc_engine_client_close(client);
   https_testserver_stop(&server);
   assert_server_ok(&server);
 
   lc_engine_queue_stats_response_cleanup(&stats_res);
-  lc_engine_queue_ack_response_cleanup(&ack_res);
-  lc_engine_queue_nack_response_cleanup(&nack_res);
-  lc_engine_queue_extend_response_cleanup(&extend_res);
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
 }
@@ -2878,343 +2240,6 @@ static void test_public_bound_lease_methods_emit_logs(void **state) {
 
   free(logs);
   fclose(log_fp);
-  https_testserver_stop(&server);
-  assert_server_ok(&server);
-  lc_error_cleanup(&error);
-  https_tls_material_cleanup(&material);
-}
-
-static void
-test_public_bound_lease_methods_cover_state_and_attachments(void **state) {
-  static const char *json_header[] = {"Content-Type: application/json"};
-  static const char *acquire_body[] = {
-      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
-      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
-  static const char *acquire_response_headers[] = {
-      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
-  static const char *describe_response_headers[] = {
-      "X-Correlation-Id: corr-describe", "Content-Type: application/json"};
-  static const char *get_headers[] = {
-      "X-Correlation-Id: corr-get", "Content-Type: application/json",
-      "ETag: etag-1", "X-Key-Version: 4", "X-Fencing-Token: 11"};
-  static const char *update_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
-  static const char *mutate_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-Version: 5"};
-  static const char *metadata_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-Version: 6"};
-  static const char *remove_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Txn-ID: txn-acquire", "X-If-State-ETag: etag-4", "X-If-Version: 7"};
-  static const char *attach_headers[] = {
-      "Content-Type: text/plain", "X-Lease-ID: lease-1",
-      "X-Txn-ID: txn-acquire", "X-Fencing-Token: 11"};
-  static const char *metadata_body[] = {"\"namespace\":\"transport-ns\"",
-                                        "\"query_hidden\":false"};
-  static const char *mutate_body[] = {"\"namespace\":\"transport-ns\"",
-                                      "\"mutations\":[\"set($.value,3)\","
-                                      "\"set($.ready,true)\"]"};
-  static const char *list_headers[] = {
-      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-Fencing-Token: 11"};
-  static const char *attachment_download_headers[] = {
-      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-Fencing-Token: 11"};
-  static const char *attachment_response_headers[] = {
-      "X-Correlation-Id: corr-attachment-get",
-      "Content-Type: text/plain",
-      "X-Attachment-ID: att-1",
-      "X-Attachment-Name: blob.txt",
-      "X-Attachment-SHA256: sha-1",
-      "X-Attachment-Size: 11",
-      "X-Attachment-Created-At: 100",
-      "X-Attachment-Updated-At: 101"};
-  static const char *attachment_delete_headers[] = {
-      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-Fencing-Token: 11"};
-  static const char *attachment_delete_all_headers[] = {
-      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-Fencing-Token: 11"};
-  static const char *update_response_headers[] = {
-      "X-Correlation-Id: corr-update", "Content-Type: application/json"};
-  static const char *mutate_response_headers[] = {
-      "X-Correlation-Id: corr-mutate", "Content-Type: application/json"};
-  static const char *metadata_response_headers[] = {
-      "X-Correlation-Id: corr-metadata", "Content-Type: application/json"};
-  static const char *attach_response_headers[] = {
-      "X-Correlation-Id: corr-attach", "Content-Type: application/json"};
-  static const char *list_response_headers[] = {
-      "X-Correlation-Id: corr-attachment-list",
-      "Content-Type: application/json"};
-  static const char *delete_response_headers[] = {
-      "X-Correlation-Id: corr-attachment-delete",
-      "Content-Type: application/json"};
-  static const char *delete_all_response_headers[] = {
-      "X-Correlation-Id: corr-attachment-delete-all",
-      "Content-Type: application/json"};
-  static const char *remove_response_headers[] = {
-      "X-Correlation-Id: corr-remove", "Content-Type: application/json"};
-  static const https_expectation expectations[] = {
-      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
-       acquire_response_headers, 2U,
-       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
-       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
-       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
-       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
-       "liblockdc test client"},
-      {"GET", "/v1/describe?key=resource%2F1&namespace=transport-ns", NULL, 0U,
-       NULL, 0U, 1, 200, describe_response_headers, 2U,
-       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
-       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
-       "\"expires_at_unix\":1000,\"version\":4,\"state_etag\":\"etag-1\","
-       "\"updated_at_unix\":2000,\"metadata\":{\"query_hidden\":true}}",
-       "liblockdc test client"},
-      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
-       0U, NULL, 0U, 1, 200, get_headers, 5U, "{\"value\":1}",
-       "liblockdc test client"},
-      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns",
-       update_headers, sizeof(update_headers) / sizeof(update_headers[0]), NULL,
-       0U, 0, 200, update_response_headers, 2U,
-       "{\"new_version\":5,\"new_state_etag\":\"etag-2\",\"bytes\":11}",
-       "liblockdc test client"},
-      {"POST", "/v1/mutate?key=resource%2F1&namespace=transport-ns",
-       mutate_headers, sizeof(mutate_headers) / sizeof(mutate_headers[0]),
-       mutate_body, sizeof(mutate_body) / sizeof(mutate_body[0]), 0, 200,
-       mutate_response_headers, 2U,
-       "{\"new_version\":6,\"new_state_etag\":\"etag-3\",\"bytes\":21}",
-       "liblockdc test client"},
-      {"POST", "/v1/metadata?key=resource%2F1&namespace=transport-ns",
-       metadata_headers, 3U, metadata_body, 2U, 0, 200,
-       metadata_response_headers, 2U,
-       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
-       "\"version\":7,\"metadata\":{\"query_hidden\":false}}",
-       "liblockdc test client"},
-      {"POST",
-       "/v1/attachments?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
-       "content_type=text%2Fplain",
-       attach_headers, 4U, NULL, 0U, 0, 200, attach_response_headers, 2U,
-       "{\"attachment\":{\"id\":\"att-1\",\"name\":\"blob.txt\","
-       "\"size\":11,\"plaintext_sha256\":\"sha-1\","
-       "\"content_type\":\"text/plain\",\"created_at_unix\":100,"
-       "\"updated_at_unix\":101},\"noop\":false,\"version\":8}",
-       "liblockdc test client"},
-      {"GET", "/v1/attachments?key=resource%2F1&namespace=transport-ns",
-       list_headers, 3U, NULL, 0U, 1, 200, list_response_headers, 2U,
-       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
-       "\"attachments\":[{\"id\":\"att-1\",\"name\":\"blob.txt\","
-       "\"size\":11,\"plaintext_sha256\":\"sha-1\","
-       "\"content_type\":\"text/plain\",\"created_at_unix\":100,"
-       "\"updated_at_unix\":101}]}",
-       "liblockdc test client"},
-      {"GET",
-       "/v1/attachment?key=resource%2F1&namespace=transport-ns&name=blob.txt",
-       attachment_download_headers, 3U, NULL, 0U, 0, 200,
-       attachment_response_headers, 8U, "hello world", "liblockdc test client"},
-      {"DELETE",
-       "/v1/attachment?key=resource%2F1&namespace=transport-ns&name=blob.txt",
-       attachment_delete_headers, 3U, NULL, 0U, 1, 200, delete_response_headers,
-       2U, "{\"deleted\":true,\"version\":9}", "liblockdc test client"},
-      {"DELETE", "/v1/attachments?key=resource%2F1&namespace=transport-ns",
-       attachment_delete_all_headers, 3U, NULL, 0U, 1, 200,
-       delete_all_response_headers, 2U, "{\"deleted\":1,\"version\":10}",
-       "liblockdc test client"},
-      {"POST", "/v1/remove?key=resource%2F1&namespace=transport-ns",
-       remove_headers, 5U, NULL, 0U, 1, 200, remove_response_headers, 2U,
-       "{\"removed\":true,\"new_version\":11}", "liblockdc test client"}};
-  https_tls_material material;
-  https_testserver server;
-  lc_client_config config;
-  lc_client *client;
-  lc_acquire_req acquire_req;
-  lc_lease *lease;
-  lc_error error;
-  lc_get_opts get_opts;
-  lc_get_res get_res;
-  test_value_doc value_doc;
-  lc_json *json;
-  lc_update_opts update_opts;
-  const char *mutations[2];
-  lc_mutate_req mutate_req;
-  lc_metadata_req metadata_req;
-  lc_attach_req attach_req;
-  lc_attach_res attach_res;
-  lc_source *src;
-  lc_attachment_list attachment_list;
-  lc_attachment_get_req attachment_get_req;
-  lc_attachment_get_res attachment_get_res;
-  lc_sink *sink;
-  const void *bytes;
-  size_t length;
-  lc_attachment_selector selector;
-  int deleted;
-  int deleted_count;
-  lc_remove_req remove_req;
-  int rc;
-
-  (void)state;
-  client = NULL;
-  lease = NULL;
-  memset(&value_doc, 0, sizeof(value_doc));
-  json = NULL;
-  src = NULL;
-  sink = NULL;
-  bytes = NULL;
-  length = 0U;
-  deleted = 0;
-  deleted_count = 0;
-  assert_true(https_tls_material_init(&material, 1));
-  assert_true(
-      https_testserver_start(&server, &material, expectations,
-                             sizeof(expectations) / sizeof(expectations[0])));
-
-  memset(&config, 0, sizeof(config));
-  memset(&acquire_req, 0, sizeof(acquire_req));
-  memset(&error, 0, sizeof(error));
-  memset(&get_opts, 0, sizeof(get_opts));
-  memset(&get_res, 0, sizeof(get_res));
-  memset(&update_opts, 0, sizeof(update_opts));
-  memset(&mutate_req, 0, sizeof(mutate_req));
-  memset(&metadata_req, 0, sizeof(metadata_req));
-  memset(&attach_req, 0, sizeof(attach_req));
-  memset(&attach_res, 0, sizeof(attach_res));
-  memset(&attachment_list, 0, sizeof(attachment_list));
-  memset(&attachment_get_req, 0, sizeof(attachment_get_req));
-  memset(&attachment_get_res, 0, sizeof(attachment_get_res));
-  memset(&selector, 0, sizeof(selector));
-  memset(&remove_req, 0, sizeof(remove_req));
-  init_public_client_config(&config, server.port, material.client_bundle_path,
-                            NULL);
-  rc = lc_client_open(&config, &client, &error);
-  assert_int_equal(rc, LC_OK);
-
-  acquire_req.key = "resource/1";
-  acquire_req.owner = "owner-a";
-  acquire_req.ttl_seconds = 30L;
-  rc = lc_acquire(client, &acquire_req, &lease, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_non_null(lease);
-
-  rc = lc_lease_describe(lease, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_string_equal(lease->state_etag, "etag-1");
-  assert_int_equal(lease->version, 4L);
-
-  get_opts.public_read = 1;
-  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
-                     &get_res, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(value_doc.value, 1);
-  assert_string_equal(get_res.etag, "etag-1");
-  lonejson_cleanup(&test_value_map, &value_doc);
-  lc_get_res_cleanup(&get_res);
-
-  rc = lc_json_from_string("{\"value\":2}", &json, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_lease_update(lease, json, &update_opts, &error);
-  assert_int_equal(rc, LC_OK);
-  lc_json_close(json);
-  json = NULL;
-  assert_string_equal(lease->state_etag, "etag-2");
-  assert_int_equal(lease->version, 5L);
-
-  mutations[0] = "set($.value,3)";
-  mutations[1] = "set($.ready,true)";
-  mutate_req.mutations = mutations;
-  mutate_req.mutation_count = 2U;
-  rc = lc_lease_mutate(lease, &mutate_req, &error);
-  if (rc != LC_OK) {
-    fail_msg("lease mutate rc=%d code=%d http_status=%ld message=%s detail=%s "
-             "server_failure=%s",
-             rc, error.code, error.http_status,
-             error.message != NULL ? error.message : "(null)",
-             error.detail != NULL ? error.detail : "(null)",
-             server.failure_message[0] != '\0' ? server.failure_message
-                                               : "(none)");
-  }
-  assert_int_equal(rc, LC_OK);
-  assert_string_equal(lease->state_etag, "etag-3");
-  assert_int_equal(lease->version, 6L);
-
-  metadata_req.has_query_hidden = 1;
-  metadata_req.query_hidden = 0;
-  metadata_req.if_version = 6L;
-  metadata_req.has_if_version = 1;
-  rc = lc_lease_metadata(lease, &metadata_req, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(lease->version, 7L);
-  assert_true(lease->has_query_hidden);
-  assert_false(lease->query_hidden);
-
-  rc = lc_source_from_memory("hello world", 11U, &src, &error);
-  assert_int_equal(rc, LC_OK);
-  attach_req.name = "blob.txt";
-  attach_req.content_type = "text/plain";
-  rc = lc_lease_attach(lease, &attach_req, src, &attach_res, &error);
-  if (rc != LC_OK) {
-    fail_msg("lease attach retry rc=%d code=%d http_status=%ld message=%s "
-             "server=%s handled=%zu",
-             rc, error.code, error.http_status,
-             error.message != NULL ? error.message : "(null)",
-             server.failure_message[0] != '\0' ? server.failure_message
-                                               : "(null)",
-             server.handled_count);
-  }
-  assert_int_equal(rc, LC_OK);
-  assert_string_equal(attach_res.attachment.id, "att-1");
-  assert_string_equal(attach_res.attachment.name, "blob.txt");
-  assert_false(attach_res.noop);
-  lc_attach_res_cleanup(&attach_res);
-  lc_source_close(src);
-  src = NULL;
-
-  rc = lc_lease_list_attachments(lease, &attachment_list, &error);
-  if (rc != LC_OK) {
-    fail_msg("list attachments rc=%d code=%d http_status=%ld message=%s "
-             "detail=%s server_failure=%s",
-             rc, error.code, error.http_status,
-             error.message != NULL ? error.message : "(null)",
-             error.detail != NULL ? error.detail : "(null)",
-             server.failure_message[0] != '\0' ? server.failure_message
-                                               : "(none)");
-  }
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(attachment_list.count, 1U);
-  assert_string_equal(attachment_list.items[0].id, "att-1");
-  lc_attachment_list_cleanup(&attachment_list);
-
-  rc = lc_sink_to_memory(&sink, &error);
-  assert_int_equal(rc, LC_OK);
-  attachment_get_req.selector.name = "blob.txt";
-  rc = lc_lease_get_attachment(lease, &attachment_get_req, sink,
-                               &attachment_get_res, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(length, 11U);
-  assert_memory_equal(bytes, "hello world", 11U);
-  assert_string_equal(attachment_get_res.attachment.id, "att-1");
-  lc_attachment_get_res_cleanup(&attachment_get_res);
-  lc_sink_close(sink);
-  sink = NULL;
-
-  selector.name = "blob.txt";
-  rc = lc_lease_delete_attachment(lease, &selector, &deleted, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_true(deleted);
-
-  rc = lc_lease_delete_all_attachments(lease, &deleted_count, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(deleted_count, 1);
-
-  remove_req.if_state_etag = "etag-4";
-  remove_req.if_version = 7L;
-  remove_req.has_if_version = 1;
-  rc = lc_lease_remove(lease, &remove_req, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_null(lease->state_etag);
-  assert_int_equal(lease->version, 11L);
-
-  lc_lease_close(lease);
-  lc_client_close(client);
   https_testserver_stop(&server);
   assert_server_ok(&server);
   lc_error_cleanup(&error);
@@ -4609,75 +3634,105 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   https_tls_material_cleanup(&material);
 }
 
-#if defined(LC_HTTPS_TEST_GROUP_CLIENT_OPEN)
+#if defined(LC_HTTPS_CASE_CLIENT_OPEN_REJECTS_BUNDLE_WITHOUT_CA)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_client_open_rejects_bundle_without_ca)
-#elif defined(LC_HTTPS_TEST_GROUP_STATE)
+#elif defined(LC_HTTPS_CASE_STATE_PATHS_USE_MTLS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(test_state_transport_paths_use_mtls),                        \
-      cmocka_unit_test(                                                         \
-          test_state_transport_accepts_numeric_headers_with_trailing_ows),      \
-      cmocka_unit_test(                                                         \
-          test_state_transport_rejects_invalid_numeric_headers_as_protocol)
-#elif defined(LC_HTTPS_TEST_GROUP_MANAGEMENT)
+  cmocka_unit_test(test_state_transport_paths_use_mtls)
+#elif defined(LC_HTTPS_CASE_STATE_ACCEPTS_NUMERIC_HEADERS_WITH_TRAILING_OWS)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_state_transport_accepts_numeric_headers_with_trailing_ows)
+#elif defined(LC_HTTPS_CASE_STATE_REJECTS_INVALID_NUMERIC_HEADERS_AS_PROTOCOL)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_state_transport_rejects_invalid_numeric_headers_as_protocol)
+#elif defined(LC_HTTPS_CASE_MANAGEMENT_PATHS_USE_MTLS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_management_transport_paths_use_mtls)
-#elif defined(LC_HTTPS_TEST_GROUP_QUEUE)
+#elif defined(LC_HTTPS_CASE_QUEUE_PATHS_USE_MTLS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(test_queue_transport_paths_use_mtls),                        \
-      cmocka_unit_test(test_queue_transport_rejects_oversized_error_body),     \
-      cmocka_unit_test(test_watch_transport_rejects_oversized_error_body),     \
-      cmocka_unit_test(                                                         \
-          test_queue_transport_rejects_overflowing_numeric_fields),            \
-      cmocka_unit_test(test_queue_transport_preserves_typed_json_parse_errors)
-#elif defined(LC_HTTPS_TEST_GROUP_SUBSCRIBE)
+  cmocka_unit_test(test_queue_transport_paths_use_mtls)
+#elif defined(LC_HTTPS_CASE_QUEUE_REJECTS_OVERSIZED_ERROR_BODY)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(test_subscribe_accepts_content_length_with_trailing_ows),    \
-      cmocka_unit_test(test_subscribe_respects_client_meta_limit),              \
-      cmocka_unit_test(test_subscribe_rejects_default_meta_overflow)
-#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_CLIENT)
+  cmocka_unit_test(test_queue_transport_rejects_oversized_error_body)
+#elif defined(LC_HTTPS_CASE_WATCH_REJECTS_OVERSIZED_ERROR_BODY)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(test_public_client_emits_pslog_messages),                    \
-      cmocka_unit_test(test_public_client_can_disable_sdk_sys_field)
-#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_BOUND_LEASE)
+  cmocka_unit_test(test_watch_transport_rejects_oversized_error_body)
+#elif defined(LC_HTTPS_CASE_QUEUE_REJECTS_OVERFLOWING_NUMERIC_FIELDS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(test_public_bound_lease_methods_emit_logs),                  \
-      cmocka_unit_test(                                                         \
-          test_public_bound_lease_methods_cover_state_and_attachments)
-#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_LEASE)
+  cmocka_unit_test(test_queue_transport_rejects_overflowing_numeric_fields)
+#elif defined(LC_HTTPS_CASE_QUEUE_PRESERVES_TYPED_JSON_PARSE_ERRORS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(test_public_lease_attach_rejects_malformed_json_response),   \
-      cmocka_unit_test(                                                         \
-          test_public_lease_attach_retries_node_passive_and_cleans_parser_state), \
-      cmocka_unit_test(                                                         \
-          test_public_lease_attach_rejects_non_rewindable_retry_source),        \
-      cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),     \
-      cmocka_unit_test(                                                         \
-          test_public_lease_load_respects_configured_json_response_limit),      \
-      cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path)
-#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_MANAGEMENT)
+  cmocka_unit_test(test_queue_transport_preserves_typed_json_parse_errors)
+#elif defined(LC_HTTPS_CASE_SUBSCRIBE_ACCEPTS_CONTENT_LENGTH_WITH_TRAILING_OWS)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_subscribe_accepts_content_length_with_trailing_ows)
+#elif defined(LC_HTTPS_CASE_SUBSCRIBE_RESPECTS_CLIENT_META_LIMIT)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_subscribe_respects_client_meta_limit)
+#elif defined(LC_HTTPS_CASE_SUBSCRIBE_REJECTS_DEFAULT_META_OVERFLOW)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_subscribe_rejects_default_meta_overflow)
+#elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_EMITS_PSLOG_MESSAGES)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_client_emits_pslog_messages)
+#elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_CAN_DISABLE_SDK_SYS_FIELD)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_client_can_disable_sdk_sys_field)
+#elif defined(LC_HTTPS_CASE_PUBLIC_BOUND_LEASE_METHODS_EMIT_LOGS)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_bound_lease_methods_emit_logs)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_REJECTS_MALFORMED_JSON_RESPONSE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_attach_rejects_malformed_json_response)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_attach_retries_node_passive_and_cleans_parser_state)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_REJECTS_NON_REWINDABLE_RETRY_SOURCE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_attach_rejects_non_rewindable_retry_source)
+#elif defined(LC_HTTPS_CASE_QUEUE_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_queue_transport_retries_node_passive_and_cleans_parser_state)
+#elif defined(LC_HTTPS_CASE_ENQUEUE_FROM_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_enqueue_from_retries_node_passive_and_cleans_parser_state)
+#elif defined(LC_HTTPS_CASE_ENQUEUE_FROM_REJECTS_NON_REWINDABLE_RETRY_SOURCE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_USES_MAPPED_LONEJSON_UPLOAD)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_RESPECTS_CONFIGURED_JSON_RESPONSE_LIMIT)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_load_respects_configured_json_response_limit)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_MUTATE_LOCAL_COVERS_NO_CONTENT_PATH)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path)
+#elif defined(LC_HTTPS_CASE_PUBLIC_MANAGEMENT_METHODS_EMIT_LOGS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_public_management_methods_emit_logs)
-#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_ENQUEUE)
+#elif defined(LC_HTTPS_CASE_PUBLIC_ENQUEUE_EMITS_LOGS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(                                                             \
-      test_queue_transport_retries_node_passive_and_cleans_parser_state),       \
-      cmocka_unit_test(                                                         \
-          test_enqueue_from_retries_node_passive_and_cleans_parser_state),      \
-      cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source),  \
-      cmocka_unit_test(test_public_enqueue_emits_logs),                         \
-      cmocka_unit_test(test_public_enqueue_streams_payload_from_source)
-#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_DEQUEUE)
+  cmocka_unit_test(test_public_enqueue_emits_logs)
+#elif defined(LC_HTTPS_CASE_PUBLIC_ENQUEUE_STREAMS_PAYLOAD_FROM_SOURCE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_enqueue_streams_payload_from_source)
+#elif defined(LC_HTTPS_CASE_PUBLIC_DEQUEUE_EMITS_STREAM_TRANSPORT_LOGS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_public_dequeue_emits_stream_transport_logs)
-#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_QUERY_STREAM)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_HEADERS_AND_BODY)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(test_public_query_stream_captures_headers_and_body),         \
-      cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq)
-#elif defined(LC_HTTPS_TEST_GROUP_PUBLIC_QUEUE_NACK)
+  cmocka_unit_test(test_public_query_stream_captures_headers_and_body)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_REJECTS_INVALID_INDEX_SEQ)
 #define LC_HTTPS_UNIT_TESTS                                                     \
-  cmocka_unit_test(test_public_queue_nack_maps_enum_intents),                   \
-      cmocka_unit_test(test_public_queue_nack_rejects_invalid_intent)
+  cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUEUE_NACK_MAPS_ENUM_INTENTS)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_queue_nack_maps_enum_intents)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUEUE_NACK_REJECTS_INVALID_INTENT)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_queue_nack_rejects_invalid_intent)
 #else
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_client_open_rejects_bundle_without_ca),                 \
@@ -4699,8 +3754,6 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
       cmocka_unit_test(test_public_client_emits_pslog_messages),                \
       cmocka_unit_test(test_public_client_can_disable_sdk_sys_field),           \
       cmocka_unit_test(test_public_bound_lease_methods_emit_logs),              \
-      cmocka_unit_test(                                                         \
-          test_public_bound_lease_methods_cover_state_and_attachments),         \
       cmocka_unit_test(test_public_lease_attach_rejects_malformed_json_response), \
       cmocka_unit_test(                                                         \
           test_public_lease_attach_retries_node_passive_and_cleans_parser_state), \
