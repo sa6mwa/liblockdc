@@ -24,6 +24,7 @@ static const lonejson_field e2e_status_fields[] = {
 LONEJSON_MAP_DEFINE(e2e_status_map, e2e_status_doc, e2e_status_fields);
 
 static void assert_lc_ok(int rc, lc_error *error);
+static void assert_lc_server_error(int rc, lc_error *error, long http_status);
 
 static void save_json_text_or_die(lc_lease *lease, const char *json_text,
                                   lc_error *error) {
@@ -89,6 +90,32 @@ static void assert_lc_ok(int rc, lc_error *error) {
   assert_int_equal(rc, LC_OK);
 }
 
+static void assert_lc_server_error(int rc, lc_error *error, long http_status) {
+  if (rc == LC_OK) {
+    print_message("expected server error, got success\n");
+  } else {
+    print_message(
+        "expected server error: code=%d http=%ld message=%s detail=%s "
+        "server_code=%s correlation=%s\n",
+        error != NULL ? error->code : -1,
+        error != NULL ? error->http_status : 0L,
+        error != NULL && error->message != NULL ? error->message : "(null)",
+        error != NULL && error->detail != NULL ? error->detail : "(null)",
+        error != NULL && error->server_code != NULL ? error->server_code
+                                                    : "(null)",
+        error != NULL && error->correlation_id != NULL ? error->correlation_id
+                                                       : "(null)");
+  }
+  assert_int_not_equal(rc, LC_OK);
+  assert_non_null(error);
+  assert_int_equal(error->code, LC_ERR_SERVER);
+  if (http_status > 0L) {
+    assert_int_equal(error->http_status, http_status);
+  } else {
+    assert_true(error->http_status >= 400L);
+  }
+}
+
 static int buffer_contains(const void *bytes, size_t length,
                            const char *needle) {
   const unsigned char *cursor;
@@ -137,6 +164,24 @@ static void open_tcp_client(const char *endpoint, const char *bundle_path,
   config.insecure_skip_verify = 1;
   rc = lc_client_open(&config, out, error);
   assert_lc_ok(rc, error);
+}
+
+static void open_tcp_client_allow_error(const char *endpoint,
+                                        const char *bundle_path,
+                                        lc_client **out, lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+
+  lc_client_config_init(&config);
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.client_bundle_path = bundle_path;
+  config.default_namespace = "default";
+  config.timeout_ms = 5000L;
+  config.insecure_skip_verify = 1;
+  *out = NULL;
+  lc_client_open(&config, out, error);
 }
 
 static void open_uds_client(const char *socket_path, lc_client **out,
@@ -754,6 +799,448 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
   lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_acquire_if_not_exists_conflict(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_lease *conflicting_lease;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  char key[96];
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  conflicting_lease = NULL;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("disk-conflict", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.if_not_exists = 1;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  rc = client->acquire(client, &acquire_req, &conflicting_lease, &error);
+  assert_lc_server_error(rc, &error, 409L);
+  assert_null(conflicting_lease);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_state_cas_failure_modes(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_update_opts update_opts;
+  lc_json *json;
+  lc_mutate_req mutate_req;
+  lc_metadata_req metadata_req;
+  lc_remove_req remove_req;
+  const char *mutations[1];
+  char key[96];
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  json = NULL;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_update_opts_init(&update_opts);
+  lc_mutate_req_init(&mutate_req);
+  lc_metadata_req_init(&metadata_req);
+  lc_remove_req_init(&remove_req);
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("disk-cas", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  save_json_text_or_die(lease, "{\"kind\":\"cas\"}", &error);
+
+  rc = lc_json_from_string("{\"kind\":\"cas-update\"}", &json, &error);
+  assert_lc_ok(rc, &error);
+  update_opts.if_version = lease->version + 100L;
+  update_opts.has_if_version = 1;
+  rc = lease->update(lease, json, &update_opts, &error);
+  assert_lc_server_error(rc, &error, 409L);
+  lc_json_close(json);
+  json = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  mutations[0] = "/kind=\"cas-mutate\"";
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 1U;
+  mutate_req.if_version = lease->version + 100L;
+  mutate_req.has_if_version = 1;
+  rc = lease->mutate(lease, &mutate_req, &error);
+  assert_lc_server_error(rc, &error, 409L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  metadata_req.if_version = lease->version + 100L;
+  metadata_req.has_if_version = 1;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_lc_server_error(rc, &error, 409L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  remove_req.if_state_etag = "stale-etag";
+  rc = lease->remove(lease, &remove_req, &error);
+  assert_lc_server_error(rc, &error, 409L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_query_rejects_invalid_inputs(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_error error;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_sink *sink;
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  sink = NULL;
+  lc_error_init(&error);
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  query_req.selector_json = NULL;
+  query_req.limit = 1L;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_query_res_cleanup(&query_res);
+  memset(&query_res, 0, sizeof(query_res));
+
+  query_req.selector_json = "";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_s3_attachment_failure_modes(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *src;
+  lc_sink *sink;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_get_req get_req;
+  lc_attachment_get_res get_res;
+  char key[96];
+  static const unsigned char payload[] = {'a', 't', 't', 'a', 'c', 'h'};
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
+  bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
+                               "./devenv/volumes/lockd-s3-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  src = NULL;
+  sink = NULL;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_attach_req_init(&attach_req);
+  memset(&attach_res, 0, sizeof(attach_res));
+  lc_attachment_get_req_init(&get_req);
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("s3-attach-fail", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  save_json_text_or_die(lease, "{\"kind\":\"attachment-failure\"}", &error);
+
+  rc = lc_source_from_memory(payload, sizeof(payload), &src, &error);
+  assert_lc_ok(rc, &error);
+  attach_req.name = "blob.txt";
+  attach_req.content_type = "text/plain";
+  attach_req.has_max_bytes = 1;
+  attach_req.max_bytes = 4L;
+  rc = lease->attach(lease, &attach_req, src, &attach_res, &error);
+  assert_lc_server_error(rc, &error, 413L);
+  lc_source_close(src);
+  src = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  get_req.selector.name = "missing.txt";
+  rc = lease->get_attachment(lease, &get_req, sink, &get_res, &error);
+  assert_lc_server_error(rc, &error, 404L);
+
+  lc_sink_close(sink);
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_mem_uds_queue_failure_modes(void **state) {
+  const char *socket_path;
+  lc_client *client;
+  lc_source *src;
+  lc_message *message;
+  lc_message *invalid_message;
+  lc_error error;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_req invalid_dequeue_req;
+  lc_nack_req nack_req;
+  char queue_name[96];
+  static const unsigned char payload[] = {'q', 'u', 'e', 'u', 'e', '-', 'n',
+                                          'e', 'g'};
+  int rc;
+
+  (void)state;
+  socket_path = env_or_default("LOCKDC_E2E_MEM_SOCKET",
+                               "./devenv/volumes/lockd-mem-run/lockd.sock");
+  require_socket_or_skip(socket_path);
+
+  client = NULL;
+  src = NULL;
+  message = NULL;
+  invalid_message = NULL;
+  lc_error_init(&error);
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_dequeue_req_init(&invalid_dequeue_req);
+  lc_nack_req_init(&nack_req);
+
+  open_uds_client(socket_path, &client, &error);
+  make_unique_name("mem-queue-fail", queue_name, sizeof(queue_name));
+
+  rc = lc_source_from_memory(payload, sizeof(payload), &src, &error);
+  assert_lc_ok(rc, &error);
+  enqueue_req.queue = queue_name;
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 300L;
+  enqueue_req.max_attempts = 5;
+  rc = client->enqueue(client, &enqueue_req, src, &enqueue_res, &error);
+  assert_lc_ok(rc, &error);
+  lc_source_close(src);
+  src = NULL;
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  dequeue_req.owner = "lc-e2e-worker";
+  dequeue_req.queue = queue_name;
+  dequeue_req.wait_seconds = 2L;
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+
+  nack_req.intent = (lc_nack_intent)99;
+  rc = message->nack(message, &nack_req, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  invalid_dequeue_req.queue = queue_name;
+  invalid_dequeue_req.wait_seconds = 1L;
+  invalid_dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &invalid_dequeue_req, &invalid_message, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_null(invalid_message);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_management_failure_modes(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_error error;
+  lc_tc_lease_acquire_req acquire_req;
+  lc_tc_lease_acquire_res acquire_res;
+  lc_tc_cluster_res cluster_res;
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lc_error_init(&error);
+  lc_tc_lease_acquire_req_init(&acquire_req);
+  memset(&acquire_res, 0, sizeof(acquire_res));
+  memset(&cluster_res, 0, sizeof(cluster_res));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+
+  acquire_req.candidate_id = "rw-client";
+  acquire_req.candidate_endpoint = "https://example.invalid:9443";
+  acquire_req.term = 1UL;
+  acquire_req.ttl_ms = 1000L;
+  rc = client->tc_lease_acquire(client, &acquire_req, &acquire_res, &error);
+  assert_lc_server_error(rc, &error, 403L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = client->tc_cluster_list(client, &cluster_res, &error);
+  assert_lc_server_error(rc, &error, 403L);
+
+  lc_tc_lease_acquire_res_cleanup(&acquire_res);
+  lc_tc_cluster_res_cleanup(&cluster_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_auth_permission_failure_modes(void **state) {
+  const char *endpoint;
+  const char *rw_bundle_path;
+  const char *tc_bundle_path;
+  lc_client *rw_client;
+  lc_client *tc_client;
+  lc_error error;
+  lc_tc_lease_acquire_req tc_req;
+  lc_tc_lease_acquire_res tc_res;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  char key[96];
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  rw_bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  tc_bundle_path =
+      "./devenv/volumes/lockd-disk-a-config/tc-client.pem";
+  require_file_or_skip(rw_bundle_path);
+  require_file_or_skip(tc_bundle_path);
+
+  rw_client = NULL;
+  tc_client = NULL;
+  lease = NULL;
+  lc_error_init(&error);
+  lc_tc_lease_acquire_req_init(&tc_req);
+  memset(&tc_res, 0, sizeof(tc_res));
+  lc_acquire_req_init(&acquire_req);
+
+  open_tcp_client(endpoint, rw_bundle_path, &rw_client, &error);
+  tc_req.candidate_id = "lc-e2e-tc";
+  tc_req.candidate_endpoint = "https://example.invalid:9443";
+  tc_req.term = 1UL;
+  tc_req.ttl_ms = 1000L;
+  rc = rw_client->tc_lease_acquire(rw_client, &tc_req, &tc_res, &error);
+  assert_lc_server_error(rc, &error, 403L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  open_tcp_client(endpoint, tc_bundle_path, &tc_client, &error);
+  make_unique_name("tc-no-data", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e";
+  acquire_req.ttl_seconds = 30L;
+  rc = tc_client->acquire(tc_client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_tc_lease_acquire_res_cleanup(&tc_res);
+  lc_client_close(tc_client);
+  lc_client_close(rw_client);
   lc_error_cleanup(&error);
 }
 
@@ -1547,7 +2034,13 @@ static void test_s3_dequeue_with_state_roundtrip(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
+      cmocka_unit_test(test_disk_acquire_if_not_exists_conflict),
+      cmocka_unit_test(test_disk_state_cas_failure_modes),
+      cmocka_unit_test(test_disk_query_rejects_invalid_inputs),
+      cmocka_unit_test(test_disk_management_failure_modes),
+      cmocka_unit_test(test_disk_auth_permission_failure_modes),
       cmocka_unit_test(test_s3_lease_state_roundtrip),
+      cmocka_unit_test(test_s3_attachment_failure_modes),
       cmocka_unit_test(test_disk_local_mutate_stream_roundtrip),
       cmocka_unit_test(test_s3_local_mutate_stream_roundtrip),
       cmocka_unit_test(test_s3_attachment_roundtrip),
@@ -1581,7 +2074,8 @@ int main(void) {
       cmocka_unit_test(test_mem_uds_dequeue_with_state_roundtrip),
       cmocka_unit_test(test_s3_dequeue_with_state_roundtrip),
       cmocka_unit_test(test_mem_uds_dequeue_batch_roundtrip),
-      cmocka_unit_test(test_mem_uds_queue_roundtrip)};
+      cmocka_unit_test(test_mem_uds_queue_roundtrip),
+      cmocka_unit_test(test_mem_uds_queue_failure_modes)};
 
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

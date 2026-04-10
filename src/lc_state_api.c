@@ -75,17 +75,6 @@ static const lonejson_field lc_engine_release_body_fields[] = {
                        "fencing_token"),
     LONEJSON_FIELD_BOOL(lc_engine_release_request, rollback, "rollback")};
 static const lonejson_field lc_engine_metadata_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_request, namespace_name,
-                                "namespace"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_request, key, "key"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_request, lease_id,
-                                "lease_id"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_request, txn_id, "txn_id"),
-    LONEJSON_FIELD_I64(lc_engine_metadata_request, fencing_token,
-                       "fencing_token"),
-    LONEJSON_FIELD_I64(lc_engine_metadata_request, if_version, "if_version"),
-    LONEJSON_FIELD_BOOL(lc_engine_metadata_request, has_query_hidden,
-                        "has_query_hidden"),
     LONEJSON_FIELD_BOOL(lc_engine_metadata_request, query_hidden,
                         "query_hidden")};
 static const lonejson_field lc_engine_query_body_fields[] = {
@@ -1525,16 +1514,8 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   }
 
   body_field_count = 0U;
-  if (request->namespace_name != NULL && request->namespace_name[0] != '\0') {
-    body_fields[body_field_count++] = lc_engine_metadata_body_fields[0];
-  }
-  body_fields[body_field_count++] = lc_engine_metadata_body_fields[1];
-  body_fields[body_field_count++] = lc_engine_metadata_body_fields[2];
-  if (request->has_if_version) {
-    body_fields[body_field_count++] = lc_engine_metadata_body_fields[5];
-  }
   if (request->has_query_hidden) {
-    body_fields[body_field_count++] = lc_engine_metadata_body_fields[7];
+    body_fields[body_field_count++] = lc_engine_metadata_body_fields[0];
   }
   lc_engine_lonejson_map_init(&body_map, "lc_engine_metadata_request",
                               body_fields, body_field_count, sizeof(*request));
