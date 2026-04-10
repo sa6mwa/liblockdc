@@ -339,15 +339,6 @@ static lc_source *fake_delivery_message_payload(lc_message *self) {
   return message->payload;
 }
 
-static int fake_delivery_message_payload_json(lc_message *self, lc_json **out,
-                                              lc_error *error) {
-  (void)self;
-  (void)out;
-  return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "fake delivery message does not support payload_json",
-                      NULL, NULL, NULL);
-}
-
 static int fake_delivery_message_rewind(lc_message *self, lc_error *error) {
   fake_delivery_message *message;
 
@@ -423,7 +414,6 @@ fake_delivery_message_factory(lc_consumer_service_handle *service,
   message->pub.extend = fake_delivery_message_extend;
   message->pub.state = fake_delivery_message_state;
   message->pub.payload_reader = fake_delivery_message_payload;
-  message->pub.payload_json = fake_delivery_message_payload_json;
   message->pub.rewind_payload = fake_delivery_message_rewind;
   message->pub.write_payload = fake_delivery_message_write_payload;
   message->pub.close = fake_delivery_message_close;

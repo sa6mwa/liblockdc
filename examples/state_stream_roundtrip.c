@@ -33,7 +33,7 @@ int main(void) {
   lc_lease *lease;
   lc_source *input;
   lc_sink *stdout_sink;
-  lc_json *json;
+  lc_source *update_src;
   lc_error error;
   lc_acquire_req acquire;
   lc_update_opts update_opts;
@@ -109,7 +109,7 @@ int main(void) {
   lease = NULL;
   input = NULL;
   stdout_sink = NULL;
-  json = NULL;
+  update_src = NULL;
   lc_acquire_req_init(&acquire);
   lc_update_opts_init(&update_opts);
   lc_get_opts_init(&get_opts);
@@ -147,24 +147,14 @@ int main(void) {
     return rc;
   }
 
-  rc = lc_json_from_source(input, &json, &error);
-  if (rc != LC_OK) {
-    rc = fail_with_error(example_logger, "lc_json_from_source", &error);
-    lc_source_close(input);
-    lease->close(lease);
-    client->close(client);
-    lc_error_cleanup(&error);
-    example_logger->destroy(example_logger);
-    sdk_logger->destroy(sdk_logger);
-    return rc;
-  }
+  update_src = input;
   input = NULL;
 
   update_opts.content_type = "application/json";
-  rc = lease->update(lease, json, &update_opts, &error);
+  rc = lease->update(lease, update_src, &update_opts, &error);
   if (rc != LC_OK) {
     rc = fail_with_error(example_logger, "lease->update", &error);
-    lc_json_close(json);
+    lc_source_close(update_src);
     lease->close(lease);
     client->close(client);
     lc_error_cleanup(&error);
@@ -172,8 +162,8 @@ int main(void) {
     sdk_logger->destroy(sdk_logger);
     return rc;
   }
-  lc_json_close(json);
-  json = NULL;
+  lc_source_close(update_src);
+  update_src = NULL;
 
   example_logger->infof(example_logger,
                         "example.state_stream_roundtrip.updated",

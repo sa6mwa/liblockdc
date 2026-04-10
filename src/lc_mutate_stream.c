@@ -28,6 +28,58 @@ typedef struct lc_ms_utf8_state {
   unsigned int min_codepoint;
 } lc_ms_utf8_state;
 
+typedef struct lc_ms_lonejson_sink_file {
+  FILE *fp;
+} lc_ms_lonejson_sink_file;
+
+typedef struct lc_ms_lonejson_scalar_sink {
+  FILE *fp;
+  size_t prefix_offset;
+  int has_tail;
+  unsigned char tail;
+} lc_ms_lonejson_scalar_sink;
+
+typedef struct lc_ms_string_value_json {
+  char *value;
+} lc_ms_string_value_json;
+
+typedef struct lc_ms_text_source_json {
+  lonejson_source value;
+} lc_ms_text_source_json;
+
+typedef struct lc_ms_base64_source_json {
+  lonejson_source value;
+} lc_ms_base64_source_json;
+
+typedef struct lc_ms_i64_value_json {
+  lonejson_int64 value;
+} lc_ms_i64_value_json;
+
+typedef struct lc_ms_f64_value_json {
+  double value;
+} lc_ms_f64_value_json;
+
+static const lonejson_field lc_ms_string_value_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_ms_string_value_json, value, "v")};
+static const lonejson_field lc_ms_text_source_fields[] = {
+    LONEJSON_FIELD_STRING_SOURCE_REQ(lc_ms_text_source_json, value, "v")};
+static const lonejson_field lc_ms_base64_source_fields[] = {
+    LONEJSON_FIELD_BASE64_SOURCE_REQ(lc_ms_base64_source_json, value, "v")};
+static const lonejson_field lc_ms_i64_value_fields[] = {
+    LONEJSON_FIELD_I64_REQ(lc_ms_i64_value_json, value, "v")};
+static const lonejson_field lc_ms_f64_value_fields[] = {
+    LONEJSON_FIELD_F64_REQ(lc_ms_f64_value_json, value, "v")};
+LONEJSON_MAP_DEFINE(lc_ms_string_value_map, lc_ms_string_value_json,
+                    lc_ms_string_value_fields);
+LONEJSON_MAP_DEFINE(lc_ms_text_source_map, lc_ms_text_source_json,
+                    lc_ms_text_source_fields);
+LONEJSON_MAP_DEFINE(lc_ms_base64_source_map, lc_ms_base64_source_json,
+                    lc_ms_base64_source_fields);
+LONEJSON_MAP_DEFINE(lc_ms_i64_value_map, lc_ms_i64_value_json,
+                    lc_ms_i64_value_fields);
+LONEJSON_MAP_DEFINE(lc_ms_f64_value_map, lc_ms_f64_value_json,
+                    lc_ms_f64_value_fields);
+
 static int lc_ms_set_error(lc_error *error, const char *message,
                            const char *detail) {
   return lc_error_set(error, LC_ERR_INVALID, 0L, message, detail, NULL, NULL);
@@ -151,35 +203,83 @@ static int lc_ms_write_char(FILE *out, int ch, lc_error *error) {
   return LC_OK;
 }
 
-static int lc_ms_emit_json_escaped_byte(FILE *out, unsigned char byte,
-                                        lc_error *error) {
-  static const char hex[] = "0123456789abcdef";
-  char escaped[6];
+static lonejson_status lc_ms_lonejson_scalar_sink_write(void *user,
+                                                        const void *data,
+                                                        size_t len,
+                                                        lonejson_error *error) {
+  static const unsigned char prefix[] = {'{', '"', 'v', '"', ':'};
+  lc_ms_lonejson_scalar_sink *sink;
+  const unsigned char *bytes;
+  size_t offset;
 
-  switch (byte) {
-  case '"':
-    return lc_ms_write_bytes(out, "\\\"", 2U, error);
-  case '\\':
-    return lc_ms_write_bytes(out, "\\\\", 2U, error);
-  case '\b':
-    return lc_ms_write_bytes(out, "\\b", 2U, error);
-  case '\f':
-    return lc_ms_write_bytes(out, "\\f", 2U, error);
-  case '\n':
-    return lc_ms_write_bytes(out, "\\n", 2U, error);
-  case '\r':
-    return lc_ms_write_bytes(out, "\\r", 2U, error);
-  case '\t':
-    return lc_ms_write_bytes(out, "\\t", 2U, error);
-  default:
-    escaped[0] = '\\';
-    escaped[1] = 'u';
-    escaped[2] = '0';
-    escaped[3] = '0';
-    escaped[4] = hex[(byte >> 4) & 0x0fU];
-    escaped[5] = hex[byte & 0x0fU];
-    return lc_ms_write_bytes(out, escaped, sizeof(escaped), error);
+  sink = (lc_ms_lonejson_scalar_sink *)user;
+  bytes = (const unsigned char *)data;
+  if (sink == NULL || sink->fp == NULL || (len > 0U && data == NULL)) {
+    if (error != NULL) {
+      lonejson_error_init(error);
+    }
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
+  offset = 0U;
+  while (sink->prefix_offset < sizeof(prefix) && offset < len) {
+    if (bytes[offset] != prefix[sink->prefix_offset]) {
+      if (error != NULL) {
+        lonejson_error_init(error);
+        snprintf(error->message, sizeof(error->message),
+                 "unexpected lonejson scalar wrapper shape");
+      }
+      return LONEJSON_STATUS_INVALID_JSON;
+    }
+    sink->prefix_offset += 1U;
+    offset += 1U;
+  }
+  while (offset < len) {
+    if (sink->has_tail) {
+      if (fputc((int)sink->tail, sink->fp) == EOF) {
+        if (error != NULL) {
+          lonejson_error_init(error);
+          error->system_errno = errno;
+          snprintf(error->message, sizeof(error->message),
+                   "failed to write mutate stream output");
+        }
+        return LONEJSON_STATUS_IO_ERROR;
+      }
+    }
+    sink->tail = bytes[offset++];
+    sink->has_tail = 1;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static int lc_ms_lonejson_status(lc_error *error, lonejson_status status,
+                                 const lonejson_error *lj_error,
+                                 const char *message) {
+  return lc_lonejson_error_from_status(error, status, lj_error, message);
+}
+
+static int lc_ms_serialize_scalar_json(FILE *out, const lonejson_map *map,
+                                       const void *src, lc_error *error,
+                                       const char *message) {
+  lc_ms_lonejson_scalar_sink sink;
+  lonejson_error lj_error;
+  lonejson_status status;
+  lonejson_write_options options;
+
+  memset(&sink, 0, sizeof(sink));
+  sink.fp = out;
+  memset(&lj_error, 0, sizeof(lj_error));
+  options = lonejson_default_write_options();
+  status = lonejson_serialize_sink(map, src, lc_ms_lonejson_scalar_sink_write,
+                                   &sink, &options, &lj_error);
+  if (status == LONEJSON_STATUS_OK) {
+    if (sink.prefix_offset != 5U || !sink.has_tail || sink.tail != '}') {
+      memset(&lj_error, 0, sizeof(lj_error));
+      snprintf(lj_error.message, sizeof(lj_error.message),
+               "unexpected lonejson scalar wrapper shape");
+      status = LONEJSON_STATUS_INVALID_JSON;
+    }
+  }
+  return lc_ms_lonejson_status(error, status, &lj_error, message);
 }
 
 static int lc_ms_utf8_push(lc_ms_utf8_state *state, unsigned char byte,
@@ -226,128 +326,46 @@ static int lc_ms_utf8_push(lc_ms_utf8_state *state, unsigned char byte,
   return LC_OK;
 }
 
-static int lc_ms_emit_utf8_json_string(FILE *out, lc_source *source,
-                                       lc_error *error) {
+static int lc_ms_copy_source_bytes(FILE *out, lc_source *source,
+                                   int validate_text, int *out_text_ok,
+                                   lc_error *error) {
   unsigned char buffer[LC_MS_SCRATCH];
   size_t nread;
   size_t i;
   lc_ms_utf8_state utf8;
-  int rc;
+  int text_ok;
 
   memset(&utf8, 0, sizeof(utf8));
-  rc = lc_ms_write_char(out, '"', error);
-  if (rc != LC_OK) {
-    return rc;
-  }
+  text_ok = validate_text ? 1 : 0;
   for (;;) {
     nread = source->read(source, buffer, sizeof(buffer), error);
     if (nread == 0U) {
       break;
+    }
+    if (lc_ms_write_bytes(out, buffer, nread, error) != LC_OK) {
+      return LC_ERR_TRANSPORT;
     }
     for (i = 0; i < nread; ++i) {
-      if (buffer[i] == '\0') {
-        return lc_ms_set_error(
-            error, "textfile mutation does not accept NUL bytes", NULL);
-      }
-      rc = lc_ms_utf8_push(&utf8, buffer[i], error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      if (buffer[i] < 0x20U || buffer[i] == '"' || buffer[i] == '\\') {
-        rc = lc_ms_emit_json_escaped_byte(out, buffer[i], error);
-      } else {
-        rc = lc_ms_write_bytes(out, buffer + i, 1U, error);
-      }
-      if (rc != LC_OK) {
-        return rc;
-      }
-    }
-  }
-  if (utf8.remaining != 0) {
-    return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
-  }
-  return lc_ms_write_char(out, '"', error);
-}
-
-static int lc_ms_emit_base64_string(FILE *out, lc_source *source,
-                                    lc_error *error) {
-  static const char base64_table[] =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  unsigned char buffer[LC_MS_SCRATCH];
-  unsigned char tail[3];
-  size_t nread;
-  size_t i;
-  size_t tail_len;
-  int rc;
-  char encoded[4];
-
-  tail_len = 0U;
-  rc = lc_ms_write_char(out, '"', error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  for (;;) {
-    nread = source->read(source, buffer, sizeof(buffer), error);
-    if (nread == 0U) {
-      break;
-    }
-    i = 0U;
-    if (tail_len != 0U) {
-      while (tail_len < 3U && i < nread) {
-        tail[tail_len++] = buffer[i++];
-      }
-      if (tail_len == 3U) {
-        encoded[0] = base64_table[(tail[0] >> 2) & 0x3fU];
-        encoded[1] =
-            base64_table[((tail[0] & 0x03U) << 4) | ((tail[1] >> 4) & 0x0fU)];
-        encoded[2] =
-            base64_table[((tail[1] & 0x0fU) << 2) | ((tail[2] >> 6) & 0x03U)];
-        encoded[3] = base64_table[tail[2] & 0x3fU];
-        rc = lc_ms_write_bytes(out, encoded, sizeof(encoded), error);
-        if (rc != LC_OK) {
-          return rc;
+      if (validate_text && text_ok) {
+        if (buffer[i] == '\0') {
+          text_ok = 0;
+          continue;
         }
-        tail_len = 0U;
+        if (lc_ms_utf8_push(&utf8, buffer[i], error) != LC_OK) {
+          lc_error_cleanup(error);
+          lc_error_init(error);
+          text_ok = 0;
+        }
       }
     }
-    while (i + 3U <= nread) {
-      encoded[0] = base64_table[(buffer[i] >> 2) & 0x3fU];
-      encoded[1] = base64_table[((buffer[i] & 0x03U) << 4) |
-                                ((buffer[i + 1U] >> 4) & 0x0fU)];
-      encoded[2] = base64_table[((buffer[i + 1U] & 0x0fU) << 2) |
-                                ((buffer[i + 2U] >> 6) & 0x03U)];
-      encoded[3] = base64_table[buffer[i + 2U] & 0x3fU];
-      rc = lc_ms_write_bytes(out, encoded, sizeof(encoded), error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      i += 3U;
-    }
-    tail_len = nread - i;
-    if (tail_len != 0U) {
-      memcpy(tail, buffer + i, tail_len);
-    }
   }
-  if (tail_len == 1U) {
-    encoded[0] = base64_table[(tail[0] >> 2) & 0x3fU];
-    encoded[1] = base64_table[(tail[0] & 0x03U) << 4];
-    encoded[2] = '=';
-    encoded[3] = '=';
-    rc = lc_ms_write_bytes(out, encoded, sizeof(encoded), error);
-  } else if (tail_len == 2U) {
-    encoded[0] = base64_table[(tail[0] >> 2) & 0x3fU];
-    encoded[1] =
-        base64_table[((tail[0] & 0x03U) << 4) | ((tail[1] >> 4) & 0x0fU)];
-    encoded[2] = base64_table[(tail[1] & 0x0fU) << 2];
-    encoded[3] = '=';
-    rc = lc_ms_write_bytes(out, encoded, sizeof(encoded), error);
-  } else {
-    rc = LC_OK;
+  if (validate_text && text_ok && utf8.remaining != 0) {
+    text_ok = 0;
   }
-  if (rc != LC_OK) {
-    return rc;
+  if (out_text_ok != NULL) {
+    *out_text_ok = text_ok;
   }
-  return lc_ms_write_char(out, '"', error);
+  return LC_OK;
 }
 
 static int lc_ms_open_file_source(const lc_mutation_value *value,
@@ -360,73 +378,112 @@ static int lc_ms_open_file_source(const lc_mutation_value *value,
   return lc_source_from_file(value->file_path, out, error);
 }
 
-static int lc_ms_detect_auto_file_mode(const lc_mutation_value *value,
-                                       lc_mutation_file_mode *out_mode,
-                                       lc_error *error) {
+static int lc_ms_emit_json_string_bytes(FILE *out, const char *text,
+                                        lc_error *error) {
+  lc_ms_string_value_json doc;
+
+  doc.value = (char *)text;
+  return lc_ms_serialize_scalar_json(out, &lc_ms_string_value_map, &doc, error,
+                                     "failed to serialize mutate string");
+}
+
+static int lc_ms_emit_file_mutation_value(FILE *out,
+                                          const lc_mutation_value *value,
+                                          lc_mutation_file_mode requested_mode,
+                                          lc_error *error) {
   lc_source *source;
-  unsigned char buffer[LC_MS_SCRATCH];
-  size_t nread;
-  size_t i;
-  int saw_nul;
-  lc_ms_utf8_state utf8;
+  FILE *scratch;
+  int validate_text;
+  int text_ok;
+  lc_mutation_file_mode actual_mode;
+  lonejson_source lj_source;
+  lc_ms_text_source_json text_doc;
+  lc_ms_base64_source_json base64_doc;
   int rc;
 
-  *out_mode = LC_MUTATION_FILE_BASE64;
-  saw_nul = 0;
-  memset(&utf8, 0, sizeof(utf8));
+  source = NULL;
+  scratch = NULL;
+  actual_mode = requested_mode;
+  if (actual_mode == LC_MUTATION_FILE_BASE64 &&
+      value->file_value_resolver == NULL) {
+    lonejson_source_init(&lj_source);
+    base64_doc.value = lj_source;
+    rc = lc_ms_lonejson_status(
+        error,
+        lonejson_source_set_path(&base64_doc.value, value->file_path, NULL),
+        NULL, "failed to open base64file mutation");
+    if (rc != LC_OK) {
+      lonejson_source_cleanup(&base64_doc.value);
+      return rc;
+    }
+    rc = lc_ms_serialize_scalar_json(out, &lc_ms_base64_source_map, &base64_doc,
+                                     error,
+                                     "failed to serialize base64file mutation");
+    lonejson_source_cleanup(&base64_doc.value);
+    return rc;
+  }
+
   rc = lc_ms_open_file_source(value, &source, error);
   if (rc != LC_OK) {
     return rc;
   }
-  for (;;) {
-    nread = source->read(source, buffer, sizeof(buffer), error);
-    if (nread == 0U) {
-      break;
-    }
-    for (i = 0; i < nread; ++i) {
-      if (buffer[i] == '\0') {
-        saw_nul = 1;
-        break;
-      }
-      rc = lc_ms_utf8_push(&utf8, buffer[i], error);
-      if (rc != LC_OK) {
-        source->close(source);
-        return LC_OK;
-      }
-    }
-    if (saw_nul) {
-      break;
-    }
+  scratch = tmpfile();
+  if (scratch == NULL) {
+    source->close(source);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create file-backed mutation spool",
+                        strerror(errno), NULL, NULL);
   }
+  validate_text =
+      actual_mode == LC_MUTATION_FILE_TEXT || actual_mode == LC_MUTATION_FILE_AUTO;
+  text_ok = 0;
+  rc = lc_ms_copy_source_bytes(scratch, source, validate_text, &text_ok, error);
   source->close(source);
-  if (!saw_nul && utf8.remaining == 0) {
-    *out_mode = LC_MUTATION_FILE_TEXT;
-  }
-  return LC_OK;
-}
-
-static int lc_ms_emit_json_string_bytes(FILE *out, const char *text,
-                                        lc_error *error) {
-  const unsigned char *bytes;
-  size_t i;
-  int rc;
-
-  rc = lc_ms_write_char(out, '"', error);
   if (rc != LC_OK) {
+    fclose(scratch);
     return rc;
   }
-  bytes = (const unsigned char *)text;
-  for (i = 0U; bytes[i] != '\0'; ++i) {
-    if (bytes[i] < 0x20U || bytes[i] == '"' || bytes[i] == '\\') {
-      rc = lc_ms_emit_json_escaped_byte(out, bytes[i], error);
-    } else {
-      rc = lc_ms_write_bytes(out, bytes + i, 1U, error);
-    }
-    if (rc != LC_OK) {
-      return rc;
-    }
+  if (actual_mode == LC_MUTATION_FILE_AUTO) {
+    actual_mode = text_ok ? LC_MUTATION_FILE_TEXT : LC_MUTATION_FILE_BASE64;
+  } else if (actual_mode == LC_MUTATION_FILE_TEXT && !text_ok) {
+    fclose(scratch);
+    return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
   }
-  return lc_ms_write_char(out, '"', error);
+  if (fflush(scratch) != 0 || fseek(scratch, 0L, SEEK_SET) != 0) {
+    fclose(scratch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to rewind file-backed mutation spool",
+                        strerror(errno), NULL, NULL);
+  }
+
+  lonejson_source_init(&lj_source);
+  if (actual_mode == LC_MUTATION_FILE_TEXT) {
+    text_doc.value = lj_source;
+    rc = lc_ms_lonejson_status(error,
+                               lonejson_source_set_file(&text_doc.value,
+                                                        scratch, NULL),
+                               NULL, "failed to open textfile mutation");
+    if (rc == LC_OK) {
+      rc = lc_ms_serialize_scalar_json(out, &lc_ms_text_source_map, &text_doc,
+                                       error,
+                                       "failed to serialize textfile mutation");
+    }
+    lonejson_source_cleanup(&text_doc.value);
+  } else {
+    base64_doc.value = lj_source;
+    rc = lc_ms_lonejson_status(
+        error,
+        lonejson_source_set_file(&base64_doc.value, scratch, NULL), NULL,
+        "failed to open base64file mutation");
+    if (rc == LC_OK) {
+      rc = lc_ms_serialize_scalar_json(out, &lc_ms_base64_source_map,
+                                       &base64_doc, error,
+                                       "failed to serialize base64file mutation");
+    }
+    lonejson_source_cleanup(&base64_doc.value);
+  }
+  fclose(scratch);
+  return rc;
 }
 
 static int lc_ms_plan_append(lc_mutation_plan *plan,
@@ -446,31 +503,20 @@ static int lc_ms_plan_append(lc_mutation_plan *plan,
 }
 
 static int lc_ms_emit_number(FILE *out, double number, lc_error *error) {
-  char buffer[64];
-  int length;
-  double integral_part;
+  lc_ms_f64_value_json doc;
 
   if (!isfinite(number)) {
     return lc_ms_set_error(error, "mutation produced non-finite number", NULL);
   }
-  if (modf(number, &integral_part) == 0.0 &&
-      integral_part >= (double)LONG_MIN && integral_part <= (double)LONG_MAX) {
-    length = snprintf(buffer, sizeof(buffer), "%ld", (long)integral_part);
-  } else {
-    length = snprintf(buffer, sizeof(buffer), "%.17g", number);
-  }
-  if (length < 0) {
-    return lc_ms_set_error(error, "failed to format mutation number", NULL);
-  }
-  return lc_ms_write_bytes(out, buffer, (size_t)length, error);
+  doc.value = number;
+  return lc_ms_serialize_scalar_json(out, &lc_ms_f64_value_map, &doc, error,
+                                     "failed to serialize mutate number");
 }
 
 static int lc_ms_emit_mutation_value(FILE *out, const lc_mutation *mutation,
                                      double existing_value, int has_existing,
                                      lc_error *error) {
-  lc_source *source;
   lc_mutation_file_mode mode;
-  int rc;
 
   switch (mutation->kind) {
   case LC_MUTATION_REMOVE:
@@ -489,15 +535,12 @@ static int lc_ms_emit_mutation_value(FILE *out, const lc_mutation *mutation,
                                mutation->value.bool_value ? "true" : "false",
                                mutation->value.bool_value ? 4U : 5U, error);
     case LC_MUTATION_VALUE_LONG: {
-      char buffer[64];
-      int length;
-      length = lc_i64_format_base10(mutation->value.long_value, buffer,
-                                    sizeof(buffer));
-      if (length < 0) {
-        return lc_ms_set_error(error, "failed to format mutation integer",
-                               NULL);
-      }
-      return lc_ms_write_bytes(out, buffer, (size_t)length, error);
+      lc_ms_i64_value_json doc;
+
+      doc.value = mutation->value.long_value;
+      return lc_ms_serialize_scalar_json(out, &lc_ms_i64_value_map, &doc,
+                                         error,
+                                         "failed to serialize mutate integer");
     }
     case LC_MUTATION_VALUE_DOUBLE:
       return lc_ms_emit_number(out, mutation->value.double_value, error);
@@ -506,23 +549,7 @@ static int lc_ms_emit_mutation_value(FILE *out, const lc_mutation *mutation,
                                           error);
     case LC_MUTATION_VALUE_FILE:
       mode = mutation->value.file_mode;
-      if (mode == LC_MUTATION_FILE_AUTO) {
-        rc = lc_ms_detect_auto_file_mode(&mutation->value, &mode, error);
-        if (rc != LC_OK) {
-          return rc;
-        }
-      }
-      rc = lc_ms_open_file_source(&mutation->value, &source, error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      if (mode == LC_MUTATION_FILE_TEXT) {
-        rc = lc_ms_emit_utf8_json_string(out, source, error);
-      } else {
-        rc = lc_ms_emit_base64_string(out, source, error);
-      }
-      source->close(source);
-      return rc;
+      return lc_ms_emit_file_mutation_value(out, &mutation->value, mode, error);
     default:
       return lc_ms_set_error(error, "unsupported mutation value type", NULL);
     }

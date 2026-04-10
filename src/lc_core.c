@@ -26,11 +26,6 @@ typedef struct lc_sink_impl {
   void (*close_impl)(struct lc_sink_impl *self);
 } lc_sink_impl;
 
-typedef struct lc_json_impl {
-  lc_json pub;
-  lc_source *source;
-} lc_json_impl;
-
 typedef struct lc_memory_source {
   lc_source_impl base;
   unsigned char *bytes;
@@ -593,34 +588,6 @@ static void lc_memory_sink_close(lc_sink_impl *base) {
   free(sink);
 }
 
-static size_t lc_json_pub_read(lc_json *self, void *buffer, size_t count,
-                               lc_error *error) {
-  lc_json_impl *json;
-
-  json = (lc_json_impl *)self;
-  return json->source->read(json->source, buffer, count, error);
-}
-
-static int lc_json_pub_reset(lc_json *self, lc_error *error) {
-  lc_json_impl *json;
-
-  json = (lc_json_impl *)self;
-  return json->source->reset(json->source, error);
-}
-
-static void lc_json_pub_close(lc_json *self) {
-  lc_json_impl *json;
-
-  if (self == NULL) {
-    return;
-  }
-  json = (lc_json_impl *)self;
-  if (json->source != NULL) {
-    json->source->close(json->source);
-  }
-  free(json);
-}
-
 size_t lc_engine_read_bridge(void *context, void *buffer, size_t count,
                              lc_engine_error *error) {
   lc_read_bridge *bridge;
@@ -787,7 +754,6 @@ lc_message *lc_message_new(lc_client_handle *client,
   message->pub.extend = lc_message_extend_method;
   message->pub.state = lc_message_state_method;
   message->pub.payload_reader = lc_message_payload_reader_method;
-  message->pub.payload_json = lc_message_payload_json_method;
   message->pub.rewind_payload = lc_message_rewind_payload_method;
   message->pub.write_payload = lc_message_write_payload_method;
   message->pub.close = lc_message_close_method;
@@ -1346,65 +1312,6 @@ int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error) {
     }
     total += nread;
   }
-}
-
-int lc_json_from_string(const char *json_text, lc_json **out, lc_error *error) {
-  lc_source *source;
-
-  if (json_text == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "json_from_string requires json_text", NULL, NULL,
-                        NULL);
-  }
-  if (lc_source_from_memory(json_text, strlen(json_text), &source, error) !=
-      LC_OK) {
-    return error->code;
-  }
-  return lc_json_from_source(source, out, error);
-}
-
-int lc_json_from_file(const char *path, lc_json **out, lc_error *error) {
-  lc_source *source;
-  int rc;
-
-  rc = lc_source_from_file(path, &source, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_json_from_source(source, out, error);
-}
-
-int lc_json_from_fd(int fd, lc_json **out, lc_error *error) {
-  lc_source *source;
-  int rc;
-
-  rc = lc_source_from_fd(fd, &source, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_json_from_source(source, out, error);
-}
-
-int lc_json_from_source(lc_source *source, lc_json **out, lc_error *error) {
-  lc_json_impl *json;
-
-  if (source == NULL || out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "json_from_source requires source and out", NULL, NULL,
-                        NULL);
-  }
-  json = (lc_json_impl *)calloc(1U, sizeof(*json));
-  if (json == NULL) {
-    source->close(source);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate json source", NULL, NULL, NULL);
-  }
-  json->source = source;
-  json->pub.read = lc_json_pub_read;
-  json->pub.reset = lc_json_pub_reset;
-  json->pub.close = lc_json_pub_close;
-  *out = &json->pub;
-  return LC_OK;
 }
 
 void lc_describe_res_cleanup(lc_describe_res *response) {

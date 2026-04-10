@@ -28,14 +28,14 @@ static void assert_lc_server_error(int rc, lc_error *error, long http_status);
 
 static void save_json_text_or_die(lc_lease *lease, const char *json_text,
                                   lc_error *error) {
-  lc_json *json;
+  lc_source *src;
   int rc;
 
-  json = NULL;
-  rc = lc_json_from_string(json_text, &json, error);
+  src = NULL;
+  rc = lc_source_from_memory(json_text, strlen(json_text), &src, error);
   assert_lc_ok(rc, error);
-  rc = lease->update(lease, json, NULL, error);
-  lc_json_close(json);
+  rc = lease->update(lease, src, NULL, error);
+  lc_source_close(src);
   assert_lc_ok(rc, error);
 }
 
@@ -858,7 +858,7 @@ static void test_disk_state_cas_failure_modes(void **state) {
   lc_error error;
   lc_acquire_req acquire_req;
   lc_update_opts update_opts;
-  lc_json *json;
+  lc_source *src;
   lc_mutate_req mutate_req;
   lc_metadata_req metadata_req;
   lc_remove_req remove_req;
@@ -876,7 +876,7 @@ static void test_disk_state_cas_failure_modes(void **state) {
 
   client = NULL;
   lease = NULL;
-  json = NULL;
+  src = NULL;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
   lc_update_opts_init(&update_opts);
@@ -893,14 +893,16 @@ static void test_disk_state_cas_failure_modes(void **state) {
   assert_lc_ok(rc, &error);
   save_json_text_or_die(lease, "{\"kind\":\"cas\"}", &error);
 
-  rc = lc_json_from_string("{\"kind\":\"cas-update\"}", &json, &error);
+  rc = lc_source_from_memory("{\"kind\":\"cas-update\"}",
+                             strlen("{\"kind\":\"cas-update\"}"), &src,
+                             &error);
   assert_lc_ok(rc, &error);
   update_opts.if_version = lease->version + 100L;
   update_opts.has_if_version = 1;
-  rc = lease->update(lease, json, &update_opts, &error);
+  rc = lease->update(lease, src, &update_opts, &error);
   assert_lc_server_error(rc, &error, 409L);
-  lc_json_close(json);
-  json = NULL;
+  lc_source_close(src);
+  src = NULL;
   lc_error_cleanup(&error);
   lc_error_init(&error);
 

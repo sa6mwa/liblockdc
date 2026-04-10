@@ -86,34 +86,26 @@ static int bench_json_stream(long iterations) {
   lc_error_init(&error);
   for (i = 0; i < iterations; ++i) {
     lc_source *source;
-    lc_json *json;
     size_t got;
 
     source = NULL;
-    json = NULL;
     if (lc_source_from_memory(json_payload, sizeof(json_payload) - 1U, &source,
                               &error) != LC_OK) {
       lc_error_cleanup(&error);
       return 1;
     }
-    if (lc_json_from_source(source, &json, &error) != LC_OK) {
-      lc_source_close(source);
-      lc_error_cleanup(&error);
-      return 1;
-    }
-    source = NULL;
-    got = json->read(json, scratch, sizeof(scratch) - 1U, &error);
+    got = source->read(source, scratch, sizeof(scratch) - 1U, &error);
     if (got >= sizeof(scratch)) {
       got = sizeof(scratch) - 1U;
     }
     scratch[got] = '\0';
-    if (json->reset(json, &error) != LC_OK) {
-      lc_json_close(json);
+    if (source->reset(source, &error) != LC_OK) {
+      lc_source_close(source);
       lc_error_cleanup(&error);
       return 1;
     }
-    (void)json->read(json, scratch, 64U, &error);
-    lc_json_close(json);
+    (void)source->read(source, scratch, 64U, &error);
+    lc_source_close(source);
   }
   lc_error_cleanup(&error);
   return 0;

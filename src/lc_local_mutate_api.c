@@ -43,7 +43,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
   lc_mutation_plan *plan;
   lc_update_opts update_opts;
   lc_source *source;
-  lc_json *json;
+  lc_source *src;
   FILE *input_fp;
   FILE *final_fp;
   int rc;
@@ -73,7 +73,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
   lc_engine_error_init(&engine_error);
   plan = NULL;
   source = NULL;
-  json = NULL;
+  src = NULL;
   final_fp = NULL;
 
   parse_options.file_value_base_dir = req->file_value_base_dir;
@@ -242,28 +242,9 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
                         "failed to wrap local mutate output stream", NULL, NULL,
                         NULL);
   }
-  rc = lc_json_from_source(source, &json, error);
-  if (rc != LC_OK) {
-    source->close(source);
-    fclose(final_fp);
-    lc_engine_get_stream_response_cleanup(&get_res);
-    lc_engine_error_cleanup(&engine_error);
-    {
-      pslog_field fields[6];
-
-      fields[0] = lc_log_str_field("key", lease->key);
-      fields[1] = lc_log_str_field("lease_id", lease->lease_id);
-      fields[2] = lc_log_str_field("txn_id", lease->txn_id);
-      fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
-      fields[4] = lc_log_str_field("step", "json_wrap");
-      fields[5] = lc_log_error_field("error", error);
-      lc_log_warn(lease->client->logger, "client.mutate_local.error", fields,
-                  6U);
-    }
-    return rc;
-  }
-  rc = lc_lease_update_method(self, json, &update_opts, error);
-  json->close(json);
+  src = source;
+  rc = lc_lease_update_method(self, src, &update_opts, error);
+  src->close(src);
   fclose(final_fp);
   lc_engine_get_stream_response_cleanup(&get_res);
   lc_engine_error_cleanup(&engine_error);

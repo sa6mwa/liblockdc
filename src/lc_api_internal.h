@@ -203,7 +203,8 @@ int lc_client_load_method(lc_client *self, const char *key,
                           const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error);
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
-                            lc_json *json, lc_update_res *out, lc_error *error);
+                            lc_source *src, lc_update_res *out,
+                            lc_error *error);
 int lc_client_mutate_method(lc_client *self, const lc_mutate_op *req,
                             lc_mutate_res *out, lc_error *error);
 int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
@@ -325,7 +326,7 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
                          const void *src,
                          const lonejson_write_options *write_options,
                          lc_error *error);
-int lc_lease_update_method(lc_lease *self, lc_json *json,
+int lc_lease_update_method(lc_lease *self, lc_source *src,
                            const lc_update_opts *opts, lc_error *error);
 int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
                            lc_error *error);
@@ -361,8 +362,6 @@ int lc_message_extend_method(lc_message *self, const lc_extend_req *req,
                              lc_error *error);
 lc_lease *lc_message_state_method(lc_message *self);
 lc_source *lc_message_payload_reader_method(lc_message *self);
-int lc_message_payload_json_method(lc_message *self, lc_json **out,
-                                   lc_error *error);
 int lc_message_rewind_payload_method(lc_message *self, lc_error *error);
 int lc_message_write_payload_method(lc_message *self, lc_sink *dst,
                                     size_t *written, lc_error *error);

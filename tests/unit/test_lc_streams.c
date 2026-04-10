@@ -178,9 +178,9 @@ test_copy_returns_transport_when_sink_write_fails_without_error(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_json_from_string_can_reset_and_reread(void **state) {
+static void test_source_from_memory_can_reset_and_reread(void **state) {
   static const char json_text[] = "{\"kind\":\"example\",\"n\":42}";
-  lc_json *json;
+  lc_source *source;
   lc_error error;
   char first[64];
   char second[64];
@@ -190,48 +190,47 @@ static void test_json_from_string_can_reset_and_reread(void **state) {
   int rc;
 
   (void)state;
-  json = NULL;
+  source = NULL;
   first_n = 0U;
   second_n = 0U;
   lc_error_init(&error);
 
-  rc = lc_json_from_string(json_text, &json, &error);
+  rc = lc_source_from_memory(json_text, sizeof(json_text) - 1U, &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
 
   do {
-    chunk = json->read(json, first + first_n, sizeof(first) - first_n, &error);
+    chunk =
+        source->read(source, first + first_n, sizeof(first) - first_n, &error);
     first_n += chunk;
   } while (chunk > 0U);
   assert_int_equal(error.code, LC_OK);
   assert_int_equal(first_n, sizeof(json_text) - 1U);
   assert_memory_equal(first, json_text, sizeof(json_text) - 1U);
 
-  rc = json->reset(json, &error);
+  rc = source->reset(source, &error);
   assert_int_equal(rc, LC_OK);
 
   do {
-    chunk =
-        json->read(json, second + second_n, sizeof(second) - second_n, &error);
+    chunk = source->read(source, second + second_n, sizeof(second) - second_n,
+                         &error);
     second_n += chunk;
   } while (chunk > 0U);
   assert_int_equal(error.code, LC_OK);
   assert_int_equal(second_n, sizeof(json_text) - 1U);
   assert_memory_equal(second, json_text, sizeof(json_text) - 1U);
 
-  lc_json_close(json);
+  lc_source_close(source);
   lc_error_cleanup(&error);
 }
 
-static void
-test_source_and_json_constructors_reject_invalid_arguments(void **state) {
+static void test_source_constructors_reject_invalid_arguments(void **state) {
   lc_error error;
   lc_source *source;
-  lc_json *json;
   int rc;
 
   (void)state;
   source = NULL;
-  json = NULL;
   lc_error_init(&error);
 
   rc = lc_source_from_memory("{}", 2U, NULL, &error);
@@ -246,17 +245,6 @@ test_source_and_json_constructors_reject_invalid_arguments(void **state) {
 
   lc_error_cleanup(&error);
   lc_error_init(&error);
-  rc = lc_json_from_string(NULL, &json, &error);
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_int_equal(error.code, LC_ERR_INVALID);
-
-  lc_error_cleanup(&error);
-  lc_error_init(&error);
-  rc = lc_json_from_source(NULL, &json, &error);
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_int_equal(error.code, LC_ERR_INVALID);
-
-  lc_error_cleanup(&error);
 }
 
 static void test_file_constructors_report_transport_failures(void **state) {
@@ -296,7 +284,6 @@ static void test_close_helpers_accept_null(void **state) {
   lc_message_close(NULL);
   lc_source_close(NULL);
   lc_sink_close(NULL);
-  lc_json_close(NULL);
 }
 
 static void test_copy_rejects_null_endpoints(void **state) {
@@ -346,9 +333,8 @@ int main(void) {
       cmocka_unit_test(test_copy_propagates_source_error_code),
       cmocka_unit_test(
           test_copy_returns_transport_when_sink_write_fails_without_error),
-      cmocka_unit_test(test_json_from_string_can_reset_and_reread),
-      cmocka_unit_test(
-          test_source_and_json_constructors_reject_invalid_arguments),
+      cmocka_unit_test(test_source_from_memory_can_reset_and_reread),
+      cmocka_unit_test(test_source_constructors_reject_invalid_arguments),
       cmocka_unit_test(test_file_constructors_report_transport_failures),
       cmocka_unit_test(test_close_helpers_accept_null),
       cmocka_unit_test(test_copy_rejects_null_endpoints),

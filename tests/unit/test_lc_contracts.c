@@ -78,7 +78,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lc_consumer_service_config consumer_service_config;
   lc_watch_queue_req watch_queue_req;
   lc_watch_handler watch_handler;
-  lc_json json;
+  lc_source source_for_update;
   lc_lease *lease_out;
   lc_message *message_out;
   lc_consumer_service *service_out;
@@ -94,7 +94,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lc_public_mock_consumer_service_init(&service);
   lc_public_mock_source_init(&source);
   lc_public_mock_sink_init(&sink);
-  memset(&json, 0, sizeof(json));
+  memset(&source_for_update, 0, sizeof(source_for_update));
   memset(&acquire_req, 0, sizeof(acquire_req));
   memset(&describe_req, 0, sizeof(describe_req));
   memset(&get_opts, 0, sizeof(get_opts));
@@ -187,7 +187,8 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_ptr_equal(client.load_call.arg2, "key-2");
 
-  rc = lc_update(&client.pub, &update_req, &json, &update_res, &error);
+  rc = lc_update(&client.pub, &update_req, &source_for_update, &update_res,
+                 &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_mutate(&client.pub, &mutate_op, &mutate_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -359,7 +360,7 @@ static void test_lease_wrappers_delegate_full_public_surface(void **state) {
   lc_attachment_get_req attachment_get_req;
   lc_attachment_get_res attachment_get_res;
   lc_attachment_selector attachment_selector;
-  lc_json json;
+  lc_source source_for_update;
   lc_error error;
   int deleted;
   int deleted_count;
@@ -384,7 +385,7 @@ static void test_lease_wrappers_delegate_full_public_surface(void **state) {
   memset(&attachment_get_req, 0, sizeof(attachment_get_req));
   memset(&attachment_get_res, 0, sizeof(attachment_get_res));
   memset(&attachment_selector, 0, sizeof(attachment_selector));
-  memset(&json, 0, sizeof(json));
+  memset(&source_for_update, 0, sizeof(source_for_update));
   lc_error_init(&error);
   deleted = 0;
   deleted_count = 0;
@@ -397,7 +398,7 @@ static void test_lease_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_lease_save(&lease.pub, NULL, NULL, NULL, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_lease_update(&lease.pub, &json, &update_opts, &error);
+  rc = lc_lease_update(&lease.pub, &source_for_update, &update_opts, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_lease_mutate(&lease.pub, &mutate_req, &error);
   assert_int_equal(rc, LC_OK);
@@ -455,11 +456,9 @@ test_message_and_service_wrappers_delegate_full_public_surface(void **state) {
   lc_public_mock_lease lease;
   lc_public_mock_source source;
   lc_public_mock_sink sink;
-  lc_public_mock_json json;
   lc_public_mock_consumer_service service;
   lc_nack_req nack_req;
   lc_extend_req extend_req;
-  lc_json *json_out;
   lc_lease *state_out;
   lc_source *payload_out;
   size_t written;
@@ -471,7 +470,6 @@ test_message_and_service_wrappers_delegate_full_public_surface(void **state) {
   lc_public_mock_lease_init(&lease);
   lc_public_mock_source_init(&source);
   lc_public_mock_sink_init(&sink);
-  lc_public_mock_json_init(&json);
   lc_public_mock_consumer_service_init(&service);
   memset(&nack_req, 0, sizeof(nack_req));
   memset(&extend_req, 0, sizeof(extend_req));
@@ -479,8 +477,6 @@ test_message_and_service_wrappers_delegate_full_public_surface(void **state) {
 
   message.state_to_return = &lease.pub;
   message.payload_reader_to_return = &source.pub;
-  message.payload_json_to_return = &json.pub;
-  json_out = NULL;
   written = 0U;
 
   rc = lc_message_ack(&message.pub, &error);
@@ -493,9 +489,6 @@ test_message_and_service_wrappers_delegate_full_public_surface(void **state) {
   assert_ptr_equal(state_out, &lease.pub);
   payload_out = lc_message_payload(&message.pub);
   assert_ptr_equal(payload_out, &source.pub);
-  rc = lc_message_payload_json(&message.pub, &json_out, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_ptr_equal(json_out, &json.pub);
   rc = lc_message_rewind_payload(&message.pub, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_message_write_payload(&message.pub, &sink.pub, &written, &error);
@@ -507,7 +500,6 @@ test_message_and_service_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(message.extend_call.count, 1);
   assert_int_equal(message.state_call.count, 1);
   assert_int_equal(message.payload_reader_call.count, 1);
-  assert_int_equal(message.payload_json_call.count, 1);
   assert_int_equal(message.rewind_payload_call.count, 1);
   assert_int_equal(message.write_payload_call.count, 1);
 
@@ -533,23 +525,19 @@ test_message_and_service_wrappers_delegate_full_public_surface(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_stream_and_json_close_wrappers_delegate(void **state) {
+static void test_stream_close_wrappers_delegate(void **state) {
   lc_public_mock_source source;
   lc_public_mock_sink sink;
-  lc_public_mock_json json;
 
   (void)state;
   lc_public_mock_source_init(&source);
   lc_public_mock_sink_init(&sink);
-  lc_public_mock_json_init(&json);
 
   lc_source_close(&source.pub);
   lc_sink_close(&sink.pub);
-  lc_json_close(&json.pub);
 
   assert_int_equal(source.close_calls, 1);
   assert_int_equal(sink.close_calls, 1);
-  assert_int_equal(json.close_calls, 1);
 }
 
 int main(void) {
@@ -558,7 +546,7 @@ int main(void) {
       cmocka_unit_test(test_lease_wrappers_delegate_full_public_surface),
       cmocka_unit_test(
           test_message_and_service_wrappers_delegate_full_public_surface),
-      cmocka_unit_test(test_stream_and_json_close_wrappers_delegate),
+      cmocka_unit_test(test_stream_close_wrappers_delegate),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

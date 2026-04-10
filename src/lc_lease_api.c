@@ -478,7 +478,7 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
   return LC_OK;
 }
 
-int lc_lease_update_method(lc_lease *self, lc_json *json,
+int lc_lease_update_method(lc_lease *self, lc_source *src,
                            const lc_update_opts *opts, lc_error *error) {
   lc_lease_handle *lease;
   lc_engine_update_request engine_req;
@@ -487,9 +487,9 @@ int lc_lease_update_method(lc_lease *self, lc_json *json,
   lc_read_bridge bridge;
   int rc;
 
-  if (self == NULL || json == NULL) {
+  if (self == NULL || src == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "lease update requires self and json", NULL, NULL,
+                        "lease update requires self and src", NULL, NULL,
                         NULL);
   }
   lease = (lc_lease_handle *)self;
@@ -506,7 +506,7 @@ int lc_lease_update_method(lc_lease *self, lc_json *json,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  bridge.source = (lc_source *)json;
+  bridge.source = src;
   engine_req.namespace_name = lease->namespace_name;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;

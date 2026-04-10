@@ -71,43 +71,6 @@ static void mock_sink_close(lc_sink *self) {
   mock->close_calls += 1;
 }
 
-static size_t mock_json_read(lc_json *self, void *buffer, size_t count,
-                             lc_error *error) {
-  lc_public_mock_json *mock;
-  size_t remaining;
-  size_t copied;
-
-  (void)error;
-  mock = (lc_public_mock_json *)self;
-  mock->read_calls += 1;
-  if (mock->read_bytes == NULL || mock->read_offset >= mock->read_length) {
-    return 0U;
-  }
-  remaining = mock->read_length - mock->read_offset;
-  copied = remaining < count ? remaining : count;
-  memcpy(buffer, (const unsigned char *)mock->read_bytes + mock->read_offset,
-         copied);
-  mock->read_offset += copied;
-  return copied;
-}
-
-static int mock_json_reset(lc_json *self, lc_error *error) {
-  lc_public_mock_json *mock;
-
-  (void)error;
-  mock = (lc_public_mock_json *)self;
-  mock->reset_calls += 1;
-  mock->read_offset = 0U;
-  return LC_OK;
-}
-
-static void mock_json_close(lc_json *self) {
-  lc_public_mock_json *mock;
-
-  mock = (lc_public_mock_json *)self;
-  mock->close_calls += 1;
-}
-
 static int mock_consumer_service_run(lc_consumer_service *self,
                                      lc_error *error) {
   lc_public_mock_consumer_service *mock;
@@ -193,12 +156,12 @@ static int mock_lease_save(lc_lease *self, const lonejson_map *map,
   return mock->rc;
 }
 
-static int mock_lease_update(lc_lease *self, lc_json *json,
+static int mock_lease_update(lc_lease *self, lc_source *src,
                              const lc_update_opts *opts, lc_error *error) {
   lc_public_mock_lease *mock;
 
   mock = (lc_public_mock_lease *)self;
-  lc_public_mock_record(&mock->update_call, self, json, opts, error, NULL,
+  lc_public_mock_record(&mock->update_call, self, src, opts, error, NULL,
                         NULL);
   return mock->rc;
 }
@@ -371,19 +334,6 @@ static lc_source *mock_message_payload_reader(lc_message *self) {
   return mock->payload_reader_to_return;
 }
 
-static int mock_message_payload_json(lc_message *self, lc_json **out,
-                                     lc_error *error) {
-  lc_public_mock_message *mock;
-
-  mock = (lc_public_mock_message *)self;
-  lc_public_mock_record(&mock->payload_json_call, self, out, error, NULL, NULL,
-                        NULL);
-  if (out != NULL) {
-    *out = mock->payload_json_to_return;
-  }
-  return mock->rc;
-}
-
 static int mock_message_rewind_payload(lc_message *self, lc_error *error) {
   lc_public_mock_message *mock;
 
@@ -460,12 +410,12 @@ static int mock_client_load(lc_client *self, const char *key,
 }
 
 static int mock_client_update(lc_client *self, const lc_update_req *req,
-                              lc_json *json, lc_update_res *out,
+                              lc_source *src, lc_update_res *out,
                               lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->update_call, self, req, json, out, error, NULL);
+  lc_public_mock_record(&mock->update_call, self, req, src, out, error, NULL);
   return mock->rc;
 }
 
@@ -932,13 +882,6 @@ void lc_public_mock_sink_init(lc_public_mock_sink *mock) {
   mock->pub.close = mock_sink_close;
 }
 
-void lc_public_mock_json_init(lc_public_mock_json *mock) {
-  memset(mock, 0, sizeof(*mock));
-  mock->pub.read = mock_json_read;
-  mock->pub.reset = mock_json_reset;
-  mock->pub.close = mock_json_close;
-}
-
 void lc_public_mock_client_init(lc_public_mock_client *mock) {
   memset(mock, 0, sizeof(*mock));
   mock->rc = LC_OK;
@@ -1025,7 +968,6 @@ void lc_public_mock_message_init(lc_public_mock_message *mock) {
   mock->pub.extend = mock_message_extend;
   mock->pub.state = mock_message_state;
   mock->pub.payload_reader = mock_message_payload_reader;
-  mock->pub.payload_json = mock_message_payload_json;
   mock->pub.rewind_payload = mock_message_rewind_payload;
   mock->pub.write_payload = mock_message_write_payload;
   mock->pub.close = mock_message_close;

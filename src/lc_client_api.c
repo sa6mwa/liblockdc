@@ -404,7 +404,7 @@ int lc_client_load_method(lc_client *self, const char *key,
 }
 
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
-                            lc_json *json, lc_update_res *out,
+                            lc_source *src, lc_update_res *out,
                             lc_error *error) {
   lc_client_handle *client;
   lc_engine_update_request engine_req;
@@ -413,9 +413,9 @@ int lc_client_update_method(lc_client *self, const lc_update_req *req,
   lc_read_bridge bridge;
   int rc;
 
-  if (self == NULL || req == NULL || json == NULL || out == NULL) {
+  if (self == NULL || req == NULL || src == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "update requires self, req, json, and out", NULL, NULL,
+                        "update requires self, req, src, and out", NULL, NULL,
                         NULL);
   }
   client = (lc_client_handle *)self;
@@ -432,7 +432,7 @@ int lc_client_update_method(lc_client *self, const lc_update_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  bridge.source = (lc_source *)json;
+  bridge.source = src;
   engine_req.namespace_name = req->lease.namespace_name;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;

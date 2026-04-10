@@ -23,8 +23,7 @@ The library itself is delivered as:
 - mTLS client authentication through a combined `client.pem` bundle
 - HTTP/1.1 and HTTP/2 transport through bundled `libcurl` and `nghttp2`
 - Unix domain socket transport support for local `mem://` deployments
-- stream-oriented JSON input with `lc_json`
-- stream-oriented payload upload and download with `lc_source` and `lc_sink`
+- stream-oriented state and payload upload/download with `lc_source` and `lc_sink`
 - lease, queue, attachment, and management APIs
 - managed consumer support
 - integrated SDK logging through `libpslog`
@@ -181,8 +180,8 @@ The public API is intentionally handle-oriented rather than a flat RPC wrapper.
   - lease and state handle
 - `lc_message`
   - queue delivery handle
-- `lc_json`, `lc_source`, `lc_sink`
-  - streaming JSON and payload abstractions
+- `lc_source`, `lc_sink`
+  - streaming state and payload abstractions
 
 Typical flow:
 
@@ -227,11 +226,10 @@ Acquire a lease and update JSON state:
 lc_acquire_req acquire;
 lc_release_req release;
 lc_lease *lease;
-lc_json json;
+lc_source *src;
 
 lc_acquire_req_init(&acquire);
 lc_release_req_init(&release);
-lc_json_init(&json);
 
 acquire.key = "orders/42";
 acquire.owner = "payments";
@@ -244,12 +242,22 @@ if (client->acquire(client, &acquire, &lease, &error) != LC_OK) {
   return 1;
 }
 
-lc_json_set_static(&json, "{\"status\":\"processing\"}");
+if (lc_source_from_memory("{\"status\":\"processing\"}",
+                          strlen("{\"status\":\"processing\"}"),
+                          &src, &error) != LC_OK) {
+  fprintf(stderr, "source failed: %s\n", error.message);
+  lc_error_cleanup(&error);
+  lease->close(lease);
+  client->close(client);
+  return 1;
+}
 
-if (lease->update(lease, &json, &error) != LC_OK) {
+if (lease->update(lease, src, NULL, &error) != LC_OK) {
   fprintf(stderr, "update failed: %s\n", error.message);
   lc_error_cleanup(&error);
 }
+
+lc_source_close(src);
 
 if (lease->release(lease, &release, &error) != LC_OK) {
   fprintf(stderr, "release failed: %s\n", error.message);

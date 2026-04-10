@@ -31,16 +31,6 @@ typedef struct lc_public_mock_sink {
   size_t last_write_count;
 } lc_public_mock_sink;
 
-typedef struct lc_public_mock_json {
-  lc_json pub;
-  int close_calls;
-  int reset_calls;
-  int read_calls;
-  const void *read_bytes;
-  size_t read_length;
-  size_t read_offset;
-} lc_public_mock_json;
-
 typedef struct lc_public_mock_consumer_service {
   lc_consumer_service pub;
   int rc;
@@ -80,14 +70,12 @@ typedef struct lc_public_mock_message {
   int rc;
   lc_lease *state_to_return;
   lc_source *payload_reader_to_return;
-  lc_json *payload_json_to_return;
   size_t payload_written;
   lc_public_mock_call ack_call;
   lc_public_mock_call nack_call;
   lc_public_mock_call extend_call;
   lc_public_mock_call state_call;
   lc_public_mock_call payload_reader_call;
-  lc_public_mock_call payload_json_call;
   lc_public_mock_call rewind_payload_call;
   lc_public_mock_call write_payload_call;
   int close_calls;
@@ -151,7 +139,6 @@ typedef struct lc_public_mock_client {
 
 void lc_public_mock_source_init(lc_public_mock_source *mock);
 void lc_public_mock_sink_init(lc_public_mock_sink *mock);
-void lc_public_mock_json_init(lc_public_mock_json *mock);
 void lc_public_mock_client_init(lc_public_mock_client *mock);
 void lc_public_mock_lease_init(lc_public_mock_lease *mock);
 void lc_public_mock_message_init(lc_public_mock_message *mock);

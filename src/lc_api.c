@@ -21,9 +21,9 @@ int lc_load(lc_client *client, const char *key, const lonejson_map *map,
   return client->load(client, key, map, dst, parse_options, opts, out, error);
 }
 
-int lc_update(lc_client *client, const lc_update_req *req, lc_json *json,
+int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error) {
-  return client->update(client, req, json, out, error);
+  return client->update(client, req, src, out, error);
 }
 
 int lc_mutate(lc_client *client, const lc_mutate_op *req, lc_mutate_res *out,
@@ -251,9 +251,10 @@ int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
   return lease->save(lease, map, src, write_options, error);
 }
 
-int lc_lease_update(lc_lease *lease, lc_json *json, const lc_update_opts *opts,
+int lc_lease_update(lc_lease *lease, lc_source *src,
+                    const lc_update_opts *opts,
                     lc_error *error) {
-  return lease->update(lease, json, opts, error);
+  return lease->update(lease, src, opts, error);
 }
 
 int lc_lease_mutate(lc_lease *lease, const lc_mutate_req *req,
@@ -341,16 +342,6 @@ lc_source *lc_message_payload(lc_message *message) {
   return message->payload_reader(message);
 }
 
-int lc_message_payload_json(lc_message *message, lc_json **out,
-                            lc_error *error) {
-  if (message == NULL || out == NULL || message->payload_json == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "message payload_json requires message and out", NULL,
-                        NULL, NULL);
-  }
-  return message->payload_json(message, out, error);
-}
-
 int lc_message_rewind_payload(lc_message *message, lc_error *error) {
   if (message == NULL || message->rewind_payload == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -413,12 +404,6 @@ void lc_source_close(lc_source *source) {
 void lc_sink_close(lc_sink *sink) {
   if (sink != NULL) {
     sink->close(sink);
-  }
-}
-
-void lc_json_close(lc_json *json) {
-  if (json != NULL) {
-    json->close(json);
   }
 }
 

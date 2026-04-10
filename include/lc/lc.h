@@ -17,8 +17,7 @@ typedef struct lc_lease lc_lease;
 typedef struct lc_message lc_message;
 /** Opaque managed queue consumer service. */
 typedef struct lc_consumer_service lc_consumer_service;
-/** Opaque JSON input stream used for large state updates. */
-typedef struct lc_json lc_json;
+/** Opaque raw JSON input stream used for large state updates. */
 /** Opaque byte source used for uploads and streamed request bodies. */
 typedef struct lc_source lc_source;
 /** Opaque byte sink used for downloads and streamed response bodies. */
@@ -129,19 +128,6 @@ struct lc_source {
 struct lc_sink {
   int (*write)(lc_sink *self, const void *bytes, size_t count, lc_error *error);
   void (*close)(lc_sink *self);
-  void *impl;
-};
-
-/**
- * Rewindable JSON source used for streamed state updates.
- *
- * This is the preferred input type for large JSON documents that must not be
- * fully materialized in memory.
- */
-struct lc_json {
-  size_t (*read)(lc_json *self, void *buffer, size_t count, lc_error *error);
-  int (*reset)(lc_json *self, lc_error *error);
-  void (*close)(lc_json *self);
   void *impl;
 };
 
@@ -1183,7 +1169,8 @@ struct lc_lease {
    * Use this for large JSON payloads. `opts` may be `NULL` for default update
    * behavior. On success, `self->version` and `self->state_etag` are refreshed.
    */
-  int (*update)(lc_lease *self, lc_json *json, const lc_update_opts *opts,
+  int (*update)(lc_lease *self, lc_source *src,
+                const lc_update_opts *opts,
                 lc_error *error);
   /**
    * Applies one or more server-side mutations to the current state.
@@ -1329,14 +1316,6 @@ struct lc_message {
    * `reset()`.
    */
   lc_source *(*payload_reader)(lc_message *self);
-  /**
-   * Transfers the payload source into a rewindable JSON stream.
-   *
-   * Use this when the dequeue payload is itself JSON and you want to parse it
-   * through lonejson, including spool-backed fields for very large strings or
-   * byte arrays. After success, the message no longer owns the payload source.
-   */
-  int (*payload_json)(lc_message *self, lc_json **out, lc_error *error);
   /** Rewinds the payload stream when the underlying source supports it. */
   int (*rewind_payload)(lc_message *self, lc_error *error);
   /** Copies the payload stream into `dst`. */
@@ -1476,7 +1455,7 @@ struct lc_client {
               void *dst, const lonejson_parse_options *parse_options,
               const lc_get_opts *opts, lc_get_res *out, lc_error *error);
   /** Updates an existing lease reference from a streamed JSON source. */
-  int (*update)(lc_client *self, const lc_update_req *req, lc_json *json,
+  int (*update)(lc_client *self, const lc_update_req *req, lc_source *src,
                 lc_update_res *out, lc_error *error);
   /** Applies one or more server-side mutations to an existing lease reference.
    */
@@ -1769,15 +1748,6 @@ int lc_sink_memory_bytes(lc_sink *sink, const void **bytes, size_t *length,
 /** Copies all bytes from a source into a sink. */
 int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error);
 
-/** Creates a rewindable JSON stream from a UTF-8 JSON string. */
-int lc_json_from_string(const char *json_text, lc_json **out, lc_error *error);
-/** Creates a rewindable JSON stream from a file path. */
-int lc_json_from_file(const char *path, lc_json **out, lc_error *error);
-/** Creates a rewindable JSON stream from a file descriptor. */
-int lc_json_from_fd(int fd, lc_json **out, lc_error *error);
-/** Adapts a generic source into a JSON stream and takes ownership of the source
- * handle. */
-int lc_json_from_source(lc_source *source, lc_json **out, lc_error *error);
 /** Closes and frees a client handle. */
 void lc_client_close(lc_client *client);
 /** Closes and frees a lease handle. */
@@ -1788,8 +1758,6 @@ void lc_message_close(lc_message *message);
 void lc_source_close(lc_source *source);
 /** Closes and frees a sink. */
 void lc_sink_close(lc_sink *sink);
-/** Closes and frees a JSON source. */
-void lc_json_close(lc_json *json);
 
 /** Cleanup helpers for responses and metadata structs that own heap memory. */
 void lc_describe_res_cleanup(lc_describe_res *response);
@@ -1840,8 +1808,8 @@ int lc_get(lc_client *client, const char *key, const lc_get_opts *opts,
 int lc_load(lc_client *client, const char *key, const lonejson_map *map,
             void *dst, const lonejson_parse_options *parse_options,
             const lc_get_opts *opts, lc_get_res *out, lc_error *error);
-/** Updates a lease reference from a streamed JSON source. */
-int lc_update(lc_client *client, const lc_update_req *req, lc_json *json,
+/** Updates a lease reference from a streamed source. */
+int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error);
 /** Applies one or more server-side mutations to a lease reference. */
 int lc_mutate(lc_client *client, const lc_mutate_op *req, lc_mutate_res *out,
@@ -1994,8 +1962,9 @@ int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
  */
 int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
                   const lonejson_write_options *write_options, lc_error *error);
-/** Streams a replacement JSON state document into a bound lease. */
-int lc_lease_update(lc_lease *lease, lc_json *json, const lc_update_opts *opts,
+/** Streams a replacement state document into a bound lease. */
+int lc_lease_update(lc_lease *lease, lc_source *src,
+                    const lc_update_opts *opts,
                     lc_error *error);
 /** Applies server-side mutations to the current state of a bound lease. */
 int lc_lease_mutate(lc_lease *lease, const lc_mutate_req *req, lc_error *error);
@@ -2048,16 +2017,6 @@ int lc_message_extend(lc_message *message, const lc_extend_req *req,
 lc_lease *lc_message_state(lc_message *message);
 /** Returns the rewindable payload reader owned by the message handle. */
 lc_source *lc_message_payload(lc_message *message);
-/**
- * Transfers the payload source into a rewindable JSON stream.
- *
- * Use this when the dequeue payload is itself JSON and you want to parse it
- * through lonejson, including spool-backed fields for very large strings or
- * byte arrays. Ownership of the payload source moves into `out`; the message
- * no longer owns it after success.
- */
-int lc_message_payload_json(lc_message *message, lc_json **out,
-                            lc_error *error);
 /** Rewinds a bound message payload so it can be consumed again. */
 int lc_message_rewind_payload(lc_message *message, lc_error *error);
 /** Copies a bound message payload into `dst`. */
