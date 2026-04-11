@@ -66,6 +66,23 @@ if(TARGET lc_example_curl_fetch_into_lockd)
   )
 endif()
 
+if(TARGET lc_example_local_mutate)
+  add_test(NAME lc_example_smoke_local_mutate
+    COMMAND $<TARGET_FILE:lc_example_local_mutate>
+      lc-e2e-local-mutate
+      /kind="example-local-mutate"
+      /counter=1
+      time:/ts=NOW
+      textfile:/note=${CMAKE_SOURCE_DIR}/examples/data/state_stream_input.json
+  )
+  set_tests_properties(lc_example_smoke_local_mutate PROPERTIES
+    LABELS "e2e;examples"
+    PASS_REGULAR_EXPRESSION "\"kind\":\"example-local-mutate\""
+    RUN_SERIAL TRUE
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+endif()
+
 if(TARGET lc_example_startconsumer)
   add_test(NAME lc_example_smoke_startconsumer
     COMMAND $<TARGET_FILE:lc_example_startconsumer>

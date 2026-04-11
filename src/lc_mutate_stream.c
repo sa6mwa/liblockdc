@@ -730,6 +730,9 @@ static lonejson_status lc_ms_visit_buffer_append(char **buffer, size_t *length,
   if (len == 0U) {
     return LONEJSON_STATUS_OK;
   }
+  if (*buffer == NULL && *capacity != 0U) {
+    *capacity = 0U;
+  }
   if (*length + len + 1U > *capacity) {
     next_capacity = *capacity == 0U ? 32U : *capacity * 2U;
     while (next_capacity < *length + len + 1U) {
@@ -960,6 +963,7 @@ static lonejson_status lc_ms_visit_object_key_begin(void *user,
   frame->pending_key = NULL;
   ctx->key_buffer = NULL;
   ctx->key_len = 0U;
+  ctx->key_cap = 0U;
   return LONEJSON_STATUS_OK;
 }
 

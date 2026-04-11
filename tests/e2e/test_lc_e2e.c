@@ -39,6 +39,19 @@ static void save_json_text_or_die(lc_lease *lease, const char *json_text,
   assert_lc_ok(rc, error);
 }
 
+static void write_temp_file_or_die(char *template_path,
+                                   const unsigned char *bytes, size_t length) {
+  int fd;
+  FILE *fp;
+
+  fd = mkstemp(template_path);
+  assert_true(fd >= 0);
+  fp = fdopen(fd, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fwrite(bytes, 1U, length, fp), (int)length);
+  assert_int_equal(fclose(fp), 0);
+}
+
 static const char *env_or_default(const char *name, const char *fallback) {
   const char *value;
 
@@ -136,6 +149,73 @@ static int buffer_contains(const void *bytes, size_t length,
     }
   }
   return 0;
+}
+
+static void assert_local_mutate_file_variants(lc_lease *lease,
+                                              const char *text_path,
+                                              const char *binary_path,
+                                              lc_error *error) {
+  const char *mutations[8];
+  lc_mutate_local_req mutate_req;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  char text_mutation[512];
+  char base64_mutation[512];
+  char auto_text_mutation[512];
+  char auto_bin_mutation[512];
+  int rc;
+
+  lc_mutate_local_req_init(&mutate_req);
+  lc_get_opts_init(&get_opts);
+  memset(&get_res, 0, sizeof(get_res));
+  mutate_req.file_value_base_dir = NULL;
+
+  mutations[0] = "/filename=\"blob.txt\"";
+  mutations[1] = "/counter=2";
+  mutations[2] = "rm:/remove_me";
+  mutations[3] = "time:/ts=NOW";
+  snprintf(text_mutation, sizeof(text_mutation), "textfile:/text_blob=%s",
+           text_path);
+  mutations[4] = text_mutation;
+  snprintf(base64_mutation, sizeof(base64_mutation),
+           "base64file:/bin_blob=%s", binary_path);
+  mutations[5] = base64_mutation;
+  snprintf(auto_text_mutation, sizeof(auto_text_mutation),
+           "file:/auto_text=%s", text_path);
+  mutations[6] = auto_text_mutation;
+  snprintf(auto_bin_mutation, sizeof(auto_bin_mutation), "file:/auto_bin=%s",
+           binary_path);
+  mutations[7] = auto_bin_mutation;
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 8U;
+  rc = lease->mutate_local(lease, &mutate_req, error);
+  assert_lc_ok(rc, error);
+  assert_non_null(lease->state_etag);
+
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  rc = lease->get(lease, sink, &get_opts, &get_res, error);
+  assert_lc_ok(rc, error);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  assert_lc_ok(rc, error);
+  assert_true(buffer_contains(bytes, length, "\"filename\":\"blob.txt\""));
+  assert_true(buffer_contains(bytes, length, "\"counter\":3"));
+  assert_true(buffer_contains(bytes, length,
+                              "\"text_blob\":\"hello\\n\\\"quoted\\\"\""));
+  assert_true(buffer_contains(bytes, length, "\"bin_blob\":\"AAECYQ==\""));
+  assert_true(buffer_contains(bytes, length,
+                              "\"auto_text\":\"hello\\n\\\"quoted\\\"\""));
+  assert_true(buffer_contains(bytes, length, "\"auto_bin\":\"AAECYQ==\""));
+  assert_true(buffer_contains(bytes, length, "\"ts\":\""));
+  assert_false(buffer_contains(bytes, length, "\"remove_me\""));
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
 }
 
 static void make_unique_name(const char *prefix, char *buffer,
@@ -636,19 +716,11 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   const char *bundle_path;
   lc_client *client;
   lc_lease *lease;
-  lc_sink *sink;
   lc_error error;
   lc_acquire_req acquire_req;
-  lc_get_res get_res;
-  lc_mutate_local_req mutate_req;
-  const void *bytes;
-  size_t length;
   char key[96];
-  char file_template[] = "/tmp/liblockdc-local-mutate-XXXXXX";
-  int fd;
-  FILE *fp;
-  const char *mutations[2];
-  char mutation_buffer[512];
+  char text_template[] = "/tmp/liblockdc-local-mutate-text-XXXXXX";
+  char binary_template[] = "/tmp/liblockdc-local-mutate-bin-XXXXXX";
   int rc;
 
   (void)state;
@@ -661,20 +733,13 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
 
   client = NULL;
   lease = NULL;
-  sink = NULL;
-  bytes = NULL;
-  length = 0U;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
-  memset(&get_res, 0, sizeof(get_res));
-  lc_mutate_local_req_init(&mutate_req);
-
-  fd = mkstemp(file_template);
-  assert_true(fd >= 0);
-  fp = fdopen(fd, "wb");
-  assert_non_null(fp);
-  assert_int_equal(fwrite("hello\\nlockd", 1U, 11U, fp), 11);
-  assert_int_equal(fclose(fp), 0);
+  write_temp_file_or_die(text_template,
+                         (const unsigned char *)"hello\n\"quoted\"",
+                         sizeof("hello\n\"quoted\"") - 1U);
+  write_temp_file_or_die(binary_template,
+                         (const unsigned char[]){0x00, 0x01, 0x02, 'a'}, 4U);
 
   open_tcp_client(endpoint, bundle_path, &client, &error);
   make_unique_name("disk-local-mutate", key, sizeof(key));
@@ -685,34 +750,18 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(lease);
 
-  save_json_text_or_die(lease, "{\"kind\":\"e2e-local\"}", &error);
-
-  mutations[0] = "/filename=\"blob.txt\"";
-  snprintf(mutation_buffer, sizeof(mutation_buffer), "textfile:/blob=%s",
-           file_template);
-  mutations[1] = mutation_buffer;
-  mutate_req.mutations = mutations;
-  mutate_req.mutation_count = 2U;
-  rc = lease->mutate_local(lease, &mutate_req, &error);
-  assert_lc_ok(rc, &error);
-  assert_non_null(lease->state_etag);
-
-  rc = lc_sink_to_memory(&sink, &error);
-  assert_lc_ok(rc, &error);
-  rc = lease->get(lease, sink, NULL, &get_res, &error);
-  assert_lc_ok(rc, &error);
-  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
-  assert_lc_ok(rc, &error);
-  assert_true(buffer_contains(bytes, length, "\"filename\":\"blob.txt\""));
-  assert_true(buffer_contains(bytes, length, "\"blob\":"));
+  save_json_text_or_die(
+      lease, "{\"kind\":\"e2e-local\",\"counter\":1,\"remove_me\":true}",
+      &error);
+  assert_local_mutate_file_variants(lease, text_template, binary_template,
+                                    &error);
 
   rc = lease->release(lease, NULL, &error);
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  unlink(file_template);
-  lc_sink_close(sink);
-  lc_get_res_cleanup(&get_res);
+  unlink(text_template);
+  unlink(binary_template);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
@@ -722,19 +771,11 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
   const char *bundle_path;
   lc_client *client;
   lc_lease *lease;
-  lc_sink *sink;
   lc_error error;
   lc_acquire_req acquire_req;
-  lc_get_res get_res;
-  lc_mutate_local_req mutate_req;
-  const void *bytes;
-  size_t length;
   char key[96];
-  char file_template[] = "/tmp/liblockdc-s3-local-mutate-XXXXXX";
-  int fd;
-  FILE *fp;
-  const char *mutations[2];
-  char mutation_buffer[512];
+  char text_template[] = "/tmp/liblockdc-s3-local-mutate-text-XXXXXX";
+  char binary_template[] = "/tmp/liblockdc-s3-local-mutate-bin-XXXXXX";
   int rc;
 
   (void)state;
@@ -746,20 +787,13 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
 
   client = NULL;
   lease = NULL;
-  sink = NULL;
-  bytes = NULL;
-  length = 0U;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
-  memset(&get_res, 0, sizeof(get_res));
-  lc_mutate_local_req_init(&mutate_req);
-
-  fd = mkstemp(file_template);
-  assert_true(fd >= 0);
-  fp = fdopen(fd, "wb");
-  assert_non_null(fp);
-  assert_int_equal(fwrite("hello\\nlockd", 1U, 11U, fp), 11);
-  assert_int_equal(fclose(fp), 0);
+  write_temp_file_or_die(text_template,
+                         (const unsigned char *)"hello\n\"quoted\"",
+                         sizeof("hello\n\"quoted\"") - 1U);
+  write_temp_file_or_die(binary_template,
+                         (const unsigned char[]){0x00, 0x01, 0x02, 'a'}, 4U);
 
   open_tcp_client(endpoint, bundle_path, &client, &error);
   make_unique_name("s3-local-mutate", key, sizeof(key));
@@ -770,34 +804,18 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(lease);
 
-  save_json_text_or_die(lease, "{\"kind\":\"e2e-local\"}", &error);
-
-  mutations[0] = "/filename=\"blob.txt\"";
-  snprintf(mutation_buffer, sizeof(mutation_buffer), "textfile:/blob=%s",
-           file_template);
-  mutations[1] = mutation_buffer;
-  mutate_req.mutations = mutations;
-  mutate_req.mutation_count = 2U;
-  rc = lease->mutate_local(lease, &mutate_req, &error);
-  assert_lc_ok(rc, &error);
-  assert_non_null(lease->state_etag);
-
-  rc = lc_sink_to_memory(&sink, &error);
-  assert_lc_ok(rc, &error);
-  rc = lease->get(lease, sink, NULL, &get_res, &error);
-  assert_lc_ok(rc, &error);
-  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
-  assert_lc_ok(rc, &error);
-  assert_true(buffer_contains(bytes, length, "\"filename\":\"blob.txt\""));
-  assert_true(buffer_contains(bytes, length, "\"blob\":"));
+  save_json_text_or_die(
+      lease, "{\"kind\":\"e2e-local\",\"counter\":1,\"remove_me\":true}",
+      &error);
+  assert_local_mutate_file_variants(lease, text_template, binary_template,
+                                    &error);
 
   rc = lease->release(lease, NULL, &error);
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  unlink(file_template);
-  lc_sink_close(sink);
-  lc_get_res_cleanup(&get_res);
+  unlink(text_template);
+  unlink(binary_template);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
