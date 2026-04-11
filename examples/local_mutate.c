@@ -1,5 +1,6 @@
 #include "lc/lc.h"
 
+#include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,11 +12,23 @@
 #define EXAMPLE_OWNER "example-local-mutate"
 
 static void print_usage(const char *argv0) {
-  fprintf(stderr,
-          "usage: %s KEY MUTATION [MUTATION...]\n"
-          "env: LOCKDC_URL LOCKDC_CLIENT_PEM LOCKDC_NAMESPACE LOCKDC_OWNER "
-          "LOCKDC_MUTATE_BASE_DIR\n",
+  fprintf(stderr, "usage: %s -k KEY -m MUTATION [-m MUTATION...] [options]\n",
           argv0 != NULL ? argv0 : "lc_example_local_mutate");
+  fputs("options:\n", stderr);
+  fputs("  -k KEY        state key to mutate (required)\n", stderr);
+  fputs("  -m MUTATION   lql mutate expression (required, repeatable)\n",
+        stderr);
+  fputs("  -u URL        primary lockd endpoint\n", stderr);
+  fputs("  -f URL        fallback lockd endpoint\n", stderr);
+  fputs("  -c FILE       client PEM bundle\n", stderr);
+  fputs("  -n NAME       default namespace\n", stderr);
+  fputs("  -o OWNER      lease owner\n", stderr);
+  fputs("  -b DIR        base dir for file:/textfile:/base64file:\n", stderr);
+  fputs("  -h            show help\n", stderr);
+  fputs("defaults: LOCKDC_URL/LOCKDC_E2E_DISK_ENDPOINT,\n", stderr);
+  fputs("          LOCKDC_FALLBACK_URL, LOCKDC_CLIENT_PEM,\n", stderr);
+  fputs("          LOCKDC_NAMESPACE, LOCKDC_OWNER,\n", stderr);
+  fputs("          LOCKDC_MUTATE_BASE_DIR\n", stderr);
 }
 
 static int fail_with_error(const char *step, lc_error *error) {
@@ -42,7 +55,10 @@ int main(int argc, char **argv) {
   const char *base_dir;
   const char *endpoints[2];
   size_t endpoint_count;
-  const char *const *mutations;
+  const char **mutations;
+  size_t mutation_count;
+  size_t mutation_capacity;
+  const char *key;
   lc_client_config config;
   lc_client *client;
   lc_lease *lease;
@@ -53,37 +69,120 @@ int main(int argc, char **argv) {
   lc_get_opts get_opts;
   lc_get_res get_res;
   int rc;
+  int opt;
 
-  if (argc < 3) {
+  endpoint = NULL;
+  fallback_endpoint = NULL;
+  client_pem = NULL;
+  namespace_name = NULL;
+  owner = NULL;
+  base_dir = NULL;
+  key = NULL;
+  mutations = NULL;
+  mutation_count = 0U;
+  mutation_capacity = 0U;
+
+  opterr = 0;
+  while ((opt = getopt(argc, argv, "k:m:u:f:c:n:o:b:h")) != -1) {
+    switch (opt) {
+    case 'k':
+      key = optarg;
+      break;
+    case 'm':
+      if (mutation_count == mutation_capacity) {
+        size_t next_capacity;
+        const char **next_mutations;
+        next_capacity = mutation_capacity == 0U ? 4U : mutation_capacity * 2U;
+        next_mutations = (const char **)realloc(
+            mutations, next_capacity * sizeof(*next_mutations));
+        if (next_mutations == NULL) {
+          fprintf(stderr, "out of memory\n");
+          free(mutations);
+          return 1;
+        }
+        mutations = next_mutations;
+        mutation_capacity = next_capacity;
+      }
+      mutations[mutation_count++] = optarg;
+      break;
+    case 'u':
+      endpoint = optarg;
+      break;
+    case 'f':
+      fallback_endpoint = optarg;
+      break;
+    case 'c':
+      client_pem = optarg;
+      break;
+    case 'n':
+      namespace_name = optarg;
+      break;
+    case 'o':
+      owner = optarg;
+      break;
+    case 'b':
+      base_dir = optarg;
+      break;
+    case 'h':
+      print_usage(argv[0]);
+      free(mutations);
+      return 0;
+    default:
+      print_usage(argv[0]);
+      free(mutations);
+      return 2;
+    }
+  }
+
+  if (key == NULL || mutation_count == 0U) {
     print_usage(argv[0]);
+    free(mutations);
     return 2;
   }
 
-  endpoint = getenv("LOCKDC_URL");
-  disk_endpoint = getenv("LOCKDC_E2E_DISK_ENDPOINT");
-  fallback_endpoint = getenv("LOCKDC_FALLBACK_URL");
-  client_pem = getenv("LOCKDC_CLIENT_PEM");
-  namespace_name = getenv("LOCKDC_NAMESPACE");
-  owner = getenv("LOCKDC_OWNER");
-  base_dir = getenv("LOCKDC_MUTATE_BASE_DIR");
+  if (optind != argc) {
+    print_usage(argv[0]);
+    free(mutations);
+    return 2;
+  }
+
   if (endpoint == NULL || endpoint[0] == '\0') {
+    endpoint = getenv("LOCKDC_URL");
+  }
+  if (endpoint == NULL || endpoint[0] == '\0') {
+    disk_endpoint = getenv("LOCKDC_E2E_DISK_ENDPOINT");
     if (disk_endpoint != NULL && disk_endpoint[0] != '\0') {
       endpoint = disk_endpoint;
     } else {
       endpoint = EXAMPLE_ENDPOINT;
     }
-    if (fallback_endpoint == NULL || fallback_endpoint[0] == '\0') {
-      fallback_endpoint = EXAMPLE_FALLBACK_ENDPOINT;
-    }
+  }
+  if (fallback_endpoint == NULL || fallback_endpoint[0] == '\0') {
+    fallback_endpoint = getenv("LOCKDC_FALLBACK_URL");
+  }
+  if (fallback_endpoint == NULL || fallback_endpoint[0] == '\0') {
+    fallback_endpoint = EXAMPLE_FALLBACK_ENDPOINT;
+  }
+  if (client_pem == NULL || client_pem[0] == '\0') {
+    client_pem = getenv("LOCKDC_CLIENT_PEM");
   }
   if (client_pem == NULL || client_pem[0] == '\0') {
     client_pem = EXAMPLE_CLIENT_PEM;
   }
   if (namespace_name == NULL || namespace_name[0] == '\0') {
+    namespace_name = getenv("LOCKDC_NAMESPACE");
+  }
+  if (namespace_name == NULL || namespace_name[0] == '\0') {
     namespace_name = EXAMPLE_NAMESPACE;
   }
   if (owner == NULL || owner[0] == '\0') {
+    owner = getenv("LOCKDC_OWNER");
+  }
+  if (owner == NULL || owner[0] == '\0') {
     owner = EXAMPLE_OWNER;
+  }
+  if (base_dir == NULL || base_dir[0] == '\0') {
+    base_dir = getenv("LOCKDC_MUTATE_BASE_DIR");
   }
   if (base_dir == NULL || base_dir[0] == '\0') {
     base_dir = ".";
@@ -115,10 +214,11 @@ int main(int argc, char **argv) {
   if (rc != LC_OK) {
     rc = fail_with_error("lc_client_open", &error);
     lc_error_cleanup(&error);
+    free(mutations);
     return rc;
   }
 
-  acquire_req.key = argv[1];
+  acquire_req.key = key;
   acquire_req.owner = owner;
   acquire_req.ttl_seconds = 60L;
   rc = client->acquire(client, &acquire_req, &lease, &error);
@@ -126,12 +226,12 @@ int main(int argc, char **argv) {
     rc = fail_with_error("client->acquire", &error);
     client->close(client);
     lc_error_cleanup(&error);
+    free(mutations);
     return rc;
   }
 
-  mutations = (const char *const *)&argv[2];
   mutate_req.mutations = mutations;
-  mutate_req.mutation_count = (size_t)(argc - 2);
+  mutate_req.mutation_count = mutation_count;
   mutate_req.file_value_base_dir = base_dir;
   rc = lease->mutate_local(lease, &mutate_req, &error);
   if (rc != LC_OK) {
@@ -139,6 +239,7 @@ int main(int argc, char **argv) {
     lease->close(lease);
     client->close(client);
     lc_error_cleanup(&error);
+    free(mutations);
     return rc;
   }
 
@@ -148,6 +249,7 @@ int main(int argc, char **argv) {
     lease->close(lease);
     client->close(client);
     lc_error_cleanup(&error);
+    free(mutations);
     return rc;
   }
 
@@ -158,6 +260,7 @@ int main(int argc, char **argv) {
     lease->close(lease);
     client->close(client);
     lc_error_cleanup(&error);
+    free(mutations);
     return rc;
   }
 
@@ -170,10 +273,12 @@ int main(int argc, char **argv) {
     lease->close(lease);
     client->close(client);
     lc_error_cleanup(&error);
+    free(mutations);
     return rc;
   }
 
   client->close(client);
   lc_error_cleanup(&error);
+  free(mutations);
   return 0;
 }

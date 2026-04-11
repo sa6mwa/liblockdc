@@ -69,11 +69,11 @@ endif()
 if(TARGET lc_example_local_mutate)
   add_test(NAME lc_example_smoke_local_mutate
     COMMAND $<TARGET_FILE:lc_example_local_mutate>
-      lc-e2e-local-mutate
-      /kind="example-local-mutate"
-      /counter=1
-      time:/ts=NOW
-      textfile:/note=${CMAKE_SOURCE_DIR}/examples/data/state_stream_input.json
+      -k lc-e2e-local-mutate
+      -m /kind="example-local-mutate"
+      -m /counter=1
+      -m time:/ts=NOW
+      -m textfile:/note=${CMAKE_SOURCE_DIR}/examples/data/state_stream_input.json
   )
   set_tests_properties(lc_example_smoke_local_mutate PROPERTIES
     LABELS "e2e;examples"
