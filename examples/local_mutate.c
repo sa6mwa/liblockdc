@@ -18,17 +18,18 @@ static void print_usage(const char *argv0) {
   fputs("  -k KEY        state key to mutate (required)\n", stderr);
   fputs("  -m MUTATION   lql mutate expression (required, repeatable)\n",
         stderr);
-  fputs("  -u URL        primary lockd endpoint\n", stderr);
-  fputs("  -f URL        fallback lockd endpoint\n", stderr);
-  fputs("  -c FILE       client PEM bundle\n", stderr);
-  fputs("  -n NAME       default namespace\n", stderr);
-  fputs("  -o OWNER      lease owner\n", stderr);
-  fputs("  -b DIR        base dir for file:/textfile:/base64file:\n", stderr);
+  fputs("  -u URL        primary lockd endpoint (default: https://localhost:19441)\n",
+        stderr);
+  fputs("  -f URL        fallback lockd endpoint (default: https://localhost:19442)\n",
+        stderr);
+  fputs("  -c FILE       client PEM bundle (default: devenv/volumes/lockd-disk-a-config/client.pem)\n",
+        stderr);
+  fputs("  -n NAME       default namespace (default: default)\n", stderr);
+  fputs("  -o OWNER      lease owner (default: example-local-mutate)\n",
+        stderr);
+  fputs("  -b DIR        base dir for file:/textfile:/base64file: (default: .)\n",
+        stderr);
   fputs("  -h            show help\n", stderr);
-  fputs("defaults: LOCKDC_URL/LOCKDC_E2E_DISK_ENDPOINT,\n", stderr);
-  fputs("          LOCKDC_FALLBACK_URL, LOCKDC_CLIENT_PEM,\n", stderr);
-  fputs("          LOCKDC_NAMESPACE, LOCKDC_OWNER,\n", stderr);
-  fputs("          LOCKDC_MUTATE_BASE_DIR\n", stderr);
 }
 
 static int fail_with_error(const char *step, lc_error *error) {
@@ -47,7 +48,6 @@ static int fail_with_error(const char *step, lc_error *error) {
 
 int main(int argc, char **argv) {
   const char *endpoint;
-  const char *disk_endpoint;
   const char *fallback_endpoint;
   const char *client_pem;
   const char *namespace_name;
@@ -71,12 +71,12 @@ int main(int argc, char **argv) {
   int rc;
   int opt;
 
-  endpoint = NULL;
-  fallback_endpoint = NULL;
-  client_pem = NULL;
-  namespace_name = NULL;
-  owner = NULL;
-  base_dir = NULL;
+  endpoint = EXAMPLE_ENDPOINT;
+  fallback_endpoint = EXAMPLE_FALLBACK_ENDPOINT;
+  client_pem = EXAMPLE_CLIENT_PEM;
+  namespace_name = EXAMPLE_NAMESPACE;
+  owner = EXAMPLE_OWNER;
+  base_dir = ".";
   key = NULL;
   mutations = NULL;
   mutation_count = 0U;
@@ -144,48 +144,6 @@ int main(int argc, char **argv) {
     print_usage(argv[0]);
     free(mutations);
     return 2;
-  }
-
-  if (endpoint == NULL || endpoint[0] == '\0') {
-    endpoint = getenv("LOCKDC_URL");
-  }
-  if (endpoint == NULL || endpoint[0] == '\0') {
-    disk_endpoint = getenv("LOCKDC_E2E_DISK_ENDPOINT");
-    if (disk_endpoint != NULL && disk_endpoint[0] != '\0') {
-      endpoint = disk_endpoint;
-    } else {
-      endpoint = EXAMPLE_ENDPOINT;
-    }
-  }
-  if (fallback_endpoint == NULL || fallback_endpoint[0] == '\0') {
-    fallback_endpoint = getenv("LOCKDC_FALLBACK_URL");
-  }
-  if (fallback_endpoint == NULL || fallback_endpoint[0] == '\0') {
-    fallback_endpoint = EXAMPLE_FALLBACK_ENDPOINT;
-  }
-  if (client_pem == NULL || client_pem[0] == '\0') {
-    client_pem = getenv("LOCKDC_CLIENT_PEM");
-  }
-  if (client_pem == NULL || client_pem[0] == '\0') {
-    client_pem = EXAMPLE_CLIENT_PEM;
-  }
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
-    namespace_name = getenv("LOCKDC_NAMESPACE");
-  }
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
-    namespace_name = EXAMPLE_NAMESPACE;
-  }
-  if (owner == NULL || owner[0] == '\0') {
-    owner = getenv("LOCKDC_OWNER");
-  }
-  if (owner == NULL || owner[0] == '\0') {
-    owner = EXAMPLE_OWNER;
-  }
-  if (base_dir == NULL || base_dir[0] == '\0') {
-    base_dir = getenv("LOCKDC_MUTATE_BASE_DIR");
-  }
-  if (base_dir == NULL || base_dir[0] == '\0') {
-    base_dir = ".";
   }
 
   endpoints[0] = endpoint;
