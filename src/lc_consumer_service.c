@@ -66,6 +66,8 @@ struct lc_consumer_service_handle {
   lc_consumer_clone_client_fn clone_client_fn;
   lc_consumer_subscribe_fn subscribe_fn;
   lc_consumer_test_message_factory_fn test_message_factory_hook;
+  lc_consumer_test_delivery_cleanup_hook_fn test_delivery_cleanup_hook;
+  void *test_delivery_cleanup_hook_context;
   lc_consumer_worker_state *workers;
   size_t worker_count;
   pthread_mutex_t mutex;
@@ -92,6 +94,8 @@ static void *lc_consumer_delivery_handler_main(void *context);
 static void *lc_consumer_delivery_extend_main(void *context);
 static void
 lc_consumer_delivery_stop_extender(lc_consumer_delivery_bridge *bridge);
+static void lc_consumer_invoke_test_delivery_cleanup_hook(
+    lc_consumer_service_handle *service, lc_consumer_delivery_bridge *bridge);
 
 static void lc_consumer_timespec_add_ms(struct timespec *ts, long delay_ms) {
   if (ts == NULL || delay_ms <= 0L) {
@@ -147,6 +151,17 @@ lc_consumer_delivery_stop_extender(lc_consumer_delivery_bridge *bridge) {
     pthread_join(bridge->extend_thread, NULL);
     bridge->extend_thread_started = 0;
   }
+}
+
+static void lc_consumer_invoke_test_delivery_cleanup_hook(
+    lc_consumer_service_handle *service, lc_consumer_delivery_bridge *bridge) {
+  if (service == NULL || bridge == NULL ||
+      service->test_delivery_cleanup_hook == NULL) {
+    return;
+  }
+  service->test_delivery_cleanup_hook(
+      bridge->handler_thread_started, bridge->extend_thread_started,
+      bridge->message != NULL, service->test_delivery_cleanup_hook_context);
 }
 
 static void lc_consumer_request_cleanup(const lc_allocator *allocator,
@@ -761,6 +776,45 @@ static int lc_consumer_handle_failure(lc_consumer_service_handle *service,
   return LC_OK;
 }
 
+static int
+lc_consumer_report_delivery_failure(lc_consumer_service_handle *service,
+                                    const lc_consumer_worker_config *config,
+                                    const lc_error *cause, lc_error *error) {
+  lc_consumer_error event;
+
+  if (lc_consumer_is_stop_requested(service)) {
+    return LC_OK;
+  }
+  if (config->on_error != NULL) {
+    memset(&event, 0, sizeof(event));
+    event.name = config->name;
+    event.queue = config->request.queue;
+    event.with_state = config->with_state;
+    event.attempt = 0;
+    event.restart_in_ms = 0L;
+    event.cause = cause;
+    if (config->on_error(config->context, &event, error) != LC_OK) {
+      if (error->code == LC_OK) {
+        lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                     "consumer error handler stopped service", NULL, NULL,
+                     NULL);
+      }
+      return error->code;
+    }
+  }
+  {
+    pslog_field fields[5];
+
+    fields[0] = lc_log_str_field("consumer", config->name);
+    fields[1] = lc_log_str_field("queue", config->request.queue);
+    fields[2] = lc_log_bool_field("stateful", config->with_state);
+    fields[3] = pslog_i64("attempt", (pslog_int64)0);
+    fields[4] = lc_log_error_field("error", cause);
+    lc_log_warn(service->logger, "client.consumer.delivery.error", fields, 5U);
+  }
+  return LC_OK;
+}
+
 static void
 lc_consumer_delivery_meta_copy(lc_engine_dequeue_response *dst,
                                const lc_engine_dequeue_response *src) {
@@ -941,10 +995,15 @@ static int lc_consumer_delivery_end(void *context,
                           "consumer service stopping");
       bridge->pipe = NULL;
     }
+    if (bridge->extend_thread_started) {
+      lc_consumer_delivery_stop_extender(bridge);
+    }
     if (bridge->handler_thread_started) {
       pthread_join(bridge->handler_thread, NULL);
       bridge->handler_thread_started = 0;
     }
+    lc_consumer_invoke_test_delivery_cleanup_hook(bridge->worker->service,
+                                                  bridge);
     if (bridge->message != NULL) {
       bridge->message->close(bridge->message);
       bridge->message = NULL;
@@ -1035,12 +1094,10 @@ static void *lc_consumer_delivery_handler_main(void *context) {
       } else {
         final_rc = terminal_error.code != LC_OK ? terminal_error.code
                                                 : LC_ERR_TRANSPORT;
-        if (handler_error.code == LC_OK) {
-          lc_error_set(&handler_error, final_rc, terminal_error.http_status,
-                       terminal_error.message, terminal_error.detail,
-                       terminal_error.server_code,
-                       terminal_error.correlation_id);
-        }
+        lc_error_set(&handler_error, final_rc, terminal_error.http_status,
+                     terminal_error.message, terminal_error.detail,
+                     terminal_error.server_code,
+                     terminal_error.correlation_id);
       }
       lc_error_cleanup(&terminal_error);
     }
@@ -1072,7 +1129,7 @@ static void *lc_consumer_delivery_handler_main(void *context) {
       lc_error_cleanup(&terminal_error);
     }
   }
-  if (rc != LC_OK) {
+  if (rc != LC_OK || (rc == LC_OK && final_rc != LC_OK)) {
     bridge->handler_failed = 1;
     lc_consumer_copy_error(bridge->error, &handler_error,
                            handler_error.code != LC_OK ? handler_error.code
@@ -1287,8 +1344,8 @@ static void *lc_consumer_worker_main(void *context) {
         error.code != LC_OK) {
       lc_consumer_log_subscribe_error(service, &worker->config, &error);
       lc_consumer_invoke_stop(&worker->config, attempt, &error);
-      if (lc_consumer_handle_failure(service, &worker->config, &failures,
-                                     &error, &error) != LC_OK) {
+      if (lc_consumer_report_delivery_failure(service, &worker->config, &error,
+                                              &error) != LC_OK) {
         lc_consumer_set_fatal_error(service, error.code, &error,
                                     "consumer service stopped after failure");
         break;
@@ -1557,6 +1614,8 @@ int lc_client_new_consumer_service_method(
   service->clone_client_fn = lc_consumer_clone_client;
   service->subscribe_fn = NULL;
   service->test_message_factory_hook = NULL;
+  service->test_delivery_cleanup_hook = NULL;
+  service->test_delivery_cleanup_hook_context = NULL;
   *out = &service->pub;
   return LC_OK;
 }
@@ -1584,4 +1643,17 @@ void lc_consumer_service_set_test_message_factory_hook(
   }
   service = (lc_consumer_service_handle *)self;
   service->test_message_factory_hook = factory_fn;
+}
+
+void lc_consumer_service_set_test_delivery_cleanup_hook(
+    lc_consumer_service *self, lc_consumer_test_delivery_cleanup_hook_fn hook_fn,
+    void *context) {
+  lc_consumer_service_handle *service;
+
+  if (self == NULL) {
+    return;
+  }
+  service = (lc_consumer_service_handle *)self;
+  service->test_delivery_cleanup_hook = hook_fn;
+  service->test_delivery_cleanup_hook_context = context;
 }

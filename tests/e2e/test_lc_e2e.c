@@ -1299,7 +1299,8 @@ enum {
   E2E_CONSUMER_FIRST_DELIVERY_FAIL = 1,
   E2E_CONSUMER_FIRST_DELIVERY_DEFER = 2,
   E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE = 3,
-  E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR = 4
+  E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR = 4,
+  E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE = 5
 };
 
 static const e2e_consumer_backend e2e_backend_disk = {
@@ -1483,6 +1484,12 @@ static int e2e_consumer_handle(void *context, lc_consumer_message *delivery,
     return LC_ERR_TRANSPORT;
   }
   if (consumer_context->first_delivery_mode ==
+          E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE &&
+      handled_count <= 2) {
+    e2e_sleep_ms(1500L);
+    return LC_ERR_TRANSPORT;
+  }
+  if (consumer_context->first_delivery_mode ==
           E2E_CONSUMER_FIRST_DELIVERY_DEFER &&
       handled_count == 1) {
     lc_nack_req_init(&nack_req);
@@ -1600,12 +1607,10 @@ static void wait_for_consumer_handled(e2e_consumer_context *consumer_context,
   }
 }
 
-static void run_consumer_service_variant(const e2e_consumer_backend *backend,
-                                         const char *name_prefix,
-                                         int enqueue_count,
-                                         int first_delivery_mode,
-                                         int expect_state,
-                                         size_t worker_count) {
+static void run_consumer_service_variant_with_max_failures(
+    const e2e_consumer_backend *backend, const char *name_prefix,
+    int enqueue_count, int first_delivery_mode, int expect_state,
+    size_t worker_count, int max_failures) {
   lc_client *client;
   lc_consumer_service *service;
   lc_error error;
@@ -1650,7 +1655,7 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
   lc_consumer_restart_policy_init(&consumer.restart_policy);
   consumer.restart_policy.base_delay_ms = 100L;
   consumer.restart_policy.max_delay_ms = 250L;
-  consumer.restart_policy.max_failures = 5;
+  consumer.restart_policy.max_failures = max_failures;
 
   service_config.consumers = &consumer;
   service_config.consumer_count = 1U;
@@ -1679,10 +1684,20 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
     memset(&enqueue_res, 0, sizeof(enqueue_res));
   }
 
-  wait_for_consumer_handled(
-      &consumer_context, first_delivery_mode != E2E_CONSUMER_FIRST_DELIVERY_NONE
-                             ? enqueue_count + 1
-                             : enqueue_count);
+  {
+    int minimum_count;
+
+    minimum_count = enqueue_count;
+    if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL ||
+        first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_DEFER ||
+        first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE ||
+        first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR) {
+      minimum_count += 1;
+    } else if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE) {
+      minimum_count += 2;
+    }
+    wait_for_consumer_handled(&consumer_context, minimum_count);
+  }
 
   rc = (service->stop)(service);
   assert_int_equal(rc, LC_OK);
@@ -1693,8 +1708,14 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
   assert_true(consumer_context.start_events >= (int)worker_count);
   assert_true(consumer_context.stop_events >= (int)worker_count);
   if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL ||
+      first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE ||
       first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR) {
-    assert_int_equal(consumer_context.handled, enqueue_count + 1);
+    assert_int_equal(consumer_context.handled,
+                     enqueue_count +
+                         (first_delivery_mode ==
+                                  E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE
+                              ? 2
+                              : 1));
     assert_true(consumer_context.error_events >= 1);
     assert_true(consumer_context.start_events >= (int)worker_count + 1);
   } else if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_DEFER ||
@@ -1726,6 +1747,17 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
   lc_error_cleanup(&error);
 }
 
+static void run_consumer_service_variant(const e2e_consumer_backend *backend,
+                                         const char *name_prefix,
+                                         int enqueue_count,
+                                         int first_delivery_mode,
+                                         int expect_state,
+                                         size_t worker_count) {
+  run_consumer_service_variant_with_max_failures(
+      backend, name_prefix, enqueue_count, first_delivery_mode, expect_state,
+      worker_count, 5);
+}
+
 static void test_disk_consumer_service_happy(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-happy", 1,
@@ -1749,6 +1781,15 @@ test_disk_consumer_service_restart_after_handler_failure(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-retry", 1,
                                E2E_CONSUMER_FIRST_DELIVERY_FAIL, 0, 1U);
+}
+
+static void
+test_disk_consumer_service_delivery_failures_ignore_failure_budget(
+    void **state) {
+  (void)state;
+  run_consumer_service_variant_with_max_failures(
+      &e2e_backend_disk, "disk-consumer-failure-budget", 1,
+      E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE, 0, 1U, 1);
 }
 
 static void test_disk_consumer_service_defer_then_redeliver(void **state) {
@@ -1796,6 +1837,14 @@ test_s3_consumer_service_restart_after_handler_failure(void **state) {
                                E2E_CONSUMER_FIRST_DELIVERY_FAIL, 0, 1U);
 }
 
+static void
+test_s3_consumer_service_delivery_failures_ignore_failure_budget(void **state) {
+  (void)state;
+  run_consumer_service_variant_with_max_failures(
+      &e2e_backend_s3, "s3-consumer-failure-budget", 1,
+      E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE, 0, 1U, 1);
+}
+
 static void test_s3_consumer_service_defer_then_redeliver(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-defer", 1,
@@ -1839,6 +1888,15 @@ test_mem_uds_consumer_service_restart_after_handler_failure(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-retry", 1,
                                E2E_CONSUMER_FIRST_DELIVERY_FAIL, 0, 1U);
+}
+
+static void
+test_mem_uds_consumer_service_delivery_failures_ignore_failure_budget(
+    void **state) {
+  (void)state;
+  run_consumer_service_variant_with_max_failures(
+      &e2e_backend_mem, "mem-consumer-failure-budget", 1,
+      E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE, 0, 1U, 1);
 }
 
 static void test_mem_uds_consumer_service_defer_then_redeliver(void **state) {
@@ -2069,6 +2127,8 @@ int main(void) {
       cmocka_unit_test(test_disk_consumer_service_with_state),
       cmocka_unit_test(
           test_disk_consumer_service_restart_after_handler_failure),
+      cmocka_unit_test(
+          test_disk_consumer_service_delivery_failures_ignore_failure_budget),
       cmocka_unit_test(test_disk_consumer_service_defer_then_redeliver),
       cmocka_unit_test(test_disk_consumer_service_explicit_failure_nack),
       cmocka_unit_test(
@@ -2077,6 +2137,8 @@ int main(void) {
       cmocka_unit_test(test_s3_consumer_service_multi_delivery),
       cmocka_unit_test(test_s3_consumer_service_with_state),
       cmocka_unit_test(test_s3_consumer_service_restart_after_handler_failure),
+      cmocka_unit_test(
+          test_s3_consumer_service_delivery_failures_ignore_failure_budget),
       cmocka_unit_test(test_s3_consumer_service_defer_then_redeliver),
       cmocka_unit_test(test_s3_consumer_service_explicit_failure_nack),
       cmocka_unit_test(
@@ -2087,6 +2149,8 @@ int main(void) {
       cmocka_unit_test(test_mem_uds_consumer_service_with_state),
       cmocka_unit_test(
           test_mem_uds_consumer_service_restart_after_handler_failure),
+      cmocka_unit_test(
+          test_mem_uds_consumer_service_delivery_failures_ignore_failure_budget),
       cmocka_unit_test(test_mem_uds_consumer_service_defer_then_redeliver),
       cmocka_unit_test(test_mem_uds_consumer_service_explicit_failure_nack),
       cmocka_unit_test(

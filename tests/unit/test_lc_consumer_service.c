@@ -32,12 +32,21 @@ typedef struct consumer_test_state {
   size_t nack_calls;
   size_t extend_calls;
   size_t close_calls;
+  size_t cleanup_hook_calls;
+  size_t error_events;
   int saw_logger;
   int fail_subscribe;
   int stop_requested;
+  int stop_before_end;
   int last_nack_intent;
+  int last_error_attempt;
+  long last_error_restart_in_ms;
+  int last_error_code;
   int handler_mode;
   int extend_should_fail;
+  int ack_should_fail;
+  int last_cleanup_hook_extend_started;
+  int last_cleanup_hook_has_message;
   long handler_delay_ms;
   FILE *log_fp;
 } consumer_test_state;
@@ -47,7 +56,9 @@ enum {
   CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK = 1,
   CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR = 2,
   CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR = 3,
-  CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY = 4
+  CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY = 4,
+  CONSUMER_HANDLER_MODE_AUTO_ACK_NO_STOP = 5,
+  CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS = 6
 };
 
 typedef struct fake_delivery_message {
@@ -281,11 +292,14 @@ fake_delivery_message_close_internal(fake_delivery_message *message) {
 static int fake_delivery_message_ack(lc_message *self, lc_error *error) {
   fake_delivery_message *message;
 
-  (void)error;
   message = (fake_delivery_message *)self;
   pthread_mutex_lock(&message->state->mutex);
   message->state->ack_calls += 1U;
   pthread_mutex_unlock(&message->state->mutex);
+  if (message->state->ack_should_fail) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L, "synthetic ack failure",
+                        NULL, NULL, NULL);
+  }
   if (message->terminal_flag != NULL) {
     *message->terminal_flag = 1;
   }
@@ -307,6 +321,57 @@ static int fake_delivery_message_nack(lc_message *self, const lc_nack_req *req,
     *message->terminal_flag = 1;
   }
   fake_delivery_message_close_internal(message);
+  return LC_OK;
+}
+
+static void fake_delivery_cleanup_hook(int handler_thread_started,
+                                       int extend_thread_started,
+                                       int has_message, void *context) {
+  consumer_test_state *state;
+
+  (void)handler_thread_started;
+  state = (consumer_test_state *)context;
+  pthread_mutex_lock(&state->mutex);
+  state->cleanup_hook_calls += 1U;
+  state->last_cleanup_hook_extend_started = extend_thread_started;
+  state->last_cleanup_hook_has_message = has_message;
+  pthread_mutex_unlock(&state->mutex);
+}
+
+static int fake_consumer_on_error_stop_after_first(void *context,
+                                                   const lc_consumer_error *event,
+                                                   lc_error *error) {
+  consumer_test_state *state;
+
+  (void)error;
+  state = (consumer_test_state *)context;
+  pthread_mutex_lock(&state->mutex);
+  state->error_events += 1U;
+  state->last_error_attempt = event != NULL ? event->attempt : -1;
+  state->last_error_restart_in_ms =
+      event != NULL ? event->restart_in_ms : -1L;
+  state->last_error_code =
+      event != NULL && event->cause != NULL ? event->cause->code : LC_OK;
+  pthread_mutex_unlock(&state->mutex);
+  stop_test_service(state);
+  return LC_OK;
+}
+
+static int fake_consumer_on_error_record_only(void *context,
+                                              const lc_consumer_error *event,
+                                              lc_error *error) {
+  consumer_test_state *state;
+
+  (void)error;
+  state = (consumer_test_state *)context;
+  pthread_mutex_lock(&state->mutex);
+  state->error_events += 1U;
+  state->last_error_attempt = event != NULL ? event->attempt : -1;
+  state->last_error_restart_in_ms =
+      event != NULL ? event->restart_in_ms : -1L;
+  state->last_error_code =
+      event != NULL && event->cause != NULL ? event->cause->code : LC_OK;
+  pthread_mutex_unlock(&state->mutex);
   return LC_OK;
 }
 
@@ -473,6 +538,8 @@ static int handle_terminal_scenario(void *context, lc_consumer_message *message,
   case CONSUMER_HANDLER_MODE_AUTO_ACK:
     stop_test_service(state);
     return LC_OK;
+  case CONSUMER_HANDLER_MODE_AUTO_ACK_NO_STOP:
+    return LC_OK;
   case CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY:
     consumer_test_sleep_ms(state->handler_delay_ms);
     stop_test_service(state);
@@ -508,6 +575,13 @@ static int handle_terminal_scenario(void *context, lc_consumer_message *message,
     stop_test_service(state);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "synthetic handler failure", NULL, NULL, NULL);
+  case CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS:
+    if (state->handled_messages == 1U) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "synthetic handler failure", NULL, NULL, NULL);
+    }
+    stop_test_service(state);
+    return LC_OK;
   default:
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "unknown consumer handler mode", NULL, NULL, NULL);
@@ -606,6 +680,9 @@ static int fake_subscribe(lc_consumer_service_handle *service,
       handler->chunk(handler_context, "{\"ok\":true}", 11U, engine_error);
   if (!completed) {
     return LC_ENGINE_ERROR_TRANSPORT;
+  }
+  if (state->stop_before_end && state->service != NULL) {
+    stop_test_service(state);
   }
   if (!handler->end(handler_context, &delivery, engine_error)) {
     return LC_ENGINE_ERROR_TRANSPORT;
@@ -1240,6 +1317,220 @@ test_consumer_service_skips_auto_ack_after_extend_failure(void **state) {
       LC_NACK_INTENT_FAILURE, 1, 1500L);
 }
 
+static void
+test_consumer_service_shutdown_stops_extender_before_message_close(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.handler_mode = CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY;
+  runtime_state.handler_delay_ms = 1500L;
+  runtime_state.last_nack_intent = -1;
+  runtime_state.ack_should_fail = 1;
+  runtime_state.stop_before_end = 1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.visibility_timeout_seconds = 1L;
+  consumer.handle = handle_terminal_scenario;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+  lc_consumer_service_set_test_hooks(service, fake_clone_client,
+                                     fake_subscribe);
+  lc_consumer_service_set_test_message_factory_hook(
+      service, fake_delivery_message_factory);
+  lc_consumer_service_set_test_delivery_cleanup_hook(
+      service, fake_delivery_cleanup_hook, &runtime_state);
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.cleanup_hook_calls, 1U);
+  assert_int_equal(runtime_state.last_cleanup_hook_extend_started, 0);
+  assert_int_equal(runtime_state.last_cleanup_hook_has_message, 1);
+  assert_int_equal(runtime_state.close_calls, 1U);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
+test_consumer_service_preserves_auto_ack_failure_details(void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.handler_mode = CONSUMER_HANDLER_MODE_AUTO_ACK_NO_STOP;
+  runtime_state.last_nack_intent = -1;
+  runtime_state.ack_should_fail = 1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.visibility_timeout_seconds = 1L;
+  consumer.handle = handle_terminal_scenario;
+  consumer.on_error = fake_consumer_on_error_stop_after_first;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+  lc_consumer_service_set_test_hooks(service, fake_clone_client,
+                                     fake_subscribe);
+  lc_consumer_service_set_test_message_factory_hook(
+      service, fake_delivery_message_factory);
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.ack_calls, 1U);
+  assert_int_equal(runtime_state.nack_calls, 0U);
+  assert_int_equal(runtime_state.close_calls, 1U);
+  assert_int_equal(runtime_state.error_events, 1U);
+  assert_int_equal(runtime_state.last_error_attempt, 0);
+  assert_int_equal(runtime_state.last_error_restart_in_ms, 0L);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_OK);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
+test_consumer_service_handler_failure_does_not_consume_failure_budget(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.handler_mode = CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS;
+  runtime_state.last_nack_intent = -1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.visibility_timeout_seconds = 1L;
+  consumer.handle = handle_terminal_scenario;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+  lc_consumer_service_set_test_hooks(service, fake_clone_client,
+                                     fake_subscribe);
+  lc_consumer_service_set_test_message_factory_hook(
+      service, fake_delivery_message_factory);
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  if (runtime_state.handled_messages != 2U) {
+    fail_msg("handled=%lu subscribe=%lu errors=%lu ack=%lu nack=%lu code=%d",
+             (unsigned long)runtime_state.handled_messages,
+             (unsigned long)runtime_state.subscribe_calls,
+             (unsigned long)runtime_state.error_events,
+             (unsigned long)runtime_state.ack_calls,
+             (unsigned long)runtime_state.nack_calls, error.code);
+  }
+  assert_int_equal(runtime_state.error_events, 1U);
+  assert_int_equal(runtime_state.last_error_attempt, 0);
+  assert_int_equal(runtime_state.last_error_restart_in_ms, 0L);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
+  assert_int_equal(runtime_state.nack_calls, 1U);
+  assert_int_equal(runtime_state.ack_calls, 1U);
+  assert_int_equal(error.code, LC_OK);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_consumer_restart_policy_init_sets_defaults),
@@ -1260,6 +1551,12 @@ int main(void) {
           test_consumer_service_does_not_double_nack_explicit_defer_handler_error),
       cmocka_unit_test(
           test_consumer_service_skips_auto_ack_after_extend_failure),
+      cmocka_unit_test(
+          test_consumer_service_shutdown_stops_extender_before_message_close),
+      cmocka_unit_test(
+          test_consumer_service_preserves_auto_ack_failure_details),
+      cmocka_unit_test(
+          test_consumer_service_handler_failure_does_not_consume_failure_budget),
       cmocka_unit_test(
           test_consumer_service_retains_owned_logger_after_root_client_close),
       cmocka_unit_test(

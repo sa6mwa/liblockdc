@@ -893,8 +893,9 @@ typedef struct lc_consumer_restart_policy {
  * may leave the delivery open and return `LC_OK`; the managed consumer will
  * then acknowledge it automatically on success. If the handler returns a
  * non-`LC_OK` error, the managed consumer treats it as a failure, negatively
- * acknowledges the open delivery after the callback unwinds, and restarts the
- * loop according to the configured policy.
+ * acknowledges the open delivery after the callback unwinds, reports the
+ * error, and resumes consuming without counting that delivery against the
+ * service restart budget.
  * Explicit `message->ack()`/`message->nack()` remain available for handlers
  * that want to terminalize the delivery themselves. When `state` is non-NULL,
  * it is the lease handle associated with the delivery and is owned by
@@ -920,7 +921,7 @@ typedef struct lc_consumer_message {
 } lc_consumer_message;
 
 /**
- * Recoverable consumer-loop failure reported before restart.
+ * Recoverable consumer service error reported to `on_error`.
  *
  * The `cause` object is borrowed for the duration of the callback only.
  */
@@ -931,10 +932,11 @@ typedef struct lc_consumer_error {
   const char *queue;
   /** Non-zero when the failing loop used `dequeue_with_state()`. */
   int with_state;
-  /** Current consecutive failure count for this consumer. */
+  /** Current consecutive loop failure count. Zero means the error was scoped to
+   * one delivery and did not consume the service restart budget. */
   int attempt;
-  /** Delay before the next retry, in milliseconds. Zero means immediate retry.
-   */
+  /** Delay before the next retry, in milliseconds. Zero means immediate retry
+   * or a delivery-level error with no service-level backoff. */
   long restart_in_ms;
   /** Error that caused the failure. */
   const lc_error *cause;
@@ -987,16 +989,20 @@ typedef struct lc_consumer_config {
    * Return `LC_OK` after successfully processing the delivery. If the handler
    * leaves the delivery open, the managed consumer acknowledges it
    * automatically on success and negatively acknowledges it automatically on
-   * failure before entering the restart/error path. Explicit
+   * failure before reporting the delivery error and resuming consumption.
+   * Explicit
    * `message->nack()`/`message->ack()` are still available when a handler wants
    * to terminalize the delivery itself before returning.
    */
   int (*handle)(void *context, lc_consumer_message *message, lc_error *error);
   /**
-   * Observes a failed loop before restart.
+   * Observes a failed delivery or failed loop.
    *
-   * Return `LC_OK` to continue restarting. Returning a non-`LC_OK` code stops
-   * the service and returns that error from `run()`/`wait()`.
+   * Delivery-level errors are reported with `attempt == 0` and do not consume
+   * the service restart budget. Loop/runtime failures are reported with a
+   * positive `attempt` and may back off according to `restart_policy`.
+   * Return `LC_OK` to continue. Returning a non-`LC_OK` code stops the service
+   * and returns that error from `run()`/`wait()`.
    */
   int (*on_error)(void *context, const lc_consumer_error *event,
                   lc_error *error);
@@ -1006,7 +1012,7 @@ typedef struct lc_consumer_config {
   void (*on_stop)(void *context, const lc_consumer_lifecycle_event *event);
   /** Opaque user context passed to all callbacks for this consumer. */
   void *context;
-  /** Restart behavior after handler or transport failures. */
+  /** Restart behavior after loop/runtime transport failures. */
   lc_consumer_restart_policy restart_policy;
 } lc_consumer_config;
 
