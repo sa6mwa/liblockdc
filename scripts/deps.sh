@@ -100,17 +100,36 @@ esac
 manifest_path="$deps_root/manifest.txt"
 mkdir -p "$deps_root"
 
-zlib_version=${LOCKDC_ZLIB_VERSION:-}
-if [ -z "$zlib_version" ]; then
-  zlib_version=$(
-    sed -n 's/^set(LOCKDC_ZLIB_VERSION "\(.*\)" CACHE STRING.*/\1/p' \
+resolve_cmake_cache_string() {
+  local var_name=$1
+  local override_value=$2
+  local resolved_value=
+
+  if [ -n "$override_value" ]; then
+    printf '%s\n' "$override_value"
+    return 0
+  fi
+
+  resolved_value=$(
+    sed -n "s/^set(${var_name} \"\\(.*\\)\" CACHE STRING.*/\\1/p" \
       "$repo_root/CMakeLists.txt" | head -n1
   )
-fi
-if [ -z "$zlib_version" ]; then
-  printf '%s\n' "failed to resolve LOCKDC_ZLIB_VERSION from CMakeLists.txt" >&2
-  exit 1
-fi
+  if [ -z "$resolved_value" ]; then
+    printf 'failed to resolve %s from CMakeLists.txt\n' "$var_name" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$resolved_value"
+}
+
+openssl_version=$(resolve_cmake_cache_string LOCKDC_OPENSSL_VERSION "${LOCKDC_OPENSSL_VERSION:-}")
+zlib_version=$(resolve_cmake_cache_string LOCKDC_ZLIB_VERSION "${LOCKDC_ZLIB_VERSION:-}")
+curl_version=$(resolve_cmake_cache_string LOCKDC_CURL_VERSION "${LOCKDC_CURL_VERSION:-}")
+nghttp2_version=$(resolve_cmake_cache_string LOCKDC_NGHTTP2_VERSION "${LOCKDC_NGHTTP2_VERSION:-}")
+libssh2_version=$(resolve_cmake_cache_string LOCKDC_LIBSSH2_VERSION "${LOCKDC_LIBSSH2_VERSION:-}")
+lonejson_version=$(resolve_cmake_cache_string LOCKDC_LONEJSON_VERSION "${LOCKDC_LONEJSON_VERSION:-}")
+cmocka_version=$(resolve_cmake_cache_string LOCKDC_CMOCKA_VERSION "${LOCKDC_CMOCKA_VERSION:-}")
+pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_VERSION:-}")
 
 compiler=${CC:-cc}
 compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
@@ -118,7 +137,6 @@ compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
 
 fingerprint=$(
   {
-    cat "$repo_root/CMakeLists.txt"
     cat "$repo_root/CMakePresets.json"
     cat "$repo_root/cmake/LcDependencies.cmake"
     cat "$repo_root/scripts/deps.sh"
@@ -135,7 +153,20 @@ machine=$compiler_machine
 version=$compiler_version
 fingerprint=$fingerprint
 preset=$preset
-zlib_version=$zlib_version"
+openssl_version=$openssl_version
+zlib_version=$zlib_version
+curl_version=$curl_version
+nghttp2_version=$nghttp2_version
+libssh2_version=$libssh2_version
+lonejson_version=$lonejson_version
+cmocka_version=$cmocka_version
+pslog_version=$pslog_version"
+
+manifest_value() {
+  local key=$1
+  local manifest_file=$2
+  sed -n "s/^${key}=//p" "$manifest_file" | head -n1
+}
 
 stage_dependency_license() {
   local install_subdir=$1
@@ -220,8 +251,22 @@ for path in "${required_paths[@]}"; do
   fi
 done
 
-if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ] && [ "$(cat "$manifest_path")" = "$manifest" ]; then
-  exit 0
+if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ]; then
+  existing_manifest=$(cat "$manifest_path")
+  if [ "$existing_manifest" = "$manifest" ]; then
+    exit 0
+  fi
+
+  if ! grep -q '^openssl_version=' "$manifest_path"; then
+    if [ "$(manifest_value compiler "$manifest_path")" = "$compiler" ] \
+      && [ "$(manifest_value machine "$manifest_path")" = "$compiler_machine" ] \
+      && [ "$(manifest_value version "$manifest_path")" = "$compiler_version" ] \
+      && [ "$(manifest_value preset "$manifest_path")" = "$preset" ] \
+      && [ "$(manifest_value zlib_version "$manifest_path")" = "$zlib_version" ]; then
+      printf '%s\n' "$manifest" > "$manifest_path"
+      exit 0
+    fi
+  fi
 fi
 
 reset_dependency_build_root
