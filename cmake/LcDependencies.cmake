@@ -114,6 +114,8 @@ function(lc_add_openssl variant shared_flag)
       SOURCE_DIR "${source_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
+      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
+      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
       CONFIGURE_COMMAND
         ${CMAKE_COMMAND} -E env
           CC=${CMAKE_C_COMPILER}
@@ -206,6 +208,8 @@ function(lc_add_nghttp2 variant shared_flag)
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
+      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
+      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
       CONFIGURE_COMMAND
         ${CMAKE_COMMAND} -E env
         CC=${CMAKE_C_COMPILER}
@@ -258,7 +262,9 @@ function(lc_add_zlib)
 
   if(LOCKDC_BUILD_DEPENDENCIES)
     ExternalProject_Add(${project_name}
-      URL "https://www.zlib.net/zlib-${LOCKDC_ZLIB_VERSION}.tar.gz"
+      URL
+        "https://www.zlib.net/zlib-${LOCKDC_ZLIB_VERSION}.tar.gz"
+        "https://zlib.net/fossils/zlib-${LOCKDC_ZLIB_VERSION}.tar.gz"
       URL_HASH "SHA256=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
       DOWNLOAD_NAME "zlib-${LOCKDC_ZLIB_VERSION}.tar.gz"
       PREFIX "${prefix_dir}"
@@ -267,10 +273,12 @@ function(lc_add_zlib)
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
+      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
+      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
       CMAKE_ARGS
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DZLIB_BUILD_SHARED=ON
         -DZLIB_BUILD_STATIC=ON
@@ -363,10 +371,12 @@ function(lc_add_libssh2)
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
+      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
+      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
       CMAKE_ARGS
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON
         -DBUILD_STATIC_LIBS=ON
@@ -484,6 +494,8 @@ function(lc_add_curl variant shared_flag)
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
+      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
+      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
       DEPENDS
         ${zlib_project}
         ${openssl_project}
@@ -493,7 +505,7 @@ function(lc_add_curl variant shared_flag)
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
         -DCMAKE_DEBUG_POSTFIX=
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DCMAKE_INSTALL_RPATH=${curl_install_rpath}
         -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF
@@ -677,10 +689,8 @@ function(lc_prepare_lonejson_source variant shared_flag source_dir install_dir
     file(APPEND "${source_dir}/configure.cmake"
       "          \"-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}\"\n")
   endif()
-  if(NOT CMAKE_BUILD_TYPE STREQUAL "")
-    file(APPEND "${source_dir}/configure.cmake"
-      "          \"-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}\"\n")
-  endif()
+  file(APPEND "${source_dir}/configure.cmake"
+    "          \"-DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}\"\n")
   file(APPEND "${source_dir}/configure.cmake"
     "          \"-DCMAKE_INSTALL_PREFIX=${install_dir}\"\n"
     "          -Wno-dev\n"
@@ -732,6 +742,8 @@ function(lc_add_lonejson variant shared_flag)
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
+      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
+      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
       DOWNLOAD_NO_EXTRACT TRUE
       DEPENDS ${curl_project}
       CONFIGURE_COMMAND
@@ -778,9 +790,11 @@ function(lc_add_cmocka)
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
+      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
+      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
       CMAKE_ARGS
         -DCMAKE_INSTALL_PREFIX=${install_dir}
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}
         -DBUILD_SHARED_LIBS=OFF
         -DBUILD_TESTING=OFF
         -DPICKY_DEVELOPER=OFF
@@ -853,12 +867,17 @@ function(lc_add_pslog variant shared_flag)
     ExternalProject_Add(${project_name}
       URL "https://github.com/sa6mwa/libpslog/releases/download/v${LOCKDC_PSLOG_VERSION}/${asset_name}"
       URL_HASH "SHA256=${asset_hash}"
-      DOWNLOAD_NAME "${asset_name}"
+      # Keep static/shared downloads isolated even though they come from the same
+      # upstream asset. Sharing one local download path lets one ExternalProject
+      # observe a partially written or replaced file from the other.
+      DOWNLOAD_NAME "${variant}-${asset_name}"
       PREFIX "${prefix_dir}"
       DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
       SOURCE_DIR "${source_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
+      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
+      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
       CONFIGURE_COMMAND ""
       BUILD_COMMAND ""
       INSTALL_COMMAND

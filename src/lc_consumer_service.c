@@ -143,13 +143,18 @@ lc_consumer_delivery_mark_handler_done(lc_consumer_delivery_bridge *bridge) {
 
 static void
 lc_consumer_delivery_stop_extender(lc_consumer_delivery_bridge *bridge) {
+  pthread_t extend_thread;
+  int should_join;
+
   pthread_mutex_lock(&bridge->state_mutex);
   bridge->handler_done = 1;
   pthread_cond_broadcast(&bridge->state_cond);
+  should_join = bridge->extend_thread_started;
+  extend_thread = bridge->extend_thread;
+  bridge->extend_thread_started = 0;
   pthread_mutex_unlock(&bridge->state_mutex);
-  if (bridge->extend_thread_started) {
-    pthread_join(bridge->extend_thread, NULL);
-    bridge->extend_thread_started = 0;
+  if (should_join) {
+    pthread_join(extend_thread, NULL);
   }
 }
 
@@ -1015,10 +1020,7 @@ static int lc_consumer_delivery_end(void *context,
   bridge->pipe = NULL;
   pthread_join(bridge->handler_thread, NULL);
   bridge->handler_thread_started = 0;
-  if (bridge->extend_thread_started) {
-    pthread_join(bridge->extend_thread, NULL);
-    bridge->extend_thread_started = 0;
-  }
+  lc_consumer_delivery_stop_extender(bridge);
   rc = bridge->handler_rc;
   lc_engine_dequeue_response_cleanup(&bridge->meta);
   {
@@ -1067,7 +1069,10 @@ static void *lc_consumer_delivery_handler_main(void *context) {
   rc = bridge->worker->config.handle(bridge->worker->config.context,
                                      &consumer_message, &handler_error);
   final_rc = rc;
-  if (rc == LC_OK && bridge->message != NULL && !bridge->terminal) {
+  if (bridge->message != NULL && bridge->terminal) {
+    lc_consumer_delivery_mark_terminal(bridge);
+    lc_consumer_delivery_stop_extender(bridge);
+  } else if (rc == LC_OK && bridge->message != NULL && !bridge->terminal) {
     lc_consumer_delivery_stop_extender(bridge);
   }
   if (rc == LC_OK && bridge->handler_failed) {
@@ -1199,6 +1204,12 @@ static void *lc_consumer_delivery_extend_main(void *context) {
     rc = bridge->message->extend(bridge->message, &extend_req, &extend_error);
     if (rc != LC_OK) {
       pthread_mutex_lock(&bridge->state_mutex);
+      if (bridge->terminal || bridge->handler_done ||
+          lc_consumer_is_stop_requested(bridge->worker->service)) {
+        pthread_mutex_unlock(&bridge->state_mutex);
+        lc_error_cleanup(&extend_error);
+        return NULL;
+      }
       if (bridge->error != NULL && bridge->error->code == LC_OK) {
         lc_consumer_copy_error(bridge->error, &extend_error,
                                extend_error.code != LC_OK ? extend_error.code
@@ -1310,10 +1321,7 @@ static void *lc_consumer_worker_main(void *context) {
       pthread_join(bridge.handler_thread, NULL);
       bridge.handler_thread_started = 0;
     }
-    if (bridge.extend_thread_started) {
-      pthread_join(bridge.extend_thread, NULL);
-      bridge.extend_thread_started = 0;
-    }
+    lc_consumer_delivery_stop_extender(&bridge);
     if (bridge.message != NULL) {
       /* Cleanup only closes any still-open delivery handle. Terminal queue
        * actions must already have been decided before we reach this point. */

@@ -1,0 +1,30 @@
+if(NOT DEFINED LOCKDC_ROOT)
+    message(FATAL_ERROR "LOCKDC_ROOT is required")
+endif()
+
+file(READ "${LOCKDC_ROOT}/CMakePresets.json" presets_json)
+file(READ "${LOCKDC_ROOT}/CMakeLists.txt" root_cmake)
+
+function(assert_contains haystack needle description)
+    string(FIND "${${haystack}}" "${needle}" found_at)
+    if(found_at EQUAL -1)
+        message(FATAL_ERROR "missing ${description}")
+    endif()
+endfunction()
+
+function(assert_not_contains haystack needle description)
+    string(FIND "${${haystack}}" "${needle}" found_at)
+    if(NOT found_at EQUAL -1)
+        message(FATAL_ERROR "unexpected ${description}")
+    endif()
+endfunction()
+
+assert_contains(presets_json "\"name\": \"debug\"" "debug preset")
+assert_contains(presets_json "\"LOCKDC_EXTERNAL_ROOT\": \"\${sourceDir}/.cache/deps/x86_64-linux-gnu\"" "host GNU external-root reuse")
+assert_contains(presets_json "\"LOCKDC_DEPENDENCY_BUILD_ROOT\": \"\${sourceDir}/.cache/deps-build/x86_64-linux-gnu\"" "host GNU dependency-build-root reuse")
+assert_not_contains(presets_json ".cache/deps/host-debug" "host-debug dependency root in presets")
+assert_not_contains(presets_json ".cache/deps-build/host-debug" "host-debug dependency build root in presets")
+
+assert_contains(root_cmake "set(LOCKDC_EXTERNAL_ROOT \"\${CMAKE_SOURCE_DIR}/.cache/deps/x86_64-linux-gnu\"" "default external root")
+assert_contains(root_cmake "set(LOCKDC_DEPENDENCY_BUILD_ROOT \"\${CMAKE_SOURCE_DIR}/.cache/deps-build/x86_64-linux-gnu\"" "default dependency build root")
+assert_contains(root_cmake "set(LOCKDC_DEPENDENCY_BUILD_TYPE \"Release\")" "release-only dependency build type")

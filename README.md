@@ -295,7 +295,7 @@ The examples in the repository at <https://github.com/sa6mwa/liblockdc/tree/main
 If you need direct control over the underlying build or test preset, the lower-level scripts remain available:
 
 ```bash
-scripts/deps.sh deps-host-debug
+scripts/deps.sh deps-x86_64-linux-gnu
 scripts/build.sh debug
 scripts/build.sh e2e
 scripts/build.sh x86_64-linux-gnu-release

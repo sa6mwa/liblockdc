@@ -77,7 +77,7 @@ deps-debug:
 	$(TIMED) deps-debug $(MAKE) __deps-debug
 
 __deps-debug:
-	bash ./scripts/deps.sh deps-host-debug
+	bash ./scripts/deps.sh deps-x86_64-linux-gnu
 
 deps-release:
 	$(TIMED) deps-release $(MAKE) __deps-release

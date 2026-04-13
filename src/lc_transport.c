@@ -906,8 +906,14 @@ int lc_engine_http_json_request(
 
     if (strcmp(method, "POST") == 0) {
       curl_easy_setopt(easy, CURLOPT_POST, 1L);
-    }
-    if (body != NULL) {
+      if (body != NULL) {
+        curl_easy_setopt(easy, CURLOPT_POSTFIELDS, body);
+        curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, (long)body_length);
+      } else {
+        curl_easy_setopt(easy, CURLOPT_POSTFIELDS, "");
+        curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, 0L);
+      }
+    } else if (body != NULL) {
       curl_easy_setopt(easy, CURLOPT_POSTFIELDS, body);
       curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, (long)body_length);
     }

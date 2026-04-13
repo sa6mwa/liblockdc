@@ -56,9 +56,10 @@ enum {
   CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK = 1,
   CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_ERROR = 2,
   CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_ERROR = 3,
-  CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY = 4,
-  CONSUMER_HANDLER_MODE_AUTO_ACK_NO_STOP = 5,
-  CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS = 6
+  CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_OK = 4,
+  CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY = 5,
+  CONSUMER_HANDLER_MODE_AUTO_ACK_NO_STOP = 6,
+  CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS = 7
 };
 
 typedef struct fake_delivery_message {
@@ -575,6 +576,15 @@ static int handle_terminal_scenario(void *context, lc_consumer_message *message,
     stop_test_service(state);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "synthetic handler failure", NULL, NULL, NULL);
+  case CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_OK:
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_DEFER;
+    nack_req.delay_seconds = 0L;
+    rc = message->message->nack(message->message, &nack_req, error);
+    if (rc == LC_OK) {
+      stop_test_service(state);
+    }
+    return rc;
   case CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS:
     if (state->handled_messages == 1U) {
       return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -676,11 +686,10 @@ static int fake_subscribe(lc_consumer_service_handle *service,
   if (!accepted) {
     return LC_ENGINE_ERROR_TRANSPORT;
   }
-  completed =
-      handler->chunk(handler_context, "{\"ok\":true}", 11U, engine_error);
-  if (!completed) {
-    return LC_ENGINE_ERROR_TRANSPORT;
-  }
+  /* These consumer-service unit tests exercise delivery lifecycle and
+   * terminal-action semantics, not payload streaming. Keep the harness
+   * payload-less so an immediate ack/defer/nack cannot race a synthetic
+   * producer write and turn the test into a stream timing flake. */
   if (state->stop_before_end && state->service != NULL) {
     stop_test_service(state);
   }
@@ -1310,6 +1319,14 @@ test_consumer_service_does_not_double_nack_explicit_defer_handler_error(
 }
 
 static void
+test_consumer_service_preserves_explicit_defer_on_success(void **state) {
+  (void)state;
+  run_consumer_terminal_scenario_unit_test(
+      CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_OK, LC_OK, 0U, 1U, 0U,
+      LC_NACK_INTENT_DEFER, 0, 0L);
+}
+
+static void
 test_consumer_service_skips_auto_ack_after_extend_failure(void **state) {
   (void)state;
   run_consumer_terminal_scenario_unit_test(
@@ -1549,6 +1566,8 @@ int main(void) {
           test_consumer_service_does_not_double_nack_explicit_failure_handler_error),
       cmocka_unit_test(
           test_consumer_service_does_not_double_nack_explicit_defer_handler_error),
+      cmocka_unit_test(
+          test_consumer_service_preserves_explicit_defer_on_success),
       cmocka_unit_test(
           test_consumer_service_skips_auto_ack_after_extend_failure),
       cmocka_unit_test(

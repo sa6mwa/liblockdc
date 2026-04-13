@@ -3,15 +3,15 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-preset=${1:-deps-host-debug}
+preset=${1:-deps-x86_64-linux-gnu}
 
 unset LD_LIBRARY_PATH
 
 case "$preset" in
   deps-host-debug)
-    cmake_preset="debug"
-    deps_root="$repo_root/.cache/deps/host-debug"
-    deps_build_root="$repo_root/.cache/deps-build/host-debug"
+    cmake_preset="x86_64-linux-gnu-release"
+    deps_root="$repo_root/.cache/deps/x86_64-linux-gnu"
+    deps_build_root="$repo_root/.cache/deps-build/x86_64-linux-gnu"
     cmake_extra_args=(
       -DLOCKDC_BUILD_DEPENDENCIES=ON
       -DLOCKDC_BUILD_EXAMPLES=OFF
@@ -92,7 +92,7 @@ case "$preset" in
     )
     ;;
   *)
-    echo "usage: scripts/deps.sh [deps-host-debug|deps-x86_64-linux-gnu|deps-x86_64-linux-musl|deps-aarch64-linux-gnu|deps-aarch64-linux-musl|deps-armhf-linux-gnu|deps-armhf-linux-musl]" >&2
+    echo "usage: scripts/deps.sh [deps-x86_64-linux-gnu|deps-host-debug|deps-x86_64-linux-musl|deps-aarch64-linux-gnu|deps-aarch64-linux-musl|deps-armhf-linux-gnu|deps-armhf-linux-musl]" >&2
     exit 2
     ;;
 esac
@@ -200,17 +200,10 @@ reset_dependency_build_root() {
 }
 
 shared_ext=so
-if [[ "$preset" == *musl ]] || [ "$preset" = "deps-host-debug" ]; then
-  curl_shared_path="$deps_root/curl-shared-cmake/install/lib/libcurl.${shared_ext}"
-  openssl_ssl_shared_path="$deps_root/openssl-shared/install/lib/libssl.${shared_ext}"
-  openssl_crypto_shared_path="$deps_root/openssl-shared/install/lib/libcrypto.${shared_ext}"
-  nghttp2_shared_path="$deps_root/nghttp2-shared/install/lib/libnghttp2.${shared_ext}"
-else
-  curl_shared_path="$deps_root/curl-shared-cmake/install/lib/libcurl.${shared_ext}"
-  openssl_ssl_shared_path="$deps_root/openssl-shared/install/lib/libssl.${shared_ext}"
-  openssl_crypto_shared_path="$deps_root/openssl-shared/install/lib/libcrypto.${shared_ext}"
-  nghttp2_shared_path="$deps_root/nghttp2-shared/install/lib/libnghttp2.${shared_ext}"
-fi
+curl_shared_path="$deps_root/curl-shared-cmake/install/lib/libcurl.${shared_ext}"
+openssl_ssl_shared_path="$deps_root/openssl-shared/install/lib/libssl.${shared_ext}"
+openssl_crypto_shared_path="$deps_root/openssl-shared/install/lib/libcrypto.${shared_ext}"
+nghttp2_shared_path="$deps_root/nghttp2-shared/install/lib/libnghttp2.${shared_ext}"
 
 deps_ready=1
 required_paths=(

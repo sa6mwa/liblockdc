@@ -1,26 +1,37 @@
-add_executable(lc_e2e test_lc_e2e.c)
-target_link_libraries(lc_e2e PRIVATE ${lc_test_link_target} lc::cmocka)
-target_include_directories(lc_e2e PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
-set_target_properties(lc_e2e
-  PROPERTIES
-    C_STANDARD 99
-    C_STANDARD_REQUIRED ON
-    C_EXTENSIONS ON
-)
-if(LOCKDC_ENABLE_COVERAGE)
-  target_compile_options(lc_e2e PRIVATE
-    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>
+function(lc_add_e2e_shard target_name group_macro)
+  add_executable(${target_name} test_lc_e2e.c)
+  target_link_libraries(${target_name} PRIVATE ${lc_test_link_target} lc::cmocka)
+  target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+  target_compile_definitions(${target_name} PRIVATE ${group_macro})
+  set_target_properties(${target_name}
+    PROPERTIES
+      C_STANDARD 99
+      C_STANDARD_REQUIRED ON
+      C_EXTENSIONS ON
   )
-  target_link_options(lc_e2e PRIVATE
-    $<$<LINK_LANGUAGE:C>:--coverage>
+  if(LOCKDC_ENABLE_COVERAGE)
+    target_compile_options(${target_name} PRIVATE
+      $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>
+    )
+    target_link_options(${target_name} PRIVATE
+      $<$<LINK_LANGUAGE:C>:--coverage>
+    )
+  endif()
+  add_test(NAME ${target_name} COMMAND ${target_name})
+  set_tests_properties(${target_name} PROPERTIES
+    LABELS "e2e"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
-endif()
-add_test(NAME lc_e2e COMMAND lc_e2e)
-set_tests_properties(lc_e2e PROPERTIES
-  LABELS "e2e"
-  RUN_SERIAL TRUE
-  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-)
+endfunction()
+
+lc_add_e2e_shard(lc_e2e_disk_direct LC_E2E_GROUP_DISK_DIRECT)
+lc_add_e2e_shard(lc_e2e_s3_direct LC_E2E_GROUP_S3_DIRECT)
+lc_add_e2e_shard(lc_e2e_mem_direct LC_E2E_GROUP_MEM_DIRECT)
+lc_add_e2e_shard(lc_e2e_disk_consumer LC_E2E_GROUP_DISK_CONSUMER)
+lc_add_e2e_shard(lc_e2e_s3_consumer LC_E2E_GROUP_S3_CONSUMER)
+lc_add_e2e_shard(lc_e2e_mem_consumer LC_E2E_GROUP_MEM_CONSUMER)
 
 if(TARGET lc_example_acquire_lease_lifecycle)
   add_test(NAME lc_example_smoke_acquire_lease_lifecycle

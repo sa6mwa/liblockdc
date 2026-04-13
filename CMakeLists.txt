@@ -11,6 +11,7 @@ project(lockdc VERSION ${LOCKDC_RESOLVED_VERSION} LANGUAGES C)
 include(GNUInstallDirs)
 include(CMakeDependentOption)
 include(CMakePackageConfigHelpers)
+include(ProcessorCount)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -42,13 +43,21 @@ set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release used fo
 set(LOCKDC_LONEJSON_VERSION "0.4.1" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.3.1" CACHE STRING "Pinned libpslog release used for SDK logging.")
-set(LOCKDC_EXTERNAL_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps/host-debug" CACHE PATH "Stable install root for downloaded third-party dependencies.")
-set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/host-debug" CACHE PATH "Stable build root for downloaded third-party dependencies.")
+set(LOCKDC_EXTERNAL_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps/x86_64-linux-gnu" CACHE PATH "Stable install root for downloaded third-party dependencies.")
+set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/x86_64-linux-gnu" CACHE PATH "Stable build root for downloaded third-party dependencies.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
 set(LOCKDC_VERSION_OVERRIDE "" CACHE STRING "Override the detected liblockdc package version with an explicit semantic version.")
 set(LOCKDC_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "Artifact architecture name")
 set(LOCKDC_TARGET_OS "${CMAKE_SYSTEM_NAME}" CACHE STRING "Artifact operating system name")
 set(LOCKDC_TARGET_LIBC "" CACHE STRING "Artifact libc suffix for Linux targets (gnu, musl, or empty)")
+set(LOCKDC_DEPENDENCY_BUILD_TYPE "Release")
+ProcessorCount(LOCKDC_DEPENDENCY_BUILD_JOBS_DEFAULT)
+if(NOT LOCKDC_DEPENDENCY_BUILD_JOBS_DEFAULT OR LOCKDC_DEPENDENCY_BUILD_JOBS_DEFAULT LESS 1)
+    set(LOCKDC_DEPENDENCY_BUILD_JOBS_DEFAULT 1)
+endif()
+set(LOCKDC_DEPENDENCY_BUILD_JOBS "${LOCKDC_DEPENDENCY_BUILD_JOBS_DEFAULT}" CACHE STRING "Parallel job count for vendored dependency builds.")
+set(LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT "300" CACHE STRING "Maximum time in seconds for a vendored dependency download attempt.")
+set(LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT "60" CACHE STRING "Maximum idle time in seconds for a vendored dependency download attempt.")
 
 if(NOT LOCKDC_BUILD_STATIC AND NOT LOCKDC_BUILD_SHARED)
     message(FATAL_ERROR "Enable at least one of LOCKDC_BUILD_STATIC or LOCKDC_BUILD_SHARED.")
@@ -682,6 +691,29 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/curl_dependency_interface_test.cmake
     )
     set_tests_properties(curl_dependency_interface_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME pslog_dependency_download_name_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/pslog_dependency_download_name_test.cmake
+    )
+    set_tests_properties(pslog_dependency_download_name_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME host_dependency_root_layout_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/host_dependency_root_layout_test.cmake
+    )
+    set_tests_properties(host_dependency_root_layout_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME dependency_download_timeout_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_download_timeout_test.cmake
+    )
+    set_tests_properties(dependency_download_timeout_test PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)

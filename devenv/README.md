@@ -47,7 +47,7 @@ scripts/dev-down.sh
 ```bash
 scripts/dev-ps.sh
 scripts/compose.sh logs -f lockd-disk-a
-scripts/deps.sh deps-host-debug
+scripts/deps.sh deps-x86_64-linux-gnu
 scripts/dev-e2e.sh
 make build
 make test
@@ -102,7 +102,7 @@ Those bundles contain the CA certificate, client certificate, and private key an
 Normal local flows:
 
 ```bash
-scripts/deps.sh deps-host-debug
+scripts/deps.sh deps-x86_64-linux-gnu
 make build
 make test
 make test-e2e
@@ -115,7 +115,7 @@ scripts/fuzz.sh
 Equivalent CMake preset flows:
 
 ```bash
-scripts/deps.sh deps-host-debug
+scripts/deps.sh deps-x86_64-linux-gnu
 cmake --preset debug
 cmake --build --preset debug
 
@@ -131,7 +131,8 @@ ctest --preset fuzz
 
 Dependency bootstrap is split from the low-level script workflow:
 
-- `scripts/deps.sh deps-host-debug` builds the host debug third-party stack into `./.cache/deps/host-debug`
+- `scripts/deps.sh deps-x86_64-linux-gnu` builds the shared host GNU third-party stack into `./.cache/deps/x86_64-linux-gnu`
+- `scripts/deps.sh deps-host-debug` remains as a compatibility alias to the same host GNU dependency root
 - it skips dependency work if the dependency manifest and artifacts still match
 - the primary Makefile workflow provisions the required dependency roots automatically for the common host and release paths
 - the low-level `scripts/build.sh` and `scripts/test.sh` entry points assume the required dependency tree already exists
