@@ -61,6 +61,9 @@ if(NOT TARGET lockdc::static AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.a")
   if(NOT "@CMAKE_DL_LIBS@" STREQUAL "")
     list(APPEND _lockdc_static_links "@CMAKE_DL_LIBS@")
   endif()
+  if(NOT "@LOCKDC_ATOMIC_LIBRARY@" STREQUAL "")
+    list(APPEND _lockdc_static_links atomic)
+  endif()
 
   add_library(lockdc::static STATIC IMPORTED)
   set_target_properties(lockdc::static PROPERTIES
