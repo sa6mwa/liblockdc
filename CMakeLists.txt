@@ -648,6 +648,8 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+            -DLOCKDC_C_FLAGS_DEBUG=${CMAKE_C_FLAGS_DEBUG}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_tree_sdk_test.cmake
     )
     set_tests_properties(install_tree_sdk_test PROPERTIES RUN_SERIAL TRUE)

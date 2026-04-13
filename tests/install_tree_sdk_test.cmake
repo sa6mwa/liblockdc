@@ -10,6 +10,10 @@ if(NOT DEFINED LOCKDC_C_COMPILER OR LOCKDC_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "LOCKDC_C_COMPILER is required")
 endif()
 
+if(NOT DEFINED LOCKDC_BUILD_TYPE OR LOCKDC_BUILD_TYPE STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_BUILD_TYPE is required")
+endif()
+
 set(test_root "${LOCKDC_BINARY_DIR}/install-tree-sdk-test")
 set(install_prefix "${test_root}/prefix")
 set(consumer_src_dir "${test_root}/consumer")
@@ -71,6 +75,8 @@ execute_process(
         -S "${consumer_src_dir}"
         -B "${consumer_bin_dir}"
         "-DCMAKE_C_COMPILER=${LOCKDC_C_COMPILER}"
+        "-DCMAKE_BUILD_TYPE=${LOCKDC_BUILD_TYPE}"
+        "-DCMAKE_C_FLAGS_DEBUG=${LOCKDC_C_FLAGS_DEBUG}"
         "-DCMAKE_PREFIX_PATH=${install_prefix}"
     RESULT_VARIABLE configure_result
     OUTPUT_VARIABLE configure_stdout
