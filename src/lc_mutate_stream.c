@@ -961,6 +961,7 @@ static lonejson_status lc_ms_visit_object_key_begin(void *user,
   }
   free(frame->pending_key);
   frame->pending_key = NULL;
+  free(ctx->key_buffer);
   ctx->key_buffer = NULL;
   ctx->key_len = 0U;
   ctx->key_cap = 0U;
@@ -993,7 +994,6 @@ static lonejson_status lc_ms_visit_object_key_chunk(void *user,
   if (status != LONEJSON_STATUS_OK) {
     return status;
   }
-  frame->pending_key = ctx->key_buffer;
   return LONEJSON_STATUS_OK;
 }
 
@@ -1009,9 +1009,13 @@ static lonejson_status lc_ms_visit_object_key_end(void *user,
   }
   frame = lc_ms_visit_top(ctx);
   if (frame == NULL || frame->kind != LC_MS_VISIT_CONTAINER_OBJECT ||
-      frame->pending_key == NULL) {
+      ctx->key_buffer == NULL) {
     return LONEJSON_STATUS_INVALID_JSON;
   }
+  frame->pending_key = ctx->key_buffer;
+  ctx->key_buffer = NULL;
+  ctx->key_len = 0U;
+  ctx->key_cap = 0U;
   if (ctx->mutation->path_segment_count > frame->path_len &&
       strcmp(ctx->mutation->path_segments[frame->path_len], frame->pending_key) ==
           0) {

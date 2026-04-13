@@ -351,6 +351,39 @@ static void test_mutation_plan_rejects_missing_array_path(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_mutation_plan_rejects_truncated_object_key_without_crashing(
+    void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "time:/ts=NOW";
+  memset(&options, 0, sizeof(options));
+  options.now.tv_sec = 1700000000;
+  options.now.tv_nsec = 123456789L;
+  options.has_now = 1;
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{\"broken");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_null(output);
+  assert_non_null(error.message);
+
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
 static void test_mutation_plan_streams_base64file_value(void **state) {
   const char *exprs[1];
   const unsigned char payload[] = {0x00, 0x01, 0x02, 'a'};
@@ -606,6 +639,8 @@ int main(void) {
       cmocka_unit_test(test_mutation_plan_rejects_invalid_time_literal),
       cmocka_unit_test(test_mutation_plan_increments_and_removes_fields),
       cmocka_unit_test(test_mutation_plan_rejects_missing_array_path),
+      cmocka_unit_test(
+          test_mutation_plan_rejects_truncated_object_key_without_crashing),
       cmocka_unit_test(test_mutation_plan_streams_base64file_value),
       cmocka_unit_test(test_mutation_plan_auto_file_mode_streams_in_one_pass),
       cmocka_unit_test(test_mutation_plan_rejects_invalid_utf8_textfile),
