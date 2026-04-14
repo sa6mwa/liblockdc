@@ -14,6 +14,7 @@ set(test_root "${LOCKDC_BINARY_DIR}/dependency-download-timeout-test")
 set(configure_build_dir "${test_root}/build")
 set(external_root "${test_root}/deps")
 set(dependency_build_root "${test_root}/deps-build")
+set(download_root "${test_root}/downloads")
 set(zlib_download_script "${dependency_build_root}/zlib/stamp/download-lc_zlib_project.cmake")
 
 file(REMOVE_RECURSE "${test_root}")
@@ -39,6 +40,7 @@ execute_process(
         -DLOCKDC_TARGET_LIBC=gnu
         -DLOCKDC_EXTERNAL_ROOT=${external_root}
         -DLOCKDC_DEPENDENCY_BUILD_ROOT=${dependency_build_root}
+        -DLOCKDC_DOWNLOAD_ROOT=${download_root}
     RESULT_VARIABLE configure_result
     OUTPUT_VARIABLE configure_stdout
     ERROR_VARIABLE configure_stderr
@@ -69,3 +71,4 @@ assert_contains("TIMEOUT;300" "download timeout setting")
 assert_contains("INACTIVITY_TIMEOUT;60" "download inactivity-timeout setting")
 assert_contains("https://www.zlib.net/zlib-1.3.2.tar.gz" "primary zlib URL")
 assert_contains("https://zlib.net/fossils/zlib-1.3.2.tar.gz" "fallback zlib URL")
+assert_contains("${download_root}/zlib-1.3.2.tar.gz" "shared download-root path")

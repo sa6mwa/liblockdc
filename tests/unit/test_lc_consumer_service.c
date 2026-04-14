@@ -11,7 +11,6 @@
 
 #include "lc/lc.h"
 #include "lc_api_internal.h"
-#include "lc_internal.h"
 #include "lc_log.h"
 
 typedef struct tracked_alloc_header {
@@ -265,7 +264,7 @@ static void fake_test_client_close(lc_client *self) {
   lc_client_handle *client;
 
   client = (lc_client_handle *)self;
-  lc_free_with_allocator(&client->allocator, client->engine);
+  lc_engine_client_close(client->engine);
   lc_free_with_allocator(&client->allocator, client);
 }
 
@@ -667,6 +666,25 @@ static char *read_stream_text(FILE *fp) {
   return buffer;
 }
 
+static void wait_for_subscribe_calls(consumer_test_state *state,
+                                     size_t expected_calls) {
+  size_t attempt;
+  size_t subscribe_calls;
+
+  for (attempt = 0U; attempt < 1000U; ++attempt) {
+    pthread_mutex_lock(&state->mutex);
+    subscribe_calls = state->subscribe_calls;
+    pthread_mutex_unlock(&state->mutex);
+    if (subscribe_calls >= expected_calls) {
+      return;
+    }
+    usleep(1000);
+  }
+
+  fail_msg("timed out waiting for subscribe calls: expected=%lu actual=%lu",
+           (unsigned long)expected_calls, (unsigned long)subscribe_calls);
+}
+
 static int fake_subscribe(lc_consumer_service_handle *service,
                           const lc_dequeue_req *request, int with_state,
                           lc_client_handle *client,
@@ -760,7 +778,10 @@ static int fake_subscribe_until_stop(
 int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
                           lc_error *error) {
   lc_client_handle *client;
-  lc_engine_client *engine;
+  lc_engine_client_config engine_config;
+  lc_engine_error engine_error;
+  const char *dummy_endpoint;
+  int rc;
 
   if (g_consumer_test_state == NULL) {
     return __real_lc_client_open(config, out, error);
@@ -772,26 +793,48 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
                         "failed to allocate fake worker client", NULL, NULL,
                         NULL);
   }
-  engine = (lc_engine_client *)lc_calloc_with_allocator(&config->allocator, 1U,
-                                                        sizeof(*engine));
-  if (engine == NULL) {
+  lc_engine_client_config_init(&engine_config);
+  lc_engine_error_init(&engine_error);
+  dummy_endpoint = "https://127.0.0.1:1";
+  if (config->endpoint_count == 0U &&
+      (config->unix_socket_path == NULL || config->unix_socket_path[0] == '\0')) {
+    engine_config.endpoints = &dummy_endpoint;
+    engine_config.endpoint_count = 1U;
+    engine_config.unix_socket_path = NULL;
+    engine_config.disable_mtls = 1;
+    engine_config.insecure_skip_verify = 1;
+  } else {
+    engine_config.endpoints = config->endpoints;
+    engine_config.endpoint_count = config->endpoint_count;
+    engine_config.unix_socket_path = config->unix_socket_path;
+    engine_config.disable_mtls = config->disable_mtls;
+    engine_config.insecure_skip_verify = config->insecure_skip_verify;
+  }
+  engine_config.client_bundle_path = config->client_bundle_path;
+  engine_config.default_namespace = config->default_namespace;
+  engine_config.timeout_ms = config->timeout_ms;
+  engine_config.prefer_http_2 = config->prefer_http_2;
+  engine_config.http_json_response_limit_bytes =
+      config->http_json_response_limit_bytes;
+  engine_config.logger =
+      g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
+  engine_config.disable_logger_sys_field = config->disable_logger_sys_field;
+  engine_config.allocator.malloc_fn = config->allocator.malloc_fn;
+  engine_config.allocator.realloc_fn = config->allocator.realloc_fn;
+  engine_config.allocator.free_fn = config->allocator.free_fn;
+  engine_config.allocator.context = config->allocator.context;
+  rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);
+  lc_engine_error_cleanup(&engine_error);
+  if (rc != LC_OK) {
     lc_free_with_allocator(&config->allocator, client);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate fake worker engine", NULL, NULL,
-                        NULL);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open fake worker engine", NULL, NULL, NULL);
   }
   client->allocator = config->allocator;
-  client->engine = engine;
   client->base_logger =
       g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
   client->logger =
       g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
-  engine->allocator.malloc_fn = config->allocator.malloc_fn;
-  engine->allocator.realloc_fn = config->allocator.realloc_fn;
-  engine->allocator.free_fn = config->allocator.free_fn;
-  engine->allocator.context = config->allocator.context;
-  engine->base_logger = client->base_logger;
-  engine->logger = client->logger;
   client->pub.close = fake_test_client_close;
   *out = &client->pub;
   return LC_OK;
@@ -1062,7 +1105,7 @@ test_consumer_service_multi_worker_runs_without_transport(void **state) {
     fail_msg("service start failed rc=%d err=%d msg=%s", rc, error.code,
              error.message != NULL ? error.message : "(null)");
   }
-  usleep(10000);
+  wait_for_subscribe_calls(&runtime_state, 3U);
   pthread_mutex_lock(&runtime_state.mutex);
   runtime_state.stop_requested = 1;
   pthread_mutex_unlock(&runtime_state.mutex);

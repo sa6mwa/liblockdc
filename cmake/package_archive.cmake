@@ -56,12 +56,17 @@ function(lockdc_copy_license_if_exists source_path destination_dir)
     endif()
 endfunction()
 
-function(lockdc_copy_required_license package_name destination_dir)
+function(lockdc_copy_required_license_named package_name destination_dir output_name)
     set(candidates ${ARGN})
 
     foreach(candidate IN LISTS candidates)
         if(EXISTS "${candidate}")
-            lockdc_copy_license_if_exists("${candidate}" "${destination_dir}")
+            file(MAKE_DIRECTORY "${destination_dir}")
+            file(COPY "${candidate}" DESTINATION "${destination_dir}")
+            get_filename_component(source_name "${candidate}" NAME)
+            if(NOT source_name STREQUAL output_name)
+                file(RENAME "${destination_dir}/${source_name}" "${destination_dir}/${output_name}")
+            endif()
             return()
         endif()
     endforeach()
@@ -81,28 +86,28 @@ file(MAKE_DIRECTORY "${package_root}/share/doc/liblockdc")
 
 file(COPY "${LOCKDC_PUBLIC_HEADER}" DESTINATION "${package_root}/include/lc")
 file(COPY "${LOCKDC_PUBLIC_VERSION_HEADER}" DESTINATION "${package_root}/include/lc")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/include/pslog.h" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/include/pslog_version.h" "${package_root}/include")
-lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl-static/install/include/curl" "${package_root}/include")
-lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/include/openssl" "${package_root}/include")
-lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/include/nghttp2" "${package_root}/include")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/pslog/install/include/pslog.h" "${package_root}/include")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/pslog/install/include/pslog_version.h" "${package_root}/include")
+lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl/install/include/curl" "${package_root}/include")
+lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl/install/include/openssl" "${package_root}/include")
+lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include/nghttp2" "${package_root}/include")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2.h" "${package_root}/include")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2_publickey.h" "${package_root}/include")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2_sftp.h" "${package_root}/include")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/zlib/install/include/zlib.h" "${package_root}/include")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/zlib/install/include/zconf.h" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/include/lonejson.h" "${package_root}/include")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include/lonejson.h" "${package_root}/include")
 
 file(COPY "${LOCKDC_STATIC_LIB}" DESTINATION "${package_root}/lib")
 file(COPY "${LOCKDC_SHARED_LIB}" DESTINATION "${package_root}/lib")
-file(COPY "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/lib/libpslog.a" DESTINATION "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl-static/install/lib/libcurl.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libssl.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libcrypto.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/lib/libnghttp2.a" "${package_root}/lib")
+file(COPY "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.a" DESTINATION "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2.a" "${package_root}/lib")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.a" "${package_root}/lib")
 lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/lib/liblonejson.a" "${package_root}/lib")
+lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson.a" "${package_root}/lib")
 
 if(DEFINED LOCKDC_SHARED_SONAME
    AND DEFINED LOCKDC_SHARED_LIB_NAME
@@ -121,14 +126,14 @@ if(DEFINED LOCKDC_SHARED_LINK_NAME
          SYMBOLIC)
 endif()
 
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/curl-shared-cmake/install/lib/libcurl.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libssl.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libcrypto.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/nghttp2-shared/install/lib/libnghttp2.so*" "${package_root}/lib")
+lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl.so*" "${package_root}/lib")
+lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so*" "${package_root}/lib")
+lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl.so*" "${package_root}/lib")
+lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto.so*" "${package_root}/lib")
+lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2.so*" "${package_root}/lib")
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.so*" "${package_root}/lib")
 lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/lib/liblonejson.so*" "${package_root}/lib")
+lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson.so*" "${package_root}/lib")
 
 file(COPY "${LOCKDC_PUBLIC_PKGCONFIG}" DESTINATION "${package_root}/lib/pkgconfig")
 file(COPY "${LOCKDC_PUBLIC_CMAKE_CONFIG}" DESTINATION "${package_root}/lib/cmake/lockdc")
@@ -136,58 +141,55 @@ file(COPY "${LOCKDC_PUBLIC_CMAKE_CONFIG_VERSION}" DESTINATION "${package_root}/l
 lockdc_copy_if_exists("${LOCKDC_ROOT}/LICENSE" "${package_root}/share/doc/liblockdc")
 lockdc_copy_if_exists("${LOCKDC_ROOT}/README.md" "${package_root}/share/doc/liblockdc")
 
-lockdc_copy_required_license(
+lockdc_copy_required_license_named(
     "libpslog"
     "${package_root}/share/doc/liblockdc/third_party/libpslog"
-    "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/share/doc/libpslog/LICENSE"
-    "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/share/doc/liblockdc-third-party/libpslog/LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/share/doc/libpslog/LICENSE"
-    "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/share/doc/liblockdc-third-party/libpslog/LICENSE.txt"
+    "LICENSE"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/share/doc/libpslog/LICENSE"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/share/doc/liblockdc-third-party/libpslog/LICENSE.txt"
 )
-lockdc_copy_required_license(
+lockdc_copy_required_license_named(
     "openssl"
     "${package_root}/share/doc/liblockdc/third_party/openssl"
-    "${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/openssl-shared/src/LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/openssl-static/src/LICENSE.txt"
+    "LICENSE.txt"
+    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt"
+    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/openssl/src/LICENSE.txt"
 )
-lockdc_copy_required_license(
+lockdc_copy_required_license_named(
     "curl"
     "${package_root}/share/doc/liblockdc/third_party/curl"
-    "${LOCKDC_EXTERNAL_ROOT}/curl-shared-cmake/install/share/doc/liblockdc-third-party/curl/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl-shared-cmake/src/COPYING"
-    "${LOCKDC_EXTERNAL_ROOT}/curl-static/install/share/doc/liblockdc-third-party/curl/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl-static/src/COPYING"
+    "LICENSE.txt"
+    "${LOCKDC_EXTERNAL_ROOT}/curl/install/share/doc/liblockdc-third-party/curl/LICENSE.txt"
+    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl/src/COPYING"
 )
-lockdc_copy_required_license(
+lockdc_copy_required_license_named(
     "nghttp2"
     "${package_root}/share/doc/liblockdc/third_party/nghttp2"
-    "${LOCKDC_EXTERNAL_ROOT}/nghttp2-shared/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2-shared/src/COPYING"
-    "${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2-static/src/COPYING"
+    "LICENSE.txt"
+    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt"
+    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2/src/COPYING"
 )
-lockdc_copy_required_license(
+lockdc_copy_required_license_named(
     "libssh2"
     "${package_root}/share/doc/liblockdc/third_party/libssh2"
+    "LICENSE.txt"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/share/doc/liblockdc-third-party/libssh2/LICENSE.txt"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/share/doc/libssh2/COPYING"
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/libssh2/src/COPYING"
 )
-lockdc_copy_required_license(
+lockdc_copy_required_license_named(
     "zlib"
     "${package_root}/share/doc/liblockdc/third_party/zlib"
+    "LICENSE.txt"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/share/doc/liblockdc-third-party/zlib/LICENSE.txt"
     "${LOCKDC_DEPENDENCY_BUILD_ROOT}/zlib/src/LICENSE"
 )
-lockdc_copy_required_license(
+lockdc_copy_required_license_named(
     "lonejson"
     "${package_root}/share/doc/liblockdc/third_party/lonejson"
-    "${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/share/doc/liblonejson/LICENSE"
-    "${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/share/doc/liblockdc-third-party/lonejson/LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/share/doc/liblonejson/LICENSE"
-    "${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/share/doc/liblockdc-third-party/lonejson/LICENSE.txt"
+    "LICENSE"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/share/doc/liblonejson/LICENSE"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/share/doc/liblockdc-third-party/lonejson/LICENSE.txt"
 )
 
 file(MAKE_DIRECTORY "${LOCKDC_DIST_DIR}")

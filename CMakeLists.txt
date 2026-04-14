@@ -16,6 +16,14 @@ include(ProcessorCount)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 find_library(LOCKDC_ATOMIC_LIBRARY NAMES atomic)
+set(LOCKDC_EXPORTED_ATOMIC_LIBRARY "")
+if(LOCKDC_ATOMIC_LIBRARY AND NOT LOCKDC_ATOMIC_LIBRARY MATCHES "-NOTFOUND$")
+    set(LOCKDC_EXPORTED_ATOMIC_LIBRARY "atomic")
+endif()
+set(LOCKDC_COVERAGE_RUNTIME_LIBRARY "")
+if(LOCKDC_ENABLE_COVERAGE AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    set(LOCKDC_COVERAGE_RUNTIME_LIBRARY "gcov")
+endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -45,6 +53,7 @@ set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for u
 set(LOCKDC_PSLOG_VERSION "0.3.1" CACHE STRING "Pinned libpslog release used for SDK logging.")
 set(LOCKDC_EXTERNAL_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps/x86_64-linux-gnu" CACHE PATH "Stable install root for downloaded third-party dependencies.")
 set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/x86_64-linux-gnu" CACHE PATH "Stable build root for downloaded third-party dependencies.")
+set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
 set(LOCKDC_VERSION_OVERRIDE "" CACHE STRING "Override the detected liblockdc package version with an explicit semantic version.")
 set(LOCKDC_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "Artifact architecture name")
@@ -227,16 +236,18 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/lockdc.pc"
     @ONLY
 )
+set(LOCKDC_SYSTEM_LIBRARIES Threads::Threads ${CMAKE_DL_LIBS})
+if(LOCKDC_ATOMIC_LIBRARY AND NOT LOCKDC_ATOMIC_LIBRARY MATCHES "-NOTFOUND$")
+    list(APPEND LOCKDC_SYSTEM_LIBRARIES "${LOCKDC_ATOMIC_LIBRARY}")
+endif()
+if(NOT LOCKDC_COVERAGE_RUNTIME_LIBRARY STREQUAL "")
+    list(APPEND LOCKDC_SYSTEM_LIBRARIES "${LOCKDC_COVERAGE_RUNTIME_LIBRARY}")
+endif()
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/lockdcConfig.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/lockdcConfig.cmake"
     INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/lockdc"
 )
-
-set(LOCKDC_SYSTEM_LIBRARIES Threads::Threads ${CMAKE_DL_LIBS})
-if(LOCKDC_ATOMIC_LIBRARY)
-    list(APPEND LOCKDC_SYSTEM_LIBRARIES "${LOCKDC_ATOMIC_LIBRARY}")
-endif()
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/lockdcConfigVersion.cmake"
     VERSION "${PROJECT_VERSION}"
@@ -272,10 +283,10 @@ set(lc_sources
     src/lc_transport.c
 )
 
-set(LOCKDC_PSLOG_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/include")
-set(LOCKDC_PSLOG_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/include")
-set(LOCKDC_LONEJSON_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/include")
-set(LOCKDC_LONEJSON_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/include")
+set(LOCKDC_PSLOG_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include")
+set(LOCKDC_PSLOG_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include")
+set(LOCKDC_LONEJSON_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include")
+set(LOCKDC_LONEJSON_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include")
 set(LOCKDC_PSLOG_INCLUDE_DIR "")
 set(LOCKDC_LONEJSON_INCLUDE_DIR "")
 foreach(lockdc_pslog_include_candidate
@@ -418,23 +429,23 @@ if(LOCKDC_INSTALL)
             COMPONENT dev
         )
     endif()
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/curl-static/install/include/curl")
+    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/curl/install/include/curl")
         install(DIRECTORY
-            "${LOCKDC_EXTERNAL_ROOT}/curl-static/install/include/curl"
+            "${LOCKDC_EXTERNAL_ROOT}/curl/install/include/curl"
             DESTINATION include
             COMPONENT dev
         )
     endif()
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/include/openssl")
+    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/openssl/install/include/openssl")
         install(DIRECTORY
-            "${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/include/openssl"
+            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/include/openssl"
             DESTINATION include
             COMPONENT dev
         )
     endif()
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/include/nghttp2")
+    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include/nghttp2")
         install(DIRECTORY
-            "${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/include/nghttp2"
+            "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include/nghttp2"
             DESTINATION include
             COMPONENT dev
         )
@@ -463,21 +474,21 @@ if(LOCKDC_INSTALL)
             COMPONENT dev
         )
     endif()
-    if(TARGET lc_static AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/lib/libpslog.a")
+    if(TARGET lc_static AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.a")
         install(FILES
-            "${LOCKDC_EXTERNAL_ROOT}/pslog-static/install/lib/libpslog.a"
+            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.a"
             DESTINATION lib
             COMPONENT dev
         )
     endif()
     foreach(_lc_static_dep
-        "${LOCKDC_EXTERNAL_ROOT}/curl-static/install/lib/libcurl.a"
-        "${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libssl.a"
-        "${LOCKDC_EXTERNAL_ROOT}/openssl-static/install/lib/libcrypto.a"
-        "${LOCKDC_EXTERNAL_ROOT}/nghttp2-static/install/lib/libnghttp2.a"
+        "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl.a"
+        "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl.a"
+        "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto.a"
+        "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2.a"
         "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.a"
         "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz.a"
-        "${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install/lib/liblonejson.a"
+        "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson.a"
     )
         if(TARGET lc_static AND EXISTS "${_lc_static_dep}")
             install(FILES
@@ -488,21 +499,21 @@ if(LOCKDC_INSTALL)
         endif()
     endforeach()
     if(TARGET lc_shared
-       AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.0"
-       AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.${LOCKDC_PSLOG_VERSION}")
+       AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so.0"
+       AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so.${LOCKDC_PSLOG_VERSION}")
         install(FILES
-            "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.0"
-            "${LOCKDC_EXTERNAL_ROOT}/pslog-shared/install/lib/libpslog.so.${LOCKDC_PSLOG_VERSION}"
+            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so.0"
+            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so.${LOCKDC_PSLOG_VERSION}"
             DESTINATION lib
             COMPONENT runtime
         )
     endif()
     if(TARGET lc_shared)
         foreach(_lc_shared_glob
-            "${LOCKDC_EXTERNAL_ROOT}/curl-shared-cmake/install/lib/libcurl.so*"
-            "${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libssl.so*"
-            "${LOCKDC_EXTERNAL_ROOT}/openssl-shared/install/lib/libcrypto.so*"
-            "${LOCKDC_EXTERNAL_ROOT}/nghttp2-shared/install/lib/libnghttp2.so*"
+            "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl.so*"
+            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl.so*"
+            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto.so*"
+            "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2.so*"
             "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.so*"
             "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz.so*"
         )
@@ -518,7 +529,7 @@ if(LOCKDC_INSTALL)
     endif()
     if(TARGET lc_shared)
         file(GLOB _lc_lonejson_shared_libs
-            "${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install/lib/liblonejson.so*")
+            "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson.so*")
         if(_lc_lonejson_shared_libs)
             install(FILES
                 ${_lc_lonejson_shared_libs}
@@ -691,6 +702,14 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/curl_dependency_interface_test.cmake
     )
     set_tests_properties(curl_dependency_interface_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME libssh2_dependency_interface_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/libssh2_dependency_interface_test.cmake
+    )
+    set_tests_properties(libssh2_dependency_interface_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME pslog_dependency_download_name_test
         COMMAND ${CMAKE_COMMAND}

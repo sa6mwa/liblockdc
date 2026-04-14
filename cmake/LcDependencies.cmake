@@ -73,12 +73,12 @@ function(lc_append_common_external_cmake_args out_var)
   set(${out_var} "${_args}" PARENT_SCOPE)
 endfunction()
 
-function(lc_add_openssl variant shared_flag)
-  set(project_name "lc_openssl_${variant}_project")
-  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/openssl-${variant}")
+function(lc_add_openssl)
+  set(project_name "lc_openssl_project")
+  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/openssl")
   set(source_dir "${prefix_dir}/src")
   set(build_dir "${prefix_dir}/build")
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/openssl-${variant}/install")
+  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/openssl/install")
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   lc_get_openssl_config_target(openssl_config_target)
@@ -86,31 +86,20 @@ function(lc_add_openssl variant shared_flag)
   if(LOCKDC_TARGET_LIBC STREQUAL "musl")
     list(APPEND config_args no-secure-memory no-afalgeng)
   endif()
-  if(shared_flag)
-    list(APPEND config_args shared "-Wl,--enable-new-dtags,-rpath,\\$$ORIGIN")
-    set(openssl_make_rpath "")
-  else()
-    list(APPEND config_args no-shared)
-    set(openssl_make_rpath "")
-  endif()
+  list(APPEND config_args shared "-Wl,--enable-new-dtags,-rpath,\\$$ORIGIN")
 
   lc_normalize_prefix(env_prefix "${install_dir}")
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
-  if(shared_flag)
-    set(build_command make -j1 "${openssl_make_rpath}")
-    set(install_command make -j1 "${openssl_make_rpath}" install_sw)
-  else()
-    set(build_command make -j1)
-    set(install_command make -j1 install_sw)
-  endif()
+  set(build_command make -j${LOCKDC_DEPENDENCY_BUILD_JOBS})
+  set(install_command make -j${LOCKDC_DEPENDENCY_BUILD_JOBS} install_sw)
 
   if(LOCKDC_BUILD_DEPENDENCIES)
     ExternalProject_Add(${project_name}
       URL "https://github.com/openssl/openssl/releases/download/openssl-${LOCKDC_OPENSSL_VERSION}/openssl-${LOCKDC_OPENSSL_VERSION}.tar.gz"
       URL_HASH "SHA256=b1bfedcd5b289ff22aee87c9d600f515767ebf45f77168cb6d64f231f518a82e"
-      DOWNLOAD_NAME "openssl-${LOCKDC_OPENSSL_VERSION}-${variant}.tar.gz"
+      DOWNLOAD_NAME "openssl-${LOCKDC_OPENSSL_VERSION}.tar.gz"
       PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
       SOURCE_DIR "${source_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
@@ -133,67 +122,71 @@ function(lc_add_openssl variant shared_flag)
     )
   endif()
 
-  if(shared_flag)
-    set(crypto_type SHARED)
-    set(ssl_type SHARED)
-    set(crypto_suffix "${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(ssl_suffix "${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  else()
-    set(crypto_type STATIC)
-    set(ssl_type STATIC)
-    set(crypto_suffix "${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    set(ssl_suffix "${CMAKE_STATIC_LIBRARY_SUFFIX}")
-  endif()
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
-  add_library(lc::openssl_crypto_${variant} ${crypto_type} IMPORTED GLOBAL)
-  set_target_properties(lc::openssl_crypto_${variant}
+  add_library(lc::openssl_crypto_static STATIC IMPORTED GLOBAL)
+  set_target_properties(lc::openssl_crypto_static
     PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libcrypto${crypto_suffix}"
+      IMPORTED_LOCATION "${install_dir}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::openssl_crypto_${variant} ${project_name})
+    add_dependencies(lc::openssl_crypto_static ${project_name})
     lc_record_dependency_target(${project_name})
   else()
-    lc_require_dependency_file("${install_dir}/lib/libcrypto${crypto_suffix}" "OpenSSL crypto (${variant})")
+    lc_require_dependency_file("${install_dir}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}" "OpenSSL crypto (static)")
   endif()
 
-  add_library(lc::openssl_ssl_${variant} ${ssl_type} IMPORTED GLOBAL)
-  set_target_properties(lc::openssl_ssl_${variant}
+  add_library(lc::openssl_ssl_static STATIC IMPORTED GLOBAL)
+  set_target_properties(lc::openssl_ssl_static
     PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libssl${ssl_suffix}"
+      IMPORTED_LOCATION "${install_dir}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_${variant};${CMAKE_DL_LIBS};Threads::Threads"
+      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_static;${CMAKE_DL_LIBS};Threads::Threads"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::openssl_ssl_${variant} ${project_name})
+    add_dependencies(lc::openssl_ssl_static ${project_name})
   else()
-    lc_require_dependency_file("${install_dir}/lib/libssl${ssl_suffix}" "OpenSSL ssl (${variant})")
+    lc_require_dependency_file("${install_dir}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}" "OpenSSL ssl (static)")
   endif()
 
-  set(LOCKDC_OPENSSL_${variant}_PREFIX "${install_dir}" PARENT_SCOPE)
+  add_library(lc::openssl_crypto_shared SHARED IMPORTED GLOBAL)
+  set_target_properties(lc::openssl_crypto_shared
+    PROPERTIES
+      IMPORTED_LOCATION "${install_dir}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+  )
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    add_dependencies(lc::openssl_crypto_shared ${project_name})
+  else()
+    lc_require_dependency_file("${install_dir}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}" "OpenSSL crypto (shared)")
+  endif()
+
+  add_library(lc::openssl_ssl_shared SHARED IMPORTED GLOBAL)
+  set_target_properties(lc::openssl_ssl_shared
+    PROPERTIES
+      IMPORTED_LOCATION "${install_dir}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_shared;${CMAKE_DL_LIBS};Threads::Threads"
+  )
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    add_dependencies(lc::openssl_ssl_shared ${project_name})
+  else()
+    lc_require_dependency_file("${install_dir}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}" "OpenSSL ssl (shared)")
+  endif()
+
+  set(LOCKDC_OPENSSL_static_PREFIX "${install_dir}" PARENT_SCOPE)
+  set(LOCKDC_OPENSSL_shared_PREFIX "${install_dir}" PARENT_SCOPE)
 endfunction()
 
-function(lc_add_nghttp2 variant shared_flag)
-  set(project_name "lc_nghttp2_${variant}_project")
-  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2-${variant}")
+function(lc_add_nghttp2)
+  set(project_name "lc_nghttp2_project")
+  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2")
   set(source_dir "${prefix_dir}/src")
   set(build_dir "${prefix_dir}/build")
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/nghttp2-${variant}/install")
+  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install")
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
-  if(shared_flag)
-    set(enable_shared --enable-shared)
-    set(enable_static --disable-static)
-    set(lib_type SHARED)
-    set(lib_suffix "${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  else()
-    set(enable_shared --disable-shared)
-    set(enable_static --enable-static)
-    set(lib_type STATIC)
-    set(lib_suffix "${CMAKE_STATIC_LIBRARY_SUFFIX}")
-  endif()
   lc_get_target_triple(autotools_host)
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
@@ -201,9 +194,9 @@ function(lc_add_nghttp2 variant shared_flag)
     ExternalProject_Add(${project_name}
       URL "https://github.com/nghttp2/nghttp2/releases/download/v${LOCKDC_NGHTTP2_VERSION}/nghttp2-${LOCKDC_NGHTTP2_VERSION}.tar.gz"
       URL_HASH "SHA256=2c16ffc588ad3f9e2613c3fad72db48ecb5ce15bc362fcc85b342e48daf51013"
-      DOWNLOAD_NAME "nghttp2-${LOCKDC_NGHTTP2_VERSION}-${variant}.tar.gz"
+      DOWNLOAD_NAME "nghttp2-${LOCKDC_NGHTTP2_VERSION}.tar.gz"
       PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
       SOURCE_DIR "${source_dir}"
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
@@ -218,30 +211,43 @@ function(lc_add_nghttp2 variant shared_flag)
         "${source_dir}/configure"
         --prefix=${install_dir}
         --host=${autotools_host}
-        ${enable_shared}
-        ${enable_static}
+        --enable-shared
+        --enable-static
         --enable-lib-only
-      BUILD_COMMAND make
-      INSTALL_COMMAND make install
+      BUILD_COMMAND make -C lib -j${LOCKDC_DEPENDENCY_BUILD_JOBS}
+      INSTALL_COMMAND make -C lib install
       BUILD_IN_SOURCE 0
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
   endif()
 
-  add_library(lc::nghttp2_${variant} ${lib_type} IMPORTED GLOBAL)
-  set_target_properties(lc::nghttp2_${variant}
+  add_library(lc::nghttp2_static STATIC IMPORTED GLOBAL)
+  set_target_properties(lc::nghttp2_static
     PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libnghttp2${lib_suffix}"
+      IMPORTED_LOCATION "${install_dir}/lib/libnghttp2${CMAKE_STATIC_LIBRARY_SUFFIX}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::nghttp2_${variant} ${project_name})
+    add_dependencies(lc::nghttp2_static ${project_name})
     lc_record_dependency_target(${project_name})
   else()
-    lc_require_dependency_file("${install_dir}/lib/libnghttp2${lib_suffix}" "nghttp2 (${variant})")
+    lc_require_dependency_file("${install_dir}/lib/libnghttp2${CMAKE_STATIC_LIBRARY_SUFFIX}" "nghttp2 (static)")
   endif()
 
-  set(LOCKDC_NGHTTP2_${variant}_PREFIX "${install_dir}" PARENT_SCOPE)
+  add_library(lc::nghttp2_shared SHARED IMPORTED GLOBAL)
+  set_target_properties(lc::nghttp2_shared
+    PROPERTIES
+      IMPORTED_LOCATION "${install_dir}/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+  )
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    add_dependencies(lc::nghttp2_shared ${project_name})
+  else()
+    lc_require_dependency_file("${install_dir}/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}" "nghttp2 (shared)")
+  endif()
+
+  set(LOCKDC_NGHTTP2_static_PREFIX "${install_dir}" PARENT_SCOPE)
+  set(LOCKDC_NGHTTP2_shared_PREFIX "${install_dir}" PARENT_SCOPE)
 endfunction()
 
 function(lc_add_zlib)
@@ -268,13 +274,16 @@ function(lc_add_zlib)
       URL_HASH "SHA256=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
       DOWNLOAD_NAME "zlib-${LOCKDC_ZLIB_VERSION}.tar.gz"
       PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
       SOURCE_DIR "${source_dir}"
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
       TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
       INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
+      PATCH_COMMAND ${CMAKE_COMMAND}
+        -DLOCKDC_ZLIB_SOURCE_DIR=<SOURCE_DIR>
+        -P ${CMAKE_SOURCE_DIR}/cmake/patch_zlib_single_pass.cmake
       CMAKE_ARGS
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
@@ -285,7 +294,7 @@ function(lc_add_zlib)
         -DZLIB_BUILD_TESTING=OFF
         -DZLIB_INSTALL=ON
         ${common_cmake_args}
-      BUILD_COMMAND ${CMAKE_COMMAND} --build .
+      BUILD_COMMAND ${CMAKE_COMMAND} --build . --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
       BUILD_IN_SOURCE 0
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
@@ -342,13 +351,13 @@ function(lc_add_libssh2)
   if(DEFINED LOCKDC_OPENSSL_shared_PREFIX AND NOT "${LOCKDC_OPENSSL_shared_PREFIX}" STREQUAL "")
     set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_shared_PREFIX}")
     set(libssh2_openssl_build_variant "shared")
-    set(openssl_project "lc_openssl_shared_project")
+    set(openssl_project "lc_openssl_project")
     set(libssh2_openssl_ssl_library "${libssh2_openssl_prefix}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(libssh2_openssl_crypto_library "${libssh2_openssl_prefix}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}")
   elseif(DEFINED LOCKDC_OPENSSL_static_PREFIX AND NOT "${LOCKDC_OPENSSL_static_PREFIX}" STREQUAL "")
     set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_static_PREFIX}")
     set(libssh2_openssl_build_variant "static")
-    set(openssl_project "lc_openssl_static_project")
+    set(openssl_project "lc_openssl_project")
     set(libssh2_openssl_ssl_library "${libssh2_openssl_prefix}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}")
     set(libssh2_openssl_crypto_library "${libssh2_openssl_prefix}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}")
   else()
@@ -366,13 +375,16 @@ function(lc_add_libssh2)
       URL_HASH "SHA256=d9ec76cbe34db98eec3539fe2c899d26b0c837cb3eb466a56b0f109cabf658f7"
       DOWNLOAD_NAME "libssh2-${LOCKDC_LIBSSH2_VERSION}.tar.gz"
       PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
       SOURCE_DIR "${source_dir}"
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
       TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
       INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
+      PATCH_COMMAND ${CMAKE_COMMAND}
+        -DLOCKDC_LIBSSH2_SOURCE_DIR=<SOURCE_DIR>
+        -P ${CMAKE_SOURCE_DIR}/cmake/patch_libssh2_single_pass.cmake
       CMAKE_ARGS
         -DCMAKE_INSTALL_PREFIX=${install_dir}
         -DCMAKE_INSTALL_LIBDIR=lib
@@ -394,7 +406,7 @@ function(lc_add_libssh2)
       DEPENDS
         ${openssl_project}
         lc_zlib_project
-      BUILD_COMMAND ${CMAKE_COMMAND} --build .
+      BUILD_COMMAND ${CMAKE_COMMAND} --build . --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
       BUILD_IN_SOURCE 0
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
@@ -432,50 +444,23 @@ function(lc_add_libssh2)
   set(LOCKDC_LIBSSH2_PREFIX "${install_dir}" PARENT_SCOPE)
 endfunction()
 
-function(lc_add_curl variant shared_flag)
-  set(project_name "lc_curl_${variant}_project")
-  set(openssl_project "lc_openssl_${variant}_project")
-  set(nghttp2_project "lc_nghttp2_${variant}_project")
+function(lc_add_curl)
+  set(project_name "lc_curl_project")
+  set(openssl_project "lc_openssl_project")
+  set(nghttp2_project "lc_nghttp2_project")
   set(libssh2_project "lc_libssh2_project")
   set(zlib_project "lc_zlib_project")
-
-  if(shared_flag)
-    set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl-shared-cmake")
-    set(install_dir "${LOCKDC_EXTERNAL_ROOT}/curl-shared-cmake/install")
-    set(lib_type SHARED)
-    set(lib_suffix "${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(openssl_prefix "${LOCKDC_OPENSSL_shared_PREFIX}")
-    set(nghttp2_prefix "${LOCKDC_NGHTTP2_shared_PREFIX}")
-    set(libssh2_prefix "${LOCKDC_LIBSSH2_PREFIX}")
-    set(curl_download_name "curl-${LOCKDC_CURL_VERSION}-${variant}-cmake.tar.xz")
-    set(curl_openssl_ssl_library "${openssl_prefix}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(curl_openssl_crypto_library "${openssl_prefix}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(curl_nghttp2_library "${nghttp2_prefix}/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(curl_libssh2_library "${libssh2_prefix}/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(curl_zlib_library "${LOCKDC_ZLIB_PREFIX}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(curl_build_shared_libs ON)
-    set(curl_build_static_libs OFF)
-    set(curl_install_rpath "$ORIGIN")
-    set(curl_shared_linker_flags "-Wl,--enable-new-dtags")
-  else()
-    set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl-static")
-    set(install_dir "${LOCKDC_EXTERNAL_ROOT}/curl-static/install")
-    set(lib_type STATIC)
-    set(lib_suffix "${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    set(openssl_prefix "${LOCKDC_OPENSSL_static_PREFIX}")
-    set(nghttp2_prefix "${LOCKDC_NGHTTP2_static_PREFIX}")
-    set(libssh2_prefix "${LOCKDC_LIBSSH2_PREFIX}")
-    set(curl_download_name "curl-${LOCKDC_CURL_VERSION}-${variant}-cmake.tar.xz")
-    set(curl_openssl_ssl_library "${openssl_prefix}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    set(curl_openssl_crypto_library "${openssl_prefix}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    set(curl_nghttp2_library "${nghttp2_prefix}/lib/libnghttp2${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    set(curl_libssh2_library "${libssh2_prefix}/lib/libssh2${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    set(curl_zlib_library "${LOCKDC_ZLIB_PREFIX}/lib/libz${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    set(curl_build_shared_libs OFF)
-    set(curl_build_static_libs ON)
-    set(curl_install_rpath "")
-    set(curl_shared_linker_flags "")
-  endif()
+  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl")
+  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/curl/install")
+  set(openssl_prefix "${LOCKDC_OPENSSL_shared_PREFIX}")
+  set(nghttp2_prefix "${LOCKDC_NGHTTP2_shared_PREFIX}")
+  set(libssh2_prefix "${LOCKDC_LIBSSH2_PREFIX}")
+  set(curl_download_name "curl-${LOCKDC_CURL_VERSION}.tar.xz")
+  set(curl_openssl_ssl_library "${openssl_prefix}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(curl_openssl_crypto_library "${openssl_prefix}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(curl_nghttp2_library "${nghttp2_prefix}/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(curl_libssh2_library "${libssh2_prefix}/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(curl_zlib_library "${LOCKDC_ZLIB_PREFIX}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}")
   set(source_dir "${prefix_dir}/src")
   set(build_dir "${prefix_dir}/build")
   set(stamp_dir "${prefix_dir}/stamp")
@@ -489,7 +474,7 @@ function(lc_add_curl variant shared_flag)
       URL_HASH "SHA256=40df79166e74aa20149365e11ee4c798a46ad57c34e4f68fd13100e2c9a91946"
       DOWNLOAD_NAME "${curl_download_name}"
       PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
       SOURCE_DIR "${source_dir}"
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
@@ -507,13 +492,14 @@ function(lc_add_curl variant shared_flag)
         -DCMAKE_DEBUG_POSTFIX=
         -DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-        -DCMAKE_INSTALL_RPATH=${curl_install_rpath}
+        -DCMAKE_INSTALL_RPATH=$ORIGIN
         -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF
         -DCMAKE_BUILD_RPATH=
         -DCMAKE_SKIP_INSTALL_RPATH=OFF
-        -DCMAKE_SHARED_LINKER_FLAGS=${curl_shared_linker_flags}
-        -DBUILD_SHARED_LIBS=${curl_build_shared_libs}
-        -DBUILD_STATIC_LIBS=${curl_build_static_libs}
+        -DCMAKE_SHARED_LINKER_FLAGS=-Wl,--enable-new-dtags
+        -DBUILD_SHARED_LIBS=ON
+        -DBUILD_STATIC_LIBS=ON
+        -DSHARE_LIB_OBJECT=ON
         -DBUILD_CURL_EXE=OFF
         -DBUILD_EXAMPLES=OFF
         -DBUILD_LIBCURL_DOCS=OFF
@@ -545,25 +531,38 @@ function(lc_add_curl variant shared_flag)
         -DLIBSSH2_INCLUDE_DIR=${libssh2_prefix}/include
         -DLIBSSH2_LIBRARY=${curl_libssh2_library}
         ${common_cmake_args}
-      BUILD_COMMAND ${CMAKE_COMMAND} --build .
+      BUILD_COMMAND ${CMAKE_COMMAND} --build . --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
       BUILD_IN_SOURCE 0
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
   endif()
 
-  add_library(lc::curl_${variant} ${lib_type} IMPORTED GLOBAL)
-  set_target_properties(lc::curl_${variant}
+  add_library(lc::curl_static STATIC IMPORTED GLOBAL)
+  set_target_properties(lc::curl_static
     PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libcurl${lib_suffix}"
+      IMPORTED_LOCATION "${install_dir}/lib/libcurl${CMAKE_STATIC_LIBRARY_SUFFIX}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_${variant};lc::openssl_crypto_${variant};lc::nghttp2_${variant};lc::libssh2_${variant};lc::zlib_${variant};${CMAKE_DL_LIBS};Threads::Threads"
+      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_static;lc::openssl_crypto_static;lc::nghttp2_static;lc::libssh2_static;lc::zlib_static;${CMAKE_DL_LIBS};Threads::Threads"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::curl_${variant} ${project_name})
+    add_dependencies(lc::curl_static ${project_name})
     lc_record_dependency_target(${project_name})
   else()
-    lc_require_dependency_file("${install_dir}/lib/libcurl${lib_suffix}" "curl (${variant})")
+    lc_require_dependency_file("${install_dir}/lib/libcurl${CMAKE_STATIC_LIBRARY_SUFFIX}" "curl (static)")
+  endif()
+
+  add_library(lc::curl_shared SHARED IMPORTED GLOBAL)
+  set_target_properties(lc::curl_shared
+    PROPERTIES
+      IMPORTED_LOCATION "${install_dir}/lib/libcurl${CMAKE_SHARED_LIBRARY_SUFFIX}"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_shared;lc::openssl_crypto_shared;lc::nghttp2_shared;lc::libssh2_shared;lc::zlib_shared;${CMAKE_DL_LIBS};Threads::Threads"
+  )
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    add_dependencies(lc::curl_shared ${project_name})
+  else()
+    lc_require_dependency_file("${install_dir}/lib/libcurl${CMAKE_SHARED_LIBRARY_SUFFIX}" "curl (shared)")
   endif()
 endfunction()
 
@@ -606,14 +605,8 @@ SOFTWARE.
 ]=])
 endfunction()
 
-function(lc_prepare_lonejson_source variant shared_flag source_dir install_dir
+function(lc_prepare_lonejson_source source_dir install_dir
          curl_include_dir download_dir asset_name gzip_bin)
-  if(shared_flag)
-    set(lib_type SHARED)
-  else()
-    set(lib_type STATIC)
-  endif()
-
   file(MAKE_DIRECTORY
     "${source_dir}"
     "${install_dir}/include"
@@ -630,24 +623,32 @@ function(lc_prepare_lonejson_source variant shared_flag source_dir install_dir
     "\n"
     "project(lonejson_bundle VERSION ${LOCKDC_LONEJSON_VERSION} LANGUAGES C)\n"
     "\n"
-    "add_library(lonejson ${lib_type} lonejson_impl.c)\n"
-    "target_include_directories(lonejson PRIVATE \"${curl_include_dir}\" \"${source_dir}\")\n"
-    "target_compile_definitions(lonejson PRIVATE\n"
+    "add_library(lonejson_object OBJECT lonejson_impl.c)\n"
+    "target_include_directories(lonejson_object PRIVATE \"${curl_include_dir}\" \"${source_dir}\")\n"
+    "target_compile_definitions(lonejson_object PRIVATE\n"
     "  _POSIX_C_SOURCE=200809L\n"
     "  LONEJSON_IMPLEMENTATION=1\n"
     "  LONEJSON_WITH_CURL=1\n"
     "  LONEJSON_DISABLE_SHORT_NAMES=1\n"
     ")\n"
-    "set_target_properties(lonejson\n"
+    "set_target_properties(lonejson_object PROPERTIES POSITION_INDEPENDENT_CODE ON)\n"
+    "add_library(lonejson_shared SHARED $<TARGET_OBJECTS:lonejson_object>)\n"
+    "add_library(lonejson_static STATIC $<TARGET_OBJECTS:lonejson_object>)\n"
+    "set_target_properties(lonejson_shared\n"
     "  PROPERTIES\n"
     "    OUTPUT_NAME lonejson\n"
     "    POSITION_INDEPENDENT_CODE ON\n"
     "    VERSION ${LOCKDC_LONEJSON_VERSION}\n"
     "    SOVERSION 0\n"
     ")\n"
+    "set_target_properties(lonejson_static\n"
+    "  PROPERTIES\n"
+    "    OUTPUT_NAME lonejson\n"
+    "    POSITION_INDEPENDENT_CODE ON\n"
+    ")\n"
     "\n"
     "if(CMAKE_C_COMPILER_ID MATCHES \"Clang|GNU\")\n"
-    "  target_compile_options(lonejson PRIVATE\n"
+    "  target_compile_options(lonejson_object PRIVATE\n"
     "    -std=c89\n"
     "    -Wall\n"
     "    -Wextra\n"
@@ -656,7 +657,7 @@ function(lc_prepare_lonejson_source variant shared_flag source_dir install_dir
     "endif()\n"
     "\n"
     "install(FILES \"${source_dir}/lonejson.h\" DESTINATION include)\n"
-    "install(TARGETS lonejson\n"
+    "install(TARGETS lonejson_shared lonejson_static\n"
     "  ARCHIVE DESTINATION lib\n"
     "  LIBRARY DESTINATION lib\n"
     ")\n"
@@ -701,35 +702,24 @@ function(lc_prepare_lonejson_source variant shared_flag source_dir install_dir
     "endif()\n")
 endfunction()
 
-function(lc_add_lonejson variant shared_flag)
-  set(project_name "lc_lonejson_${variant}_project")
-  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/lonejson-${variant}")
+function(lc_add_lonejson)
+  set(project_name "lc_lonejson_project")
+  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/lonejson")
   set(source_dir "${prefix_dir}/src")
   set(build_dir "${prefix_dir}/build")
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/lonejson-${variant}/install")
+  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/lonejson/install")
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
-  set(download_dir "${LOCKDC_EXTERNAL_ROOT}/downloads")
+  set(download_dir "${LOCKDC_DOWNLOAD_ROOT}")
   lc_get_lonejson_header_info(asset_name asset_hash)
   if(LOCKDC_BUILD_DEPENDENCIES)
     find_program(LOCKDC_GZIP_BIN NAMES gzip REQUIRED)
   endif()
-
-  if(shared_flag)
-    set(lib_type SHARED)
-    set(imported_location "${install_dir}/lib/liblonejson${CMAKE_SHARED_LIBRARY_SUFFIX}.0")
-    set(curl_include_dir "${LOCKDC_EXTERNAL_ROOT}/curl-shared-cmake/install/include")
-    set(curl_project "lc_curl_shared_project")
-  else()
-    set(lib_type STATIC)
-    set(imported_location "${install_dir}/lib/liblonejson${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    set(curl_include_dir "${LOCKDC_EXTERNAL_ROOT}/curl-static/install/include")
-    set(curl_project "lc_curl_static_project")
-  endif()
+  set(curl_include_dir "${LOCKDC_EXTERNAL_ROOT}/curl/install/include")
+  set(curl_project "lc_curl_project")
 
   if(LOCKDC_BUILD_DEPENDENCIES)
-    lc_prepare_lonejson_source("${variant}" "${shared_flag}" "${source_dir}"
-                               "${install_dir}" "${curl_include_dir}"
+    lc_prepare_lonejson_source("${source_dir}" "${install_dir}" "${curl_include_dir}"
                                "${download_dir}" "${asset_name}"
                                "${LOCKDC_GZIP_BIN}")
     ExternalProject_Add(${project_name}
@@ -748,24 +738,36 @@ function(lc_add_lonejson variant shared_flag)
       DEPENDS ${curl_project}
       CONFIGURE_COMMAND
         ${CMAKE_COMMAND} -P "${source_dir}/configure.cmake"
-      BUILD_COMMAND ${CMAKE_COMMAND} --build "${build_dir}"
+      BUILD_COMMAND ${CMAKE_COMMAND} --build "${build_dir}" --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install "${build_dir}"
       BUILD_IN_SOURCE 0
     )
   endif()
 
-  add_library(lc::lonejson_${variant} ${lib_type} IMPORTED GLOBAL)
-  set_target_properties(lc::lonejson_${variant}
+  add_library(lc::lonejson_static STATIC IMPORTED GLOBAL)
+  set_target_properties(lc::lonejson_static
     PROPERTIES
-      IMPORTED_LOCATION "${imported_location}"
+      IMPORTED_LOCATION "${install_dir}/lib/liblonejson${CMAKE_STATIC_LIBRARY_SUFFIX}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::lonejson_${variant} ${project_name})
+    add_dependencies(lc::lonejson_static ${project_name})
     lc_record_dependency_target(${project_name})
   else()
-    lc_require_dependency_file("${imported_location}" "lonejson (${variant})")
-    lc_require_dependency_file("${install_dir}/include/lonejson.h" "lonejson header (${variant})")
+    lc_require_dependency_file("${install_dir}/lib/liblonejson${CMAKE_STATIC_LIBRARY_SUFFIX}" "lonejson (static)")
+    lc_require_dependency_file("${install_dir}/include/lonejson.h" "lonejson header")
+  endif()
+
+  add_library(lc::lonejson_shared SHARED IMPORTED GLOBAL)
+  set_target_properties(lc::lonejson_shared
+    PROPERTIES
+      IMPORTED_LOCATION "${install_dir}/lib/liblonejson${CMAKE_SHARED_LIBRARY_SUFFIX}.0"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+  )
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    add_dependencies(lc::lonejson_shared ${project_name})
+  else()
+    lc_require_dependency_file("${install_dir}/lib/liblonejson${CMAKE_SHARED_LIBRARY_SUFFIX}.0" "lonejson (shared)")
   endif()
 endfunction()
 
@@ -785,7 +787,7 @@ function(lc_add_cmocka)
       URL "https://cmocka.org/files/2.0/cmocka-${LOCKDC_CMOCKA_VERSION}.tar.xz"
       URL_HASH "SHA256=39f92f366bdf3f1a02af4da75b4a5c52df6c9f7e736c7d65de13283f9f0ef416"
       PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
       SOURCE_DIR "${source_dir}"
       BINARY_DIR "${build_dir}"
       STAMP_DIR "${stamp_dir}"
@@ -797,10 +799,11 @@ function(lc_add_cmocka)
         -DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}
         -DBUILD_SHARED_LIBS=OFF
         -DBUILD_TESTING=OFF
+        -DWITH_EXAMPLES=OFF
         -DPICKY_DEVELOPER=OFF
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         ${common_cmake_args}
-      BUILD_COMMAND ${CMAKE_COMMAND} --build .
+      BUILD_COMMAND ${CMAKE_COMMAND} --build . --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
@@ -843,23 +846,15 @@ function(lc_get_pslog_asset_info out_name out_hash shared_flag)
   set(${out_hash} "${asset_hash}" PARENT_SCOPE)
 endfunction()
 
-function(lc_add_pslog variant shared_flag)
-  set(project_name "lc_pslog_${variant}_project")
-  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/pslog-${variant}")
+function(lc_add_pslog)
+  set(project_name "lc_pslog_project")
+  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/pslog")
   set(source_dir "${prefix_dir}/src")
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/pslog-${variant}/install")
+  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/pslog/install")
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
 
-  lc_get_pslog_asset_info(asset_name asset_hash ${shared_flag})
-
-  if(shared_flag)
-    set(lib_type SHARED)
-    set(imported_location "${install_dir}/lib/libpslog${CMAKE_SHARED_LIBRARY_SUFFIX}.0")
-  else()
-    set(lib_type STATIC)
-    set(imported_location "${install_dir}/lib/libpslog${CMAKE_STATIC_LIBRARY_SUFFIX}")
-  endif()
+  lc_get_pslog_asset_info(asset_name asset_hash TRUE)
 
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
@@ -867,12 +862,9 @@ function(lc_add_pslog variant shared_flag)
     ExternalProject_Add(${project_name}
       URL "https://github.com/sa6mwa/libpslog/releases/download/v${LOCKDC_PSLOG_VERSION}/${asset_name}"
       URL_HASH "SHA256=${asset_hash}"
-      # Keep static/shared downloads isolated even though they come from the same
-      # upstream asset. Sharing one local download path lets one ExternalProject
-      # observe a partially written or replaced file from the other.
-      DOWNLOAD_NAME "${variant}-${asset_name}"
+      DOWNLOAD_NAME "${asset_name}"
       PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${LOCKDC_EXTERNAL_ROOT}/downloads"
+      DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
       SOURCE_DIR "${source_dir}"
       STAMP_DIR "${stamp_dir}"
       TMP_DIR "${tmp_dir}"
@@ -888,45 +880,46 @@ function(lc_add_pslog variant shared_flag)
     )
   endif()
 
-  add_library(lc::pslog_${variant} ${lib_type} IMPORTED GLOBAL)
-  set_target_properties(lc::pslog_${variant}
+  add_library(lc::pslog_static STATIC IMPORTED GLOBAL)
+  set_target_properties(lc::pslog_static
     PROPERTIES
-      IMPORTED_LOCATION "${imported_location}"
+      IMPORTED_LOCATION "${install_dir}/lib/libpslog${CMAKE_STATIC_LIBRARY_SUFFIX}"
       INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
   )
   if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::pslog_${variant} ${project_name})
+    add_dependencies(lc::pslog_static ${project_name})
     lc_record_dependency_target(${project_name})
   else()
-    lc_require_dependency_file("${imported_location}" "libpslog (${variant})")
-    lc_require_dependency_file("${install_dir}/include/pslog.h" "libpslog header (${variant})")
+    lc_require_dependency_file("${install_dir}/lib/libpslog${CMAKE_STATIC_LIBRARY_SUFFIX}" "libpslog (static)")
+    lc_require_dependency_file("${install_dir}/include/pslog.h" "libpslog header")
+  endif()
+
+  add_library(lc::pslog_shared SHARED IMPORTED GLOBAL)
+  set_target_properties(lc::pslog_shared
+    PROPERTIES
+      IMPORTED_LOCATION "${install_dir}/lib/libpslog${CMAKE_SHARED_LIBRARY_SUFFIX}.0"
+      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
+  )
+  if(LOCKDC_BUILD_DEPENDENCIES)
+    add_dependencies(lc::pslog_shared ${project_name})
+  else()
+    lc_require_dependency_file("${install_dir}/lib/libpslog${CMAKE_SHARED_LIBRARY_SUFFIX}.0" "libpslog (shared)")
   endif()
 endfunction()
 
 function(lc_configure_dependencies)
-  if(LOCKDC_BUILD_STATIC)
-    lc_add_openssl(static FALSE)
-  endif()
-
-  if(LOCKDC_BUILD_SHARED)
-    lc_add_openssl(shared TRUE)
+  if(LOCKDC_BUILD_STATIC OR LOCKDC_BUILD_SHARED)
+    lc_add_openssl()
   endif()
 
   lc_add_zlib()
   lc_add_libssh2()
 
-  if(LOCKDC_BUILD_STATIC)
-    lc_add_pslog(static FALSE)
-    lc_add_nghttp2(static FALSE)
-    lc_add_curl(static FALSE)
-    lc_add_lonejson(static FALSE)
-  endif()
-
-  if(LOCKDC_BUILD_SHARED)
-    lc_add_pslog(shared TRUE)
-    lc_add_nghttp2(shared TRUE)
-    lc_add_curl(shared TRUE)
-    lc_add_lonejson(shared TRUE)
+  if(LOCKDC_BUILD_STATIC OR LOCKDC_BUILD_SHARED)
+    lc_add_pslog()
+    lc_add_nghttp2()
+    lc_add_curl()
+    lc_add_lonejson()
   endif()
 
   if(LOCKDC_BUILD_TESTS)

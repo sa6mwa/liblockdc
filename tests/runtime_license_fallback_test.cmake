@@ -21,24 +21,23 @@ file(MAKE_DIRECTORY
     "${binary_dir}"
     "${public_include_dir}"
     "${shared_lib_dir}"
-    "${external_root}/pslog-static/install/include"
-    "${external_root}/pslog-static/install/lib"
-    "${external_root}/curl-shared-cmake/install/lib"
+    "${external_root}/pslog/install/include"
+    "${external_root}/pslog/install/lib"
+    "${external_root}/curl/install/lib"
     "${external_root}/libssh2/install/include"
     "${external_root}/libssh2/install/lib"
     "${external_root}/zlib/install/include"
     "${external_root}/zlib/install/lib"
-    "${external_root}/pslog-shared/install/lib"
-    "${external_root}/openssl-shared/install/lib"
-    "${external_root}/nghttp2-shared/install/lib"
-    "${external_root}/lonejson-shared/install/lib"
-    "${external_root}/curl-shared-cmake/install/share/doc/liblockdc-third-party/curl"
+    "${external_root}/openssl/install/lib"
+    "${external_root}/nghttp2/install/lib"
+    "${external_root}/lonejson/install/lib"
+    "${external_root}/curl/install/share/doc/liblockdc-third-party/curl"
     "${external_root}/libssh2/install/share/doc/liblockdc-third-party/libssh2"
     "${external_root}/zlib/install/share/doc/liblockdc-third-party/zlib"
-    "${external_root}/pslog-shared/install/share/doc/libpslog"
-    "${external_root}/openssl-shared/install/share/doc/liblockdc-third-party/openssl"
-    "${external_root}/nghttp2-shared/install/share/doc/liblockdc-third-party/nghttp2"
-    "${external_root}/lonejson-shared/install/share/doc/liblonejson"
+    "${external_root}/pslog/install/share/doc/libpslog"
+    "${external_root}/openssl/install/share/doc/liblockdc-third-party/openssl"
+    "${external_root}/nghttp2/install/share/doc/liblockdc-third-party/nghttp2"
+    "${external_root}/lonejson/install/share/doc/liblonejson"
 )
 
 file(WRITE "${fake_repo_root}/LICENSE" "liblockdc test license\n")
@@ -50,9 +49,9 @@ file(WRITE "${shared_lib_dir}/liblockdc.so.1.2.3" "shared library placeholder\n"
 file(WRITE "${binary_dir}/lockdc.pc" "prefix=/tmp\n")
 file(WRITE "${binary_dir}/lockdcConfig.cmake" "set(lockdc_FOUND TRUE)\n")
 file(WRITE "${binary_dir}/lockdcConfigVersion.cmake" "set(PACKAGE_VERSION 1.2.3)\n")
-file(WRITE "${external_root}/pslog-static/install/include/pslog.h" "/* pslog header */\n")
-file(WRITE "${external_root}/pslog-static/install/include/pslog_version.h" "/* pslog version header */\n")
-file(WRITE "${external_root}/pslog-static/install/lib/libpslog.a" "pslog static\n")
+file(WRITE "${external_root}/pslog/install/include/pslog.h" "/* pslog header */\n")
+file(WRITE "${external_root}/pslog/install/include/pslog_version.h" "/* pslog version header */\n")
+file(WRITE "${external_root}/pslog/install/lib/libpslog.a" "pslog static\n")
 file(WRITE "${external_root}/libssh2/install/include/libssh2.h" "/* libssh2 header */\n")
 file(WRITE "${external_root}/libssh2/install/include/libssh2_publickey.h" "/* libssh2 publickey header */\n")
 file(WRITE "${external_root}/libssh2/install/include/libssh2_sftp.h" "/* libssh2 sftp header */\n")
@@ -67,20 +66,20 @@ file(WRITE "${external_root}/zlib/install/lib/libz.so.${LOCKDC_ZLIB_VERSION}" "z
 file(CREATE_LINK "libz.so.${LOCKDC_ZLIB_VERSION}" "${external_root}/zlib/install/lib/libz.so.1" SYMBOLIC)
 file(CREATE_LINK "libz.so.1" "${external_root}/zlib/install/lib/libz.so" SYMBOLIC)
 
-file(WRITE "${external_root}/curl-shared-cmake/install/lib/libcurl.so.4" "curl shared\n")
-file(WRITE "${external_root}/pslog-shared/install/lib/libpslog.so.0" "pslog shared\n")
-file(WRITE "${external_root}/openssl-shared/install/lib/libssl.so.3" "openssl ssl shared\n")
-file(WRITE "${external_root}/openssl-shared/install/lib/libcrypto.so.3" "openssl crypto shared\n")
-file(WRITE "${external_root}/nghttp2-shared/install/lib/libnghttp2.so.14" "nghttp2 shared\n")
-file(WRITE "${external_root}/lonejson-shared/install/lib/liblonejson.so.0" "lonejson shared\n")
+file(WRITE "${external_root}/curl/install/lib/libcurl.so.4" "curl shared\n")
+file(WRITE "${external_root}/pslog/install/lib/libpslog.so.0" "pslog shared\n")
+file(WRITE "${external_root}/openssl/install/lib/libssl.so.3" "openssl ssl shared\n")
+file(WRITE "${external_root}/openssl/install/lib/libcrypto.so.3" "openssl crypto shared\n")
+file(WRITE "${external_root}/nghttp2/install/lib/libnghttp2.so.14" "nghttp2 shared\n")
+file(WRITE "${external_root}/lonejson/install/lib/liblonejson.so.0" "lonejson shared\n")
 
-file(WRITE "${external_root}/curl-shared-cmake/install/share/doc/liblockdc-third-party/curl/LICENSE.txt" "curl license\n")
+file(WRITE "${external_root}/curl/install/share/doc/liblockdc-third-party/curl/LICENSE.txt" "curl license\n")
 file(WRITE "${external_root}/libssh2/install/share/doc/liblockdc-third-party/libssh2/LICENSE.txt" "libssh2 license\n")
 file(WRITE "${external_root}/zlib/install/share/doc/liblockdc-third-party/zlib/LICENSE.txt" "zlib license\n")
-file(WRITE "${external_root}/pslog-shared/install/share/doc/libpslog/LICENSE" "pslog license\n")
-file(WRITE "${external_root}/openssl-shared/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt" "openssl license\n")
-file(WRITE "${external_root}/nghttp2-shared/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt" "nghttp2 license\n")
-file(WRITE "${external_root}/lonejson-shared/install/share/doc/liblonejson/LICENSE" "lonejson license\n")
+file(WRITE "${external_root}/pslog/install/share/doc/libpslog/LICENSE" "pslog license\n")
+file(WRITE "${external_root}/openssl/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt" "openssl license\n")
+file(WRITE "${external_root}/nghttp2/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt" "nghttp2 license\n")
+file(WRITE "${external_root}/lonejson/install/share/doc/liblonejson/LICENSE" "lonejson license\n")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}"

@@ -139,6 +139,15 @@ fingerprint=$(
   {
     cat "$repo_root/CMakePresets.json"
     cat "$repo_root/cmake/LcDependencies.cmake"
+    if [ -f "$repo_root/cmake/prune_dependency_install_tree.cmake" ]; then
+      cat "$repo_root/cmake/prune_dependency_install_tree.cmake"
+    fi
+    if [ -f "$repo_root/cmake/patch_libssh2_single_pass.cmake" ]; then
+      cat "$repo_root/cmake/patch_libssh2_single_pass.cmake"
+    fi
+    if [ -f "$repo_root/cmake/patch_zlib_single_pass.cmake" ]; then
+      cat "$repo_root/cmake/patch_zlib_single_pass.cmake"
+    fi
     cat "$repo_root/scripts/deps.sh"
     if [ -d "$repo_root/cmake/toolchains" ]; then
       find "$repo_root/cmake/toolchains" -maxdepth 1 -type f | sort | while read -r file; do
@@ -200,18 +209,18 @@ reset_dependency_build_root() {
 }
 
 shared_ext=so
-curl_shared_path="$deps_root/curl-shared-cmake/install/lib/libcurl.${shared_ext}"
-openssl_ssl_shared_path="$deps_root/openssl-shared/install/lib/libssl.${shared_ext}"
-openssl_crypto_shared_path="$deps_root/openssl-shared/install/lib/libcrypto.${shared_ext}"
-nghttp2_shared_path="$deps_root/nghttp2-shared/install/lib/libnghttp2.${shared_ext}"
+curl_shared_path="$deps_root/curl/install/lib/libcurl.${shared_ext}"
+openssl_ssl_shared_path="$deps_root/openssl/install/lib/libssl.${shared_ext}"
+openssl_crypto_shared_path="$deps_root/openssl/install/lib/libcrypto.${shared_ext}"
+nghttp2_shared_path="$deps_root/nghttp2/install/lib/libnghttp2.${shared_ext}"
 
 deps_ready=1
 required_paths=(
-  "$deps_root/openssl-static/install/lib/libssl.a"
-  "$deps_root/openssl-static/install/lib/libcrypto.a"
+  "$deps_root/openssl/install/lib/libssl.a"
+  "$deps_root/openssl/install/lib/libcrypto.a"
   "$openssl_ssl_shared_path"
   "$openssl_crypto_shared_path"
-  "$deps_root/nghttp2-static/install/lib/libnghttp2.a"
+  "$deps_root/nghttp2/install/lib/libnghttp2.a"
   "$nghttp2_shared_path"
   "$deps_root/libssh2/install/lib/libssh2.a"
   "$deps_root/libssh2/install/lib/libssh2.so"
@@ -226,14 +235,14 @@ required_paths=(
   "$deps_root/zlib/install/lib/libz.so.$zlib_version"
   "$deps_root/zlib/install/include/zlib.h"
   "$deps_root/zlib/install/include/zconf.h"
-  "$deps_root/curl-static/install/lib/libcurl.a"
+  "$deps_root/curl/install/lib/libcurl.a"
   "$curl_shared_path"
-  "$deps_root/pslog-static/install/lib/libpslog.a"
-  "$deps_root/pslog-static/install/include/pslog.h"
-  "$deps_root/pslog-shared/install/lib/libpslog.so.0"
-  "$deps_root/lonejson-static/install/lib/liblonejson.a"
-  "$deps_root/lonejson-static/install/include/lonejson.h"
-  "$deps_root/lonejson-shared/install/lib/liblonejson.so.0"
+  "$deps_root/pslog/install/lib/libpslog.a"
+  "$deps_root/pslog/install/include/pslog.h"
+  "$deps_root/pslog/install/lib/libpslog.so.0"
+  "$deps_root/lonejson/install/lib/liblonejson.a"
+  "$deps_root/lonejson/install/include/lonejson.h"
+  "$deps_root/lonejson/install/lib/liblonejson.so.0"
   "$deps_root/cmocka/install/lib/libcmocka.a"
 )
 
@@ -266,11 +275,12 @@ reset_dependency_build_root
 cmake_extra_args+=("-DLOCKDC_ZLIB_VERSION=$zlib_version")
 cmake --preset "$cmake_preset" --fresh "${cmake_extra_args[@]}"
 cmake --build --preset "$cmake_preset" --target lc_deps
-stage_dependency_license "openssl-shared" "openssl" "$deps_build_root/openssl-shared/src/LICENSE.txt"
-stage_dependency_license "curl-shared-cmake" "curl" "$deps_build_root/curl-shared-cmake/src/COPYING"
+stage_dependency_license "openssl" "openssl" "$deps_build_root/openssl/src/LICENSE.txt"
+stage_dependency_license "curl" "curl" "$deps_build_root/curl/src/COPYING"
 stage_dependency_license "libssh2" "libssh2" "$deps_build_root/libssh2/src/COPYING"
 stage_dependency_license "zlib" "zlib" "$deps_build_root/zlib/src/LICENSE"
-stage_dependency_license "pslog-shared" "libpslog" "$deps_root/pslog-shared/install/share/doc/libpslog/LICENSE"
-stage_dependency_license "nghttp2-shared" "nghttp2" "$deps_build_root/nghttp2-shared/src/COPYING"
-stage_dependency_license "lonejson-shared" "lonejson" "$deps_root/lonejson-shared/install/share/doc/liblonejson/LICENSE"
+stage_dependency_license "pslog" "libpslog" "$deps_root/pslog/install/share/doc/libpslog/LICENSE"
+stage_dependency_license "nghttp2" "nghttp2" "$deps_build_root/nghttp2/src/COPYING"
+stage_dependency_license "lonejson" "lonejson" "$deps_root/lonejson/install/share/doc/liblonejson/LICENSE"
+cmake -DLOCKDC_EXTERNAL_ROOT="$deps_root" -P "$repo_root/cmake/prune_dependency_install_tree.cmake"
 printf '%s\n' "$manifest" > "$manifest_path"

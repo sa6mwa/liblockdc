@@ -12,7 +12,19 @@ if(LOCKDC_EXTERNAL_ROOT)
   add_test(NAME lonejson_dependency_interface
     COMMAND "${CMAKE_COMMAND}"
       -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+      -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
       -P "${CMAKE_SOURCE_DIR}/tests/lonejson_dependency_interface_test.cmake"
+  )
+  add_test(NAME zlib_dependency_interface
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+      -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
+      -P "${CMAKE_SOURCE_DIR}/tests/zlib_dependency_interface_test.cmake"
+  )
+  add_test(NAME dependency_public_surface_test
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+      -P "${CMAKE_SOURCE_DIR}/tests/dependency_public_surface_test.cmake"
   )
 endif()
 

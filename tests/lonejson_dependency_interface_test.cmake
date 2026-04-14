@@ -2,11 +2,15 @@ if(NOT DEFINED LOCKDC_EXTERNAL_ROOT OR LOCKDC_EXTERNAL_ROOT STREQUAL "")
     message(FATAL_ERROR "LOCKDC_EXTERNAL_ROOT is required")
 endif()
 
-set(lonejson_static_root "${LOCKDC_EXTERNAL_ROOT}/lonejson-static/install")
-set(lonejson_shared_root "${LOCKDC_EXTERNAL_ROOT}/lonejson-shared/install")
-set(lonejson_static_archive "${lonejson_static_root}/lib/liblonejson.a")
-set(lonejson_shared_library "${lonejson_shared_root}/lib/liblonejson.so.0")
-set(lonejson_header "${lonejson_static_root}/include/lonejson.h")
+if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT OR LOCKDC_DEPENDENCY_BUILD_ROOT STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_DEPENDENCY_BUILD_ROOT is required")
+endif()
+
+set(lonejson_root "${LOCKDC_EXTERNAL_ROOT}/lonejson/install")
+set(lonejson_build_root "${LOCKDC_DEPENDENCY_BUILD_ROOT}/lonejson/build")
+set(lonejson_static_archive "${lonejson_root}/lib/liblonejson.a")
+set(lonejson_shared_library "${lonejson_root}/lib/liblonejson.so.0")
+set(lonejson_header "${lonejson_root}/include/lonejson.h")
 
 foreach(path IN ITEMS
     "${lonejson_static_archive}"
@@ -16,6 +20,25 @@ foreach(path IN ITEMS
         message(FATAL_ERROR "missing lonejson dependency artifact: ${path}")
     endif()
 endforeach()
+
+foreach(path IN ITEMS
+    "${lonejson_root}/lib/pkgconfig"
+    "${lonejson_root}/lib/cmake"
+    "${lonejson_root}/bin")
+    if(EXISTS "${path}")
+        message(FATAL_ERROR "lonejson install tree still exposes non-public artifact: ${path}")
+    endif()
+endforeach()
+
+set(lonejson_ninja "${lonejson_build_root}/build.ninja")
+if(NOT EXISTS "${lonejson_ninja}")
+    message(FATAL_ERROR "missing lonejson build graph: ${lonejson_ninja}")
+endif()
+
+file(READ "${lonejson_ninja}" lonejson_ninja_text)
+if(NOT lonejson_ninja_text MATCHES "CMakeFiles/lonejson_object\\.dir/")
+    message(FATAL_ERROR "lonejson dependency build is not using a shared object library")
+endif()
 
 find_program(NM_BIN NAMES nm REQUIRED)
 

@@ -32,14 +32,14 @@ FUZZ_TIME ?= 30
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__asan __coverage __fuzz __benchmarks \
 	__package __package-checksums __clean-dist \
-	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __clean \
+	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __clean __world \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
 	asan coverage fuzz benchmarks \
 	package package-checksums verify-release-archives clean-dist \
-	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release clean
+	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release clean world
 
 help:
 	@printf '%s\n' \
@@ -69,6 +69,7 @@ help:
 		'make cross-preset-test  Run the host debug/asan cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
 		'make release            Run the full Linux release matrix and package generation.' \
+		'make world              Run the full clean-slate workflow: clean, builds, tests, fuzz, coverage, e2e, benchmarks, and final release verification.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
 
 build: build-debug
@@ -264,7 +265,7 @@ __cross-preset-test:
 cross-test:
 	$(TIMED) cross-test $(MAKE) __cross-test
 
-__cross-test: __deps-cross
+__cross-test: __cross-build
 	bash ./scripts/cross_test.sh all
 
 release:
@@ -272,6 +273,21 @@ release:
 
 __release: __deps-release __deps-cross
 	bash ./scripts/run_linux_release_matrix.sh
+
+world:
+	$(TIMED) world $(MAKE) __world
+
+__world:
+	$(MAKE) __clean
+	$(MAKE) __test-debug
+	$(MAKE) __test-host
+	$(MAKE) __cross-test
+	$(MAKE) __asan
+	$(MAKE) __coverage
+	$(MAKE) __fuzz
+	$(MAKE) __test-e2e
+	$(MAKE) __benchmarks
+	$(MAKE) __release
 
 clean:
 	$(TIMED) clean $(MAKE) __clean
