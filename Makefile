@@ -44,15 +44,23 @@ FUZZ_TIME ?= 30
 help:
 	@printf '%s\n' \
 		'make build              Configure and build the debug preset.' \
+		'make build-debug        Configure and build the debug preset.' \
 		'make build-release      Configure and build the full shipped Linux release matrix.' \
 		'make build-e2e          Configure and build the e2e preset.' \
 		'make build-asan         Configure and build the ASan/UBSan preset.' \
+		'make build-coverage     Configure and build the coverage preset.' \
+		'make build-fuzz         Configure and build the fuzz preset.' \
+		'make deps-debug         Provision the host-native release dependency tree used by debug/e2e/asan/coverage/fuzz.' \
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
+		'make test-debug         Run the debug preset test suite.' \
 		'make test               Run the host release suite (x86_64 GNU + musl).' \
+		'make test-host          Run the host release suite (x86_64 GNU + musl).' \
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
 		'make test-all           Run host release suites plus non-host cross release suites.' \
+		'make test-asan          Run the ASan/UBSan preset test suite.' \
+		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
 		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
