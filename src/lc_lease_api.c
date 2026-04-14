@@ -233,8 +233,6 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
   out->version = engine_res.version;
   out->fencing_token = engine_res.fencing_token;
   out->correlation_id = lc_strdup_local(engine_res.correlation_id);
-  lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
-                              engine_res.fencing_token, 0L);
   if (engine_res.no_content) {
     pslog_field fields[4];
 
@@ -345,8 +343,6 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
-                              engine_res.fencing_token, 0L);
   if (engine_res.no_content) {
     pslog_field fields[4];
 
@@ -392,6 +388,8 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   out->version = version;
   out->fencing_token = fencing_token;
   out->correlation_id = correlation_id;
+  lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
+                              engine_res.fencing_token, 0L);
   lc_engine_get_stream_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;

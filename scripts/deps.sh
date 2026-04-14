@@ -7,18 +7,42 @@ preset=${1:-deps-x86_64-linux-gnu}
 
 unset LD_LIBRARY_PATH
 
+resolve_host_debug_preset() {
+  local compiler triple
+
+  compiler=${CC:-cc}
+  triple=$("$compiler" -dumpmachine 2>/dev/null || true)
+
+  case "$triple" in
+    x86_64-*-linux-musl*)
+      printf '%s\n' "deps-x86_64-linux-musl"
+      ;;
+    x86_64-*-linux-gnu*|x86_64-*-linux*)
+      printf '%s\n' "deps-x86_64-linux-gnu"
+      ;;
+    aarch64-*-linux-musl*)
+      printf '%s\n' "deps-aarch64-linux-musl"
+      ;;
+    aarch64-*-linux-gnu*|aarch64-*-linux*)
+      printf '%s\n' "deps-aarch64-linux-gnu"
+      ;;
+    arm*-linux-musleabihf*|armv7*-linux-musleabihf*)
+      printf '%s\n' "deps-armhf-linux-musl"
+      ;;
+    arm*-linux-gnueabihf*|armv7*-linux-gnueabihf*|arm*-linux-gnu*|armv7*-linux-gnu*)
+      printf '%s\n' "deps-armhf-linux-gnu"
+      ;;
+    *)
+      printf 'unsupported native host compiler triple for deps-host-debug: %s\n' "${triple:-unknown}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 case "$preset" in
   deps-host-debug)
-    cmake_preset="x86_64-linux-gnu-release"
-    deps_root="$repo_root/.cache/deps/x86_64-linux-gnu"
-    deps_build_root="$repo_root/.cache/deps-build/x86_64-linux-gnu"
-    cmake_extra_args=(
-      -DLOCKDC_BUILD_DEPENDENCIES=ON
-      -DLOCKDC_BUILD_EXAMPLES=OFF
-      -DLOCKDC_BUILD_BENCHMARKS=OFF
-      -DLOCKDC_BUILD_FUZZERS=OFF
-    )
-    ;;
+    preset=$(resolve_host_debug_preset)
+    ;&
   deps-x86_64-linux-gnu)
     cmake_preset="x86_64-linux-gnu-release"
     deps_root="$repo_root/.cache/deps/x86_64-linux-gnu"

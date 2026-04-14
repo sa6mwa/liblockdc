@@ -51,8 +51,6 @@ set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release used fo
 set(LOCKDC_LONEJSON_VERSION "0.4.1" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.3.1" CACHE STRING "Pinned libpslog release used for SDK logging.")
-set(LOCKDC_EXTERNAL_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps/x86_64-linux-gnu" CACHE PATH "Stable install root for downloaded third-party dependencies.")
-set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/x86_64-linux-gnu" CACHE PATH "Stable build root for downloaded third-party dependencies.")
 set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
 set(LOCKDC_VERSION_OVERRIDE "" CACHE STRING "Override the detected liblockdc package version with an explicit semantic version.")
@@ -96,7 +94,18 @@ endif()
 set(LOCKDC_TARGET_ARCH "${LOCKDC_TARGET_ARCH_LOWER}" CACHE STRING "Artifact architecture name" FORCE)
 
 if(LOCKDC_TARGET_OS_LOWER STREQUAL "linux" AND NOT LOCKDC_TARGET_LIBC)
-    set(LOCKDC_TARGET_LIBC "gnu")
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" -dumpmachine
+        OUTPUT_VARIABLE lockdc_compiler_machine
+        RESULT_VARIABLE lockdc_compiler_machine_result
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(lockdc_compiler_machine_result EQUAL 0 AND lockdc_compiler_machine MATCHES "musl")
+        set(LOCKDC_TARGET_LIBC "musl")
+    else()
+        set(LOCKDC_TARGET_LIBC "gnu")
+    endif()
 endif()
 
 if(LOCKDC_TARGET_OS_LOWER STREQUAL "darwin")
@@ -111,6 +120,13 @@ elseif(LOCKDC_TARGET_OS_LOWER STREQUAL "linux")
     endif()
 else()
     set(LOCKDC_TARGET_ID "${LOCKDC_TARGET_ARCH_LOWER}-${LOCKDC_TARGET_OS_LOWER}")
+endif()
+
+if(NOT DEFINED LOCKDC_EXTERNAL_ROOT)
+    set(LOCKDC_EXTERNAL_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps/${LOCKDC_TARGET_ID}" CACHE PATH "Stable install root for downloaded third-party dependencies.")
+endif()
+if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT)
+    set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/${LOCKDC_TARGET_ID}" CACHE PATH "Stable build root for downloaded third-party dependencies.")
 endif()
 
 function(lc_configure_c_target target)
