@@ -1,6 +1,7 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 
 #include "lc/lc.h"
 #include "lc_api_internal.h"
+#include "lc_internal.h"
 #include "lc_log.h"
 
 typedef struct tracked_alloc_header {
@@ -32,7 +34,6 @@ typedef struct consumer_test_state {
   size_t nack_calls;
   size_t extend_calls;
   size_t close_calls;
-  size_t cleanup_hook_calls;
   size_t error_events;
   int saw_logger;
   int fail_subscribe;
@@ -45,8 +46,15 @@ typedef struct consumer_test_state {
   int handler_mode;
   int extend_should_fail;
   int ack_should_fail;
-  int last_cleanup_hook_extend_started;
-  int last_cleanup_hook_has_message;
+  int fail_message_factory;
+  int subscribe_mode;
+  long nack_delay_ms;
+  int fail_thread_create_call;
+  int thread_create_calls;
+  int have_extend_thread;
+  int extend_joined;
+  int close_saw_extend_joined;
+  pthread_t extend_thread;
   long handler_delay_ms;
   FILE *log_fp;
 } consumer_test_state;
@@ -59,7 +67,15 @@ enum {
   CONSUMER_HANDLER_MODE_EXPLICIT_DEFER_OK = 4,
   CONSUMER_HANDLER_MODE_AUTO_ACK_AFTER_DELAY = 5,
   CONSUMER_HANDLER_MODE_AUTO_ACK_NO_STOP = 6,
-  CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS = 7
+  CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS = 7,
+  CONSUMER_HANDLER_MODE_EXPLICIT_ACK_ERROR_ONCE_THEN_SUCCESS = 8,
+  CONSUMER_HANDLER_MODE_FAIL_TWICE_THEN_SUCCESS = 9,
+  CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK = 10
+};
+
+enum {
+  CONSUMER_SUBSCRIBE_MODE_DELIVERY = 0,
+  CONSUMER_SUBSCRIBE_MODE_UNTIL_STOP = 1
 };
 
 typedef struct fake_delivery_message {
@@ -89,6 +105,23 @@ typedef struct fake_client {
 static consumer_test_state *g_consumer_test_state = NULL;
 static lc_allocator g_test_allocator;
 static pslog_logger *g_test_client_logger = NULL;
+
+int __real_lc_client_open(const lc_client_config *config, lc_client **out,
+                          lc_error *error);
+int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                          void *(*start_routine)(void *), void *arg);
+int __real_pthread_join(pthread_t thread, void **retval);
+lc_message *__real_lc_message_new(lc_client_handle *client,
+                                  const lc_engine_dequeue_response *engine,
+                                  lc_source *payload, int *terminal_flag);
+int __real_lc_engine_client_subscribe(
+    lc_engine_client *client, const lc_engine_dequeue_request *request,
+    const lc_engine_queue_stream_handler *handler, void *handler_context,
+    lc_engine_error *error);
+int __real_lc_engine_client_subscribe_with_state(
+    lc_engine_client *client, const lc_engine_dequeue_request *request,
+    const lc_engine_queue_stream_handler *handler, void *handler_context,
+    lc_engine_error *error);
 
 struct lc_consumer_service_handle {
   lc_consumer_service pub;
@@ -232,29 +265,8 @@ static void fake_test_client_close(lc_client *self) {
   lc_client_handle *client;
 
   client = (lc_client_handle *)self;
+  lc_free_with_allocator(&client->allocator, client->engine);
   lc_free_with_allocator(&client->allocator, client);
-}
-
-static int fake_clone_client(lc_consumer_service_handle *service,
-                             lc_client **out, lc_error *error) {
-  lc_client_handle *client;
-  (void)service;
-
-  client = (lc_client_handle *)lc_calloc_with_allocator(&g_test_allocator, 1U,
-                                                        sizeof(*client));
-  if (client == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate fake worker client", NULL, NULL,
-                        NULL);
-  }
-  client->allocator = g_test_allocator;
-  client->base_logger = g_test_client_logger != NULL ? g_test_client_logger
-                                                     : lc_log_noop_logger();
-  client->logger = g_test_client_logger != NULL ? g_test_client_logger
-                                                : lc_log_noop_logger();
-  client->pub.close = fake_test_client_close;
-  *out = &client->pub;
-  return LC_OK;
 }
 
 static void stop_test_service(consumer_test_state *state) {
@@ -282,6 +294,7 @@ fake_delivery_message_close_internal(fake_delivery_message *message) {
   message->closed = 1;
   pthread_mutex_lock(&message->state->mutex);
   message->state->close_calls += 1U;
+  message->state->close_saw_extend_joined = message->state->extend_joined;
   pthread_mutex_unlock(&message->state->mutex);
   if (message->payload != NULL) {
     message->payload->close(message->payload);
@@ -314,6 +327,7 @@ static int fake_delivery_message_nack(lc_message *self, const lc_nack_req *req,
 
   (void)error;
   message = (fake_delivery_message *)self;
+  consumer_test_sleep_ms(message->state->nack_delay_ms);
   pthread_mutex_lock(&message->state->mutex);
   message->state->nack_calls += 1U;
   message->state->last_nack_intent = req != NULL ? req->intent : -1;
@@ -323,20 +337,6 @@ static int fake_delivery_message_nack(lc_message *self, const lc_nack_req *req,
   }
   fake_delivery_message_close_internal(message);
   return LC_OK;
-}
-
-static void fake_delivery_cleanup_hook(int handler_thread_started,
-                                       int extend_thread_started,
-                                       int has_message, void *context) {
-  consumer_test_state *state;
-
-  (void)handler_thread_started;
-  state = (consumer_test_state *)context;
-  pthread_mutex_lock(&state->mutex);
-  state->cleanup_hook_calls += 1U;
-  state->last_cleanup_hook_extend_started = extend_thread_started;
-  state->last_cleanup_hook_has_message = has_message;
-  pthread_mutex_unlock(&state->mutex);
 }
 
 static int fake_consumer_on_error_stop_after_first(void *context,
@@ -458,14 +458,17 @@ static void fake_delivery_message_close(lc_message *self) {
   fake_delivery_message_close_internal((fake_delivery_message *)self);
 }
 
-static lc_message *
-fake_delivery_message_factory(lc_consumer_service_handle *service,
-                              lc_client_handle *client,
-                              const lc_engine_dequeue_response *delivery,
-                              lc_source *payload, int *terminal_flag) {
+lc_message *__wrap_lc_message_new(lc_client_handle *client,
+                                  const lc_engine_dequeue_response *delivery,
+                                  lc_source *payload, int *terminal_flag) {
   fake_delivery_message *message;
 
-  (void)service;
+  if (g_consumer_test_state == NULL) {
+    return __real_lc_message_new(client, delivery, payload, terminal_flag);
+  }
+  if (g_consumer_test_state->fail_message_factory) {
+    return NULL;
+  }
   message = (fake_delivery_message *)lc_calloc_with_allocator(
       &client->allocator, 1U, sizeof(*message));
   if (message == NULL) {
@@ -592,6 +595,31 @@ static int handle_terminal_scenario(void *context, lc_consumer_message *message,
     }
     stop_test_service(state);
     return LC_OK;
+  case CONSUMER_HANDLER_MODE_FAIL_TWICE_THEN_SUCCESS:
+    if (state->handled_messages <= 2U) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "synthetic handler failure", NULL, NULL, NULL);
+    }
+    stop_test_service(state);
+    return LC_OK;
+  case CONSUMER_HANDLER_MODE_EXPLICIT_ACK_ERROR_ONCE_THEN_SUCCESS:
+    if (state->handled_messages == 1U) {
+      rc = message->message->ack(message->message, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "synthetic handler failure after ack", NULL, NULL,
+                          NULL);
+    }
+    stop_test_service(state);
+    return LC_OK;
+  case CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK:
+    rc = message->message->ack(message->message, error);
+    if (rc == LC_OK) {
+      stop_test_service(state);
+    }
+    return rc;
   default:
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "unknown consumer handler mode", NULL, NULL, NULL);
@@ -727,6 +755,140 @@ static int fake_subscribe_until_stop(
     usleep(1000);
   }
   return LC_ENGINE_OK;
+}
+
+int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
+                          lc_error *error) {
+  lc_client_handle *client;
+  lc_engine_client *engine;
+
+  if (g_consumer_test_state == NULL) {
+    return __real_lc_client_open(config, out, error);
+  }
+  client = (lc_client_handle *)lc_calloc_with_allocator(&config->allocator, 1U,
+                                                        sizeof(*client));
+  if (client == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate fake worker client", NULL, NULL,
+                        NULL);
+  }
+  engine = (lc_engine_client *)lc_calloc_with_allocator(&config->allocator, 1U,
+                                                        sizeof(*engine));
+  if (engine == NULL) {
+    lc_free_with_allocator(&config->allocator, client);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate fake worker engine", NULL, NULL,
+                        NULL);
+  }
+  client->allocator = config->allocator;
+  client->engine = engine;
+  client->base_logger =
+      g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
+  client->logger =
+      g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
+  engine->allocator.malloc_fn = config->allocator.malloc_fn;
+  engine->allocator.realloc_fn = config->allocator.realloc_fn;
+  engine->allocator.free_fn = config->allocator.free_fn;
+  engine->allocator.context = config->allocator.context;
+  engine->base_logger = client->base_logger;
+  engine->logger = client->logger;
+  client->pub.close = fake_test_client_close;
+  *out = &client->pub;
+  return LC_OK;
+}
+
+static int wrap_consumer_engine_subscribe(
+    const lc_engine_dequeue_request *request,
+    const lc_engine_queue_stream_handler *handler, void *handler_context,
+    lc_engine_error *engine_error, int with_state) {
+  lc_dequeue_req public_request;
+
+  if (g_consumer_test_state == NULL) {
+    return LC_ENGINE_ERROR_INVALID_ARGUMENT;
+  }
+  memset(&public_request, 0, sizeof(public_request));
+  public_request.namespace_name = request->namespace_name;
+  public_request.queue = request->queue;
+  public_request.owner = request->owner;
+  public_request.txn_id = request->txn_id;
+  public_request.visibility_timeout_seconds = request->visibility_timeout_seconds;
+  public_request.wait_seconds = request->wait_seconds;
+  public_request.page_size = request->page_size;
+  public_request.start_after = request->start_after;
+  if (g_consumer_test_state->subscribe_mode == CONSUMER_SUBSCRIBE_MODE_UNTIL_STOP) {
+    return fake_subscribe_until_stop(NULL, &public_request, with_state, NULL,
+                                     handler, handler_context, engine_error);
+  }
+  return fake_subscribe(NULL, &public_request, with_state, NULL, handler,
+                        handler_context, engine_error);
+}
+
+int __wrap_lc_engine_client_subscribe(
+    lc_engine_client *client, const lc_engine_dequeue_request *request,
+    const lc_engine_queue_stream_handler *handler, void *handler_context,
+    lc_engine_error *error) {
+  if (g_consumer_test_state == NULL) {
+    return __real_lc_engine_client_subscribe(client, request, handler,
+                                             handler_context, error);
+  }
+  return wrap_consumer_engine_subscribe(request, handler, handler_context, error,
+                                        0);
+}
+
+int __wrap_lc_engine_client_subscribe_with_state(
+    lc_engine_client *client, const lc_engine_dequeue_request *request,
+    const lc_engine_queue_stream_handler *handler, void *handler_context,
+    lc_engine_error *error) {
+  if (g_consumer_test_state == NULL) {
+    return __real_lc_engine_client_subscribe_with_state(
+        client, request, handler, handler_context, error);
+  }
+  return wrap_consumer_engine_subscribe(request, handler, handler_context, error,
+                                        1);
+}
+
+int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                          void *(*start_routine)(void *), void *arg) {
+  consumer_test_state *state;
+  int rc;
+
+  state = g_consumer_test_state;
+  if (state == NULL) {
+    return __real_pthread_create(thread, attr, start_routine, arg);
+  }
+  pthread_mutex_lock(&state->mutex);
+  state->thread_create_calls += 1;
+  if (state->fail_thread_create_call > 0 &&
+      state->thread_create_calls == state->fail_thread_create_call) {
+    pthread_mutex_unlock(&state->mutex);
+    return EAGAIN;
+  }
+  pthread_mutex_unlock(&state->mutex);
+  rc = __real_pthread_create(thread, attr, start_routine, arg);
+  if (rc == 0) {
+    pthread_mutex_lock(&state->mutex);
+    if (state->thread_create_calls == 3) {
+      state->extend_thread = *thread;
+      state->have_extend_thread = 1;
+    }
+    pthread_mutex_unlock(&state->mutex);
+  }
+  return rc;
+}
+
+int __wrap_pthread_join(pthread_t thread, void **retval) {
+  consumer_test_state *state;
+
+  state = g_consumer_test_state;
+  if (state != NULL) {
+    pthread_mutex_lock(&state->mutex);
+    if (state->have_extend_thread &&
+        pthread_equal(state->extend_thread, thread)) {
+      state->extend_joined = 1;
+    }
+    pthread_mutex_unlock(&state->mutex);
+  }
+  return __real_pthread_join(thread, retval);
 }
 
 static void init_fake_root_client(lc_client_handle *client,
@@ -892,9 +1054,8 @@ test_consumer_service_multi_worker_runs_without_transport(void **state) {
                                              &error);
   assert_int_equal(rc, LC_OK);
   runtime_state.service = service;
+  runtime_state.subscribe_mode = CONSUMER_SUBSCRIBE_MODE_UNTIL_STOP;
   g_consumer_test_state = &runtime_state;
-  lc_consumer_service_set_test_hooks(service, fake_clone_client,
-                                     fake_subscribe_until_stop);
 
   rc = service->start(service, &error);
   if (rc != LC_OK) {
@@ -980,8 +1141,6 @@ test_consumer_service_logs_restart_with_configured_logger(void **state) {
   assert_int_equal(rc, LC_OK);
   runtime_state.service = service;
   g_consumer_test_state = &runtime_state;
-  lc_consumer_service_set_test_hooks(service, fake_clone_client,
-                                     fake_subscribe);
 
   rc = service->run(service, &error);
   assert_int_not_equal(rc, LC_OK);
@@ -1051,9 +1210,8 @@ static void test_consumer_service_logs_subscribe_lifecycle(void **state) {
                                              &error);
   assert_int_equal(rc, LC_OK);
   runtime_state.service = service;
+  runtime_state.subscribe_mode = CONSUMER_SUBSCRIBE_MODE_UNTIL_STOP;
   g_consumer_test_state = &runtime_state;
-  lc_consumer_service_set_test_hooks(service, fake_clone_client,
-                                     fake_subscribe_until_stop);
 
   rc = service->start(service, &error);
   assert_int_equal(rc, LC_OK);
@@ -1196,8 +1354,6 @@ static void test_consumer_service_multi_worker_failure_cleans_up(void **state) {
   assert_int_equal(rc, LC_OK);
   runtime_state.service = service;
   g_consumer_test_state = &runtime_state;
-  lc_consumer_service_set_test_hooks(service, fake_clone_client,
-                                     fake_subscribe);
 
   rc = service->run(service, &error);
   assert_int_not_equal(rc, LC_OK);
@@ -1259,10 +1415,6 @@ static void run_consumer_terminal_scenario_unit_test(
   assert_int_equal(rc, LC_OK);
   runtime_state.service = service;
   g_consumer_test_state = &runtime_state;
-  lc_consumer_service_set_test_hooks(service, fake_clone_client,
-                                     fake_subscribe);
-  lc_consumer_service_set_test_message_factory_hook(
-      service, fake_delivery_message_factory);
 
   rc = service->run(service, &error);
   if (expected_run_rc == LC_OK) {
@@ -1298,6 +1450,76 @@ test_consumer_service_preserves_explicit_failure_nack_on_success(void **state) {
   run_consumer_terminal_scenario_unit_test(
       CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK, LC_OK, 0U, 1U, 0U,
       LC_NACK_INTENT_FAILURE, 0, 0L);
+}
+
+static void test_consumer_service_preserves_explicit_ack_on_success(
+    void **state) {
+  (void)state;
+  run_consumer_terminal_scenario_unit_test(CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK,
+                                           LC_OK, 1U, 0U, 0U, -1, 0, 0L);
+}
+
+static void
+test_consumer_service_explicit_failure_nack_blocks_extender_race(void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.handler_mode = CONSUMER_HANDLER_MODE_EXPLICIT_FAILURE_NACK_OK;
+  runtime_state.last_nack_intent = -1;
+  runtime_state.extend_should_fail = 1;
+  runtime_state.nack_delay_ms = 600L;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.visibility_timeout_seconds = 1L;
+  consumer.handle = handle_terminal_scenario;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.nack_calls, 1U);
+  assert_int_equal(runtime_state.extend_calls, 0U);
+  assert_int_equal(runtime_state.error_events, 0U);
+  assert_int_equal(runtime_state.close_calls, 1U);
+  assert_int_equal(runtime_state.last_nack_intent, LC_NACK_INTENT_FAILURE);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
 }
 
 static void
@@ -1382,19 +1604,11 @@ test_consumer_service_shutdown_stops_extender_before_message_close(
   assert_int_equal(rc, LC_OK);
   runtime_state.service = service;
   g_consumer_test_state = &runtime_state;
-  lc_consumer_service_set_test_hooks(service, fake_clone_client,
-                                     fake_subscribe);
-  lc_consumer_service_set_test_message_factory_hook(
-      service, fake_delivery_message_factory);
-  lc_consumer_service_set_test_delivery_cleanup_hook(
-      service, fake_delivery_cleanup_hook, &runtime_state);
 
   rc = service->run(service, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(runtime_state.cleanup_hook_calls, 1U);
-  assert_int_equal(runtime_state.last_cleanup_hook_extend_started, 0);
-  assert_int_equal(runtime_state.last_cleanup_hook_has_message, 1);
   assert_int_equal(runtime_state.close_calls, 1U);
+  assert_int_equal(runtime_state.close_saw_extend_joined, 1);
 
   service->close(service);
   g_consumer_test_state = NULL;
@@ -1449,10 +1663,6 @@ test_consumer_service_preserves_auto_ack_failure_details(void **state) {
   assert_int_equal(rc, LC_OK);
   runtime_state.service = service;
   g_consumer_test_state = &runtime_state;
-  lc_consumer_service_set_test_hooks(service, fake_clone_client,
-                                     fake_subscribe);
-  lc_consumer_service_set_test_message_factory_hook(
-      service, fake_delivery_message_factory);
 
   rc = service->run(service, &error);
   assert_int_equal(rc, LC_OK);
@@ -1518,10 +1728,6 @@ test_consumer_service_handler_failure_does_not_consume_failure_budget(
   assert_int_equal(rc, LC_OK);
   runtime_state.service = service;
   g_consumer_test_state = &runtime_state;
-  lc_consumer_service_set_test_hooks(service, fake_clone_client,
-                                     fake_subscribe);
-  lc_consumer_service_set_test_message_factory_hook(
-      service, fake_delivery_message_factory);
 
   rc = service->run(service, &error);
   assert_int_equal(rc, LC_OK);
@@ -1548,6 +1754,437 @@ test_consumer_service_handler_failure_does_not_consume_failure_budget(
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
+static void
+test_consumer_service_repeated_handler_failures_do_not_consume_failure_budget(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.handler_mode = CONSUMER_HANDLER_MODE_FAIL_TWICE_THEN_SUCCESS;
+  runtime_state.last_nack_intent = -1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.visibility_timeout_seconds = 1L;
+  consumer.handle = handle_terminal_scenario;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.handled_messages, 3U);
+  assert_int_equal(runtime_state.error_events, 2U);
+  assert_int_equal(runtime_state.last_error_attempt, 0);
+  assert_int_equal(runtime_state.last_error_restart_in_ms, 0L);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
+  assert_int_equal(runtime_state.nack_calls, 2U);
+  assert_int_equal(runtime_state.ack_calls, 1U);
+  assert_int_equal(error.code, LC_OK);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
+test_consumer_service_explicit_ack_then_handler_error_surfaces_without_nack(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.handler_mode =
+      CONSUMER_HANDLER_MODE_EXPLICIT_ACK_ERROR_ONCE_THEN_SUCCESS;
+  runtime_state.last_nack_intent = -1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.visibility_timeout_seconds = 1L;
+  consumer.handle = handle_terminal_scenario;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.handled_messages, 2U);
+  assert_int_equal(runtime_state.ack_calls, 2U);
+  assert_int_equal(runtime_state.nack_calls, 0U);
+  assert_int_equal(runtime_state.error_events, 1U);
+  assert_int_equal(runtime_state.last_error_attempt, 0);
+  assert_int_equal(runtime_state.last_error_restart_in_ms, 0L);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_OK);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
+test_consumer_service_subscribe_failures_consume_service_failure_budget(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.fail_subscribe = 1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 2;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.subscribe_calls, 3U);
+  assert_int_equal(runtime_state.error_events, 2U);
+  assert_int_equal(runtime_state.last_error_attempt, 2);
+  assert_true(runtime_state.last_error_restart_in_ms >= 0L);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
+  assert_int_equal(runtime_state.ack_calls, 0U);
+  assert_int_equal(runtime_state.nack_calls, 0U);
+  assert_int_equal(error.code, LC_ERR_TRANSPORT);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void test_consumer_service_handler_thread_start_failure_is_fatal(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.fail_thread_create_call = 2;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.thread_create_calls, 2);
+  assert_int_equal(runtime_state.ack_calls, 0U);
+  assert_int_equal(runtime_state.nack_calls, 0U);
+  assert_int_equal(runtime_state.close_calls, 1U);
+  assert_int_equal(runtime_state.error_events, 1U);
+  assert_int_equal(runtime_state.last_error_attempt, 1);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_ERR_TRANSPORT);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void test_consumer_service_worker_thread_start_failure_is_fatal(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.fail_thread_create_call = 1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.thread_create_calls, 1);
+  assert_int_equal(runtime_state.ack_calls, 0U);
+  assert_int_equal(runtime_state.nack_calls, 0U);
+  assert_int_equal(runtime_state.close_calls, 0U);
+  assert_int_equal(runtime_state.error_events, 0U);
+  assert_int_equal(error.code, LC_ERR_TRANSPORT);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void test_consumer_service_extender_thread_start_failure_is_fatal(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.fail_thread_create_call = 3;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.thread_create_calls, 3);
+  assert_int_equal(runtime_state.ack_calls, 1U);
+  assert_int_equal(runtime_state.nack_calls, 0U);
+  assert_int_equal(runtime_state.close_calls, 1U);
+  assert_int_equal(runtime_state.error_events, 1U);
+  assert_int_equal(runtime_state.last_error_attempt, 1);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_ERR_TRANSPORT);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void test_consumer_service_message_factory_failure_is_fatal(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.fail_message_factory = 1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.ack_calls, 0U);
+  assert_int_equal(runtime_state.nack_calls, 0U);
+  assert_int_equal(runtime_state.close_calls, 0U);
+  assert_int_equal(runtime_state.error_events, 1U);
+  assert_int_equal(runtime_state.last_error_attempt, 1);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_NOMEM);
+  assert_int_equal(error.code, LC_ERR_NOMEM);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_consumer_restart_policy_init_sets_defaults),
@@ -1561,7 +2198,11 @@ int main(void) {
       cmocka_unit_test(
           test_consumer_service_auto_acks_open_delivery_on_success),
       cmocka_unit_test(
+          test_consumer_service_preserves_explicit_ack_on_success),
+      cmocka_unit_test(
           test_consumer_service_preserves_explicit_failure_nack_on_success),
+      cmocka_unit_test(
+          test_consumer_service_explicit_failure_nack_blocks_extender_race),
       cmocka_unit_test(
           test_consumer_service_does_not_double_nack_explicit_failure_handler_error),
       cmocka_unit_test(
@@ -1576,6 +2217,20 @@ int main(void) {
           test_consumer_service_preserves_auto_ack_failure_details),
       cmocka_unit_test(
           test_consumer_service_handler_failure_does_not_consume_failure_budget),
+      cmocka_unit_test(
+          test_consumer_service_repeated_handler_failures_do_not_consume_failure_budget),
+      cmocka_unit_test(
+          test_consumer_service_explicit_ack_then_handler_error_surfaces_without_nack),
+      cmocka_unit_test(
+          test_consumer_service_subscribe_failures_consume_service_failure_budget),
+      cmocka_unit_test(
+          test_consumer_service_worker_thread_start_failure_is_fatal),
+      cmocka_unit_test(
+          test_consumer_service_handler_thread_start_failure_is_fatal),
+      cmocka_unit_test(
+          test_consumer_service_extender_thread_start_failure_is_fatal),
+      cmocka_unit_test(
+          test_consumer_service_message_factory_failure_is_fatal),
       cmocka_unit_test(
           test_consumer_service_retains_owned_logger_after_root_client_close),
       cmocka_unit_test(

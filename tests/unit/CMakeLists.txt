@@ -57,6 +57,14 @@ lc_add_unit_test(lc_unit_engine_allocator test_lc_engine_allocator.c)
 lc_add_unit_test(lc_unit_contracts test_lc_contracts.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_consumer_service test_lc_consumer_service.c)
+target_link_options(lc_unit_consumer_service PRIVATE
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_client_open>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_engine_client_subscribe>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_engine_client_subscribe_with_state>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_message_new>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_create>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_join>
+)
 lc_add_unit_test(lc_unit_runtime test_lc_runtime.c)
 lc_add_unit_test(lc_unit_mutate_stream test_lc_mutate_stream.c)
 
