@@ -6,6 +6,7 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 preset=${1:-deps-x86_64-linux-gnu}
 
 unset LD_LIBRARY_PATH
+dry_run=${LOCKDC_DEPS_DRY_RUN:-0}
 
 resolve_host_debug_preset() {
   local compiler triple
@@ -14,19 +15,19 @@ resolve_host_debug_preset() {
   triple=$("$compiler" -dumpmachine 2>/dev/null || true)
 
   case "$triple" in
-    x86_64-*-linux-musl*)
+    x86_64*-linux-musl*)
       printf '%s\n' "deps-x86_64-linux-musl"
       ;;
-    x86_64-*-linux-gnu*|x86_64-*-linux*)
+    x86_64*-linux-gnu*|x86_64*-linux)
       printf '%s\n' "deps-x86_64-linux-gnu"
       ;;
-    aarch64-*-linux-musl*)
+    aarch64*-linux-musl*)
       printf '%s\n' "deps-aarch64-linux-musl"
       ;;
-    aarch64-*-linux-gnu*|aarch64-*-linux*)
+    aarch64*-linux-gnu*|aarch64*-linux)
       printf '%s\n' "deps-aarch64-linux-gnu"
       ;;
-    arm*-linux-musleabihf*|armv7*-linux-musleabihf*)
+    arm*-linux-musleabihf*|armv7*-linux-musleabihf*|arm*-linux-musl*|armv7*-linux-musl*)
       printf '%s\n' "deps-armhf-linux-musl"
       ;;
     arm*-linux-gnueabihf*|armv7*-linux-gnueabihf*|arm*-linux-gnu*|armv7*-linux-gnu*)
@@ -120,6 +121,14 @@ case "$preset" in
     exit 2
     ;;
 esac
+
+if [ "$dry_run" = "1" ]; then
+  printf 'preset=%s\n' "$preset"
+  printf 'cmake_preset=%s\n' "$cmake_preset"
+  printf 'deps_root=%s\n' "$deps_root"
+  printf 'deps_build_root=%s\n' "$deps_build_root"
+  exit 0
+fi
 
 manifest_path="$deps_root/manifest.txt"
 mkdir -p "$deps_root"

@@ -6,7 +6,7 @@ file(READ "${LOCKDC_ROOT}/CMakePresets.json" presets_json)
 file(READ "${LOCKDC_ROOT}/CMakeLists.txt" root_cmake)
 file(READ "${LOCKDC_ROOT}/Makefile" root_makefile)
 file(READ "${LOCKDC_ROOT}/scripts/deps.sh" deps_script)
-set(target_cache_dir "${LOCKDC_ROOT}/build/test-host-root-layout")
+set(fake_compiler_dir "${LOCKDC_ROOT}/build/test-host-root-layout-fake-bin")
 
 function(assert_contains haystack needle description)
     string(FIND "${${haystack}}" "${needle}" found_at)
@@ -34,29 +34,36 @@ assert_contains(deps_script "resolve_host_debug_preset()" "host-native dependenc
 assert_contains(deps_script "deps-aarch64-linux-gnu" "aarch64 host-native dependency mapping")
 assert_contains(deps_script "deps-armhf-linux-gnu" "armhf host-native dependency mapping")
 assert_contains(deps_script "deps-x86_64-linux-gnu" "x86_64 host-native dependency mapping")
+assert_contains(deps_script "LOCKDC_DEPS_DRY_RUN" "deps dry-run support")
 
-file(REMOVE_RECURSE "${target_cache_dir}")
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-        -S "${LOCKDC_ROOT}"
-        -B "${target_cache_dir}"
-        -G Ninja
-        -DLOCKDC_BUILD_TESTS=OFF
-        -DLOCKDC_BUILD_EXAMPLES=OFF
-        -DLOCKDC_BUILD_BENCHMARKS=OFF
-        -DLOCKDC_BUILD_FUZZERS=OFF
-        -DLOCKDC_TARGET_ARCH=aarch64
-        -DLOCKDC_TARGET_OS=linux
-        -DLOCKDC_TARGET_LIBC=gnu
-    RESULT_VARIABLE configure_result
-    OUTPUT_VARIABLE configure_stdout
-    ERROR_VARIABLE configure_stderr
-)
-if(NOT configure_result EQUAL 0)
-    message(FATAL_ERROR
-        "target-aware configure failed\nstdout:\n${configure_stdout}\nstderr:\n${configure_stderr}")
-endif()
+file(REMOVE_RECURSE "${fake_compiler_dir}")
+file(MAKE_DIRECTORY "${fake_compiler_dir}")
 
-file(READ "${target_cache_dir}/CMakeCache.txt" target_cache)
-assert_contains(target_cache "LOCKDC_EXTERNAL_ROOT:PATH=${LOCKDC_ROOT}/.cache/deps/aarch64-linux-gnu" "configured aarch64 external root")
-assert_contains(target_cache "LOCKDC_DEPENDENCY_BUILD_ROOT:PATH=${LOCKDC_ROOT}/.cache/deps-build/aarch64-linux-gnu" "configured aarch64 dependency build root")
+function(assert_host_debug_resolution triple expected_preset)
+    set(fake_compiler "${fake_compiler_dir}/cc-${expected_preset}.sh")
+    file(WRITE "${fake_compiler}" "#!/usr/bin/env bash\nif [ \"$1\" = \"-dumpmachine\" ]; then\n  printf '%s\\n' \"${triple}\"\n  exit 0\nfi\nprintf 'unexpected compiler invocation: %s\\n' \"$*\" >&2\nexit 1\n")
+    execute_process(COMMAND chmod +x "${fake_compiler}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "CC=${fake_compiler}"
+            "LOCKDC_DEPS_DRY_RUN=1"
+            bash "${LOCKDC_ROOT}/scripts/deps.sh" deps-host-debug
+        WORKING_DIRECTORY "${LOCKDC_ROOT}"
+        RESULT_VARIABLE dry_run_result
+        OUTPUT_VARIABLE dry_run_stdout
+        ERROR_VARIABLE dry_run_stderr
+    )
+    if(NOT dry_run_result EQUAL 0)
+        message(FATAL_ERROR
+            "deps-host-debug dry-run failed for ${triple}\nstdout:\n${dry_run_stdout}\nstderr:\n${dry_run_stderr}")
+    endif()
+    string(FIND "${dry_run_stdout}" "preset=${expected_preset}" preset_match)
+    if(preset_match EQUAL -1)
+        message(FATAL_ERROR
+            "deps-host-debug resolved wrong preset for ${triple}\nstdout:\n${dry_run_stdout}\nstderr:\n${dry_run_stderr}")
+    endif()
+endfunction()
+
+assert_host_debug_resolution("x86_64-linux-gnu" "deps-x86_64-linux-gnu")
+assert_host_debug_resolution("aarch64-unknown-linux-gnu" "deps-aarch64-linux-gnu")
+assert_host_debug_resolution("armv7l-unknown-linux-gnueabihf" "deps-armhf-linux-gnu")
