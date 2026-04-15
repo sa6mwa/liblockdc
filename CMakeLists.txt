@@ -436,7 +436,10 @@ configure_file(
 )
 
 if(LOCKDC_INSTALL)
-    install(FILES ${LOCKDC_PUBLIC_HEADER} ${LOCKDC_PUBLIC_VERSION_HEADER} DESTINATION include/lc)
+    install(FILES ${LOCKDC_PUBLIC_HEADER} ${LOCKDC_PUBLIC_VERSION_HEADER}
+        DESTINATION include/lc
+        COMPONENT dev
+    )
     if(EXISTS "${LOCKDC_PSLOG_INCLUDE_DIR}/pslog.h" AND EXISTS "${LOCKDC_PSLOG_INCLUDE_DIR}/pslog_version.h")
         install(FILES
             "${LOCKDC_PSLOG_INCLUDE_DIR}/pslog.h"
@@ -619,6 +622,16 @@ if(LOCKDC_BUILD_TESTS)
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/package_archives_test.cmake
         )
         set_tests_properties(package_archives_test PROPERTIES RUN_SERIAL TRUE)
+    endif()
+
+    if(TARGET lc_shared AND TARGET lc_static AND NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME release_tarball_sdk_test
+            COMMAND ${CMAKE_COMMAND}
+                -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/release_tarball_sdk_test.cmake
+        )
+        set_tests_properties(release_tarball_sdk_test PROPERTIES RUN_SERIAL TRUE)
     endif()
 
     add_test(NAME version_resolution_test
