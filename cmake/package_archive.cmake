@@ -1,4 +1,3 @@
-set(package_root "${LOCKDC_BINARY_DIR}/package/archive")
 if(DEFINED LOCKDC_DIST_DIR AND NOT "${LOCKDC_DIST_DIR}" STREQUAL "")
     set(lockdc_input_dist_dir "${LOCKDC_DIST_DIR}")
 endif()
@@ -10,6 +9,10 @@ if(DEFINED lockdc_input_dist_dir)
 elseif(NOT DEFINED LOCKDC_DIST_DIR OR "${LOCKDC_DIST_DIR}" STREQUAL "")
     set(LOCKDC_DIST_DIR "${LOCKDC_ROOT}/dist")
 endif()
+
+set(package_stage_root "${LOCKDC_BINARY_DIR}/package")
+set(package_prefix_name "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
+set(package_root "${package_stage_root}/${package_prefix_name}")
 
 function(lockdc_import_cache_path var_name)
     if(DEFINED ${var_name} AND NOT "${${var_name}}" STREQUAL "")
@@ -139,8 +142,8 @@ if(NOT LOCKDC_GZIP_BIN)
 endif()
 file(REMOVE "${archive_base}" "${archive}")
 execute_process(
-    COMMAND "${LOCKDC_TAR_BIN}" -cf "${archive_base}" --format=gnu .
-    WORKING_DIRECTORY "${package_root}"
+    COMMAND "${LOCKDC_TAR_BIN}" -cf "${archive_base}" --format=gnu "${package_prefix_name}"
+    WORKING_DIRECTORY "${package_stage_root}"
     RESULT_VARIABLE tar_result
 )
 if(NOT tar_result EQUAL 0)

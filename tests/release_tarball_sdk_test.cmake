@@ -51,6 +51,7 @@ if(NOT DEFINED LOCKDC_DIST_DIR OR LOCKDC_DIST_DIR STREQUAL "")
 endif()
 
 set(release_archive "${dist_dir}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
+set(release_prefix "${extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
 
 file(REMOVE_RECURSE "${test_root}")
 file(MAKE_DIRECTORY "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}" "${dist_dir}")
@@ -92,7 +93,9 @@ if(NOT extract_result EQUAL 0)
         "stderr:\n${extract_stderr}")
 endif()
 
-set(release_prefix "${extract_root}")
+if(NOT EXISTS "${release_prefix}")
+    message(FATAL_ERROR "release tarball missing expected prefix directory: ${release_prefix}")
+endif()
 
 foreach(required_path
     "${release_prefix}/include/lc/lc.h"
