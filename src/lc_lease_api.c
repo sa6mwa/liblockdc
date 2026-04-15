@@ -392,8 +392,10 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   out->version = version;
   out->fencing_token = fencing_token;
   out->correlation_id = correlation_id;
-  lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
-                              engine_res.fencing_token, 0L);
+  if (!no_content) {
+    lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
+                                engine_res.fencing_token, 0L);
+  }
   lc_engine_get_stream_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;

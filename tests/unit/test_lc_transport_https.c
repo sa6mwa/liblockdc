@@ -3756,6 +3756,89 @@ test_public_lease_load_parse_failure_does_not_refresh_state_view(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+static void
+test_public_lease_load_empty_does_not_refresh_state_view(void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *get_headers[] = {"X-Correlation-Id: corr-get"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":3,\"state_etag\":\"etag-prev\",\"fencing_token\":7}",
+       "liblockdc test client"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 204, get_headers, 1U, NULL, "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  test_value_doc value_doc;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&value_doc, 0, sizeof(value_doc));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&get_opts, 0, sizeof(get_opts));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  assert_int_equal(((lc_lease_handle *)lease)->version, 3L);
+  assert_int_equal(((lc_lease_handle *)lease)->fencing_token, 7L);
+  assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
+
+  get_opts.public_read = 1;
+  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
+                     &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  assert_null(get_res.etag);
+  assert_int_equal(get_res.version, 0L);
+  assert_int_equal(get_res.fencing_token, 0L);
+  assert_int_equal(value_doc.value, 0);
+  assert_int_equal(((lc_lease_handle *)lease)->version, 3L);
+  assert_int_equal(((lc_lease_handle *)lease)->fencing_token, 7L);
+  assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
+
+  lonejson_cleanup(&test_value_map, &value_doc);
+  lc_get_res_cleanup(&get_res);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
 static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
@@ -3896,6 +3979,9 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_PARSE_FAILURE_DOES_NOT_REFRESH_STATE_VIEW)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_public_lease_load_parse_failure_does_not_refresh_state_view)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_EMPTY_DOES_NOT_REFRESH_STATE_VIEW)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_load_empty_does_not_refresh_state_view)
 #elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_MUTATE_LOCAL_COVERS_NO_CONTENT_PATH)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path)
@@ -3960,6 +4046,8 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_public_lease_load_respects_configured_json_response_limit),      \
       cmocka_unit_test(                                                         \
           test_public_lease_load_parse_failure_does_not_refresh_state_view),    \
+      cmocka_unit_test(                                                         \
+          test_public_lease_load_empty_does_not_refresh_state_view),            \
       cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path),  \
       cmocka_unit_test(test_public_management_methods_emit_logs),               \
       cmocka_unit_test(test_public_enqueue_emits_logs),                         \

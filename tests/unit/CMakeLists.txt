@@ -185,6 +185,10 @@ lc_add_https_unit_test_case(
   LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_PARSE_FAILURE_DOES_NOT_REFRESH_STATE_VIEW
 )
 lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_lease_load_empty_does_not_refresh_state_view
+  LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_EMPTY_DOES_NOT_REFRESH_STATE_VIEW
+)
+lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_mutate_local_covers_no_content_path
   LC_HTTPS_CASE_PUBLIC_LEASE_MUTATE_LOCAL_COVERS_NO_CONTENT_PATH
 )
