@@ -1,7 +1,15 @@
 function(lc_add_unit_test target_name)
   add_executable(${target_name} ${ARGN})
   target_link_libraries(${target_name} PRIVATE ${lc_test_link_target} lc::cmocka)
-  target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+  target_include_directories(${target_name} PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${LOCKDC_EXTERNAL_ROOT}/curl/install/include
+    ${LOCKDC_EXTERNAL_ROOT}/openssl/install/include
+    ${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include
+    ${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include
+    ${LOCKDC_EXTERNAL_ROOT}/zlib/install/include
+  )
   set_target_properties(${target_name}
     PROPERTIES
       C_STANDARD 99

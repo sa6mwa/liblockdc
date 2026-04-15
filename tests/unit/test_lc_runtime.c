@@ -8,27 +8,7 @@
 
 #include "lc/lc.h"
 #include "lc_api_internal.h"
-
-typedef struct lc_engine_http_result {
-  long http_status;
-  char *correlation_id;
-  char *etag;
-  long key_version;
-  long fencing_token;
-  char *content_type;
-  char *header_parse_error_message;
-  char *server_error_code;
-  char *detail;
-  char *leader_endpoint;
-  char *current_etag;
-  long current_version;
-  long retry_after_seconds;
-  int header_parse_failed;
-} lc_engine_http_result;
-
-int lc_engine_set_server_error_from_result(lc_engine_error *error,
-                                           const lc_engine_http_result *result);
-void lc_engine_http_result_cleanup(lc_engine_http_result *result);
+#include "lc_internal.h"
 
 static char *dup_cstr(const char *value) {
   size_t len;
@@ -225,6 +205,64 @@ test_error_from_engine_maps_protocol_and_server_codes(void **state) {
   assert_string_equal(error.message, "server failed");
   lc_engine_error_cleanup(&engine);
   lc_error_cleanup(&error);
+}
+
+static void test_lonejson_status_io_maps_to_transport(void **state) {
+  lc_error error;
+  lonejson_error lj_error;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&lj_error, 0, sizeof(lj_error));
+  memcpy(lj_error.message, "io failed", sizeof("io failed"));
+
+  rc = lc_lonejson_error_from_status(&error, LONEJSON_STATUS_IO_ERROR,
+                                     &lj_error, "mapped load failed");
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "mapped load failed");
+  assert_string_equal(error.detail, "io failed");
+
+  lc_error_cleanup(&error);
+}
+
+static void test_lonejson_status_callback_maps_to_transport(void **state) {
+  lc_engine_error error;
+  lonejson_error lj_error;
+  int rc;
+
+  (void)state;
+  memset(&error, 0, sizeof(error));
+  memset(&lj_error, 0, sizeof(lj_error));
+  memcpy(lj_error.message, "callback failed", sizeof("callback failed"));
+
+  rc = lc_engine_lonejson_error_from_status(
+      &error, LONEJSON_STATUS_CALLBACK_FAILED, &lj_error, "mapped save failed");
+  assert_int_equal(rc, LC_ENGINE_ERROR_TRANSPORT);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_TRANSPORT);
+  assert_string_equal(error.message, "mapped save failed");
+
+  lc_engine_error_cleanup(&error);
+}
+
+static void test_lonejson_status_invalid_json_stays_protocol(void **state) {
+  lc_engine_error error;
+  lonejson_error lj_error;
+  int rc;
+
+  (void)state;
+  memset(&error, 0, sizeof(error));
+  memset(&lj_error, 0, sizeof(lj_error));
+  memcpy(lj_error.message, "invalid json", sizeof("invalid json"));
+
+  rc = lc_engine_lonejson_error_from_status(
+      &error, LONEJSON_STATUS_INVALID_JSON, &lj_error, "mapped load failed");
+  assert_int_equal(rc, LC_ENGINE_ERROR_PROTOCOL);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_PROTOCOL);
+  assert_string_equal(error.message, "mapped load failed");
+
+  lc_engine_error_cleanup(&error);
 }
 
 static void test_dup_bytes_as_text_copies_and_terminates(void **state) {
@@ -468,6 +506,9 @@ int main(void) {
       cmocka_unit_test(test_error_set_duplicates_message_fields),
       cmocka_unit_test(test_error_set_returns_code_without_error_object),
       cmocka_unit_test(test_error_from_engine_maps_protocol_and_server_codes),
+      cmocka_unit_test(test_lonejson_status_io_maps_to_transport),
+      cmocka_unit_test(test_lonejson_status_callback_maps_to_transport),
+      cmocka_unit_test(test_lonejson_status_invalid_json_stays_protocol),
       cmocka_unit_test(test_dup_bytes_as_text_copies_and_terminates),
       cmocka_unit_test(test_attachment_info_copy_deep_copies_fields),
       cmocka_unit_test(test_client_open_rejects_missing_config),

@@ -13,23 +13,37 @@ static const char *lc_lonejson_detail_message(const lonejson_error *error,
   return fallback;
 }
 
+static int lc_lonejson_status_to_error_code(lonejson_status status) {
+  switch (status) {
+  case LONEJSON_STATUS_OK:
+    return LC_OK;
+  case LONEJSON_STATUS_INVALID_ARGUMENT:
+    return LC_ERR_INVALID;
+  case LONEJSON_STATUS_ALLOCATION_FAILED:
+    return LC_ERR_NOMEM;
+  case LONEJSON_STATUS_CALLBACK_FAILED:
+  case LONEJSON_STATUS_IO_ERROR:
+  case LONEJSON_STATUS_INTERNAL_ERROR:
+    return LC_ERR_TRANSPORT;
+  case LONEJSON_STATUS_INVALID_JSON:
+  case LONEJSON_STATUS_TYPE_MISMATCH:
+  case LONEJSON_STATUS_MISSING_REQUIRED_FIELD:
+  case LONEJSON_STATUS_DUPLICATE_FIELD:
+  case LONEJSON_STATUS_OVERFLOW:
+  case LONEJSON_STATUS_TRUNCATED:
+  default:
+    return LC_ERR_PROTOCOL;
+  }
+}
+
 int lc_lonejson_error_from_status(lc_error *error, lonejson_status status,
                                   const lonejson_error *lj_error,
                                   const char *message) {
   int code;
 
-  switch (status) {
-  case LONEJSON_STATUS_OK:
+  code = lc_lonejson_status_to_error_code(status);
+  if (code == LC_OK) {
     return LC_OK;
-  case LONEJSON_STATUS_INVALID_ARGUMENT:
-    code = LC_ERR_INVALID;
-    break;
-  case LONEJSON_STATUS_ALLOCATION_FAILED:
-    code = LC_ERR_NOMEM;
-    break;
-  default:
-    code = LC_ERR_PROTOCOL;
-    break;
   }
   return lc_error_set(error, code, 0L, message,
                       lc_lonejson_detail_message(lj_error, NULL), NULL, NULL);
@@ -54,6 +68,19 @@ int lc_engine_lonejson_error_from_status(lc_engine_error *error,
         message != NULL ? message
                         : lc_lonejson_detail_message(
                               lj_error, "lonejson allocation failed"));
+  case LONEJSON_STATUS_CALLBACK_FAILED:
+  case LONEJSON_STATUS_IO_ERROR:
+  case LONEJSON_STATUS_INTERNAL_ERROR:
+    return lc_engine_set_transport_error(
+        error, message != NULL ? message
+                               : lc_lonejson_detail_message(
+                                     lj_error, "local JSON mapping failed"));
+  case LONEJSON_STATUS_INVALID_JSON:
+  case LONEJSON_STATUS_TYPE_MISMATCH:
+  case LONEJSON_STATUS_MISSING_REQUIRED_FIELD:
+  case LONEJSON_STATUS_DUPLICATE_FIELD:
+  case LONEJSON_STATUS_OVERFLOW:
+  case LONEJSON_STATUS_TRUNCATED:
   default:
     return lc_engine_set_protocol_error(
         error, message != NULL ? message

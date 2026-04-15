@@ -41,11 +41,33 @@ foreach(required_path
     "${install_prefix}/include/lonejson.h"
     "${install_prefix}/lib/liblockdc.a"
     "${install_prefix}/lib/liblonejson.a"
+    "${install_prefix}/lib/cmake/lockdc/lockdcConfig.cmake"
 )
     if(NOT EXISTS "${required_path}")
         message(FATAL_ERROR "installed SDK is missing required artifact: ${required_path}")
     endif()
 endforeach()
+
+file(READ "${install_prefix}/lib/cmake/lockdc/lockdcConfig.cmake" lockdc_config_text)
+string(FIND "${lockdc_config_text}" "libssh2.a" lockdc_ssh2_index)
+string(FIND "${lockdc_config_text}" "libssl.a" lockdc_ssl_index)
+string(FIND "${lockdc_config_text}" "libcrypto.a" lockdc_crypto_index)
+string(FIND "${lockdc_config_text}" "libz.a" lockdc_z_index)
+
+if(lockdc_ssh2_index EQUAL -1 OR lockdc_ssl_index EQUAL -1 OR
+   lockdc_crypto_index EQUAL -1 OR lockdc_z_index EQUAL -1)
+    message(FATAL_ERROR
+        "installed static package config is missing expected static dependency archives\n"
+        "config:\n${lockdc_config_text}")
+endif()
+
+if(lockdc_ssh2_index GREATER lockdc_ssl_index OR
+   lockdc_ssh2_index GREATER lockdc_crypto_index OR
+   lockdc_ssh2_index GREATER lockdc_z_index)
+    message(FATAL_ERROR
+        "installed static package config exports libssh2 after one of its dependencies\n"
+        "config:\n${lockdc_config_text}")
+endif()
 
 file(WRITE "${consumer_src_dir}/CMakeLists.txt" [=[
 cmake_minimum_required(VERSION 3.21)
