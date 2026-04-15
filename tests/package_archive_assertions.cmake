@@ -23,6 +23,34 @@ function(assert_symlink_target extract_root archive_path symlink_path)
     endif()
 endfunction()
 
+function(assert_shared_library_runpath extract_root archive_path shared_lib_name)
+    find_program(LOCKDC_READELF_BIN NAMES readelf)
+    if(NOT LOCKDC_READELF_BIN)
+        message(FATAL_ERROR "readelf is required for archive shared-library validation")
+    endif()
+
+    execute_process(
+        COMMAND "${LOCKDC_READELF_BIN}" -d "${extract_root}/lib/${shared_lib_name}"
+        RESULT_VARIABLE readelf_result
+        OUTPUT_VARIABLE readelf_output
+        ERROR_VARIABLE readelf_error
+    )
+    if(NOT readelf_result EQUAL 0)
+        message(FATAL_ERROR
+            "failed to inspect shared library dynamic tags in ${archive_path}\n${readelf_output}${readelf_error}")
+    endif()
+
+    if(readelf_output MATCHES "\\(RUNPATH\\).*\\[/")
+        message(FATAL_ERROR
+            "archive contains absolute RUNPATH in lib/${shared_lib_name}: ${archive_path}\n${readelf_output}")
+    endif()
+
+    if(NOT readelf_output MATCHES "\\(RUNPATH\\).*\\[\\$ORIGIN\\]")
+        message(FATAL_ERROR
+            "archive shared library is missing relocatable $ORIGIN RUNPATH in lib/${shared_lib_name}: ${archive_path}\n${readelf_output}")
+    endif()
+endfunction()
+
 function(assert_archive_layout archive_path version target_id shared_lib_name shared_soname shared_link_name)
     if(NOT EXISTS "${archive_path}")
         message(FATAL_ERROR "missing archive: ${archive_path}")
@@ -117,6 +145,7 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     if(DEFINED shared_link_name AND NOT "${shared_link_name}" STREQUAL "")
         assert_symlink_target("${extract_root}" "${archive_path}" "lib/${shared_link_name}")
     endif()
+    assert_shared_library_runpath("${extract_root}" "${archive_path}" "${shared_lib_name}")
     assert_symlink_target("${extract_root}" "${archive_path}" "lib/libssh2.so")
     assert_symlink_target("${extract_root}" "${archive_path}" "lib/libssh2.so.1")
     assert_symlink_target("${extract_root}" "${archive_path}" "lib/libz.so")

@@ -12,7 +12,7 @@ cross_release_presets=(
   armhf-linux-musl-release
 )
 
-cross_preset_package_regex='dist_dir_configure_test|package_archives_test|package_script_targeting_test|runtime_license_fallback_test|pslog_build_modes_test'
+cross_preset_package_regex='dist_dir_configure_test|package_archives_test|package_script_targeting_test|runtime_license_install_tree_test|pslog_build_modes_test'
 
 unset LD_LIBRARY_PATH
 

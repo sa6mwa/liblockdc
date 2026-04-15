@@ -412,21 +412,14 @@ if(LOCKDC_BUILD_TESTS)
     )
 endif()
 
-set(LOCKDC_SHARED_LIB_PATH "")
 set(LOCKDC_SHARED_LIB_NAME "")
 set(LOCKDC_SHARED_SONAME "")
 set(LOCKDC_SHARED_LINK_NAME "")
-set(LOCKDC_STATIC_LIB_PATH "")
 
 if(TARGET lc_shared)
-    set(LOCKDC_SHARED_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}lockdc${CMAKE_SHARED_LIBRARY_SUFFIX}.${PROJECT_VERSION}")
     set(LOCKDC_SHARED_LIB_NAME "${CMAKE_SHARED_LIBRARY_PREFIX}lockdc${CMAKE_SHARED_LIBRARY_SUFFIX}.${PROJECT_VERSION}")
     set(LOCKDC_SHARED_SONAME "${CMAKE_SHARED_LIBRARY_PREFIX}lockdc${CMAKE_SHARED_LIBRARY_SUFFIX}.${PROJECT_VERSION_MAJOR}")
     set(LOCKDC_SHARED_LINK_NAME "${CMAKE_SHARED_LIBRARY_PREFIX}lockdc${CMAKE_SHARED_LIBRARY_SUFFIX}")
-endif()
-
-if(TARGET lc_static)
-    set(LOCKDC_STATIC_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}lockdc${CMAKE_STATIC_LIBRARY_SUFFIX}")
 endif()
 
 configure_file(
@@ -624,7 +617,9 @@ if(LOCKDC_BUILD_TESTS)
         set_tests_properties(package_archives_test PROPERTIES RUN_SERIAL TRUE)
     endif()
 
-    if(TARGET lc_shared AND TARGET lc_static AND NOT CMAKE_CROSSCOMPILING)
+    if(TARGET lc_shared AND TARGET lc_static
+       AND NOT CMAKE_CROSSCOMPILING
+       AND CMAKE_BUILD_TYPE STREQUAL "Release")
         add_test(NAME release_tarball_sdk_test
             COMMAND ${CMAKE_COMMAND}
                 -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
@@ -684,13 +679,15 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(cross_test_targeting_test PROPERTIES RUN_SERIAL TRUE)
 
-    add_test(NAME runtime_license_fallback_test
+    add_test(NAME runtime_license_install_tree_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_license_fallback_test.cmake
+            -DLOCKDC_VERSION=${LOCKDC_RESOLVED_VERSION}
+            -DLOCKDC_TARGET_ID=${LOCKDC_TARGET_ID}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_license_install_tree_test.cmake
     )
-    set_tests_properties(runtime_license_fallback_test PROPERTIES RUN_SERIAL TRUE)
+    set_tests_properties(runtime_license_install_tree_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME install_tree_sdk_test
         COMMAND ${CMAKE_COMMAND}
@@ -762,6 +759,15 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_download_timeout_test.cmake
     )
     set_tests_properties(dependency_download_timeout_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME lonejson_generator_reuse_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lonejson_generator_reuse_test.cmake
+    )
+    set_tests_properties(lonejson_generator_reuse_test PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)

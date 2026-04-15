@@ -26,36 +26,6 @@ endfunction()
 lockdc_import_cache_path(LOCKDC_EXTERNAL_ROOT)
 lockdc_import_cache_path(LOCKDC_DEPENDENCY_BUILD_ROOT)
 
-function(lockdc_copy_if_exists source_path destination_dir)
-    if(EXISTS "${source_path}")
-        file(COPY "${source_path}" DESTINATION "${destination_dir}")
-    endif()
-endfunction()
-
-function(lockdc_copy_directory_if_exists source_path destination_dir)
-    if(EXISTS "${source_path}")
-        file(COPY "${source_path}" DESTINATION "${destination_dir}")
-    endif()
-endfunction()
-
-function(lockdc_copy_glob_follow pattern destination_dir)
-    file(GLOB matches "${pattern}")
-    if(matches)
-        file(COPY ${matches} DESTINATION "${destination_dir}" FOLLOW_SYMLINK_CHAIN)
-    endif()
-endfunction()
-
-function(lockdc_copy_license_if_exists source_path destination_dir)
-    if(EXISTS "${source_path}")
-        file(MAKE_DIRECTORY "${destination_dir}")
-        get_filename_component(source_name "${source_path}" NAME)
-        file(COPY "${source_path}" DESTINATION "${destination_dir}")
-        if(source_name STREQUAL "COPYING")
-            file(RENAME "${destination_dir}/COPYING" "${destination_dir}/LICENSE.txt")
-        endif()
-    endif()
-endfunction()
-
 function(lockdc_copy_required_license_named package_name destination_dir output_name)
     set(candidates ${ARGN})
 
@@ -84,62 +54,26 @@ file(MAKE_DIRECTORY "${package_root}/lib/pkgconfig")
 file(MAKE_DIRECTORY "${package_root}/lib/cmake/lockdc")
 file(MAKE_DIRECTORY "${package_root}/share/doc/liblockdc")
 
-file(COPY "${LOCKDC_PUBLIC_HEADER}" DESTINATION "${package_root}/include/lc")
-file(COPY "${LOCKDC_PUBLIC_VERSION_HEADER}" DESTINATION "${package_root}/include/lc")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/pslog/install/include/pslog.h" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/pslog/install/include/pslog_version.h" "${package_root}/include")
-lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl/install/include/curl" "${package_root}/include")
-lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl/install/include/openssl" "${package_root}/include")
-lockdc_copy_directory_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include/nghttp2" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2.h" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2_publickey.h" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2_sftp.h" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/zlib/install/include/zlib.h" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/zlib/install/include/zconf.h" "${package_root}/include")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include/lonejson.h" "${package_root}/include")
-
-file(COPY "${LOCKDC_STATIC_LIB}" DESTINATION "${package_root}/lib")
-file(COPY "${LOCKDC_SHARED_LIB}" DESTINATION "${package_root}/lib")
-file(COPY "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.a" DESTINATION "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz.a" "${package_root}/lib")
-lockdc_copy_if_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson.a" "${package_root}/lib")
-
-if(DEFINED LOCKDC_SHARED_SONAME
-   AND DEFINED LOCKDC_SHARED_LIB_NAME
-   AND NOT LOCKDC_SHARED_SONAME STREQUAL ""
-   AND NOT LOCKDC_SHARED_SONAME STREQUAL LOCKDC_SHARED_LIB_NAME)
-    file(CREATE_LINK "${LOCKDC_SHARED_LIB_NAME}"
-         "${package_root}/lib/${LOCKDC_SHARED_SONAME}"
-         SYMBOLIC)
-endif()
-if(DEFINED LOCKDC_SHARED_LINK_NAME
-   AND NOT LOCKDC_SHARED_LINK_NAME STREQUAL ""
-   AND DEFINED LOCKDC_SHARED_SONAME
-   AND NOT LOCKDC_SHARED_SONAME STREQUAL "")
-    file(CREATE_LINK "${LOCKDC_SHARED_SONAME}"
-         "${package_root}/lib/${LOCKDC_SHARED_LINK_NAME}"
-         SYMBOLIC)
+if(NOT EXISTS "${LOCKDC_BINARY_DIR}/cmake_install.cmake")
+    message(FATAL_ERROR
+        "package generation requires a real install-enabled build tree; missing ${LOCKDC_BINARY_DIR}/cmake_install.cmake")
 endif()
 
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz.so*" "${package_root}/lib")
-lockdc_copy_glob_follow("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson.so*" "${package_root}/lib")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --install "${LOCKDC_BINARY_DIR}" --prefix "${package_root}" --component runtime
+    RESULT_VARIABLE lockdc_runtime_install_result
+)
+if(NOT lockdc_runtime_install_result EQUAL 0)
+    message(FATAL_ERROR "failed to install runtime package payload")
+endif()
 
-file(COPY "${LOCKDC_PUBLIC_PKGCONFIG}" DESTINATION "${package_root}/lib/pkgconfig")
-file(COPY "${LOCKDC_PUBLIC_CMAKE_CONFIG}" DESTINATION "${package_root}/lib/cmake/lockdc")
-file(COPY "${LOCKDC_PUBLIC_CMAKE_CONFIG_VERSION}" DESTINATION "${package_root}/lib/cmake/lockdc")
-lockdc_copy_if_exists("${LOCKDC_ROOT}/LICENSE" "${package_root}/share/doc/liblockdc")
-lockdc_copy_if_exists("${LOCKDC_ROOT}/README.md" "${package_root}/share/doc/liblockdc")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --install "${LOCKDC_BINARY_DIR}" --prefix "${package_root}" --component dev
+    RESULT_VARIABLE lockdc_dev_install_result
+)
+if(NOT lockdc_dev_install_result EQUAL 0)
+    message(FATAL_ERROR "failed to install development package payload")
+endif()
 
 lockdc_copy_required_license_named(
     "libpslog"

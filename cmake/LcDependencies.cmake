@@ -672,6 +672,10 @@ function(lc_prepare_lonejson_source source_dir install_dir
   file(WRITE "${source_dir}/configure.cmake" "if(NOT EXISTS \"${download_dir}/${asset_name}\")\n"
     "  message(FATAL_ERROR \"missing downloaded lonejson header archive: ${download_dir}/${asset_name}\")\n"
     "endif()\n"
+    "set(lockdc_lonejson_generator \"${CMAKE_GENERATOR}\")\n"
+    "if(DEFINED LOCKDC_LONEJSON_GENERATOR AND NOT LOCKDC_LONEJSON_GENERATOR STREQUAL \"\")\n"
+    "  set(lockdc_lonejson_generator \"\${LOCKDC_LONEJSON_GENERATOR}\")\n"
+    "endif()\n"
     "execute_process(\n"
     "  COMMAND \"${gzip_bin}\" -dc \"${download_dir}/${asset_name}\"\n"
     "  OUTPUT_FILE \"${source_dir}/lonejson.h\"\n"
@@ -680,9 +684,20 @@ function(lc_prepare_lonejson_source source_dir install_dir
     "if(NOT gzip_result EQUAL 0)\n"
     "  message(FATAL_ERROR \"failed to decompress lonejson header archive: ${download_dir}/${asset_name}\")\n"
     "endif()\n"
+    "if(EXISTS \"${build_dir}/CMakeCache.txt\")\n"
+    "  file(STRINGS \"${build_dir}/CMakeCache.txt\" lonejson_cache_generator_line\n"
+    "    REGEX \"^CMAKE_GENERATOR:INTERNAL=\")\n"
+    "  if(lonejson_cache_generator_line)\n"
+    "    string(REPLACE \"CMAKE_GENERATOR:INTERNAL=\" \"\" lonejson_cache_generator\n"
+    "      \"\${lonejson_cache_generator_line}\")\n"
+    "    if(NOT lonejson_cache_generator STREQUAL lockdc_lonejson_generator)\n"
+    "      file(REMOVE_RECURSE \"${build_dir}\")\n"
+    "    endif()\n"
+    "  endif()\n"
+    "endif()\n"
     "execute_process(\n"
     "  COMMAND \"${CMAKE_COMMAND}\" -S \"${source_dir}\" -B \"${build_dir}\"\n"
-    "          -G \"${CMAKE_GENERATOR}\"\n"
+    "          -G \"\${lockdc_lonejson_generator}\"\n"
     "          \"-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}\"\n"
     "          \"-DCMAKE_AR=${CMAKE_AR}\"\n"
     "          \"-DCMAKE_RANLIB=${CMAKE_RANLIB}\"\n")
@@ -737,7 +752,9 @@ function(lc_add_lonejson)
       DOWNLOAD_NO_EXTRACT TRUE
       DEPENDS ${curl_project}
       CONFIGURE_COMMAND
-        ${CMAKE_COMMAND} -P "${source_dir}/configure.cmake"
+        ${CMAKE_COMMAND}
+          "-DLOCKDC_LONEJSON_GENERATOR=${CMAKE_GENERATOR}"
+          -P "${source_dir}/configure.cmake"
       BUILD_COMMAND ${CMAKE_COMMAND} --build "${build_dir}" --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install "${build_dir}"
       BUILD_IN_SOURCE 0
