@@ -279,8 +279,8 @@ __cross-test: __cross-build
 release:
 	$(TIMED) release $(MAKE) __release
 
-__release: __deps-release __deps-cross
-	bash ./scripts/run_linux_release_matrix.sh
+__release: __build-release
+	bash ./scripts/run_linux_package_matrix.sh
 
 world:
 	$(TIMED) world $(MAKE) __world
