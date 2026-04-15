@@ -233,6 +233,10 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
   out->version = engine_res.version;
   out->fencing_token = engine_res.fencing_token;
   out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  if (!engine_res.no_content) {
+    lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
+                                engine_res.fencing_token, 0L);
+  }
   if (engine_res.no_content) {
     pslog_field fields[4];
 

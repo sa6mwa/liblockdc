@@ -45,6 +45,9 @@ typedef struct lc_consumer_delivery_bridge {
   pthread_t extend_thread;
   int handler_thread_started;
   int extend_thread_started;
+  int state_mutex_initialized;
+  int state_cond_initialized;
+  int op_mutex_initialized;
   int handler_rc;
   int runtime_fatal;
   lc_consumer_delivery_state state;
@@ -73,6 +76,7 @@ struct lc_consumer_service_handle {
   int disable_mtls;
   int insecure_skip_verify;
   int prefer_http_2;
+  size_t http_json_response_limit_bytes;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
@@ -187,6 +191,9 @@ lc_consumer_delivery_stop_extender(lc_consumer_delivery_bridge *bridge) {
   pthread_t extend_thread;
   int should_join;
 
+  if (bridge == NULL || !bridge->state_mutex_initialized) {
+    return;
+  }
   lc_consumer_delivery_request_extender_stop(bridge);
   pthread_mutex_lock(&bridge->state_mutex);
   should_join = bridge->extend_thread_started;
@@ -195,6 +202,36 @@ lc_consumer_delivery_stop_extender(lc_consumer_delivery_bridge *bridge) {
   pthread_mutex_unlock(&bridge->state_mutex);
   if (should_join) {
     pthread_join(extend_thread, NULL);
+  }
+}
+
+static void
+lc_consumer_delivery_cleanup(lc_consumer_delivery_bridge *bridge) {
+  if (bridge == NULL) {
+    return;
+  }
+  if (bridge->handler_thread_started) {
+    pthread_join(bridge->handler_thread, NULL);
+    bridge->handler_thread_started = 0;
+  }
+  lc_consumer_delivery_stop_extender(bridge);
+  if (bridge->message != NULL) {
+    bridge->message->close(bridge->message);
+    bridge->message = NULL;
+    bridge->inner_message = NULL;
+  }
+  lc_engine_dequeue_response_cleanup(&bridge->meta);
+  if (bridge->op_mutex_initialized) {
+    pthread_mutex_destroy(&bridge->op_mutex);
+    bridge->op_mutex_initialized = 0;
+  }
+  if (bridge->state_cond_initialized) {
+    pthread_cond_destroy(&bridge->state_cond);
+    bridge->state_cond_initialized = 0;
+  }
+  if (bridge->state_mutex_initialized) {
+    pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->state_mutex_initialized = 0;
   }
 }
 
@@ -885,6 +922,8 @@ static int lc_consumer_copy_base_config(lc_consumer_service_handle *service,
   service->disable_mtls = client->disable_mtls;
   service->insecure_skip_verify = client->insecure_skip_verify;
   service->prefer_http_2 = client->prefer_http_2;
+  service->http_json_response_limit_bytes =
+      client->http_json_response_limit_bytes;
   service->disable_logger_sys_field = client->disable_logger_sys_field;
   service->base_logger =
       client->base_logger != NULL ? client->base_logger : lc_log_noop_logger();
@@ -934,6 +973,8 @@ static int lc_consumer_clone_client(lc_consumer_service_handle *service,
   config.disable_mtls = service->disable_mtls;
   config.insecure_skip_verify = service->insecure_skip_verify;
   config.prefer_http_2 = service->prefer_http_2;
+  config.http_json_response_limit_bytes =
+      service->http_json_response_limit_bytes;
   config.disable_logger_sys_field = service->disable_logger_sys_field;
   config.logger = service->base_logger;
   config.allocator = service->allocator;
@@ -1187,6 +1228,9 @@ lc_consumer_delivery_begin(void *context,
   bridge->inner_message = NULL;
   bridge->handler_thread_started = 0;
   bridge->extend_thread_started = 0;
+  bridge->state_mutex_initialized = 0;
+  bridge->state_cond_initialized = 0;
+  bridge->op_mutex_initialized = 0;
   rc = pthread_mutex_init(&bridge->state_mutex, NULL);
   if (rc != 0) {
     bridge->runtime_fatal = 1;
@@ -1196,33 +1240,43 @@ lc_consumer_delivery_begin(void *context,
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
+  bridge->state_mutex_initialized = 1;
   rc = pthread_cond_init(&bridge->state_cond, NULL);
   if (rc != 0) {
     bridge->runtime_fatal = 1;
     pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->state_mutex_initialized = 0;
     lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
                  "failed to initialize consumer delivery state", NULL, NULL,
                  NULL);
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
+  bridge->state_cond_initialized = 1;
   rc = pthread_mutex_init(&bridge->op_mutex, NULL);
   if (rc != 0) {
     bridge->runtime_fatal = 1;
     pthread_cond_destroy(&bridge->state_cond);
     pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
     lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
                  "failed to initialize consumer delivery state", NULL, NULL,
                  NULL);
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
+  bridge->op_mutex_initialized = 1;
   rc = lc_stream_pipe_open(65536U, &bridge->client->allocator, &payload,
                            &bridge->pipe, bridge->error);
   if (rc != LC_OK) {
     bridge->runtime_fatal = 1;
+    pthread_mutex_destroy(&bridge->op_mutex);
     pthread_cond_destroy(&bridge->state_cond);
     pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->op_mutex_initialized = 0;
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
@@ -1239,6 +1293,9 @@ lc_consumer_delivery_begin(void *context,
     pthread_mutex_destroy(&bridge->op_mutex);
     pthread_cond_destroy(&bridge->state_cond);
     pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->op_mutex_initialized = 0;
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
@@ -1257,6 +1314,9 @@ lc_consumer_delivery_begin(void *context,
     pthread_mutex_destroy(&bridge->op_mutex);
     pthread_cond_destroy(&bridge->state_cond);
     pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->op_mutex_initialized = 0;
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
@@ -1275,6 +1335,9 @@ lc_consumer_delivery_begin(void *context,
     pthread_mutex_destroy(&bridge->op_mutex);
     pthread_cond_destroy(&bridge->state_cond);
     pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->op_mutex_initialized = 0;
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
@@ -1301,6 +1364,9 @@ lc_consumer_delivery_begin(void *context,
     pthread_mutex_destroy(&bridge->op_mutex);
     pthread_cond_destroy(&bridge->state_cond);
     pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->op_mutex_initialized = 0;
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     return 0;
   }
@@ -1355,6 +1421,7 @@ static int lc_consumer_delivery_end(void *context,
     }
     lc_engine_dequeue_response_cleanup(&bridge->meta);
     pthread_mutex_destroy(&bridge->op_mutex);
+    bridge->op_mutex_initialized = 0;
     return 1;
   }
   lc_stream_pipe_finish(bridge->pipe);
@@ -1365,6 +1432,7 @@ static int lc_consumer_delivery_end(void *context,
   rc = bridge->handler_rc;
   lc_engine_dequeue_response_cleanup(&bridge->meta);
   pthread_mutex_destroy(&bridge->op_mutex);
+  bridge->op_mutex_initialized = 0;
   {
     pslog_field fields[7];
 
@@ -1656,20 +1724,7 @@ static void *lc_consumer_worker_main(void *context) {
                           "consumer subscribe aborted");
       bridge.pipe = NULL;
     }
-    if (bridge.handler_thread_started) {
-      pthread_join(bridge.handler_thread, NULL);
-      bridge.handler_thread_started = 0;
-    }
-    lc_consumer_delivery_stop_extender(&bridge);
-    if (bridge.message != NULL) {
-      /* Cleanup only closes any still-open delivery handle. Terminal queue
-       * actions must already have been decided before we reach this point. */
-      bridge.message->close(bridge.message);
-      bridge.message = NULL;
-    }
-    lc_engine_dequeue_response_cleanup(&bridge.meta);
-    pthread_cond_destroy(&bridge.state_cond);
-    pthread_mutex_destroy(&bridge.state_mutex);
+    lc_consumer_delivery_cleanup(&bridge);
 
     if (rc == LC_ENGINE_OK && bridge.handler_rc == LC_OK &&
         error.code == LC_OK) {

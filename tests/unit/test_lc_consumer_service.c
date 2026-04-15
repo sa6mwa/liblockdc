@@ -50,6 +50,18 @@ typedef struct consumer_test_state {
   long nack_delay_ms;
   int fail_thread_create_call;
   int thread_create_calls;
+  size_t last_client_open_json_limit;
+  int track_pthread_primitives;
+  int wrapped_mutex_init_calls;
+  int wrapped_mutex_destroy_calls;
+  int wrapped_cond_init_calls;
+  int wrapped_cond_destroy_calls;
+  int wrapped_unknown_mutex_destroy_calls;
+  int wrapped_unknown_cond_destroy_calls;
+  pthread_mutex_t *tracked_mutexes[16];
+  size_t tracked_mutex_count;
+  pthread_cond_t *tracked_conds[16];
+  size_t tracked_cond_count;
   int have_extend_thread;
   int extend_joined;
   int close_saw_extend_joined;
@@ -110,6 +122,12 @@ int __real_lc_client_open(const lc_client_config *config, lc_client **out,
 int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                           void *(*start_routine)(void *), void *arg);
 int __real_pthread_join(pthread_t thread, void **retval);
+int __real_pthread_mutex_init(pthread_mutex_t *mutex,
+                              const pthread_mutexattr_t *attr);
+int __real_pthread_mutex_destroy(pthread_mutex_t *mutex);
+int __real_pthread_cond_init(pthread_cond_t *cond,
+                             const pthread_condattr_t *attr);
+int __real_pthread_cond_destroy(pthread_cond_t *cond);
 lc_message *__real_lc_message_new(lc_client_handle *client,
                                   const lc_engine_dequeue_response *engine,
                                   lc_source *payload, int *terminal_flag);
@@ -133,6 +151,7 @@ struct lc_consumer_service_handle {
   int disable_mtls;
   int insecure_skip_verify;
   int prefer_http_2;
+  size_t http_json_response_limit_bytes;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
@@ -823,6 +842,8 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
   engine_config.allocator.realloc_fn = config->allocator.realloc_fn;
   engine_config.allocator.free_fn = config->allocator.free_fn;
   engine_config.allocator.context = config->allocator.context;
+  g_consumer_test_state->last_client_open_json_limit =
+      config->http_json_response_limit_bytes;
   rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);
   lc_engine_error_cleanup(&engine_error);
   if (rc != LC_OK) {
@@ -835,6 +856,8 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
       g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
   client->logger =
       g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
+  client->http_json_response_limit_bytes =
+      config->http_json_response_limit_bytes;
   client->pub.close = fake_test_client_close;
   *out = &client->pub;
   return LC_OK;
@@ -932,6 +955,108 @@ int __wrap_pthread_join(pthread_t thread, void **retval) {
     pthread_mutex_unlock(&state->mutex);
   }
   return __real_pthread_join(thread, retval);
+}
+
+int __wrap_pthread_mutex_init(pthread_mutex_t *mutex,
+                              const pthread_mutexattr_t *attr) {
+  consumer_test_state *state;
+  size_t index;
+
+  state = g_consumer_test_state;
+  if (state != NULL && state->track_pthread_primitives) {
+    pthread_mutex_lock(&state->mutex);
+    state->wrapped_mutex_init_calls += 1;
+    for (index = 0U; index < state->tracked_mutex_count; ++index) {
+      if (state->tracked_mutexes[index] == mutex) {
+        pthread_mutex_unlock(&state->mutex);
+        return __real_pthread_mutex_init(mutex, attr);
+      }
+    }
+    assert_true(state->tracked_mutex_count <
+                sizeof(state->tracked_mutexes) / sizeof(state->tracked_mutexes[0]));
+    state->tracked_mutexes[state->tracked_mutex_count++] = mutex;
+    pthread_mutex_unlock(&state->mutex);
+  }
+  return __real_pthread_mutex_init(mutex, attr);
+}
+
+int __wrap_pthread_mutex_destroy(pthread_mutex_t *mutex) {
+  consumer_test_state *state;
+  size_t index;
+  int found;
+
+  state = g_consumer_test_state;
+  if (state != NULL && state->track_pthread_primitives) {
+    pthread_mutex_lock(&state->mutex);
+    state->wrapped_mutex_destroy_calls += 1;
+    found = 0;
+    for (index = 0U; index < state->tracked_mutex_count; ++index) {
+      if (state->tracked_mutexes[index] == mutex) {
+        state->tracked_mutex_count -= 1U;
+        state->tracked_mutexes[index] =
+            state->tracked_mutexes[state->tracked_mutex_count];
+        state->tracked_mutexes[state->tracked_mutex_count] = NULL;
+        found = 1;
+        break;
+      }
+    }
+    if (!found) {
+      state->wrapped_unknown_mutex_destroy_calls += 1;
+    }
+    pthread_mutex_unlock(&state->mutex);
+  }
+  return __real_pthread_mutex_destroy(mutex);
+}
+
+int __wrap_pthread_cond_init(pthread_cond_t *cond,
+                             const pthread_condattr_t *attr) {
+  consumer_test_state *state;
+  size_t index;
+
+  state = g_consumer_test_state;
+  if (state != NULL && state->track_pthread_primitives) {
+    pthread_mutex_lock(&state->mutex);
+    state->wrapped_cond_init_calls += 1;
+    for (index = 0U; index < state->tracked_cond_count; ++index) {
+      if (state->tracked_conds[index] == cond) {
+        pthread_mutex_unlock(&state->mutex);
+        return __real_pthread_cond_init(cond, attr);
+      }
+    }
+    assert_true(state->tracked_cond_count <
+                sizeof(state->tracked_conds) / sizeof(state->tracked_conds[0]));
+    state->tracked_conds[state->tracked_cond_count++] = cond;
+    pthread_mutex_unlock(&state->mutex);
+  }
+  return __real_pthread_cond_init(cond, attr);
+}
+
+int __wrap_pthread_cond_destroy(pthread_cond_t *cond) {
+  consumer_test_state *state;
+  size_t index;
+  int found;
+
+  state = g_consumer_test_state;
+  if (state != NULL && state->track_pthread_primitives) {
+    pthread_mutex_lock(&state->mutex);
+    state->wrapped_cond_destroy_calls += 1;
+    found = 0;
+    for (index = 0U; index < state->tracked_cond_count; ++index) {
+      if (state->tracked_conds[index] == cond) {
+        state->tracked_cond_count -= 1U;
+        state->tracked_conds[index] =
+            state->tracked_conds[state->tracked_cond_count];
+        state->tracked_conds[state->tracked_cond_count] = NULL;
+        found = 1;
+        break;
+      }
+    }
+    if (!found) {
+      state->wrapped_unknown_cond_destroy_calls += 1;
+    }
+    pthread_mutex_unlock(&state->mutex);
+  }
+  return __real_pthread_cond_destroy(cond);
 }
 
 static void init_fake_root_client(lc_client_handle *client,
@@ -1175,7 +1300,7 @@ test_consumer_service_logs_restart_with_configured_logger(void **state) {
   consumer.restart_policy.immediate_retries = 0;
   consumer.restart_policy.base_delay_ms = 1L;
   consumer.restart_policy.max_delay_ms = 1L;
-  consumer.restart_policy.max_failures = 1;
+  consumer.restart_policy.max_failures = 2;
   config.consumers = &consumer;
   config.consumer_count = 1U;
 
@@ -1388,7 +1513,7 @@ static void test_consumer_service_multi_worker_failure_cleans_up(void **state) {
   consumer.handle = handle_consumer_message;
   consumer.worker_count = 2U;
   consumer.context = &runtime_state;
-  consumer.restart_policy.max_failures = 1;
+  consumer.restart_policy.max_failures = 2;
   config.consumers = &consumer;
   config.consumer_count = 1U;
 
@@ -2084,6 +2209,10 @@ static void test_consumer_service_worker_thread_start_failure_is_fatal(
   consumer.on_error = fake_consumer_on_error_record_only;
   consumer.worker_count = 1U;
   consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
   config.consumers = &consumer;
   config.consumer_count = 1U;
 
@@ -2202,6 +2331,10 @@ static void test_consumer_service_message_factory_failure_is_fatal(
   consumer.on_error = fake_consumer_on_error_record_only;
   consumer.worker_count = 1U;
   consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
   config.consumers = &consumer;
   config.consumer_count = 1U;
 
@@ -2220,6 +2353,120 @@ static void test_consumer_service_message_factory_failure_is_fatal(
   assert_int_equal(runtime_state.last_error_attempt, 1);
   assert_int_equal(runtime_state.last_error_code, LC_ERR_NOMEM);
   assert_int_equal(error.code, LC_ERR_NOMEM);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
+test_consumer_service_worker_clone_preserves_json_response_limit(void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  client.http_json_response_limit_bytes = 123U;
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.fail_subscribe = 1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 2;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.last_client_open_json_limit, 123U);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
+test_consumer_service_no_delivery_does_not_destroy_uninitialized_primitives(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.fail_subscribe = 1;
+  runtime_state.track_pthread_primitives = 1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.on_error = fake_consumer_on_error_record_only;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 2;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.wrapped_unknown_mutex_destroy_calls, 0);
+  assert_int_equal(runtime_state.wrapped_unknown_cond_destroy_calls, 0);
 
   service->close(service);
   g_consumer_test_state = NULL;
@@ -2274,6 +2521,10 @@ int main(void) {
           test_consumer_service_extender_thread_start_failure_is_fatal),
       cmocka_unit_test(
           test_consumer_service_message_factory_failure_is_fatal),
+      cmocka_unit_test(
+          test_consumer_service_worker_clone_preserves_json_response_limit),
+      cmocka_unit_test(
+          test_consumer_service_no_delivery_does_not_destroy_uninitialized_primitives),
       cmocka_unit_test(
           test_consumer_service_retains_owned_logger_after_root_client_close),
       cmocka_unit_test(

@@ -72,6 +72,10 @@ target_link_options(lc_unit_consumer_service PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_message_new>
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_create>
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_join>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_mutex_init>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_mutex_destroy>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_cond_init>
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_cond_destroy>
 )
 lc_add_unit_test(lc_unit_runtime test_lc_runtime.c)
 lc_add_unit_test(lc_unit_mutate_stream test_lc_mutate_stream.c)
@@ -167,6 +171,10 @@ lc_add_https_unit_test_case(
 lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_save_uses_mapped_lonejson_upload
   LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_USES_MAPPED_LONEJSON_UPLOAD
+)
+lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_lease_get_refreshes_state_view
+  LC_HTTPS_CASE_PUBLIC_LEASE_GET_REFRESHES_STATE_VIEW
 )
 lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_load_respects_configured_json_response_limit
