@@ -77,7 +77,7 @@ help:
 		'make cross-preset-test  Run the host debug/asan cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
 		'make release            Run the full Linux release matrix and package generation.' \
-		'make world              Run the full clean-slate workflow: clean, builds, tests, coverage, e2e, benchmarks, and final release verification; fuzz is included when Clang/libFuzzer is available.' \
+		'make world              Run the full clean-slate workflow: clean, builds, tests, e2e, benchmarks, and final release verification; fuzz is included when Clang/libFuzzer is available.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
 
 build: build-debug

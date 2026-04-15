@@ -33,7 +33,6 @@ run_step __test-debug
 run_step __test-host
 run_step __cross-test
 run_step __asan
-run_step __coverage
 if should_run_fuzz; then
     run_step __fuzz
 else

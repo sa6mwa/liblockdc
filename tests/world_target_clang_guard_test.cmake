@@ -26,7 +26,6 @@ foreach(expected
     "[world] __test-host"
     "[world] __cross-test"
     "[world] __asan"
-    "[world] __coverage"
     "[world] skipping __fuzz: clang not available (__missing_clang__)"
     "[world] __test-e2e"
     "[world] __benchmarks"
