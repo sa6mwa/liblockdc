@@ -432,6 +432,12 @@ configure_file(
 set(SOURCE_URL "git+https://github.com/sa6mwa/liblockdc.git")
 set(SOURCE_TAG_LINE "  tag = \"v${LOCKDC_RESOLVED_VERSION}\",")
 set(LOCKDC_LUA_ROCKSPEC_PATH "${CMAKE_CURRENT_BINARY_DIR}/lockdc-${PROJECT_VERSION}-1.rockspec")
+file(GLOB LOCKDC_STALE_LUA_ROCKSPEC_PATHS "${CMAKE_CURRENT_BINARY_DIR}/lockdc-*-1.rockspec")
+foreach(_lockdc_stale_lua_rockspec_path IN LISTS LOCKDC_STALE_LUA_ROCKSPEC_PATHS)
+    if(NOT "${_lockdc_stale_lua_rockspec_path}" STREQUAL "${LOCKDC_LUA_ROCKSPEC_PATH}")
+        file(REMOVE "${_lockdc_stale_lua_rockspec_path}")
+    endif()
+endforeach()
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/lockdc.rockspec.in"
     "${LOCKDC_LUA_ROCKSPEC_PATH}"
@@ -448,9 +454,6 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     if("${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "" AND EXISTS "/usr/local/include/lua.h")
         set(LOCKDC_LUA_INCLUDE_DIR "/usr/local/include")
     endif()
-endif()
-
-if(LOCKDC_BUILD_LUA_BINDINGS)
     if(LOCKDC_BUILD_SHARED AND NOT "${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "")
         add_library(lockdc_lua_core MODULE src/lua/lockdc_lua.c)
         target_include_directories(lockdc_lua_core PRIVATE "${LOCKDC_LUA_INCLUDE_DIR}")
@@ -467,7 +470,19 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     endif()
 endif()
 
+function(lockdc_install_shared_dependency_glob library_glob)
+    file(GLOB _lockdc_shared_dep_libs "${library_glob}")
+    if(_lockdc_shared_dep_libs)
+        install(FILES
+            ${_lockdc_shared_dep_libs}
+            DESTINATION lib
+            COMPONENT runtime
+        )
+    endif()
+endfunction()
+
 if(LOCKDC_INSTALL)
+
     install(FILES ${LOCKDC_PUBLIC_HEADER} ${LOCKDC_PUBLIC_VERSION_HEADER}
         DESTINATION include/lc
         COMPONENT dev
@@ -549,48 +564,23 @@ if(LOCKDC_INSTALL)
             )
         endif()
     endforeach()
-    if(TARGET lc_shared
-       AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so.0"
-       AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so.${LOCKDC_PSLOG_VERSION}")
-        install(FILES
-            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so.0"
-            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so.${LOCKDC_PSLOG_VERSION}"
-            DESTINATION lib
-            COMPONENT runtime
-        )
-    endif()
     if(TARGET lc_shared)
         foreach(_lc_shared_glob
-            "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl.so*"
-            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl.so*"
-            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto.so*"
-            "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2.so*"
-            "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.so*"
-            "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz.so*"
+            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+            "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+            "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+            "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+            "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+            "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson${CMAKE_SHARED_LIBRARY_SUFFIX}*"
         )
-            file(GLOB _lc_shared_dep_libs "${_lc_shared_glob}")
-            if(_lc_shared_dep_libs)
-                install(FILES
-                    ${_lc_shared_dep_libs}
-                    DESTINATION lib
-                    COMPONENT runtime
-                )
-            endif()
+            lockdc_install_shared_dependency_glob("${_lc_shared_glob}")
         endforeach()
     endif()
     if(TARGET lc_shared)
-        file(GLOB _lc_lonejson_shared_libs
-            "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson.so*")
-        if(_lc_lonejson_shared_libs)
-            install(FILES
-                ${_lc_lonejson_shared_libs}
-                DESTINATION lib
-                COMPONENT runtime
-            )
-        endif()
-    endif()
-    if(TARGET lc_shared)
         install(TARGETS lc_shared
+
             LIBRARY DESTINATION lib
             COMPONENT runtime
             NAMELINK_COMPONENT dev
@@ -622,14 +612,10 @@ if(LOCKDC_INSTALL)
     )
     install(FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua"
-        DESTINATION share/lua/5.5/lockdc
-        COMPONENT runtime
-    )
-    install(FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua"
         DESTINATION share/lockdc/luarocks/lua/lockdc
         COMPONENT dev
     )
+
     install(FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/src/lua/lockdc_lua.c"
         DESTINATION share/lockdc/luarocks/src/lua
@@ -642,11 +628,17 @@ if(LOCKDC_INSTALL)
     )
     if(TARGET lockdc_lua_core)
         install(FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua"
+            DESTINATION share/lua/5.5/lockdc
+            COMPONENT runtime
+        )
+        install(FILES
             "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}"
             DESTINATION lib/lua/5.5/lockdc
             COMPONENT runtime
         )
     endif()
+
     foreach(_lc_component runtime dev)
         install(FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
