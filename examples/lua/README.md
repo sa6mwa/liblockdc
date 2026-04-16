@@ -9,6 +9,10 @@ helpers.
 Install the `lockdc` and `lonejson` Lua rocks against a released or staged
 `liblockdc` SDK bundle.
 
+`liblockdc` owns this Lua dependency layout. Downstream consumers such as
+`vectis` should use the `lockdc` and `lonejson` Lua modules shipped with the
+`liblockdc` SDK bundle rather than repackaging a separate `lockd` Lua client.
+
 When running from this repository after building and staging the SDK locally,
 one workable path is:
 
@@ -69,3 +73,5 @@ In practical terms, the intended Lua DX is:
 3. update state or attachments if needed
 4. ack or nack
 5. continue to the next message
+
+For the broader Lua SDK surface and distribution policy, see `docs/lua.md`.

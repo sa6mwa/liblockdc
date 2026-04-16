@@ -208,6 +208,30 @@ The Lua consumer API is intentionally single-threaded and blocking. Lua
 handlers run one message at a time on the calling Lua state; the binding does
 not expose the native threaded C callback model into the same Lua VM.
 
+The Lua SDK reference and dependency policy are documented in
+`docs/lua.md`.
+
+## Lua SDK
+
+`liblockdc` ships a Lua frontend for the public client API as the `lockdc`
+module.
+
+The intended ownership model is:
+
+- `liblockdc` owns the Lua-facing `lockd` client
+- `liblockdc` owns the Lua-facing `lonejson` dependency boundary for what it
+  exposes
+- downstream components such as `vectis` should consume that shipped Lua
+  distribution instead of maintaining a second `lockd` Lua client or a second
+  incompatible JSON binding layout
+
+This keeps one coherent SDK import path for downstream Lua workflow runtimes.
+
+For the Lua public surface, consumer behavior, and packaging model, see:
+
+- `docs/lua.md`
+- `examples/lua/README.md`
+
 The following C snippets show the expected calling style directly.
 
 Open a client:
