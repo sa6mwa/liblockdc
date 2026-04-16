@@ -26,6 +26,39 @@ function(lc_add_e2e_shard target_name group_macro)
   )
 endfunction()
 
+function(lc_add_lua_e2e_test test_name script_path)
+  if(NOT TARGET lockdc_lua_core)
+    return()
+  endif()
+  if(NOT LOCKDC_LUA_BIN OR NOT LOCKDC_LUAROCKS_BIN)
+    return()
+  endif()
+
+  set(options)
+  set(one_value_args ENV_OVERRIDES)
+  cmake_parse_arguments(LUA_E2E "${options}" "${one_value_args}" "" ${ARGN})
+
+  set(lua_e2e_command
+    "${CMAKE_COMMAND}"
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_TEST_NAME=${test_name}
+      -DLOCKDC_LUA_TEST_SCRIPT=${script_path}
+      -P "${CMAKE_SOURCE_DIR}/tests/lua_rock_install_and_run_test.cmake"
+  )
+  if(LUA_E2E_ENV_OVERRIDES)
+    list(APPEND lua_e2e_command "-DLOCKDC_LUA_TEST_ENV=${LUA_E2E_ENV_OVERRIDES}")
+  endif()
+
+  add_test(NAME ${test_name} COMMAND ${lua_e2e_command})
+  set_tests_properties(${test_name} PROPERTIES
+    LABELS "e2e;lua"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+endfunction()
+
 lc_add_e2e_shard(lc_e2e_disk_direct LC_E2E_GROUP_DISK_DIRECT)
 lc_add_e2e_shard(lc_e2e_s3_direct LC_E2E_GROUP_S3_DIRECT)
 lc_add_e2e_shard(lc_e2e_mem_direct LC_E2E_GROUP_MEM_DIRECT)
@@ -105,3 +138,29 @@ if(TARGET lc_example_startconsumer)
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
+
+find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
+find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_example_acquire_update_json
+  "${CMAKE_SOURCE_DIR}/examples/lua/acquire_update_json.lua"
+  ENV_OVERRIDES "LOCKDC_KEY=tests/lua/e2e-acquire-update-json;LOCKDC_OWNER=lua-e2e-acquire-update-json"
+)
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_example_queue_roundtrip
+  "${CMAKE_SOURCE_DIR}/examples/lua/queue_roundtrip.lua"
+  ENV_OVERRIDES "LOCKDC_QUEUE=tests-lua-e2e-queue-roundtrip;LOCKDC_OWNER=lua-e2e-queue-roundtrip"
+)
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_example_namespace_config
+  "${CMAKE_SOURCE_DIR}/examples/lua/namespace_config.lua"
+)
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_consumer_single_message
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_consumer.lua"
+  ENV_OVERRIDES "LOCKDC_QUEUE=tests-lua-e2e-consumer;LOCKDC_OWNER=lua-e2e-consumer"
+)

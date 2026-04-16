@@ -56,23 +56,23 @@ set(release_prefix "${extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_
 file(REMOVE_RECURSE "${test_root}")
 file(MAKE_DIRECTORY "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}" "${dist_dir}")
 
-if(NOT EXISTS "${release_archive}")
-    execute_process(
-        COMMAND "${CMAKE_COMMAND}"
-            -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
-            -DLOCKDC_ROOT=${LOCKDC_ROOT}
-            -DLOCKDC_DIST_DIR=${dist_dir}
-            -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
-        RESULT_VARIABLE package_result
-        OUTPUT_VARIABLE package_stdout
-        ERROR_VARIABLE package_stderr
-    )
-    if(NOT package_result EQUAL 0)
-        message(FATAL_ERROR
-            "failed to build release archive for SDK test\n"
-            "stdout:\n${package_stdout}\n"
-            "stderr:\n${package_stderr}")
-    endif()
+file(REMOVE "${release_archive}")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+        -DLOCKDC_ROOT=${LOCKDC_ROOT}
+        -DLOCKDC_DIST_DIR=${dist_dir}
+        -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
+    RESULT_VARIABLE package_result
+    OUTPUT_VARIABLE package_stdout
+    ERROR_VARIABLE package_stderr
+)
+if(NOT package_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to build release archive for SDK test\n"
+        "stdout:\n${package_stdout}\n"
+        "stderr:\n${package_stderr}")
 endif()
 
 if(NOT EXISTS "${release_archive}")
@@ -105,11 +105,53 @@ foreach(required_path
     "${release_prefix}/lib/liblockdc.so"
     "${release_prefix}/lib/pkgconfig/lockdc.pc"
     "${release_prefix}/lib/cmake/lockdc/lockdcConfig.cmake"
+    "${release_prefix}/share/lua/5.5/lockdc/init.lua"
+    "${release_prefix}/share/lockdc/luarocks/lua/lockdc/init.lua"
+    "${release_prefix}/share/lockdc/luarocks/src/lua/lockdc_lua.c"
 )
     if(NOT EXISTS "${required_path}")
         message(FATAL_ERROR "release tarball is missing required SDK artifact: ${required_path}")
     endif()
 endforeach()
+
+file(GLOB release_rockspec "${release_prefix}/share/lockdc/luarocks/lockdc-*-1.rockspec")
+list(LENGTH release_rockspec release_rockspec_count)
+if(NOT release_rockspec_count EQUAL 1)
+    message(FATAL_ERROR "expected one release lockdc rockspec in ${release_prefix}/share/lockdc/luarocks")
+endif()
+list(GET release_rockspec 0 release_rockspec_path)
+file(READ "${release_rockspec_path}" release_rockspec_text)
+foreach(required_snippet
+    "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
+    "tag = \"v"
+)
+    string(FIND "${release_rockspec_text}" "${required_snippet}" snippet_index)
+    if(snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "release lockdc rockspec is missing expected source metadata '${required_snippet}'\n"
+            "rockspec:\n${release_rockspec_text}")
+    endif()
+endforeach()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+        -DLOCKDC_ROOT=${LOCKDC_ROOT}
+        -DLOCKDC_TEST_NAME=release-tarball-sdk-smoke
+        -DLOCKDC_SDK_PREFIX=${release_prefix}
+        -DLOCKDC_ROCKSPEC_PATH=${release_rockspec_path}
+        -DLOCKDC_LUA_TEST_SCRIPT=${LOCKDC_ROOT}/tests/lua/test_lockdc_luarocks_smoke.lua
+        -P "${LOCKDC_ROOT}/tests/lua_rock_install_and_run_test.cmake"
+    RESULT_VARIABLE lua_result
+    OUTPUT_VARIABLE lua_stdout
+    ERROR_VARIABLE lua_stderr
+)
+if(NOT lua_result EQUAL 0)
+    message(FATAL_ERROR
+        "release tarball LuaRocks validation failed\n"
+        "stdout:\n${lua_stdout}\n"
+        "stderr:\n${lua_stderr}")
+endif()
 
 file(READ "${release_prefix}/lib/cmake/lockdc/lockdcConfig.cmake" lockdc_config_text)
 file(READ "${release_prefix}/lib/pkgconfig/lockdc.pc" lockdc_pkgconfig_text)

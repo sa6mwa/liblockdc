@@ -195,7 +195,20 @@ This keeps lease identity, transaction identifiers, and related lifecycle state 
 
 ## Examples
 
-The repository includes standalone example programs under `examples/`. The following snippets show the expected calling style directly.
+The repository includes standalone example programs under `examples/`.
+
+- C examples: `examples/*.c`
+- Lua examples: `examples/lua/*.lua`
+
+The Lua examples assume the `lockdc` and `lonejson` rocks are installed and
+show the intended Lua DX directly without wrapper helper modules. Additional
+Lua example notes live in `examples/lua/README.md`.
+
+The Lua consumer API is intentionally single-threaded and blocking. Lua
+handlers run one message at a time on the calling Lua state; the binding does
+not expose the native threaded C callback model into the same Lua VM.
+
+The following C snippets show the expected calling style directly.
 
 Open a client:
 

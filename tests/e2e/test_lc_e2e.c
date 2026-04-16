@@ -1290,6 +1290,22 @@ typedef struct e2e_consumer_context {
   long last_error_http_status;
   char last_error_server_code[96];
   char last_error_message[192];
+  const char *backend_label;
+  const char *queue_name;
+  int enqueue_count;
+  size_t worker_count;
+  int max_failures;
+  int expected_minimum_count;
+  int queue_stats_available;
+  long queue_stats_waiting_consumers;
+  long queue_stats_pending_candidates;
+  long queue_stats_total_consumers;
+  int queue_stats_has_active_watcher;
+  long queue_stats_head_enqueued_at_unix;
+  long queue_stats_head_not_visible_until_unix;
+  long queue_stats_head_age_seconds;
+  char queue_stats_head_message_id[160];
+  char queue_stats_correlation_id[96];
   char payload[64];
   char state_json[128];
   char state_key[160];
@@ -1335,6 +1351,94 @@ static const e2e_consumer_backend e2e_backend_mem = {
     "LOCKDC_E2E_MEM_SOCKET",
     "./devenv/volumes/lockd-mem-run/lockd.sock",
     1};
+
+static const char *e2e_consumer_delivery_mode_name(int mode) {
+  switch (mode) {
+  case E2E_CONSUMER_FIRST_DELIVERY_NONE:
+    return "none";
+  case E2E_CONSUMER_FIRST_DELIVERY_FAIL:
+    return "fail";
+  case E2E_CONSUMER_FIRST_DELIVERY_DEFER:
+    return "defer";
+  case E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE:
+    return "nack_failure";
+  case E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR:
+    return "nack_failure_error";
+  case E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE:
+    return "fail_twice";
+  case E2E_CONSUMER_FIRST_DELIVERY_ACK_ERROR:
+    return "ack_error";
+  case E2E_CONSUMER_FIRST_DELIVERY_ACK:
+    return "ack";
+  default:
+    return "unknown";
+  }
+}
+
+static void e2e_consumer_capture_queue_stats(lc_client *client,
+                                             const char *queue_name,
+                                             e2e_consumer_context *context) {
+  lc_queue_stats_req req;
+  lc_queue_stats_res res;
+  lc_error error;
+  int rc;
+
+  if (client == NULL || queue_name == NULL || context == NULL) {
+    return;
+  }
+
+  lc_queue_stats_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  req.queue = queue_name;
+  rc = client->queue_stats(client, &req, &res, &error);
+
+  pthread_mutex_lock(&context->mutex);
+  if (rc == LC_OK) {
+    context->queue_stats_available = res.available;
+    context->queue_stats_waiting_consumers = res.waiting_consumers;
+    context->queue_stats_pending_candidates = res.pending_candidates;
+    context->queue_stats_total_consumers = res.total_consumers;
+    context->queue_stats_has_active_watcher = res.has_active_watcher;
+    context->queue_stats_head_enqueued_at_unix = res.head_enqueued_at_unix;
+    context->queue_stats_head_not_visible_until_unix =
+        res.head_not_visible_until_unix;
+    context->queue_stats_head_age_seconds = res.head_age_seconds;
+    memset(context->queue_stats_head_message_id, 0,
+           sizeof(context->queue_stats_head_message_id));
+    if (res.head_message_id != NULL) {
+      strncpy(context->queue_stats_head_message_id, res.head_message_id,
+              sizeof(context->queue_stats_head_message_id) - 1U);
+    }
+    memset(context->queue_stats_correlation_id, 0,
+           sizeof(context->queue_stats_correlation_id));
+    if (res.correlation_id != NULL) {
+      strncpy(context->queue_stats_correlation_id, res.correlation_id,
+              sizeof(context->queue_stats_correlation_id) - 1U);
+    }
+  } else {
+    context->queue_stats_available = -1;
+    context->queue_stats_waiting_consumers = -1L;
+    context->queue_stats_pending_candidates = -1L;
+    context->queue_stats_total_consumers = -1L;
+    context->queue_stats_has_active_watcher = 0;
+    context->queue_stats_head_enqueued_at_unix = -1L;
+    context->queue_stats_head_not_visible_until_unix = -1L;
+    context->queue_stats_head_age_seconds = -1L;
+    memset(context->queue_stats_head_message_id, 0,
+           sizeof(context->queue_stats_head_message_id));
+    memset(context->queue_stats_correlation_id, 0,
+           sizeof(context->queue_stats_correlation_id));
+    if (error.correlation_id != NULL) {
+      strncpy(context->queue_stats_correlation_id, error.correlation_id,
+              sizeof(context->queue_stats_correlation_id) - 1U);
+    }
+  }
+  pthread_mutex_unlock(&context->mutex);
+
+  lc_queue_stats_res_cleanup(&res);
+  lc_error_cleanup(&error);
+}
 
 static void open_consumer_backend_client(const e2e_consumer_backend *backend,
                                          lc_client **out, lc_error *error) {
@@ -1612,18 +1716,44 @@ static void wait_for_consumer_handled(e2e_consumer_context *consumer_context,
     }
     pthread_mutex_unlock(&consumer_context->mutex);
     if (retries++ > maximum_retries) {
-      fail_msg("consumer retry timed out: handled=%d start_events=%d "
+      fail_msg("consumer retry timed out: backend=%s queue=%s mode=%s "
+               "enqueue_count=%d worker_count=%lu max_failures=%d "
+               "expected_minimum_count=%d handled=%d start_events=%d "
                "stop_events=%d error_events=%d last_error_code=%d "
                "last_error_http_status=%ld last_error_server_code=%s "
-               "last_error_message=%s "
-               "last_visibility_timeout_seconds=%ld",
+               "last_error_message=%s last_visibility_timeout_seconds=%ld "
+               "payload=%s state_json=%s state_key=%s "
+               "queue_available=%d waiting_consumers=%ld "
+               "pending_candidates=%ld total_consumers=%ld "
+               "has_active_watcher=%d head_message_id=%s "
+               "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
+               "head_age_seconds=%ld stats_cid=%s",
+               consumer_context->backend_label, consumer_context->queue_name,
+               e2e_consumer_delivery_mode_name(
+                   consumer_context->first_delivery_mode),
+               consumer_context->enqueue_count,
+               (unsigned long)consumer_context->worker_count,
+               consumer_context->max_failures,
+               consumer_context->expected_minimum_count,
                consumer_context->handled, consumer_context->start_events,
                consumer_context->stop_events, consumer_context->error_events,
                consumer_context->last_error_code,
                consumer_context->last_error_http_status,
                consumer_context->last_error_server_code,
                consumer_context->last_error_message,
-               consumer_context->last_visibility_timeout_seconds);
+               consumer_context->last_visibility_timeout_seconds,
+               consumer_context->payload, consumer_context->state_json,
+               consumer_context->state_key,
+               consumer_context->queue_stats_available,
+               consumer_context->queue_stats_waiting_consumers,
+               consumer_context->queue_stats_pending_candidates,
+               consumer_context->queue_stats_total_consumers,
+               consumer_context->queue_stats_has_active_watcher,
+               consumer_context->queue_stats_head_message_id,
+               consumer_context->queue_stats_head_enqueued_at_unix,
+               consumer_context->queue_stats_head_not_visible_until_unix,
+               consumer_context->queue_stats_head_age_seconds,
+               consumer_context->queue_stats_correlation_id);
     }
     usleep(100000);
   }
@@ -1655,13 +1785,25 @@ static void run_consumer_service_variant_with_max_failures(
   lc_consumer_config_init(&consumer);
   lc_consumer_service_config_init(&service_config);
   memset(&consumer_context, 0, sizeof(consumer_context));
+  consumer_context.backend_label = backend->label;
   consumer_context.first_delivery_mode = first_delivery_mode;
   consumer_context.expect_state = expect_state;
   consumer_context.read_payload = read_payload;
+  consumer_context.enqueue_count = enqueue_count;
+  consumer_context.worker_count = worker_count;
+  consumer_context.max_failures = max_failures;
+  consumer_context.queue_stats_available = -1;
+  consumer_context.queue_stats_waiting_consumers = -1L;
+  consumer_context.queue_stats_pending_candidates = -1L;
+  consumer_context.queue_stats_total_consumers = -1L;
+  consumer_context.queue_stats_head_enqueued_at_unix = -1L;
+  consumer_context.queue_stats_head_not_visible_until_unix = -1L;
+  consumer_context.queue_stats_head_age_seconds = -1L;
   assert_int_equal(pthread_mutex_init(&consumer_context.mutex, NULL), 0);
 
   open_consumer_backend_client(backend, &client, &error);
   make_unique_name(name_prefix, queue_name, sizeof(queue_name));
+  consumer_context.queue_name = queue_name;
 
   consumer.name = backend->label;
   consumer.request.queue = queue_name;
@@ -1683,10 +1825,30 @@ static void run_consumer_service_variant_with_max_failures(
   service_config.consumers = &consumer;
   service_config.consumer_count = 1U;
   rc = client->new_consumer_service(client, &service_config, &service, &error);
+  if (rc != LC_OK) {
+    fail_msg("consumer service create failed: backend=%s queue=%s mode=%s "
+             "enqueue_count=%d worker_count=%lu max_failures=%d rc=%d "
+             "error_code=%d http_status=%ld message=%s detail=%s",
+             backend->label, queue_name,
+             e2e_consumer_delivery_mode_name(first_delivery_mode), enqueue_count,
+             (unsigned long)worker_count, max_failures, rc, error.code,
+             error.http_status, error.message != NULL ? error.message : "",
+             error.detail != NULL ? error.detail : "");
+  }
   assert_lc_ok(rc, &error);
   assert_non_null(service);
 
   rc = service->start(service, &error);
+  if (rc != LC_OK) {
+    fail_msg("consumer service start failed: backend=%s queue=%s mode=%s "
+             "enqueue_count=%d worker_count=%lu max_failures=%d rc=%d "
+             "error_code=%d http_status=%ld message=%s detail=%s",
+             backend->label, queue_name,
+             e2e_consumer_delivery_mode_name(first_delivery_mode), enqueue_count,
+             (unsigned long)worker_count, max_failures, rc, error.code,
+             error.http_status, error.message != NULL ? error.message : "",
+             error.detail != NULL ? error.detail : "");
+  }
   assert_lc_ok(rc, &error);
 
   enqueue_req.queue = queue_name;
@@ -1719,20 +1881,99 @@ static void run_consumer_service_variant_with_max_failures(
     } else if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE) {
       minimum_count += 2;
     }
+    consumer_context.expected_minimum_count = minimum_count;
     wait_for_consumer_handled(&consumer_context, minimum_count);
   }
 
+  e2e_consumer_capture_queue_stats(client, queue_name, &consumer_context);
   rc = (service->stop)(service);
+  if (rc != LC_OK) {
+    fail_msg("consumer service stop failed: backend=%s queue=%s mode=%s "
+             "handled=%d error_events=%d start_events=%d stop_events=%d rc=%d",
+             backend->label, queue_name,
+             e2e_consumer_delivery_mode_name(first_delivery_mode),
+             consumer_context.handled, consumer_context.error_events,
+             consumer_context.start_events, consumer_context.stop_events, rc);
+  }
   assert_int_equal(rc, LC_OK);
   rc = service->wait(service, &error);
+  e2e_consumer_capture_queue_stats(client, queue_name, &consumer_context);
+  if (rc != LC_OK) {
+    fail_msg("consumer service wait failed: backend=%s queue=%s mode=%s "
+             "enqueue_count=%d worker_count=%lu max_failures=%d handled=%d "
+             "start_events=%d stop_events=%d error_events=%d "
+             "last_error_code=%d last_error_http_status=%ld "
+             "last_error_server_code=%s last_error_message=%s "
+             "queue_available=%d waiting_consumers=%ld pending_candidates=%ld "
+             "total_consumers=%ld has_active_watcher=%d head_message_id=%s "
+             "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
+             "head_age_seconds=%ld "
+             "stats_cid=%s rc=%d error_code=%d http_status=%ld message=%s detail=%s",
+             backend->label, queue_name,
+             e2e_consumer_delivery_mode_name(first_delivery_mode), enqueue_count,
+             (unsigned long)worker_count, max_failures, consumer_context.handled,
+             consumer_context.start_events, consumer_context.stop_events,
+             consumer_context.error_events, consumer_context.last_error_code,
+             consumer_context.last_error_http_status,
+             consumer_context.last_error_server_code,
+             consumer_context.last_error_message,
+             consumer_context.queue_stats_available,
+             consumer_context.queue_stats_waiting_consumers,
+             consumer_context.queue_stats_pending_candidates,
+             consumer_context.queue_stats_total_consumers,
+             consumer_context.queue_stats_has_active_watcher,
+             consumer_context.queue_stats_head_message_id,
+             consumer_context.queue_stats_head_enqueued_at_unix,
+             consumer_context.queue_stats_head_not_visible_until_unix,
+             consumer_context.queue_stats_head_age_seconds,
+             consumer_context.queue_stats_correlation_id,
+             rc, error.code, error.http_status,
+             error.message != NULL ? error.message : "",
+             error.detail != NULL ? error.detail : "");
+  }
   assert_lc_ok(rc, &error);
 
   pthread_mutex_lock(&consumer_context.mutex);
+  if (!(consumer_context.start_events >= (int)worker_count)) {
+    fail_msg("consumer start_events too low: backend=%s queue=%s mode=%s "
+             "start_events=%d worker_count=%lu handled=%d error_events=%d",
+             backend->label, queue_name,
+             e2e_consumer_delivery_mode_name(first_delivery_mode),
+             consumer_context.start_events, (unsigned long)worker_count,
+             consumer_context.handled, consumer_context.error_events);
+  }
+  if (!(consumer_context.stop_events >= (int)worker_count)) {
+    fail_msg("consumer stop_events too low: backend=%s queue=%s mode=%s "
+             "stop_events=%d worker_count=%lu handled=%d error_events=%d",
+             backend->label, queue_name,
+             e2e_consumer_delivery_mode_name(first_delivery_mode),
+             consumer_context.stop_events, (unsigned long)worker_count,
+             consumer_context.handled, consumer_context.error_events);
+  }
   assert_true(consumer_context.start_events >= (int)worker_count);
   assert_true(consumer_context.stop_events >= (int)worker_count);
   if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL ||
       first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE ||
       first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR) {
+    if (consumer_context.handled !=
+        enqueue_count +
+            (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE
+                 ? 2
+                 : 1)) {
+      fail_msg("unexpected handled count after retrying failure path: "
+               "backend=%s queue=%s mode=%s handled=%d enqueue_count=%d "
+               "error_events=%d start_events=%d stop_events=%d "
+               "last_error_code=%d last_error_http_status=%ld "
+               "last_error_server_code=%s last_error_message=%s",
+               backend->label, queue_name,
+               e2e_consumer_delivery_mode_name(first_delivery_mode),
+               consumer_context.handled, enqueue_count,
+               consumer_context.error_events, consumer_context.start_events,
+               consumer_context.stop_events, consumer_context.last_error_code,
+               consumer_context.last_error_http_status,
+               consumer_context.last_error_server_code,
+               consumer_context.last_error_message);
+    }
     assert_int_equal(consumer_context.handled,
                      enqueue_count +
                          (first_delivery_mode ==
@@ -1742,6 +1983,36 @@ static void run_consumer_service_variant_with_max_failures(
     assert_true(consumer_context.error_events >= 1);
     assert_true(consumer_context.start_events >= (int)worker_count + 1);
   } else if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_ACK_ERROR) {
+    if (consumer_context.handled != enqueue_count ||
+        consumer_context.error_events < 1 ||
+        consumer_context.start_events < (int)worker_count + 1) {
+      fail_msg("unexpected ack-error consumer state: backend=%s queue=%s "
+               "mode=%s handled=%d enqueue_count=%d error_events=%d "
+               "start_events=%d stop_events=%d last_error_code=%d "
+               "last_error_http_status=%ld last_error_server_code=%s "
+               "last_error_message=%s payload=%s "
+               "queue_available=%d waiting_consumers=%ld pending_candidates=%ld "
+               "total_consumers=%ld head_message_id=%s "
+               "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
+               "head_age_seconds=%ld stats_cid=%s",
+               backend->label, queue_name,
+               e2e_consumer_delivery_mode_name(first_delivery_mode),
+               consumer_context.handled, enqueue_count,
+               consumer_context.error_events, consumer_context.start_events,
+               consumer_context.stop_events, consumer_context.last_error_code,
+               consumer_context.last_error_http_status,
+               consumer_context.last_error_server_code,
+               consumer_context.last_error_message, consumer_context.payload,
+               consumer_context.queue_stats_available,
+               consumer_context.queue_stats_waiting_consumers,
+               consumer_context.queue_stats_pending_candidates,
+               consumer_context.queue_stats_total_consumers,
+               consumer_context.queue_stats_head_message_id,
+               consumer_context.queue_stats_head_enqueued_at_unix,
+               consumer_context.queue_stats_head_not_visible_until_unix,
+               consumer_context.queue_stats_head_age_seconds,
+               consumer_context.queue_stats_correlation_id);
+    }
     assert_int_equal(consumer_context.handled, enqueue_count);
     assert_true(consumer_context.error_events >= 1);
     assert_true(consumer_context.start_events >= (int)worker_count + 1);
@@ -1771,11 +2042,30 @@ static void run_consumer_service_variant_with_max_failures(
     assert_int_equal(consumer_context.start_events, (int)worker_count);
   }
   if (read_payload) {
+    if (strcmp(consumer_context.payload, "consumer-ok") != 0) {
+      fail_msg("unexpected consumer payload: backend=%s queue=%s mode=%s "
+               "payload=%s handled=%d error_events=%d",
+               backend->label, queue_name,
+               e2e_consumer_delivery_mode_name(first_delivery_mode),
+               consumer_context.payload, consumer_context.handled,
+               consumer_context.error_events);
+    }
     assert_string_equal(consumer_context.payload, "consumer-ok");
   } else {
     assert_string_equal(consumer_context.payload, "");
   }
   if (expect_state) {
+    if (consumer_context.saw_state != 1 ||
+        strstr(consumer_context.state_json, "from-consumer-service") == NULL ||
+        strstr(consumer_context.state_key, "/state/") == NULL ||
+        strstr(consumer_context.state_key, queue_name) == NULL) {
+      fail_msg("unexpected consumer state persistence: backend=%s queue=%s "
+               "mode=%s saw_state=%d state_json=%s state_key=%s",
+               backend->label, queue_name,
+               e2e_consumer_delivery_mode_name(first_delivery_mode),
+               consumer_context.saw_state, consumer_context.state_json,
+               consumer_context.state_key);
+    }
     assert_int_equal(consumer_context.saw_state, 1);
     assert_non_null(
         strstr(consumer_context.state_json, "from-consumer-service"));

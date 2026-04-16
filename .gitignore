@@ -1,6 +1,7 @@
 build/
 cmake-build-*/
 .cache/
+.luarocks-build/
 dist/
 /stash/
 /logs/

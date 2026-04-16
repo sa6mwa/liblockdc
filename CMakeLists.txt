@@ -32,6 +32,7 @@ option(LOCKDC_BUILD_SHARED "Build the shared lockdc library." ON)
 option(LOCKDC_BUILD_DEPENDENCIES "Download and build OpenSSL, zlib, nghttp2, libcurl, libssh2, and lonejson." OFF)
 option(LOCKDC_BUILD_EXAMPLES "Build example programs." ON)
 option(LOCKDC_BUILD_TESTS "Build unit tests." ON)
+option(LOCKDC_BUILD_LUA_BINDINGS "Build the optional Lua extension when Lua headers are available." ON)
 cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS
     "Build end-to-end tests that target a real lockd environment."
     OFF
@@ -428,6 +429,44 @@ configure_file(
     @ONLY
 )
 
+set(SOURCE_URL "git+https://github.com/sa6mwa/liblockdc.git")
+set(SOURCE_TAG_LINE "  tag = \"v${LOCKDC_RESOLVED_VERSION}\",")
+set(LOCKDC_LUA_ROCKSPEC_PATH "${CMAKE_CURRENT_BINARY_DIR}/lockdc-${PROJECT_VERSION}-1.rockspec")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/lockdc.rockspec.in"
+    "${LOCKDC_LUA_ROCKSPEC_PATH}"
+    @ONLY
+)
+
+set(LOCKDC_LUA_INCLUDE_DIR "")
+if(LOCKDC_BUILD_LUA_BINDINGS)
+    find_path(LOCKDC_LUA_INCLUDE_DIR
+        NAMES lua.h
+        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 include/lua lua5.5 lua-5.5 lua
+        PATHS /usr/local /usr /usr/local/include /usr/include
+    )
+    if("${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "" AND EXISTS "/usr/local/include/lua.h")
+        set(LOCKDC_LUA_INCLUDE_DIR "/usr/local/include")
+    endif()
+endif()
+
+if(LOCKDC_BUILD_LUA_BINDINGS)
+    if(LOCKDC_BUILD_SHARED AND NOT "${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "")
+        add_library(lockdc_lua_core MODULE src/lua/lockdc_lua.c)
+        target_include_directories(lockdc_lua_core PRIVATE "${LOCKDC_LUA_INCLUDE_DIR}")
+        target_link_libraries(lockdc_lua_core PRIVATE lc_shared)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            target_link_options(lockdc_lua_core PRIVATE "LINKER:--allow-shlib-undefined")
+        endif()
+        lc_configure_c_target(lockdc_lua_core)
+        set_target_properties(lockdc_lua_core PROPERTIES
+            PREFIX ""
+            OUTPUT_NAME core
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc"
+        )
+    endif()
+endif()
+
 if(LOCKDC_INSTALL)
     install(FILES ${LOCKDC_PUBLIC_HEADER} ${LOCKDC_PUBLIC_VERSION_HEADER}
         DESTINATION include/lc
@@ -576,6 +615,38 @@ if(LOCKDC_INSTALL)
         DESTINATION lib/cmake/lockdc
         COMPONENT dev
     )
+    install(FILES
+        "${LOCKDC_LUA_ROCKSPEC_PATH}"
+        DESTINATION share/lockdc/luarocks
+        COMPONENT dev
+    )
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua"
+        DESTINATION share/lua/5.5/lockdc
+        COMPONENT runtime
+    )
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua"
+        DESTINATION share/lockdc/luarocks/lua/lockdc
+        COMPONENT dev
+    )
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/lua/lockdc_lua.c"
+        DESTINATION share/lockdc/luarocks/src/lua
+        COMPONENT dev
+    )
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_lockdc_lua_rock.sh"
+        DESTINATION share/lockdc/luarocks/scripts
+        COMPONENT dev
+    )
+    if(TARGET lockdc_lua_core)
+        install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}"
+            DESTINATION lib/lua/5.5/lockdc
+            COMPONENT runtime
+        )
+    endif()
     foreach(_lc_component runtime dev)
         install(FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
