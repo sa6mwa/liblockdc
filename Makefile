@@ -32,7 +32,7 @@ FUZZ_TIME ?= 30
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__asan __coverage __fuzz __benchmarks \
 	__package __package-checksums __clean-dist \
-	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __clean __world \
+	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __release-package-only __clean __world \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
@@ -280,6 +280,9 @@ release:
 	$(TIMED) release $(MAKE) __release
 
 __release: __build-release
+	bash ./scripts/run_linux_release_matrix.sh
+
+__release-package-only: __build-release
 	bash ./scripts/run_linux_package_matrix.sh
 
 world:

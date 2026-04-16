@@ -29,7 +29,7 @@ foreach(expected
     "[world] skipping __fuzz: clang not available (__missing_clang__)"
     "[world] __test-e2e"
     "[world] __benchmarks"
-    "[world] __release"
+    "[world] __release-package-only"
 )
     string(FIND "${world_stdout}" "${expected}" match_index)
     if(match_index EQUAL -1)

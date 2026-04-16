@@ -306,10 +306,8 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   load_state.byte_limit = lease->client->http_json_response_limit_bytes > 0U
                               ? lease->client->http_json_response_limit_bytes
                               : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
-  lonejson_init(map, dst);
   rc = lonejson_curl_parse_init(&load_state.parse, map, dst, &options);
   if (rc != LONEJSON_STATUS_OK) {
-    lonejson_cleanup(map, dst);
     return lc_lonejson_error_from_status(
         error, rc, &load_state.parse.error,
         "failed to initialize mapped lease load parser");
@@ -343,7 +341,6 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
     }
     lc_engine_get_stream_response_cleanup(&engine_res);
     lonejson_curl_parse_cleanup(&load_state.parse);
-    lonejson_cleanup(map, dst);
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
@@ -356,16 +353,6 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
     fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_debug(lease->client->logger, "client.get.empty", fields, 4U);
-  } else {
-    pslog_field fields[5];
-
-    fields[0] = lc_log_str_field("key", lease->key);
-    fields[1] = lc_log_str_field("lease_id", lease->lease_id);
-    fields[2] =
-        lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
-    fields[3] = lc_log_str_field("etag", engine_res.etag);
-    fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.get.success", fields, 5U);
   }
   no_content = engine_res.no_content;
   version = engine_res.version;
@@ -376,10 +363,20 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
       lc_engine_get_stream_response_cleanup(&engine_res);
       lc_engine_error_cleanup(&engine_error);
       lonejson_curl_parse_cleanup(&load_state.parse);
-      lonejson_cleanup(map, dst);
       return lc_lonejson_error_from_status(
           error, rc, &load_state.parse.error,
           "failed to parse mapped lease state");
+    }
+    {
+      pslog_field fields[5];
+
+      fields[0] = lc_log_str_field("key", lease->key);
+      fields[1] = lc_log_str_field("lease_id", lease->lease_id);
+      fields[2] =
+          lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
+      fields[3] = lc_log_str_field("etag", engine_res.etag);
+      fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
+      lc_log_trace(lease->client->logger, "client.get.success", fields, 5U);
     }
   }
   lonejson_curl_parse_cleanup(&load_state.parse);

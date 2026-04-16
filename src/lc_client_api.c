@@ -327,10 +327,8 @@ int lc_client_load_method(lc_client *self, const char *key,
   load_state.byte_limit = client->http_json_response_limit_bytes > 0U
                               ? client->http_json_response_limit_bytes
                               : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
-  lonejson_init(map, dst);
   rc = lonejson_curl_parse_init(&load_state.parse, map, dst, &options);
   if (rc != LONEJSON_STATUS_OK) {
-    lonejson_cleanup(map, dst);
     return lc_lonejson_error_from_status(
         error, rc, &load_state.parse.error,
         "failed to initialize mapped load parser");
@@ -358,21 +356,8 @@ int lc_client_load_method(lc_client *self, const char *key,
           fields, 2U, error);
     }
     lonejson_curl_parse_cleanup(&load_state.parse);
-    lonejson_cleanup(map, dst);
     lc_engine_error_cleanup(&engine_error);
     return rc;
-  }
-  {
-    pslog_field fields[5];
-
-    fields[0] = lc_log_str_field("key", key);
-    fields[1] =
-        lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
-    fields[2] = pslog_i64("version", (pslog_int64)engine_res.version);
-    fields[3] =
-        pslog_i64("fencing_token", (pslog_int64)engine_res.fencing_token);
-    fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(client->logger, "client.get.success", fields, 5U);
   }
   no_content = engine_res.no_content;
   version = engine_res.version;
@@ -383,9 +368,20 @@ int lc_client_load_method(lc_client *self, const char *key,
       lc_engine_get_stream_response_cleanup(&engine_res);
       lc_engine_error_cleanup(&engine_error);
       lonejson_curl_parse_cleanup(&load_state.parse);
-      lonejson_cleanup(map, dst);
       return lc_lonejson_error_from_status(error, rc, &load_state.parse.error,
                                            "failed to parse mapped state");
+    }
+    {
+      pslog_field fields[5];
+
+      fields[0] = lc_log_str_field("key", key);
+      fields[1] =
+          lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
+      fields[2] = pslog_i64("version", (pslog_int64)engine_res.version);
+      fields[3] =
+          pslog_i64("fencing_token", (pslog_int64)engine_res.fencing_token);
+      fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
+      lc_log_trace(client->logger, "client.get.success", fields, 5U);
     }
   }
   lonejson_curl_parse_cleanup(&load_state.parse);

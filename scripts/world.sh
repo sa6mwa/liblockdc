@@ -40,4 +40,4 @@ else
 fi
 run_step __test-e2e
 run_step __benchmarks
-run_step __release
+run_step __release-package-only

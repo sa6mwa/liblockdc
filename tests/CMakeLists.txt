@@ -46,6 +46,12 @@ add_test(NAME release_package_matrix_targeting_test
     -P "${CMAKE_SOURCE_DIR}/tests/release_package_matrix_targeting_test.cmake"
 )
 
+add_test(NAME release_targeting_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/release_targeting_test.cmake"
+)
+
 add_subdirectory(unit)
 if(LOCKDC_BUILD_E2E_TESTS)
   add_subdirectory(e2e)
