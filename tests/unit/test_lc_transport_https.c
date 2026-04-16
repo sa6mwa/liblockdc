@@ -2602,6 +2602,186 @@ test_public_lease_attach_rejects_non_rewindable_retry_source(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+static void test_public_client_update_rejects_non_rewindable_retry_source(
+    void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_source *src;
+  test_enqueue_source *src_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  src = NULL;
+  src_state = NULL;
+  memset(&update_req, 0, sizeof(update_req));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&error, 0, sizeof(error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  {
+    static char endpoint_a[128];
+    static char endpoint_b[128];
+    static const char *endpoints[2];
+
+    snprintf(endpoint_a, sizeof(endpoint_a), "https://127.0.0.1:%u",
+             (unsigned)server.port);
+    snprintf(endpoint_b, sizeof(endpoint_b), "https://127.0.0.1:%u",
+             (unsigned)server.port);
+    endpoints[0] = endpoint_a;
+    endpoints[1] = endpoint_b;
+    config.endpoints = endpoints;
+    config.endpoint_count = 2U;
+  }
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = test_enqueue_source_new_non_rewindable("{\"value\":2}", 11U, 0U, &src,
+                                              &src_state, &error);
+  assert_int_equal(rc, LC_OK);
+  update_req.lease.namespace_name = "transport-ns";
+  update_req.lease.key = "resource/1";
+  update_req.lease.lease_id = "lease-1";
+  update_req.lease.txn_id = "txn-acquire";
+  update_req.lease.fencing_token = 11L;
+  update_req.content_type = "application/json";
+  rc = lc_update(client, &update_req, src, &update_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(error.message);
+  assert_non_null(strstr(error.message, "not rewindable"));
+  assert_int_equal(src_state->reset_count, 0U);
+
+  lc_update_res_cleanup(&update_res);
+  lc_source_close(src);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_lease_update_rejects_non_rewindable_retry_source(
+    void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_update_opts update_opts;
+  lc_source *src;
+  test_enqueue_source *src_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  src = NULL;
+  src_state = NULL;
+  memset(&update_opts, 0, sizeof(update_opts));
+  memset(&error, 0, sizeof(error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  {
+    static char endpoint_a[128];
+    static char endpoint_b[128];
+    static const char *endpoints[2];
+
+    snprintf(endpoint_a, sizeof(endpoint_a), "https://127.0.0.1:%u",
+             (unsigned)server.port);
+    snprintf(endpoint_b, sizeof(endpoint_b), "https://127.0.0.1:%u",
+             (unsigned)server.port);
+    endpoints[0] = endpoint_a;
+    endpoints[1] = endpoint_b;
+    config.endpoints = endpoints;
+    config.endpoint_count = 2U;
+  }
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = test_enqueue_source_new_non_rewindable("{\"value\":2}", 11U, 0U, &src,
+                                              &src_state, &error);
+  assert_int_equal(rc, LC_OK);
+  update_opts.content_type = "application/json";
+  rc = lc_lease_update(lease, src, &update_opts, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(error.message);
+  assert_non_null(strstr(error.message, "not rewindable"));
+  assert_int_equal(src_state->reset_count, 0U);
+
+  lc_source_close(src);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
 static void test_queue_transport_retries_node_passive_and_cleans_parser_state(
     void **state) {
   static const char *queue_headers[] = {"Content-Type: application/json"};
@@ -4497,6 +4677,12 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_REJECTS_NON_REWINDABLE_RETRY_SOURCE)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_public_lease_attach_rejects_non_rewindable_retry_source)
+#elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_UPDATE_REJECTS_NON_REWINDABLE_RETRY_SOURCE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_client_update_rejects_non_rewindable_retry_source)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_UPDATE_REJECTS_NON_REWINDABLE_RETRY_SOURCE)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_update_rejects_non_rewindable_retry_source)
 #elif defined(LC_HTTPS_CASE_QUEUE_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_queue_transport_retries_node_passive_and_cleans_parser_state)
@@ -4594,6 +4780,10 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_public_lease_attach_retries_node_passive_and_cleans_parser_state), \
       cmocka_unit_test(                                                         \
           test_public_lease_attach_rejects_non_rewindable_retry_source),        \
+      cmocka_unit_test(                                                         \
+          test_public_client_update_rejects_non_rewindable_retry_source),       \
+      cmocka_unit_test(                                                         \
+          test_public_lease_update_rejects_non_rewindable_retry_source),        \
       cmocka_unit_test(                                                         \
           test_queue_transport_retries_node_passive_and_cleans_parser_state),   \
       cmocka_unit_test(                                                         \

@@ -106,6 +106,31 @@ typedef struct lc_engine_enqueue_meta_json {
   char *payload_content_type;
 } lc_engine_enqueue_meta_json;
 
+static int lc_engine_validate_update_retry_source(
+    const lc_engine_client *client, lc_engine_read_callback reader,
+    void *reader_context, lc_engine_error *error) {
+  lc_read_bridge *bridge;
+
+  if (client == NULL || client->endpoint_count <= 1U || reader == NULL) {
+    return LC_ENGINE_OK;
+  }
+  if (reader != lc_engine_read_bridge) {
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "multi-endpoint updates require lc_source-backed rewindable payloads");
+  }
+  bridge = (lc_read_bridge *)reader_context;
+  if (bridge == NULL || bridge->source == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "payload reset requires source");
+  }
+  if (bridge->source->reset == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "payload source is not rewindable");
+  }
+  return LC_ENGINE_OK;
+}
+
 static const lonejson_field lc_engine_enqueue_meta_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, namespace_name,
                                 "namespace"),
@@ -1497,6 +1522,13 @@ int lc_engine_client_update_from(lc_engine_client *client,
   lc_engine_update_response_cleanup(response);
   memset(&parsed, 0, sizeof(parsed));
   memset(&state, 0, sizeof(state));
+  rc = lc_engine_validate_update_retry_source(client, reader, reader_context,
+                                              error);
+  if (rc != LC_ENGINE_OK) {
+    curl_slist_free_all(headers);
+    lc_engine_buffer_cleanup(&path);
+    return rc;
+  }
   state.error = error;
   rc = lc_engine_perform_streaming(
       client, "POST", path.data, headers,

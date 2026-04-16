@@ -54,8 +54,8 @@ help:
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
 		'make test-debug         Run the debug preset test suite.' \
-		'make test               Run the host release suite (x86_64 GNU + musl).' \
-		'make test-host          Run the host release suite (x86_64 GNU + musl).' \
+		'make test               Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
+		'make test-host          Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
 		'make test-all           Run host release suites plus non-host cross release suites.' \
@@ -160,7 +160,7 @@ __test-debug: __build-debug
 test-host:
 	$(TIMED) test-host $(MAKE) __test-host
 
-__test-host: __deps-release
+__test-host:
 	bash ./scripts/host_test.sh
 
 test-cross:
