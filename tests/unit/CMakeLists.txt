@@ -37,6 +37,10 @@ function(lc_add_https_unit_test_case target_name case_macro)
     lc::openssl_crypto_shared
     Threads::Threads
   )
+  target_link_options(${target_name} PRIVATE
+    $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_strdup_local>
+    $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_client_strdup>
+  )
   target_include_directories(${target_name} PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
@@ -181,6 +185,10 @@ lc_add_https_unit_test_case(
   LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_PRESERVES_PREINITIALIZED_JSON_VALUE_CAPTURE
 )
 lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_client_load_fails_on_metadata_allocation
+  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_FAILS_ON_METADATA_ALLOCATION
+)
+lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_load_respects_configured_json_response_limit
   LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_RESPECTS_CONFIGURED_JSON_RESPONSE_LIMIT
 )
@@ -197,8 +205,16 @@ lc_add_https_unit_test_case(
   LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_PRESERVES_PREINITIALIZED_JSON_VALUE_CAPTURE
 )
 lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_lease_load_fails_on_metadata_allocation
+  LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_FAILS_ON_METADATA_ALLOCATION
+)
+lc_add_https_unit_test_case(
   lc_unit_transport_https_public_client_load_parse_failure_does_not_log_success
   LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_PARSE_FAILURE_DOES_NOT_LOG_SUCCESS
+)
+lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_lease_save_fails_on_state_etag_allocation
+  LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_FAILS_ON_STATE_ETAG_ALLOCATION
 )
 lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_mutate_local_covers_no_content_path

@@ -247,6 +247,43 @@ static void buffer_cleanup(test_request_capture *capture) {
   memset(capture, 0, sizeof(*capture));
 }
 
+static int g_fail_lc_strdup_local_on_call;
+static int g_fail_lc_client_strdup_on_call;
+static int g_lc_strdup_local_call_count;
+static int g_lc_client_strdup_call_count;
+
+static void reset_strdup_failure_state(void) {
+  g_fail_lc_strdup_local_on_call = 0;
+  g_fail_lc_client_strdup_on_call = 0;
+  g_lc_strdup_local_call_count = 0;
+  g_lc_client_strdup_call_count = 0;
+}
+
+char *__real_lc_strdup_local(const char *value);
+char *__real_lc_client_strdup(lc_client_handle *client, const char *value);
+
+char *__wrap_lc_strdup_local(const char *value) {
+  if (value != NULL) {
+    g_lc_strdup_local_call_count += 1;
+    if (g_fail_lc_strdup_local_on_call > 0 &&
+        g_lc_strdup_local_call_count == g_fail_lc_strdup_local_on_call) {
+      return NULL;
+    }
+  }
+  return __real_lc_strdup_local(value);
+}
+
+char *__wrap_lc_client_strdup(lc_client_handle *client, const char *value) {
+  if (value != NULL) {
+    g_lc_client_strdup_call_count += 1;
+    if (g_fail_lc_client_strdup_on_call > 0 &&
+        g_lc_client_strdup_call_count == g_fail_lc_client_strdup_on_call) {
+      return NULL;
+    }
+  }
+  return __real_lc_client_strdup(client, value);
+}
+
 static lonejson_status test_lonejson_capture_sink(void *user, const void *data,
                                                   size_t len,
                                                   lonejson_error *error) {
@@ -3764,6 +3801,66 @@ test_public_client_load_preserves_preinitialized_json_value_capture(
   https_tls_material_cleanup(&material);
 }
 
+static void test_public_client_load_fails_on_metadata_allocation(void **state) {
+  static const char *get_headers[] = {"X-Correlation-Id: corr-get",
+                                      "Content-Type: application/json",
+                                      "ETag: etag-1", "X-Key-Version: 4",
+                                      "X-Fencing-Token: 11"};
+  static const https_expectation expectations[] = {
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, get_headers, 5U, "{\"value\":1}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  test_value_doc value_doc;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&value_doc, 0, sizeof(value_doc));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&error, 0, sizeof(error));
+  reset_strdup_failure_state();
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&get_opts, 0, sizeof(get_opts));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  get_opts.public_read = 1;
+  g_fail_lc_strdup_local_on_call = 1;
+  rc = lc_load(client, "resource/1", &test_value_map, &value_doc, NULL,
+               &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_int_equal(error.code, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to allocate mapped load metadata");
+  assert_null(get_res.content_type);
+  assert_null(get_res.etag);
+  assert_null(get_res.correlation_id);
+  assert_int_equal(get_res.version, 0L);
+  assert_int_equal(get_res.fencing_token, 0L);
+
+  lonejson_cleanup(&test_value_map, &value_doc);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+  reset_strdup_failure_state();
+}
+
 static void
 test_public_lease_load_parse_failure_does_not_refresh_state_view(void **state) {
   static const char *json_header[] = {"Content-Type: application/json"};
@@ -3863,6 +3960,174 @@ test_public_lease_load_parse_failure_does_not_refresh_state_view(void **state) {
   assert_server_ok(&server);
   lc_error_cleanup(&error);
   https_tls_material_cleanup(&material);
+}
+
+static void test_public_lease_load_fails_on_metadata_allocation(void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *get_headers[] = {"X-Correlation-Id: corr-get",
+                                      "Content-Type: application/json",
+                                      "ETag: etag-next", "X-Key-Version: 5",
+                                      "X-Fencing-Token: 12"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":3,\"state_etag\":\"etag-prev\",\"fencing_token\":7}",
+       "liblockdc test client"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, get_headers, 5U, "{\"value\":1}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  test_value_doc value_doc;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&value_doc, 0, sizeof(value_doc));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&error, 0, sizeof(error));
+  reset_strdup_failure_state();
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&get_opts, 0, sizeof(get_opts));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  get_opts.public_read = 1;
+  g_fail_lc_strdup_local_on_call = 1;
+  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
+                     &get_res, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_int_equal(error.code, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to allocate mapped load metadata");
+  assert_null(get_res.content_type);
+  assert_null(get_res.etag);
+  assert_null(get_res.correlation_id);
+  assert_int_equal(((lc_lease_handle *)lease)->version, 3L);
+  assert_int_equal(((lc_lease_handle *)lease)->fencing_token, 7L);
+  assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
+
+  lonejson_cleanup(&test_value_map, &value_doc);
+  lc_get_res_cleanup(&get_res);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+  reset_strdup_failure_state();
+}
+
+static void test_public_lease_save_fails_on_state_etag_allocation(void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *update_headers[] = {
+      "Content-Type: application/json", "X-Fencing-Token: 11",
+      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
+  static const char *update_response_headers[] = {
+      "X-Correlation-Id: corr-update", "Content-Type: application/json"};
+  static const char *update_body[] = {"{\"value\":2}"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"},
+      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns",
+       update_headers, sizeof(update_headers) / sizeof(update_headers[0]),
+       update_body, 1U, 0, 200, update_response_headers, 2U,
+       "{\"new_version\":5,\"new_state_etag\":\"etag-2\","
+       "\"bytes\":11}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  test_value_doc value_doc;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&value_doc, 0, sizeof(value_doc));
+  memset(&error, 0, sizeof(error));
+  reset_strdup_failure_state();
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  value_doc.value = 2;
+  g_fail_lc_client_strdup_on_call = 1;
+  rc = lc_lease_save(lease, &test_value_map, &value_doc, NULL, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_int_equal(error.code, LC_ERR_NOMEM);
+  assert_string_equal(error.message,
+                      "failed to allocate refreshed lease state etag");
+  assert_int_equal(lease->version, 4L);
+  assert_string_equal(lease->state_etag, "etag-1");
+
+  lonejson_cleanup(&test_value_map, &value_doc);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+  reset_strdup_failure_state();
 }
 
 static void
@@ -4251,6 +4516,9 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(                                                             \
       test_public_client_load_preserves_preinitialized_json_value_capture)
+#elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_FAILS_ON_METADATA_ALLOCATION)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_client_load_fails_on_metadata_allocation)
 #elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_RESPECTS_CONFIGURED_JSON_RESPONSE_LIMIT)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_public_lease_load_respects_configured_json_response_limit)
@@ -4264,9 +4532,15 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(                                                             \
       test_public_lease_load_preserves_preinitialized_json_value_capture)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_FAILS_ON_METADATA_ALLOCATION)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_load_fails_on_metadata_allocation)
 #elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_PARSE_FAILURE_DOES_NOT_LOG_SUCCESS)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_public_client_load_parse_failure_does_not_log_success)
+#elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_FAILS_ON_STATE_ETAG_ALLOCATION)
+#define LC_HTTPS_UNIT_TESTS                                                     \
+  cmocka_unit_test(test_public_lease_save_fails_on_state_etag_allocation)
 #elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_MUTATE_LOCAL_COVERS_NO_CONTENT_PATH)
 #define LC_HTTPS_UNIT_TESTS                                                     \
   cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path)
@@ -4329,6 +4603,7 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
       cmocka_unit_test(test_public_lease_get_refreshes_state_view),             \
       cmocka_unit_test(                                                         \
           test_public_client_load_preserves_preinitialized_json_value_capture), \
+      cmocka_unit_test(test_public_client_load_fails_on_metadata_allocation),   \
       cmocka_unit_test(                                                         \
           test_public_lease_load_respects_configured_json_response_limit),      \
       cmocka_unit_test(                                                         \
@@ -4337,8 +4612,10 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_public_lease_load_empty_does_not_refresh_state_view),            \
       cmocka_unit_test(                                                         \
           test_public_lease_load_preserves_preinitialized_json_value_capture),  \
+      cmocka_unit_test(test_public_lease_load_fails_on_metadata_allocation),    \
       cmocka_unit_test(                                                         \
           test_public_client_load_parse_failure_does_not_log_success),          \
+      cmocka_unit_test(test_public_lease_save_fails_on_state_etag_allocation),  \
       cmocka_unit_test(test_public_lease_mutate_local_covers_no_content_path),  \
       cmocka_unit_test(test_public_management_methods_emit_logs),               \
       cmocka_unit_test(test_public_enqueue_emits_logs),                         \

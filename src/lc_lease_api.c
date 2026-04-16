@@ -70,15 +70,54 @@ static int lc_lease_lonejson_load_write_callback(void *context,
   return 1;
 }
 
-static void lc_lease_refresh_state_view(lc_lease_handle *lease,
-                                        const char *state_etag, long version,
-                                        long fencing_token,
-                                        long lease_expires_at_unix) {
+static int lc_lease_duplicate_get_metadata(const char *content_type,
+                                           const char *etag,
+                                           const char *correlation_id,
+                                           char **out_content_type,
+                                           char **out_etag,
+                                           char **out_correlation_id,
+                                           lc_error *error) {
+  char *content_type_copy;
+  char *etag_copy;
+  char *correlation_id_copy;
+
+  content_type_copy = lc_strdup_local(content_type);
+  etag_copy = lc_strdup_local(etag);
+  correlation_id_copy = lc_strdup_local(correlation_id);
+  if ((content_type != NULL && content_type_copy == NULL) ||
+      (etag != NULL && etag_copy == NULL) ||
+      (correlation_id != NULL && correlation_id_copy == NULL)) {
+    free(content_type_copy);
+    free(etag_copy);
+    free(correlation_id_copy);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate mapped load metadata", NULL, NULL,
+                        NULL);
+  }
+  *out_content_type = content_type_copy;
+  *out_etag = etag_copy;
+  *out_correlation_id = correlation_id_copy;
+  return LC_OK;
+}
+
+static int lc_lease_refresh_state_view(lc_lease_handle *lease,
+                                       const char *state_etag, long version,
+                                       long fencing_token,
+                                       long lease_expires_at_unix,
+                                       lc_error *error) {
+  char *state_etag_copy;
+
   if (lease == NULL) {
-    return;
+    return LC_OK;
+  }
+  state_etag_copy = lc_client_strdup(lease->client, state_etag);
+  if (state_etag != NULL && state_etag_copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate refreshed lease state etag", NULL,
+                        NULL, NULL);
   }
   lc_client_free(lease->client, lease->state_etag);
-  lease->state_etag = lc_client_strdup(lease->client, state_etag);
+  lease->state_etag = state_etag_copy;
   lease->version = version;
   if (fencing_token > 0L) {
     lease->fencing_token = fencing_token;
@@ -90,6 +129,26 @@ static void lc_lease_refresh_state_view(lc_lease_handle *lease,
   lease->pub.version = lease->version;
   lease->pub.fencing_token = lease->fencing_token;
   lease->pub.lease_expires_at_unix = lease->lease_expires_at_unix;
+  return LC_OK;
+}
+
+static int lc_lease_refresh_new_state_etag(lc_lease_handle *lease,
+                                           const char *state_etag,
+                                           long version, lc_error *error) {
+  char *state_etag_copy;
+
+  state_etag_copy = lc_client_strdup(lease->client, state_etag);
+  if (state_etag != NULL && state_etag_copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate refreshed lease state etag", NULL,
+                        NULL, NULL);
+  }
+  lc_client_free(lease->client, lease->state_etag);
+  lease->state_etag = state_etag_copy;
+  lease->version = version;
+  lease->pub.state_etag = lease->state_etag;
+  lease->pub.version = lease->version;
+  return LC_OK;
 }
 
 int lc_lease_describe_method(lc_lease *self, lc_error *error) {
@@ -227,15 +286,29 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
+  out->content_type = NULL;
+  out->etag = NULL;
+  out->correlation_id = NULL;
+  rc = lc_lease_duplicate_get_metadata(engine_res.content_type, engine_res.etag,
+                                       engine_res.correlation_id,
+                                       &out->content_type, &out->etag,
+                                       &out->correlation_id, error);
+  if (rc != LC_OK) {
+    lc_engine_get_stream_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
+    return rc;
+  }
   out->no_content = engine_res.no_content;
-  out->content_type = lc_strdup_local(engine_res.content_type);
-  out->etag = lc_strdup_local(engine_res.etag);
   out->version = engine_res.version;
   out->fencing_token = engine_res.fencing_token;
-  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   if (!engine_res.no_content) {
-    lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
-                                engine_res.fencing_token, 0L);
+    rc = lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
+                                     engine_res.fencing_token, 0L, error);
+    if (rc != LC_OK) {
+      lc_get_res_cleanup(out);
+      lc_engine_error_cleanup(&engine_error);
+      return rc;
+    }
   }
   if (engine_res.no_content) {
     pslog_field fields[4];
@@ -357,6 +430,9 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   no_content = engine_res.no_content;
   version = engine_res.version;
   fencing_token = engine_res.fencing_token;
+  content_type = NULL;
+  etag = NULL;
+  correlation_id = NULL;
   if (!engine_res.no_content) {
     rc = lonejson_curl_parse_finish(&load_state.parse);
     if (rc != LONEJSON_STATUS_OK) {
@@ -367,6 +443,17 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
           error, rc, &load_state.parse.error,
           "failed to parse mapped lease state");
     }
+  }
+  rc = lc_lease_duplicate_get_metadata(
+      engine_res.content_type, engine_res.etag, engine_res.correlation_id,
+      &content_type, &etag, &correlation_id, error);
+  if (rc != LC_OK) {
+    lc_engine_get_stream_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
+    lonejson_curl_parse_cleanup(&load_state.parse);
+    return rc;
+  }
+  if (!engine_res.no_content) {
     {
       pslog_field fields[5];
 
@@ -380,9 +467,6 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
     }
   }
   lonejson_curl_parse_cleanup(&load_state.parse);
-  content_type = lc_strdup_local(engine_res.content_type);
-  etag = lc_strdup_local(engine_res.etag);
-  correlation_id = lc_strdup_local(engine_res.correlation_id);
   out->no_content = no_content;
   out->content_type = content_type;
   out->etag = etag;
@@ -390,8 +474,14 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   out->fencing_token = fencing_token;
   out->correlation_id = correlation_id;
   if (!no_content) {
-    lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
-                                engine_res.fencing_token, 0L);
+    rc = lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
+                                     engine_res.fencing_token, 0L, error);
+    if (rc != LC_OK) {
+      lc_get_res_cleanup(out);
+      lc_engine_get_stream_response_cleanup(&engine_res);
+      lc_engine_error_cleanup(&engine_error);
+      return rc;
+    }
   }
   lc_engine_get_stream_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -457,12 +547,13 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  lc_client_free(lease->client, lease->state_etag);
-  lease->state_etag =
-      lc_client_strdup(lease->client, engine_res.new_state_etag);
-  lease->version = engine_res.new_version;
-  lease->pub.state_etag = lease->state_etag;
-  lease->pub.version = lease->version;
+  rc = lc_lease_refresh_new_state_etag(lease, engine_res.new_state_etag,
+                                       engine_res.new_version, error);
+  if (rc != LC_OK) {
+    lc_engine_update_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
+    return rc;
+  }
   {
     pslog_field fields[6];
 
@@ -543,12 +634,13 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  lc_client_free(lease->client, lease->state_etag);
-  lease->state_etag =
-      lc_client_strdup(lease->client, engine_res.new_state_etag);
-  lease->version = engine_res.new_version;
-  lease->pub.state_etag = lease->state_etag;
-  lease->pub.version = lease->version;
+  rc = lc_lease_refresh_new_state_etag(lease, engine_res.new_state_etag,
+                                       engine_res.new_version, error);
+  if (rc != LC_OK) {
+    lc_engine_update_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
+    return rc;
+  }
   {
     pslog_field fields[6];
 
@@ -627,12 +719,13 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  lc_client_free(lease->client, lease->state_etag);
-  lease->state_etag =
-      lc_client_strdup(lease->client, engine_res.new_state_etag);
-  lease->version = engine_res.new_version;
-  lease->pub.state_etag = lease->state_etag;
-  lease->pub.version = lease->version;
+  rc = lc_lease_refresh_new_state_etag(lease, engine_res.new_state_etag,
+                                       engine_res.new_version, error);
+  if (rc != LC_OK) {
+    lc_engine_mutate_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
+    return rc;
+  }
   {
     pslog_field fields[6];
 
@@ -860,13 +953,14 @@ int lc_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  lc_client_free(lease->client, lease->state_etag);
-  lease->state_etag = lc_client_strdup(lease->client, engine_res.state_etag);
-  lease->lease_expires_at_unix = engine_res.lease_expires_at_unix;
-  lease->version = engine_res.version;
-  lease->pub.state_etag = lease->state_etag;
-  lease->pub.lease_expires_at_unix = lease->lease_expires_at_unix;
-  lease->pub.version = lease->version;
+  rc = lc_lease_refresh_state_view(lease, engine_res.state_etag,
+                                   engine_res.version, 0L,
+                                   engine_res.lease_expires_at_unix, error);
+  if (rc != LC_OK) {
+    lc_engine_keepalive_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
+    return rc;
+  }
   {
     pslog_field fields[6];
 

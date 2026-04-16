@@ -74,6 +74,36 @@ static int lc_client_lonejson_load_write_callback(void *context,
   return 1;
 }
 
+static int lc_client_duplicate_get_metadata(const char *content_type,
+                                            const char *etag,
+                                            const char *correlation_id,
+                                            char **out_content_type,
+                                            char **out_etag,
+                                            char **out_correlation_id,
+                                            lc_error *error) {
+  char *content_type_copy;
+  char *etag_copy;
+  char *correlation_id_copy;
+
+  content_type_copy = lc_strdup_local(content_type);
+  etag_copy = lc_strdup_local(etag);
+  correlation_id_copy = lc_strdup_local(correlation_id);
+  if ((content_type != NULL && content_type_copy == NULL) ||
+      (etag != NULL && etag_copy == NULL) ||
+      (correlation_id != NULL && correlation_id_copy == NULL)) {
+    free(content_type_copy);
+    free(etag_copy);
+    free(correlation_id_copy);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate mapped load metadata", NULL, NULL,
+                        NULL);
+  }
+  *out_content_type = content_type_copy;
+  *out_etag = etag_copy;
+  *out_correlation_id = correlation_id_copy;
+  return LC_OK;
+}
+
 int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                              lc_lease **out, lc_error *error) {
   lc_client_handle *client;
@@ -362,6 +392,9 @@ int lc_client_load_method(lc_client *self, const char *key,
   no_content = engine_res.no_content;
   version = engine_res.version;
   fencing_token = engine_res.fencing_token;
+  content_type = NULL;
+  etag = NULL;
+  correlation_id = NULL;
   if (!engine_res.no_content) {
     rc = lonejson_curl_parse_finish(&load_state.parse);
     if (rc != LONEJSON_STATUS_OK) {
@@ -371,6 +404,17 @@ int lc_client_load_method(lc_client *self, const char *key,
       return lc_lonejson_error_from_status(error, rc, &load_state.parse.error,
                                            "failed to parse mapped state");
     }
+  }
+  rc = lc_client_duplicate_get_metadata(
+      engine_res.content_type, engine_res.etag, engine_res.correlation_id,
+      &content_type, &etag, &correlation_id, error);
+  if (rc != LC_OK) {
+    lc_engine_get_stream_response_cleanup(&engine_res);
+    lc_engine_error_cleanup(&engine_error);
+    lonejson_curl_parse_cleanup(&load_state.parse);
+    return rc;
+  }
+  if (!engine_res.no_content) {
     {
       pslog_field fields[5];
 
@@ -385,9 +429,6 @@ int lc_client_load_method(lc_client *self, const char *key,
     }
   }
   lonejson_curl_parse_cleanup(&load_state.parse);
-  content_type = lc_strdup_local(engine_res.content_type);
-  etag = lc_strdup_local(engine_res.etag);
-  correlation_id = lc_strdup_local(engine_res.correlation_id);
   out->no_content = no_content;
   out->content_type = content_type;
   out->etag = etag;
