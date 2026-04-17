@@ -6,12 +6,65 @@ if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
 
+function(lockdc_import_cache_value var_name)
+    if(DEFINED ${var_name} AND NOT "${${var_name}}" STREQUAL "")
+        return()
+    endif()
+
+    file(STRINGS "${LOCKDC_BINARY_DIR}/CMakeCache.txt" cache_line
+        REGEX "^${var_name}(:[^=]+)?="
+        LIMIT_COUNT 1)
+    if(cache_line)
+        string(REGEX REPLACE "^[^=]*=" "" cache_value "${cache_line}")
+        set(${var_name} "${cache_value}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+lockdc_import_cache_value(CMAKE_C_COMPILER)
+
 if(NOT DEFINED LOCKDC_TEST_NAME OR LOCKDC_TEST_NAME STREQUAL "")
     message(FATAL_ERROR "LOCKDC_TEST_NAME is required")
 endif()
 
 if(NOT DEFINED LOCKDC_LUA_TEST_SCRIPT OR LOCKDC_LUA_TEST_SCRIPT STREQUAL "")
     message(FATAL_ERROR "LOCKDC_LUA_TEST_SCRIPT is required")
+endif()
+
+if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
+    message(FATAL_ERROR "CMAKE_C_COMPILER is required for LuaRocks validation")
+endif()
+
+if(EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
+    include("${LOCKDC_BINARY_DIR}/package-metadata.cmake")
+endif()
+
+if(NOT DEFINED LOCKDC_RUN_LUA_SMOKE)
+    set(LOCKDC_RUN_LUA_SMOKE ON)
+
+    if(DEFINED LOCKDC_TARGET_ID AND NOT LOCKDC_TARGET_ID STREQUAL "")
+        execute_process(
+            COMMAND uname -m
+            OUTPUT_VARIABLE lockdc_host_arch_raw
+            RESULT_VARIABLE lockdc_host_arch_result
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(lockdc_host_arch_result EQUAL 0)
+            string(TOLOWER "${lockdc_host_arch_raw}" lockdc_host_arch)
+            if(lockdc_host_arch STREQUAL "amd64")
+                set(lockdc_host_arch "x86_64")
+            elseif(lockdc_host_arch STREQUAL "arm64")
+                set(lockdc_host_arch "aarch64")
+            elseif(lockdc_host_arch MATCHES "^armv[0-9]+l$")
+                set(lockdc_host_arch "armhf")
+            endif()
+        endif()
+
+        string(REGEX MATCH "^[^-]+" lockdc_target_arch "${LOCKDC_TARGET_ID}")
+        if(LOCKDC_TARGET_ID MATCHES "musl"
+           OR (DEFINED lockdc_host_arch AND NOT lockdc_host_arch STREQUAL "" AND NOT lockdc_target_arch STREQUAL lockdc_host_arch))
+            set(LOCKDC_RUN_LUA_SMOKE OFF)
+        endif()
+    endif()
 endif()
 
 find_program(LOCKDC_BASH_BIN NAMES bash)
@@ -78,6 +131,7 @@ if(NOT EXISTS "${lonejson_src_rock}")
 endif()
 
 set(test_env
+    "CC=${CMAKE_C_COMPILER}"
     "LOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}"
     "LOCKDC_LUAROCKS_BIN=${LOCKDC_LUAROCKS_BIN}"
     "LOCKDC_LUA_VERSION=5.5"
@@ -99,12 +153,19 @@ endif()
 
 set(lua_build_root "${lua_rock_workdir}/.luarocks-build")
 
+if(LOCKDC_RUN_LUA_SMOKE)
+    set(lockdc_run_lua_smoke_env "ON")
+else()
+    set(lockdc_run_lua_smoke_env "OFF")
+endif()
+
 list(APPEND test_env "LOCKDC_LUAROCKS_WORKDIR=${lua_rock_workdir}")
 list(APPEND test_env "LOCKDC_LUAROCKS_BUILD_ROOT=${lua_build_root}")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         ${test_env}
+        "LOCKDC_RUN_LUA_SMOKE=${lockdc_run_lua_smoke_env}"
         "${LOCKDC_BASH_BIN}" "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh"
         "${lua_tree_dir}"
         "${LOCKDC_SDK_PREFIX}"

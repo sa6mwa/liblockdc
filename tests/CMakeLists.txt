@@ -60,7 +60,15 @@ add_test(NAME release_targeting_test
 )
 
 find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
-if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN)
+if(LOCKDC_LUA_BIN)
+  add_test(NAME lua_facade_unit_test
+    COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_facade_unit.lua"
+  )
+  set_tests_properties(lua_facade_unit_test PROPERTIES
+    ENVIRONMENT "LOCKDC_ROOT=${CMAKE_SOURCE_DIR}"
+  )
+endif()
+if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NOT LOCKDC_TARGET_LIBC STREQUAL "musl")
   add_test(NAME lua_binding_core_smoke_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_core_smoke.lua"
   )

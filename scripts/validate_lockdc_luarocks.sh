@@ -18,6 +18,7 @@ lua_version="${LOCKDC_LUA_VERSION:-5.5}"
 lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.4.1/lonejson-0.4.1-1.src.rock}"
 luarocks_build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${tree_dir}/.luarocks-build}"
 luarocks_workdir="${LOCKDC_LUAROCKS_WORKDIR:-$PWD}"
+run_lua_smoke="${LOCKDC_RUN_LUA_SMOKE:-1}"
 
 require_path() {
   if [ ! -e "$1" ]; then
@@ -51,5 +52,10 @@ LOCKDC_LUAROCKS_BUILD_ROOT="$luarocks_build_root" \
 
 eval "$("$luarocks_bin" --tree "$tree_dir" path --lua-version "$lua_version")"
 export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+if [ "$run_lua_smoke" = "0" ] || [ "$run_lua_smoke" = "OFF" ] || [ "$run_lua_smoke" = "FALSE" ]; then
+  printf '%s\n' "Skipping Lua runtime smoke: target module is not loadable by the host Lua VM"
+  exit 0
+fi
 
 "$lua_bin" "$lua_script"
