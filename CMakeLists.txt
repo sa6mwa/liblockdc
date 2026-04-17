@@ -605,40 +605,6 @@ if(LOCKDC_INSTALL)
         DESTINATION lib/cmake/lockdc
         COMPONENT dev
     )
-    install(FILES
-        "${LOCKDC_LUA_ROCKSPEC_PATH}"
-        DESTINATION share/lockdc/luarocks
-        COMPONENT dev
-    )
-    install(FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua"
-        DESTINATION share/lockdc/luarocks/lua/lockdc
-        COMPONENT dev
-    )
-
-    install(FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/lua/lockdc_lua.c"
-        DESTINATION share/lockdc/luarocks/src/lua
-        COMPONENT dev
-    )
-    install(FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_lockdc_lua_rock.sh"
-        DESTINATION share/lockdc/luarocks/scripts
-        COMPONENT dev
-    )
-    if(TARGET lockdc_lua_core)
-        set(LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/lockdc_lua_runtime_install.cmake")
-        string(CONCAT LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT_CONTENT
-            "set(_lockdc_lua_runtime_init \"${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua\")\n"
-            "set(_lockdc_lua_runtime_core \"${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}\")\n"
-            "if(EXISTS \"${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}\")\n"
-            "  file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}/share/lua/5.5/lockdc\" TYPE FILE FILES \"${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua\")\n"
-            "  file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}/lib/lua/5.5/lockdc\" TYPE FILE FILES \"${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}\")\n"
-            "endif()\n"
-        )
-        file(WRITE "${LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT}" "${LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT_CONTENT}")
-        install(SCRIPT "${LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT}" COMPONENT runtime)
-    endif()
 
     foreach(_lc_component runtime dev)
         install(FILES
@@ -691,6 +657,14 @@ if(LOCKDC_BUILD_TESTS)
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/release_tarball_sdk_test.cmake
         )
         set_tests_properties(release_tarball_sdk_test PROPERTIES RUN_SERIAL TRUE)
+
+        add_test(NAME lua_release_package_test
+            COMMAND ${CMAKE_COMMAND}
+                -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lua_release_package_test.cmake
+        )
+        set_tests_properties(lua_release_package_test PROPERTIES RUN_SERIAL TRUE)
     endif()
 
     add_test(NAME version_resolution_test

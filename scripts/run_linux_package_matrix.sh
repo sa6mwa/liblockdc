@@ -27,7 +27,7 @@ detect_host_release_preset() {
     local cc_bin="${CC:-cc}"
     local triple
 
-    if ! triple="$("$cc_bin" -dumpmachine 2>/dev/null)"; then
+    if ! triple="$($cc_bin -dumpmachine 2>/dev/null)"; then
         printf 'failed to resolve native compiler triple with %s -dumpmachine\n' "$cc_bin" >&2
         exit 1
     fi
@@ -84,7 +84,17 @@ package_target aarch64-linux-musl-release
 package_target armhf-linux-gnu-release
 package_target armhf-linux-musl-release
 
-cmake -DLOCKDC_ROOT="$repo_root" -DLOCKDC_BINARY_DIR="$repo_root/build/x86_64-linux-gnu-release" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_checksums.cmake"
+host_release_preset="$(detect_host_release_preset)"
+cmake \
+    -DLOCKDC_ROOT="$repo_root" \
+    -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
+    -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -P "$repo_root/cmake/package_lua_rock.cmake"
+cmake \
+    -DLOCKDC_ROOT="$repo_root" \
+    -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
+    -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -P "$repo_root/cmake/package_checksums.cmake"
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
@@ -95,11 +105,15 @@ cmake \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
     -DLOCKDC_RELEASE_PRESETS="x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release" \
     -P "$repo_root/tests/release_tarball_sdk_matrix_test.cmake"
-host_release_preset="$(detect_host_release_preset)"
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
     -P "$repo_root/tests/release_tarball_sdk_test.cmake"
+cmake \
+    -DLOCKDC_ROOT="$repo_root" \
+    -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
+    -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -P "$repo_root/tests/lua_release_package_test.cmake"
 
 printf '\nLinux release package matrix completed successfully.\n'

@@ -25,7 +25,6 @@ lockdc_import_cache_value(CMAKE_C_FLAGS)
 lockdc_import_cache_value(CMAKE_C_FLAGS_DEBUG)
 lockdc_import_cache_value(CMAKE_BUILD_TYPE)
 
-
 if(NOT DEFINED LOCKDC_TEST_NAME OR LOCKDC_TEST_NAME STREQUAL "")
     message(FATAL_ERROR "LOCKDC_TEST_NAME is required")
 endif()
@@ -109,13 +108,17 @@ if(NOT DEFINED LOCKDC_SDK_PREFIX OR LOCKDC_SDK_PREFIX STREQUAL "")
     endif()
 endif()
 
-if(NOT DEFINED LOCKDC_ROCKSPEC_PATH OR LOCKDC_ROCKSPEC_PATH STREQUAL "")
+if(DEFINED LOCKDC_ROCKSPEC_PATH AND NOT LOCKDC_ROCKSPEC_PATH STREQUAL "")
+    set(LOCKDC_LUA_PACKAGE_PATH "${LOCKDC_ROCKSPEC_PATH}")
+elseif(DEFINED LOCKDC_ROCK_PATH AND NOT LOCKDC_ROCK_PATH STREQUAL "")
+    set(LOCKDC_LUA_PACKAGE_PATH "${LOCKDC_ROCK_PATH}")
+else()
     file(GLOB generated_rockspec "${LOCKDC_BINARY_DIR}/lockdc-*-1.rockspec")
     list(LENGTH generated_rockspec generated_rockspec_count)
     if(NOT generated_rockspec_count EQUAL 1)
         message(FATAL_ERROR "expected one generated lockdc rockspec in ${LOCKDC_BINARY_DIR}")
     endif()
-    list(GET generated_rockspec 0 LOCKDC_ROCKSPEC_PATH)
+    list(GET generated_rockspec 0 LOCKDC_LUA_PACKAGE_PATH)
 endif()
 
 set(lonejson_cache_dir "${LOCKDC_BINARY_DIR}/lua-rock-cache")
@@ -164,13 +167,14 @@ if(lockdc_sanitizer_flags MATCHES "(^|[ 	])-fsanitize=([^ 	,]+,)*address([, ][^ 
     endif()
 endif()
 
+set(lua_build_root "${lua_rock_workdir}/.luarocks-build")
+
 set(test_env
     "CC=${CMAKE_C_COMPILER}"
     "LOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}"
     "LOCKDC_LUAROCKS_BIN=${LOCKDC_LUAROCKS_BIN}"
     "LOCKDC_LUA_VERSION=5.5"
     "LOCKDC_LONEJSON_SRC_ROCK=${lonejson_src_rock}"
-    "LOCKDC_LUAROCKS_BUILD_ROOT=${lua_build_root}"
 )
 if(NOT lockdc_asan_runtime STREQUAL "")
     list(APPEND test_env "LOCKDC_LD_PRELOAD=${lockdc_asan_runtime}")
@@ -183,13 +187,6 @@ if(DEFINED LOCKDC_LUA_TEST_ENV AND NOT LOCKDC_LUA_TEST_ENV STREQUAL "")
     endforeach()
 endif()
 
-if(DEFINED LOCKDC_SDK_PREFIX AND NOT LOCKDC_SDK_PREFIX STREQUAL ""
-   AND EXISTS "${LOCKDC_SDK_PREFIX}/share/lockdc/luarocks")
-    file(REAL_PATH "${LOCKDC_SDK_PREFIX}/share/lockdc/luarocks" lua_rock_workdir)
-endif()
-
-set(lua_build_root "${lua_rock_workdir}/.luarocks-build")
-
 if(LOCKDC_RUN_LUA_SMOKE)
     set(lockdc_run_lua_smoke_env "ON")
 else()
@@ -197,7 +194,9 @@ else()
 endif()
 
 list(APPEND test_env "LOCKDC_LUAROCKS_WORKDIR=${lua_rock_workdir}")
-list(APPEND test_env "LOCKDC_LUAROCKS_BUILD_ROOT=${lua_build_root}")
+if(LOCKDC_LUA_PACKAGE_PATH MATCHES "\.rockspec$")
+    list(APPEND test_env "LOCKDC_LUAROCKS_BUILD_ROOT=${lua_build_root}")
+endif()
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
@@ -206,7 +205,7 @@ execute_process(
         "${LOCKDC_BASH_BIN}" "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh"
         "${lua_tree_dir}"
         "${LOCKDC_SDK_PREFIX}"
-        "${LOCKDC_ROCKSPEC_PATH}"
+        "${LOCKDC_LUA_PACKAGE_PATH}"
         "${LOCKDC_LUA_TEST_SCRIPT}"
     RESULT_VARIABLE run_result
     OUTPUT_VARIABLE run_stdout

@@ -3,13 +3,13 @@
 set -eu
 
 if [ "$#" -ne 4 ]; then
-  printf 'usage: %s TREE_DIR SDK_PREFIX ROCKSPEC_PATH LUA_SCRIPT\n' "$0" >&2
+  printf 'usage: %s TREE_DIR SDK_PREFIX LUA_PACKAGE_PATH LUA_SCRIPT\n' "$0" >&2
   exit 1
 fi
 
 tree_dir="$1"
 sdk_prefix="$2"
-rockspec_path="$3"
+lua_package_path="$3"
 lua_script="$4"
 
 lua_bin="${LOCKDC_LUA_BIN:-lua}"
@@ -38,11 +38,12 @@ require_command() {
 require_command "$lua_bin"
 require_command "$luarocks_bin"
 require_path "$sdk_prefix"
-require_path "$rockspec_path"
+require_path "$lua_package_path"
 require_path "$lua_script"
 require_path "$luarocks_workdir"
 
 export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LOCKDC_PREFIX="$sdk_prefix"
 if [ -n "$lockdc_ld_preload" ]; then
   export LD_PRELOAD="$lockdc_ld_preload${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
@@ -52,9 +53,19 @@ mkdir -p "$tree_dir"
 cd "$luarocks_workdir"
 
 "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lonejson_src_rock"
-LOCKDC_PREFIX="$sdk_prefix" \
-LOCKDC_LUAROCKS_BUILD_ROOT="$luarocks_build_root" \
-  "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" make "$rockspec_path"
+case "$lua_package_path" in
+  *.rockspec)
+    LOCKDC_LUAROCKS_BUILD_ROOT="$luarocks_build_root" \
+      "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" make "$lua_package_path"
+    ;;
+  *.src.rock|*.rock)
+    "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lua_package_path"
+    ;;
+  *)
+    printf 'unsupported Lua package path: %s\n' "$lua_package_path" >&2
+    exit 1
+    ;;
+esac
 
 eval "$("$luarocks_bin" --tree "$tree_dir" path --lua-version "$lua_version")"
 

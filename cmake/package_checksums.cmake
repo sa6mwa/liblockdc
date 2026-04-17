@@ -12,7 +12,7 @@ set(checksums_name "liblockdc-${LOCKDC_VERSION}-CHECKSUMS")
 set(checksums_path "${dist_dir}/${checksums_name}")
 
 file(MAKE_DIRECTORY "${dist_dir}")
-file(GLOB release_entries RELATIVE "${dist_dir}" "${dist_dir}/liblockdc-${LOCKDC_VERSION}-*")
+file(GLOB release_entries RELATIVE "${dist_dir}" "${dist_dir}/*")
 
 set(checksum_inputs "")
 foreach(entry IN LISTS release_entries)

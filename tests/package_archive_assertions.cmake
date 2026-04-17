@@ -99,6 +99,9 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/zconf\\.h(\n|$)" "zlib configuration header")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lonejson\\.h(\n|$)" "lonejson header")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/liblockdc(/|\n|$)" "engine share/liblockdc path")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lockdc/luarocks(/|\n|$)" "embedded LuaRocks payload")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lua/5\\.5/lockdc(/|\n|$)" "embedded Lua runtime wrapper")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/lua/5\\.5/lockdc(/|\n|$)" "embedded Lua native module")
     string(REPLACE "." "\\." shared_name_regex "${shared_lib_name}")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${shared_name_regex}(\n|$)" "versioned shared library")
     if(DEFINED shared_soname

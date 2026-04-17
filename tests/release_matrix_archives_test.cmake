@@ -19,7 +19,7 @@ endif()
 
 include("${LOCKDC_ROOT}/tests/package_archive_assertions.cmake")
 
-set(lockdc_expected_archives "")
+set(lockdc_expected_artifacts "")
 set(lockdc_release_version "")
 
 foreach(lockdc_preset IN LISTS lockdc_release_presets)
@@ -49,7 +49,7 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
     assert_archive_layout("${lockdc_release_archive}" "${LOCKDC_VERSION}" "${LOCKDC_TARGET_ID}"
         "${LOCKDC_SHARED_LIB_NAME}" "${LOCKDC_SHARED_SONAME}" "${LOCKDC_SHARED_LINK_NAME}")
 
-    list(APPEND lockdc_expected_archives
+    list(APPEND lockdc_expected_artifacts
         "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz"
     )
 endforeach()
@@ -58,17 +58,47 @@ if(lockdc_release_version STREQUAL "")
     message(FATAL_ERROR "no release presets were provided for archive verification")
 endif()
 
-list(SORT lockdc_expected_archives)
-list(LENGTH lockdc_expected_archives lockdc_expected_archive_count)
+list(APPEND lockdc_expected_artifacts
+    "lockdc-${lockdc_release_version}-1.rockspec"
+    "lockdc-${lockdc_release_version}-1.src.rock"
+)
+list(SORT lockdc_expected_artifacts)
+list(LENGTH lockdc_expected_artifacts lockdc_expected_artifact_count)
 
-file(GLOB lockdc_actual_archives RELATIVE "${lockdc_dist_dir}" "${lockdc_dist_dir}/liblockdc-${lockdc_release_version}-*.tar.gz")
-list(SORT lockdc_actual_archives)
-if(NOT lockdc_actual_archives STREQUAL lockdc_expected_archives)
-    list(JOIN lockdc_expected_archives "\n  " lockdc_expected_archive_list)
-    list(JOIN lockdc_actual_archives "\n  " lockdc_actual_archive_list)
+file(GLOB lockdc_actual_artifacts RELATIVE "${lockdc_dist_dir}" "${lockdc_dist_dir}/*")
+list(FILTER lockdc_actual_artifacts EXCLUDE REGEX "^liblockdc-${lockdc_release_version}-CHECKSUMS$")
+list(SORT lockdc_actual_artifacts)
+if(NOT lockdc_actual_artifacts STREQUAL lockdc_expected_artifacts)
+    list(JOIN lockdc_expected_artifacts "\n  " lockdc_expected_artifact_list)
+    list(JOIN lockdc_actual_artifacts "\n  " lockdc_actual_artifact_list)
     message(FATAL_ERROR
-        "release archive set mismatch for ${lockdc_release_version}\nexpected:\n  ${lockdc_expected_archive_list}\nactual:\n  ${lockdc_actual_archive_list}")
+        "release artifact set mismatch for ${lockdc_release_version}\nexpected:\n  ${lockdc_expected_artifact_list}\nactual:\n  ${lockdc_actual_artifact_list}")
 endif()
+
+set(lockdc_lua_rockspec_path "${lockdc_dist_dir}/lockdc-${lockdc_release_version}-1.rockspec")
+set(lockdc_lua_src_rock_path "${lockdc_dist_dir}/lockdc-${lockdc_release_version}-1.src.rock")
+foreach(required_path
+    "${lockdc_lua_rockspec_path}"
+    "${lockdc_lua_src_rock_path}"
+)
+    if(NOT EXISTS "${required_path}")
+        message(FATAL_ERROR "missing standalone Lua release artifact: ${required_path}")
+    endif()
+endforeach()
+
+file(READ "${lockdc_lua_rockspec_path}" lockdc_lua_rockspec_text)
+foreach(required_snippet
+    "package = \"lockdc\""
+    "version = \"${lockdc_release_version}-1\""
+    "tag = \"v${lockdc_release_version}\""
+)
+    string(FIND "${lockdc_lua_rockspec_text}" "${required_snippet}" snippet_index)
+    if(snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "standalone Lua rockspec is missing expected snippet '${required_snippet}'\n"
+            "rockspec:\n${lockdc_lua_rockspec_text}")
+    endif()
+endforeach()
 
 set(lockdc_checksums_name "liblockdc-${lockdc_release_version}-CHECKSUMS")
 set(lockdc_checksums_path "${lockdc_dist_dir}/${lockdc_checksums_name}")
@@ -90,21 +120,21 @@ endif()
 
 file(STRINGS "${lockdc_checksums_path}" lockdc_checksum_lines)
 list(LENGTH lockdc_checksum_lines lockdc_checksum_line_count)
-if(NOT lockdc_checksum_line_count EQUAL lockdc_expected_archive_count)
+if(NOT lockdc_checksum_line_count EQUAL lockdc_expected_artifact_count)
     message(FATAL_ERROR
-        "checksum manifest line count mismatch for ${lockdc_checksums_path}: expected ${lockdc_expected_archive_count}, got ${lockdc_checksum_line_count}")
+        "checksum manifest line count mismatch for ${lockdc_checksums_path}: expected ${lockdc_expected_artifact_count}, got ${lockdc_checksum_line_count}")
 endif()
 
-foreach(lockdc_expected_archive IN LISTS lockdc_expected_archives)
+foreach(lockdc_expected_artifact IN LISTS lockdc_expected_artifacts)
     set(lockdc_found_checksum 0)
     foreach(lockdc_checksum_line IN LISTS lockdc_checksum_lines)
-        if(lockdc_checksum_line MATCHES "^[0-9a-f]+[ \t]+\\*?${lockdc_expected_archive}$")
+        if(lockdc_checksum_line MATCHES "^[0-9a-f]+[ \t]+\\*?${lockdc_expected_artifact}$")
             set(lockdc_found_checksum 1)
             break()
         endif()
     endforeach()
     if(NOT lockdc_found_checksum)
         message(FATAL_ERROR
-            "checksum manifest is missing entry for ${lockdc_expected_archive}: ${lockdc_checksums_path}")
+            "checksum manifest is missing entry for ${lockdc_expected_artifact}: ${lockdc_checksums_path}")
     endif()
 endforeach()
