@@ -12,15 +12,19 @@ set(checksums_name "liblockdc-${LOCKDC_VERSION}-CHECKSUMS")
 set(checksums_path "${dist_dir}/${checksums_name}")
 
 file(MAKE_DIRECTORY "${dist_dir}")
-file(GLOB release_entries RELATIVE "${dist_dir}" "${dist_dir}/*")
 
 set(checksum_inputs "")
-foreach(entry IN LISTS release_entries)
-    if(NOT entry STREQUAL "${checksums_name}")
-        list(APPEND checksum_inputs "${entry}")
-    endif()
+foreach(pattern
+    "${dist_dir}/liblockdc-${LOCKDC_VERSION}-*.tar.gz"
+    "${dist_dir}/lockdc-${LOCKDC_VERSION}-1.rockspec"
+    "${dist_dir}/lockdc-${LOCKDC_VERSION}-1.src.rock"
+)
+    file(GLOB matched_entries RELATIVE "${dist_dir}" LIST_DIRECTORIES false "${pattern}")
+    list(APPEND checksum_inputs ${matched_entries})
 endforeach()
 
+list(REMOVE_DUPLICATES checksum_inputs)
+list(FILTER checksum_inputs EXCLUDE REGEX "^${checksums_name}$")
 list(LENGTH checksum_inputs checksum_input_count)
 if(checksum_input_count EQUAL 0)
     message(FATAL_ERROR "no release artifacts found in ${dist_dir} for version ${LOCKDC_VERSION}")

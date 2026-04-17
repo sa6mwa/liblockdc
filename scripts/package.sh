@@ -43,6 +43,8 @@ run_target() {
 
 run_cmake_script -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_clean_dist.cmake"
 
+package_lua=0
+
 case "$requested_abi" in
   all)
     run_target x86_64-linux-gnu-release
@@ -51,11 +53,13 @@ case "$requested_abi" in
     run_target aarch64-linux-musl-release
     run_target armhf-linux-gnu-release
     run_target armhf-linux-musl-release
+    package_lua=1
     ;;
   gnu)
     run_target x86_64-linux-gnu-release
     run_target aarch64-linux-gnu-release
     run_target armhf-linux-gnu-release
+    package_lua=1
     ;;
   musl)
     run_target x86_64-linux-musl-release
@@ -64,6 +68,7 @@ case "$requested_abi" in
     ;;
   x86_64-linux-gnu)
     run_target x86_64-linux-gnu-release
+    package_lua=1
     ;;
   x86_64-linux-musl)
     run_target x86_64-linux-musl-release
