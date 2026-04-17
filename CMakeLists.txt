@@ -627,16 +627,17 @@ if(LOCKDC_INSTALL)
         COMPONENT dev
     )
     if(TARGET lockdc_lua_core)
-        install(FILES
-            "${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua"
-            DESTINATION share/lua/5.5/lockdc
-            COMPONENT runtime
+        set(LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/lockdc_lua_runtime_install.cmake")
+        string(CONCAT LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT_CONTENT
+            "set(_lockdc_lua_runtime_init \"${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua\")\n"
+            "set(_lockdc_lua_runtime_core \"${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}\")\n"
+            "if(EXISTS \"${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}\")\n"
+            "  file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}/share/lua/5.5/lockdc\" TYPE FILE FILES \"${CMAKE_CURRENT_SOURCE_DIR}/lua/lockdc/init.lua\")\n"
+            "  file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}/lib/lua/5.5/lockdc\" TYPE FILE FILES \"${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}\")\n"
+            "endif()\n"
         )
-        install(FILES
-            "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc/core${CMAKE_SHARED_MODULE_SUFFIX}"
-            DESTINATION lib/lua/5.5/lockdc
-            COMPONENT runtime
-        )
+        file(WRITE "${LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT}" "${LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT_CONTENT}")
+        install(SCRIPT "${LOCKDC_LUA_RUNTIME_INSTALL_SCRIPT}" COMPONENT runtime)
     endif()
 
     foreach(_lc_component runtime dev)
