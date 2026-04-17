@@ -9,6 +9,11 @@ helpers.
 Install the `lockdc` and `lonejson` Lua rocks against a released or staged
 `liblockdc` SDK bundle.
 
+For normal LuaRocks use, install the matching `liblockdc` binary SDK release
+first, then install the Lua rock. The `lockdc` rock does not build the full C
+SDK for you; it builds only the Lua binding and links it against the matching
+installed `liblockdc` release.
+
 `liblockdc` owns this Lua dependency layout. Downstream consumers such as
 `vectis` should use the `lockdc` and `lonejson` Lua modules shipped with the
 `liblockdc` SDK bundle rather than repackaging a separate `lockd` Lua client.

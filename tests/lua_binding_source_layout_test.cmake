@@ -6,6 +6,10 @@ if(NOT DEFINED LOCKDC_BINARY_DIR)
     message(FATAL_ERROR "LOCKDC_BINARY_DIR is required")
 endif()
 
+if(EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
+    include("${LOCKDC_BINARY_DIR}/package-metadata.cmake")
+endif()
+
 file(GLOB generated_rockspec "${LOCKDC_BINARY_DIR}/lockdc-*-1.rockspec")
 list(LENGTH generated_rockspec generated_rockspec_count)
 if(NOT generated_rockspec_count EQUAL 1)
@@ -32,6 +36,7 @@ foreach(required_snippet
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v"
     "scripts/build_lockdc_lua_rock.sh"
+    "\\"$(LUA_INCDIR)\\" \\"${LOCKDC_VERSION}\\""
     "[\"lockdc.init\"] = \"lua/lockdc/init.lua\""
     "[\"lockdc.core\"] = \".luarocks-build/lockdc/core."
 )

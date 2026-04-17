@@ -47,6 +47,13 @@ add_test(NAME lua_binding_source_layout_test
     -P "${CMAKE_SOURCE_DIR}/tests/lua_binding_source_layout_test.cmake"
 )
 
+add_test(NAME lua_external_sdk_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/lua_external_sdk_contract_test.cmake"
+)
+
 add_test(NAME release_package_matrix_targeting_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}

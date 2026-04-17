@@ -19,7 +19,7 @@ dependencies = {
 }
 build = {
   type = "command",
-  build_command = "sh scripts/build_lockdc_lua_rock.sh \"$(CC)\" \"$(CFLAGS)\" \"$(LIBFLAG)\" \"$(OBJ_EXTENSION)\" \"$(LIB_EXTENSION)\" \"$(LUA_INCDIR)\"",
+  build_command = "sh scripts/build_lockdc_lua_rock.sh \"$(CC)\" \"$(CFLAGS)\" \"$(LIBFLAG)\" \"$(OBJ_EXTENSION)\" \"$(LIB_EXTENSION)\" \"$(LUA_INCDIR)\" \"@PROJECT_VERSION@\"",
   install = {
     lua = {
       ["lockdc.init"] = "lua/lockdc/init.lua",

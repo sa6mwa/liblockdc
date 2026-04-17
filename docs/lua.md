@@ -15,8 +15,20 @@ already-built `liblockdc` SDK installation.
 - the Lua rock builds only the Lua extension module
 - the C SDK and bundled native dependencies come from the installed
   `liblockdc` release
+- the required `liblockdc` version is an exact match for the Lua rock version
 - supported runtime architectures are the same ones shipped by the `liblockdc`
   binary SDK bundle
+
+Normal LuaRocks installs are expected to be a two-step flow:
+
+1. install or unpack the matching `liblockdc` SDK release for the target host
+2. install the `lockdc` Lua rock against that SDK
+
+The rock build checks the installed `liblockdc` version and fails early if it is
+missing or does not match. The failure message points at the matching GitHub
+release tarball URL for the current rock version and tells the user to set
+`LOCKDC_PREFIX` to the extracted SDK root or make `lockdc.pc` visible to
+`pkg-config`.
 
 The generated rockspec expects:
 
