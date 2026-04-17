@@ -19,6 +19,7 @@ lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejso
 luarocks_build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${tree_dir}/.luarocks-build}"
 luarocks_workdir="${LOCKDC_LUAROCKS_WORKDIR:-$PWD}"
 run_lua_smoke="${LOCKDC_RUN_LUA_SMOKE:-1}"
+lockdc_ld_preload="${LOCKDC_LD_PRELOAD:-}"
 
 require_path() {
   if [ ! -e "$1" ]; then
@@ -41,6 +42,11 @@ require_path "$rockspec_path"
 require_path "$lua_script"
 require_path "$luarocks_workdir"
 
+export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ -n "$lockdc_ld_preload" ]; then
+  export LD_PRELOAD="$lockdc_ld_preload${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
 rm -rf "$tree_dir" "$luarocks_build_root"
 mkdir -p "$tree_dir"
 cd "$luarocks_workdir"
@@ -51,7 +57,6 @@ LOCKDC_LUAROCKS_BUILD_ROOT="$luarocks_build_root" \
   "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" make "$rockspec_path"
 
 eval "$("$luarocks_bin" --tree "$tree_dir" path --lua-version "$lua_version")"
-export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 if [ "$run_lua_smoke" = "0" ] || [ "$run_lua_smoke" = "OFF" ] || [ "$run_lua_smoke" = "FALSE" ]; then
   printf '%s\n' "Skipping Lua runtime smoke: target module is not loadable by the host Lua VM"

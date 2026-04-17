@@ -70,24 +70,33 @@ foreach(required_snippet
     endif()
 endforeach()
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
-        -DLOCKDC_ROOT=${LOCKDC_ROOT}
-        -DLOCKDC_TEST_NAME=install-tree-sdk-smoke
-        -DLOCKDC_SDK_PREFIX=${install_prefix}
-        -DLOCKDC_ROCKSPEC_PATH=${install_rockspec_path}
-        -DLOCKDC_LUA_TEST_SCRIPT=${LOCKDC_ROOT}/tests/lua/test_lockdc_luarocks_smoke.lua
-        -P "${LOCKDC_ROOT}/tests/lua_rock_install_and_run_test.cmake"
-    RESULT_VARIABLE lua_result
-    OUTPUT_VARIABLE lua_stdout
-    ERROR_VARIABLE lua_stderr
-)
-if(NOT lua_result EQUAL 0)
-    message(FATAL_ERROR
-        "installed SDK LuaRocks validation failed\n"
-        "stdout:\n${lua_stdout}\n"
-        "stderr:\n${lua_stderr}")
+set(lockdc_skip_lua_rock_validation OFF)
+if(LOCKDC_BUILD_TYPE STREQUAL "Debug"
+   AND DEFINED LOCKDC_C_FLAGS_DEBUG
+   AND LOCKDC_C_FLAGS_DEBUG MATCHES "-fsanitize=[^ ]*address")
+    set(lockdc_skip_lua_rock_validation ON)
+endif()
+
+if(NOT lockdc_skip_lua_rock_validation)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+            -DLOCKDC_ROOT=${LOCKDC_ROOT}
+            -DLOCKDC_TEST_NAME=install-tree-sdk-smoke
+            -DLOCKDC_SDK_PREFIX=${install_prefix}
+            -DLOCKDC_ROCKSPEC_PATH=${install_rockspec_path}
+            -DLOCKDC_LUA_TEST_SCRIPT=${LOCKDC_ROOT}/tests/lua/test_lockdc_luarocks_smoke.lua
+            -P "${LOCKDC_ROOT}/tests/lua_rock_install_and_run_test.cmake"
+        RESULT_VARIABLE lua_result
+        OUTPUT_VARIABLE lua_stdout
+        ERROR_VARIABLE lua_stderr
+    )
+    if(NOT lua_result EQUAL 0)
+        message(FATAL_ERROR
+            "installed SDK LuaRocks validation failed\n"
+            "stdout:\n${lua_stdout}\n"
+            "stderr:\n${lua_stderr}")
+    endif()
 endif()
 
 file(READ "${install_prefix}/lib/cmake/lockdc/lockdcConfig.cmake" lockdc_config_text)

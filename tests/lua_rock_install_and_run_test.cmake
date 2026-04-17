@@ -21,6 +21,10 @@ function(lockdc_import_cache_value var_name)
 endfunction()
 
 lockdc_import_cache_value(CMAKE_C_COMPILER)
+lockdc_import_cache_value(CMAKE_C_FLAGS)
+lockdc_import_cache_value(CMAKE_C_FLAGS_DEBUG)
+lockdc_import_cache_value(CMAKE_BUILD_TYPE)
+
 
 if(NOT DEFINED LOCKDC_TEST_NAME OR LOCKDC_TEST_NAME STREQUAL "")
     message(FATAL_ERROR "LOCKDC_TEST_NAME is required")
@@ -38,38 +42,45 @@ if(EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
     include("${LOCKDC_BINARY_DIR}/package-metadata.cmake")
 endif()
 
+set(LOCKDC_RUN_LUAROCKS_VALIDATION ON)
 if(NOT DEFINED LOCKDC_RUN_LUA_SMOKE)
     set(LOCKDC_RUN_LUA_SMOKE ON)
+endif()
 
-    if(DEFINED LOCKDC_TARGET_ID AND NOT LOCKDC_TARGET_ID STREQUAL "")
-        execute_process(
-            COMMAND uname -m
-            OUTPUT_VARIABLE lockdc_host_arch_raw
-            RESULT_VARIABLE lockdc_host_arch_result
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-        if(lockdc_host_arch_result EQUAL 0)
-            string(TOLOWER "${lockdc_host_arch_raw}" lockdc_host_arch)
-            if(lockdc_host_arch STREQUAL "amd64")
-                set(lockdc_host_arch "x86_64")
-            elseif(lockdc_host_arch STREQUAL "arm64")
-                set(lockdc_host_arch "aarch64")
-            elseif(lockdc_host_arch MATCHES "^armv[0-9]+l$")
-                set(lockdc_host_arch "armhf")
-            endif()
+if(DEFINED LOCKDC_TARGET_ID AND NOT LOCKDC_TARGET_ID STREQUAL "")
+    execute_process(
+        COMMAND uname -m
+        OUTPUT_VARIABLE lockdc_host_arch_raw
+        RESULT_VARIABLE lockdc_host_arch_result
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(lockdc_host_arch_result EQUAL 0)
+        string(TOLOWER "${lockdc_host_arch_raw}" lockdc_host_arch)
+        if(lockdc_host_arch STREQUAL "amd64")
+            set(lockdc_host_arch "x86_64")
+        elseif(lockdc_host_arch STREQUAL "arm64")
+            set(lockdc_host_arch "aarch64")
+        elseif(lockdc_host_arch MATCHES "^armv[0-9]+l$")
+            set(lockdc_host_arch "armhf")
         endif()
+    endif()
 
-        string(REGEX MATCH "^[^-]+" lockdc_target_arch "${LOCKDC_TARGET_ID}")
-        if(LOCKDC_TARGET_ID MATCHES "musl"
-           OR (DEFINED lockdc_host_arch AND NOT lockdc_host_arch STREQUAL "" AND NOT lockdc_target_arch STREQUAL lockdc_host_arch))
-            set(LOCKDC_RUN_LUA_SMOKE OFF)
-        endif()
+    string(REGEX MATCH "^[^-]+" lockdc_target_arch "${LOCKDC_TARGET_ID}")
+    if(LOCKDC_TARGET_ID MATCHES "musl"
+       OR (DEFINED lockdc_host_arch AND NOT lockdc_host_arch STREQUAL "" AND NOT lockdc_target_arch STREQUAL lockdc_host_arch))
+        set(LOCKDC_RUN_LUA_SMOKE OFF)
+        set(LOCKDC_RUN_LUAROCKS_VALIDATION OFF)
     endif()
 endif()
 
 find_program(LOCKDC_BASH_BIN NAMES bash)
 find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
+
+if(NOT LOCKDC_RUN_LUAROCKS_VALIDATION)
+    message(STATUS "Skipping LuaRocks validation for ${LOCKDC_TEST_NAME}: target ${LOCKDC_TARGET_ID} is not buildable/loadable with the host Lua VM")
+    return()
+endif()
 
 if(NOT LOCKDC_BASH_BIN)
     message(FATAL_ERROR "bash is required for LuaRocks validation")
@@ -130,6 +141,29 @@ if(NOT EXISTS "${lonejson_src_rock}")
     endif()
 endif()
 
+set(lockdc_sanitizer_flags "${CMAKE_C_FLAGS}")
+if(DEFINED CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "")
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" lockdc_build_type_upper)
+    if(lockdc_build_type_upper STREQUAL "DEBUG")
+        string(APPEND lockdc_sanitizer_flags " ${CMAKE_C_FLAGS_DEBUG}")
+    endif()
+endif()
+
+set(lockdc_asan_runtime "")
+if(lockdc_sanitizer_flags MATCHES "(^|[ 	])-fsanitize=([^ 	,]+,)*address([, ][^ 	,]+)*($|[ 	])")
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libasan.so
+        OUTPUT_VARIABLE lockdc_asan_runtime_raw
+        RESULT_VARIABLE lockdc_asan_runtime_result
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(lockdc_asan_runtime_result EQUAL 0
+       AND NOT lockdc_asan_runtime_raw STREQUAL ""
+       AND NOT lockdc_asan_runtime_raw STREQUAL "libasan.so")
+        set(lockdc_asan_runtime "${lockdc_asan_runtime_raw}")
+    endif()
+endif()
+
 set(test_env
     "CC=${CMAKE_C_COMPILER}"
     "LOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}"
@@ -138,6 +172,9 @@ set(test_env
     "LOCKDC_LONEJSON_SRC_ROCK=${lonejson_src_rock}"
     "LOCKDC_LUAROCKS_BUILD_ROOT=${lua_build_root}"
 )
+if(NOT lockdc_asan_runtime STREQUAL "")
+    list(APPEND test_env "LOCKDC_LD_PRELOAD=${lockdc_asan_runtime}")
+endif()
 
 if(DEFINED LOCKDC_LUA_TEST_ENV AND NOT LOCKDC_LUA_TEST_ENV STREQUAL "")
     string(REPLACE "|" ";" LOCKDC_LUA_TEST_ENV_LIST "${LOCKDC_LUA_TEST_ENV}")

@@ -59,6 +59,25 @@ add_test(NAME release_targeting_test
     -P "${CMAKE_SOURCE_DIR}/tests/release_targeting_test.cmake"
 )
 
+set(LOCKDC_LUA_TEST_ENV_COMMON "")
+set(lockdc_lua_test_sanitizer_flags "${CMAKE_C_FLAGS}")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  string(APPEND lockdc_lua_test_sanitizer_flags " ${CMAKE_C_FLAGS_DEBUG}")
+endif()
+if(lockdc_lua_test_sanitizer_flags MATCHES "(^|[ \t])-fsanitize=([^ \t,]+,)*address([, ][^ \t,]+)*($|[ \t])")
+  execute_process(
+    COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libasan.so
+    OUTPUT_VARIABLE lockdc_lua_asan_runtime
+    RESULT_VARIABLE lockdc_lua_asan_runtime_result
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(lockdc_lua_asan_runtime_result EQUAL 0
+     AND NOT lockdc_lua_asan_runtime STREQUAL ""
+     AND NOT lockdc_lua_asan_runtime STREQUAL "libasan.so")
+    list(APPEND LOCKDC_LUA_TEST_ENV_COMMON "LD_PRELOAD=${lockdc_lua_asan_runtime}")
+  endif()
+endif()
+
 find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
 if(LOCKDC_LUA_BIN)
   add_test(NAME lua_facade_unit_test
@@ -72,8 +91,12 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NO
   add_test(NAME lua_binding_core_smoke_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_core_smoke.lua"
   )
+  set(lockdc_lua_core_smoke_env
+    "LOCKDC_LUA_CORE_DIR=${CMAKE_BINARY_DIR}/lua"
+    ${LOCKDC_LUA_TEST_ENV_COMMON}
+  )
   set_tests_properties(lua_binding_core_smoke_test PROPERTIES
-    ENVIRONMENT "LOCKDC_LUA_CORE_DIR=${CMAKE_BINARY_DIR}/lua"
+    ENVIRONMENT "${lockdc_lua_core_smoke_env}"
   )
 endif()
 
