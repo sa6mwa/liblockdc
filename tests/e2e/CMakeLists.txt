@@ -170,3 +170,9 @@ lc_add_lua_e2e_test(
   "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_consumer_handler_error.lua"
   ENV_OVERRIDES "LOCKDC_QUEUE=tests-lua-e2e-consumer-handler-error;LOCKDC_OWNER=lua-e2e-consumer-handler-error"
 )
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_state_after_ack
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_state_after_ack.lua"
+  ENV_OVERRIDES "LOCKDC_QUEUE=tests-lua-e2e-state-after-ack;LOCKDC_OWNER=lua-e2e-state-after-ack"
+)

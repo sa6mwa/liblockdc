@@ -81,7 +81,8 @@ enum {
   CONSUMER_HANDLER_MODE_FAIL_ONCE_THEN_SUCCESS = 7,
   CONSUMER_HANDLER_MODE_EXPLICIT_ACK_ERROR_ONCE_THEN_SUCCESS = 8,
   CONSUMER_HANDLER_MODE_FAIL_TWICE_THEN_SUCCESS = 9,
-  CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK = 10
+  CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK = 10,
+  CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK = 11
 };
 
 enum {
@@ -638,6 +639,10 @@ static int handle_terminal_scenario(void *context, lc_consumer_message *message,
       stop_test_service(state);
     }
     return rc;
+  case CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK:
+    message->message->close(message->message);
+    stop_test_service(state);
+    return LC_OK;
   default:
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "unknown consumer handler mode", NULL, NULL, NULL);
@@ -1594,7 +1599,10 @@ static void run_consumer_terminal_scenario_unit_test(
   assert_int_equal(runtime_state.nack_calls, expected_nack_calls);
   assert_int_equal(runtime_state.extend_calls, expected_extend_calls);
   assert_int_equal(runtime_state.close_calls,
-                   expected_ack_calls + expected_nack_calls);
+                   expected_ack_calls + expected_nack_calls +
+                       (handler_mode == CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK
+                            ? 1U
+                            : 0U));
   assert_int_equal(runtime_state.handled_messages, 1U);
   assert_int_equal(runtime_state.last_nack_intent, expected_nack_intent);
 
@@ -1625,6 +1633,13 @@ static void test_consumer_service_preserves_explicit_ack_on_success(
   (void)state;
   run_consumer_terminal_scenario_unit_test(CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK,
                                            LC_OK, 1U, 0U, 0U, -1, 0, 0L);
+}
+
+static void test_consumer_service_preserves_explicit_close_on_success(
+    void **state) {
+  (void)state;
+  run_consumer_terminal_scenario_unit_test(
+      CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK, LC_OK, 0U, 0U, 0U, -1, 0, 0L);
 }
 
 static void
@@ -2489,6 +2504,8 @@ int main(void) {
           test_consumer_service_auto_acks_open_delivery_on_success),
       cmocka_unit_test(
           test_consumer_service_preserves_explicit_ack_on_success),
+      cmocka_unit_test(
+          test_consumer_service_preserves_explicit_close_on_success),
       cmocka_unit_test(
           test_consumer_service_preserves_explicit_failure_nack_on_success),
       cmocka_unit_test(

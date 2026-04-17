@@ -7,6 +7,8 @@
 
 #include <lc/lc.h>
 
+#include "lc_api_internal.h"
+
 #define LCDC_CLIENT_MT "lockdc.client"
 #define LCDC_LEASE_MT "lockdc.lease"
 #define LCDC_MESSAGE_MT "lockdc.message"
@@ -401,6 +403,26 @@ static int lcdc_push_message(lua_State *L, lc_message *message) {
   luaL_getmetatable(L, LCDC_MESSAGE_MT);
   lua_setmetatable(L, -2);
   return 1;
+}
+
+static int lcdc_push_cloned_lease(lua_State *L, const lc_lease *lease) {
+  const lc_lease_handle *lease_handle;
+  lc_lease *lease_copy;
+
+  if (lease == NULL) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lease_handle = (const lc_lease_handle *)lease;
+  lease_copy = lc_lease_new(lease_handle->client, lease->namespace_name,
+                            lease->key, lease->owner, lease->lease_id,
+                            lease->txn_id, lease->fencing_token,
+                            lease->version, lease->state_etag,
+                            lease_handle->queue_state_etag);
+  if (lease_copy == NULL) {
+    return luaL_error(L, "failed to clone message state lease");
+  }
+  return lcdc_push_lease(L, lease_copy, 0);
 }
 
 static void lcdc_parse_lease_ref(lua_State *L, int index, lc_lease_ref *lease) {
@@ -2052,11 +2074,7 @@ static int lcdc_message_state(lua_State *L) {
 
   ud = lcdc_check_message(L, 1);
   lease = lc_message_state(ud->message);
-  if (lease == NULL) {
-    lua_pushnil(L);
-    return 1;
-  }
-  return lcdc_push_lease(L, lease, 1);
+  return lcdc_push_cloned_lease(L, lease);
 }
 
 static int lcdc_message_rewind_payload(lua_State *L) {

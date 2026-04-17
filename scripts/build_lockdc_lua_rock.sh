@@ -119,7 +119,7 @@ run_cc() {
 mkdir -p "${module_dir}"
 rm -f "${object_path}" "${module_path}"
 
-common_cflags="${cflags} -I${repo_root}/include -I${lua_incdir}"
+common_cflags="${cflags} -I${repo_root}/include -I${repo_root}/src -I${lua_incdir}"
 linkflags="${LDFLAGS:-}"
 lockdc_cflags=""
 lockdc_libs=""

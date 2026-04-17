@@ -427,6 +427,9 @@ static void lc_consumer_runtime_message_close(lc_message *self) {
     runtime_message->inner = NULL;
     runtime_message->bridge->inner_message = NULL;
   }
+  if (runtime_message->bridge->message == &runtime_message->pub) {
+    runtime_message->bridge->message = NULL;
+  }
   lc_client_free(runtime_message->bridge->client, runtime_message);
 }
 

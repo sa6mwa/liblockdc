@@ -56,6 +56,8 @@ if(NOT lockdc_generated_rockspec_name STREQUAL lockdc_lua_rockspec_name)
 endif()
 file(COPY "${LOCKDC_ROOT}/lua/lockdc/init.lua" DESTINATION "${lockdc_lua_source_root}/lua/lockdc")
 file(COPY "${LOCKDC_ROOT}/src/lua/lockdc_lua.c" DESTINATION "${lockdc_lua_source_root}/src/lua")
+file(COPY "${LOCKDC_ROOT}/src/lc_api_internal.h" DESTINATION "${lockdc_lua_source_root}/src")
+file(COPY "${LOCKDC_ROOT}/src/lc_engine_api.h" DESTINATION "${lockdc_lua_source_root}/src")
 file(COPY "${LOCKDC_ROOT}/scripts/build_lockdc_lua_rock.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
 
 file(REMOVE "${lockdc_lua_source_archive_base}" "${lockdc_lua_source_archive_path}")

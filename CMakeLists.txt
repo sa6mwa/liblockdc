@@ -448,7 +448,7 @@ set(LOCKDC_LUA_INCLUDE_DIR "")
 if(LOCKDC_BUILD_LUA_BINDINGS)
     find_path(LOCKDC_LUA_INCLUDE_DIR
         NAMES lua.h
-        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 include/lua lua5.5 lua-5.5 lua
+        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 include/lua5.4 include/lua-5.4 include/lua5.3 include/lua-5.3 include/lua lua5.5 lua-5.5 lua5.4 lua-5.4 lua5.3 lua-5.3 lua
         PATHS /usr/local /usr /usr/local/include /usr/include
     )
     if("${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "" AND EXISTS "/usr/local/include/lua.h")
@@ -456,7 +456,7 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     endif()
     if(LOCKDC_BUILD_SHARED AND NOT "${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "")
         add_library(lockdc_lua_core MODULE src/lua/lockdc_lua.c)
-        target_include_directories(lockdc_lua_core PRIVATE "${LOCKDC_LUA_INCLUDE_DIR}")
+        target_include_directories(lockdc_lua_core PRIVATE "${LOCKDC_LUA_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
         target_link_libraries(lockdc_lua_core PRIVATE lc_shared)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             target_link_options(lockdc_lua_core PRIVATE "LINKER:--allow-shlib-undefined")
