@@ -74,6 +74,21 @@ lockdc_dependency_error() {
   exit 1
 }
 
+lockdc_shared_sdk_error() {
+  lockdc_dependency_error \
+    "normal LuaRocks builds require a shared liblockdc SDK; static-only SDKs are for vectis or in-tree embedded Lua builds"
+}
+
+lockdc_sdk_has_shared_library() {
+  libdir="$1"
+  if [ -z "$libdir" ] || [ ! -d "$libdir" ]; then
+    return 1
+  fi
+  find "$libdir" -maxdepth 1 \
+    \( -name 'liblockdc.so' -o -name 'liblockdc.so.*' -o -name 'liblockdc.dylib' -o -name 'lockdc.dll' -o -name 'liblockdc.dll' \) \
+    | grep -q .
+}
+
 extract_lockdc_pc_version() {
   pc_path="$1"
   if [ ! -f "$pc_path" ]; then
@@ -84,20 +99,29 @@ extract_lockdc_pc_version() {
 
 resolve_lockdc_from_prefix() {
   prefix="$1"
-  pc_path="${prefix}/lib/pkgconfig/lockdc.pc"
+  libdir="${prefix}/lib"
+  pc_path="${libdir}/pkgconfig/lockdc.pc"
   version="$(extract_lockdc_pc_version "$pc_path" || true)"
   if [ -z "$version" ]; then
     lockdc_dependency_error "unable to determine liblockdc version from ${pc_path}"
   fi
+  if ! lockdc_sdk_has_shared_library "$libdir"; then
+    lockdc_shared_sdk_error
+  fi
 
   lockdc_resolved_version="$version"
   lockdc_cflags="-I${prefix}/include"
-  lockdc_libs="-L${prefix}/lib -Wl,-rpath,${prefix}/lib -llockdc"
+  lockdc_libs="-L${libdir} -Wl,-rpath,${libdir} -llockdc"
 }
 
 resolve_lockdc_from_pkg_config() {
   if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists lockdc; then
     return 1
+  fi
+
+  lockdc_pkgconfig_libdir="$(pkg-config --variable=libdir lockdc 2>/dev/null || true)"
+  if ! lockdc_sdk_has_shared_library "$lockdc_pkgconfig_libdir"; then
+    lockdc_shared_sdk_error
   fi
 
   lockdc_resolved_version="$(pkg-config --modversion lockdc)"

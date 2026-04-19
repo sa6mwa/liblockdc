@@ -25,10 +25,13 @@ Normal LuaRocks installs are expected to be a two-step flow:
 2. install the `lockdc` Lua rock against that SDK
 
 The rock build checks the installed `liblockdc` version and fails early if it is
-missing or does not match. The failure message points at the matching GitHub
-release tarball URL for the current rock version and tells the user to set
-`LOCKDC_PREFIX` to the extracted SDK root or make `lockdc.pc` visible to
-`pkg-config`.
+missing or does not match. Normal LuaRocks installs also require a shared
+`liblockdc` SDK; static-only SDK bundles are reserved for `vectis` or other
+in-tree embedded-Lua builds.
+
+The failure message points at the matching GitHub release tarball URL for the
+current rock version and tells the user to set `LOCKDC_PREFIX` to the extracted
+SDK root or make `lockdc.pc` visible to `pkg-config`.
 
 The generated rockspec expects:
 

@@ -51,6 +51,7 @@ foreach(required_snippet
 endforeach()
 
 file(WRITE "${fake_prefix}/lib/pkgconfig/lockdc.pc" "prefix=${fake_prefix}\nVersion: 9.9.9\n")
+file(WRITE "${fake_prefix}/lib/liblockdc.so" "")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "PATH=${fake_path}"
@@ -73,5 +74,33 @@ foreach(required_snippet
         message(FATAL_ERROR
             "mismatched-SDK failure is missing snippet '${required_snippet}'\n"
             "stderr:\n${mismatch_stderr}")
+    endif()
+endforeach()
+
+file(WRITE "${fake_prefix}/lib/pkgconfig/lockdc.pc" "prefix=${fake_prefix}\nVersion: ${LOCKDC_VERSION}\n")
+file(REMOVE "${fake_prefix}/lib/liblockdc.so")
+file(WRITE "${fake_prefix}/lib/liblockdc.a" "")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PATH=${fake_path}"
+        "LOCKDC_PREFIX=${fake_prefix}"
+        /bin/sh "${script_path}" /bin/true "" -shared o so "${LOCKDC_ROOT}/include" "${LOCKDC_VERSION}"
+    WORKING_DIRECTORY "${LOCKDC_ROOT}"
+    RESULT_VARIABLE static_only_result
+    OUTPUT_VARIABLE static_only_stdout
+    ERROR_VARIABLE static_only_stderr
+)
+if(static_only_result EQUAL 0)
+    message(FATAL_ERROR "expected static-only SDK Lua rock build to fail")
+endif()
+foreach(required_snippet
+    "normal LuaRocks builds require a shared liblockdc SDK"
+    "static-only SDKs are for vectis or in-tree embedded Lua builds"
+)
+    string(FIND "${static_only_stderr}" "${required_snippet}" snippet_index)
+    if(snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "static-only SDK failure is missing snippet '${required_snippet}'\n"
+            "stderr:\n${static_only_stderr}")
     endif()
 endforeach()
