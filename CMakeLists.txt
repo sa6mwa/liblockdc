@@ -470,16 +470,26 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     endif()
 endif()
 
-function(lockdc_install_shared_dependency_glob library_glob)
-    file(GLOB _lockdc_shared_dep_libs "${library_glob}")
-    if(_lockdc_shared_dep_libs)
-        install(FILES
-            ${_lockdc_shared_dep_libs}
-            DESTINATION lib
-            COMPONENT runtime
-        )
-    endif()
-endfunction()
+set(LOCKDC_INSTALL_VENDORED_SDK_DEV_ARTIFACTS_SCRIPT
+    "${CMAKE_CURRENT_BINARY_DIR}/install_vendored_sdk_dev_artifacts.cmake")
+set(LOCKDC_INSTALL_VENDORED_SDK_RUNTIME_ARTIFACTS_SCRIPT
+    "${CMAKE_CURRENT_BINARY_DIR}/install_vendored_sdk_runtime_artifacts.cmake")
+if(TARGET lc_static)
+    set(LOCKDC_INSTALL_STATIC_VENDORED_SDK_ARTIFACTS 1)
+else()
+    set(LOCKDC_INSTALL_STATIC_VENDORED_SDK_ARTIFACTS 0)
+endif()
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_vendored_sdk_dev_artifacts.cmake.in"
+    "${LOCKDC_INSTALL_VENDORED_SDK_DEV_ARTIFACTS_SCRIPT}"
+    @ONLY
+)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_vendored_sdk_runtime_artifacts.cmake.in"
+    "${LOCKDC_INSTALL_VENDORED_SDK_RUNTIME_ARTIFACTS_SCRIPT}"
+    @ONLY
+)
 
 if(LOCKDC_INSTALL)
 
@@ -487,96 +497,9 @@ if(LOCKDC_INSTALL)
         DESTINATION include/lc
         COMPONENT dev
     )
-    if(EXISTS "${LOCKDC_PSLOG_INCLUDE_DIR}/pslog.h" AND EXISTS "${LOCKDC_PSLOG_INCLUDE_DIR}/pslog_version.h")
-        install(FILES
-            "${LOCKDC_PSLOG_INCLUDE_DIR}/pslog.h"
-            "${LOCKDC_PSLOG_INCLUDE_DIR}/pslog_version.h"
-            DESTINATION include
-            COMPONENT dev
-        )
-    endif()
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/curl/install/include/curl")
-        install(DIRECTORY
-            "${LOCKDC_EXTERNAL_ROOT}/curl/install/include/curl"
-            DESTINATION include
-            COMPONENT dev
-        )
-    endif()
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/openssl/install/include/openssl")
-        install(DIRECTORY
-            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/include/openssl"
-            DESTINATION include
-            COMPONENT dev
-        )
-    endif()
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include/nghttp2")
-        install(DIRECTORY
-            "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include/nghttp2"
-            DESTINATION include
-            COMPONENT dev
-        )
-    endif()
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2.h")
-        install(FILES
-            "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2.h"
-            "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2_publickey.h"
-            "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include/libssh2_sftp.h"
-            DESTINATION include
-            COMPONENT dev
-        )
-    endif()
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include/zlib.h")
-        install(FILES
-            "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include/zlib.h"
-            "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include/zconf.h"
-            DESTINATION include
-            COMPONENT dev
-        )
-    endif()
-    if(EXISTS "${LOCKDC_LONEJSON_INCLUDE_DIR}/lonejson.h")
-        install(FILES
-            "${LOCKDC_LONEJSON_INCLUDE_DIR}/lonejson.h"
-            DESTINATION include
-            COMPONENT dev
-        )
-    endif()
-    if(TARGET lc_static AND EXISTS "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.a")
-        install(FILES
-            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.a"
-            DESTINATION lib
-            COMPONENT dev
-        )
-    endif()
-    foreach(_lc_static_dep
-        "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl.a"
-        "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl.a"
-        "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto.a"
-        "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2.a"
-        "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2.a"
-        "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz.a"
-        "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson.a"
-    )
-        if(TARGET lc_static AND EXISTS "${_lc_static_dep}")
-            install(FILES
-                "${_lc_static_dep}"
-                DESTINATION lib
-                COMPONENT dev
-            )
-        endif()
-    endforeach()
+    install(SCRIPT "${LOCKDC_INSTALL_VENDORED_SDK_DEV_ARTIFACTS_SCRIPT}" COMPONENT dev)
     if(TARGET lc_shared)
-        foreach(_lc_shared_glob
-            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog${CMAKE_SHARED_LIBRARY_SUFFIX}*"
-            "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib/libcurl${CMAKE_SHARED_LIBRARY_SUFFIX}*"
-            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}*"
-            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}*"
-            "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}*"
-            "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}*"
-            "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}*"
-            "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/liblonejson${CMAKE_SHARED_LIBRARY_SUFFIX}*"
-        )
-            lockdc_install_shared_dependency_glob("${_lc_shared_glob}")
-        endforeach()
+        install(SCRIPT "${LOCKDC_INSTALL_VENDORED_SDK_RUNTIME_ARTIFACTS_SCRIPT}" COMPONENT runtime)
     endif()
     if(TARGET lc_shared)
         install(TARGETS lc_shared
@@ -691,6 +614,14 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/c_only_configure_test.cmake
     )
     set_tests_properties(c_only_configure_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME deferred_vendored_install_manifest_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/deferred_vendored_install_manifest_test.cmake
+    )
+    set_tests_properties(deferred_vendored_install_manifest_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME arch_alias_configure_test
         COMMAND ${CMAKE_COMMAND}
