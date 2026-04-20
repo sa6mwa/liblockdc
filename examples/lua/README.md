@@ -66,6 +66,7 @@ The Lua consumer path is intentionally simple and single-threaded.
 - `client:start_consumer(...)` is blocking
 - `client:new_consumer_service(...):run()` is blocking
 - `client:new_consumer_service(...):start()` is also blocking
+- each blocking Lua consumer service takes exactly one consumer config
 - one message is consumed at a time
 - the Lua handler runs to completion on the calling Lua state
 - after the handler completes, the next message is consumed

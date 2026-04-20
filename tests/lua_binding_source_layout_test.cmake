@@ -38,7 +38,7 @@ foreach(required_snippet
     "scripts/build_lockdc_lua_rock.sh"
     "\\"$(LUA_INCDIR)\\" \\"${LOCKDC_VERSION}\\""
     "[\"lockdc.init\"] = \"lua/lockdc/init.lua\""
-    "[\"lockdc.core\"] = \".luarocks-build/lockdc/core."
+    "[\"lockdc.core\"] = \".luarocks-build/lockdc/core.so\""
 )
     string(FIND "${rockspec_text}" "${required_snippet}" snippet_index)
     if(snippet_index EQUAL -1)

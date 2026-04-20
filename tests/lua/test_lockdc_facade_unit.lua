@@ -348,12 +348,34 @@ local function test_subscribe_with_state_and_service_lifecycle()
   assert_eq(err, nil, 'service:start success should not return error')
   assert_eq(service_message.ack_count, 1, 'service handler success should ack message')
   assert_truthy(service:wait(), 'wait after completed run should succeed')
+
+  local multi_service = client:new_consumer_service({
+    Name = 'worker-1',
+    Queue = 'jobs-a',
+    MessageHandler = function()
+      error('first multi-config handler should not run')
+    end,
+  }, {
+    Name = 'worker-2',
+    Queue = 'jobs-b',
+    MessageHandler = function()
+      error('second multi-config handler should not run')
+    end,
+  })
+
+  ok, err = multi_service:start()
+  assert_eq(ok, nil, 'service:start should reject multiple blocking consumer configs')
+  assert_eq(err.code, core_stub.ERR_INVALID, 'multiple consumer configs should return ERR_INVALID')
+  assert_truthy(
+    err.message:match('exactly one consumer config'),
+    'multiple consumer configs should return actionable error'
+  )
 end
 
 local function test_watch_queue_change_detection()
   local queue_stats_plan = {
     { available = 0, head_message_id = 'a', correlation_id = 'one' },
-    { available = 0, head_message_id = 'a', correlation_id = 'one' },
+    { available = 0, head_message_id = 'a', correlation_id = 'two' },
     { available = 1, head_message_id = 'b', correlation_id = 'two' },
   }
   local captured_events = {}

@@ -20,6 +20,7 @@ build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${repo_root}/.luarocks-build}"
 module_dir="${build_root}/lockdc"
 object_path="${build_root}/lockdc_lua.${obj_ext}"
 module_path="${module_dir}/core.${lib_ext}"
+rock_install_module_path="${module_dir}/core.so"
 lockdc_release_base_url="https://github.com/sa6mwa/liblockdc/releases/download/v${expected_lockdc_version}"
 
 if [ -z "${cc}" ]; then
@@ -141,7 +142,7 @@ run_cc() {
 }
 
 mkdir -p "${module_dir}"
-rm -f "${object_path}" "${module_path}"
+rm -f "${object_path}" "${module_path}" "${rock_install_module_path}"
 
 common_cflags="${cflags} -I${repo_root}/include -I${repo_root}/src -I${lua_incdir}"
 linkflags="${LDFLAGS:-}"
@@ -169,3 +170,6 @@ fi
 
 run_cc ${common_cflags} ${lockdc_cflags} -c "${repo_root}/src/lua/lockdc_lua.c" -o "${object_path}"
 run_cc ${libflag} -o "${module_path}" "${object_path}" ${linkflags} ${lockdc_libs}
+if [ "${module_path}" != "${rock_install_module_path}" ]; then
+  cp "${module_path}" "${rock_install_module_path}"
+fi

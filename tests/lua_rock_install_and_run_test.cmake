@@ -194,7 +194,7 @@ else()
 endif()
 
 list(APPEND test_env "LOCKDC_LUAROCKS_WORKDIR=${lua_rock_workdir}")
-if(LOCKDC_LUA_PACKAGE_PATH MATCHES "\.rockspec$")
+if(LOCKDC_LUA_PACKAGE_PATH MATCHES "[.]rockspec$")
     list(APPEND test_env "LOCKDC_LUAROCKS_BUILD_ROOT=${lua_build_root}")
 endif()
 

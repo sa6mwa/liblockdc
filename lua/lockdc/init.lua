@@ -545,7 +545,6 @@ function Client:watch_queue(req, handler)
     signature = table.concat({
       tostring(stats.available),
       stats.head_message_id or "",
-      stats.correlation_id or "",
     }, "|")
     if signature ~= last_signature then
       local ok, callback_err = pcall(handler, {
@@ -600,6 +599,19 @@ end
 function Service:run()
   local configs = self._configs
   local i
+
+  if #configs == 0 then
+    return nil, {
+      code = core.ERR_INVALID,
+      message = "lockdc Lua consumer service requires exactly one consumer config",
+    }
+  end
+  if #configs ~= 1 then
+    return nil, {
+      code = core.ERR_INVALID,
+      message = "lockdc Lua consumer service supports exactly one consumer config per blocking service; start separate consumers for separate queues",
+    }
+  end
 
   for i = 1, #configs do
     local config = configs[i]

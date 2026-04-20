@@ -209,6 +209,8 @@ The supported Lua consumer paths are:
 - `client:new_consumer_service(...):start()`
 
 `Service:start()` is a blocking alias for `run()`.
+Each blocking Lua consumer service supports exactly one consumer config. Start
+separate blocking consumers if you need to consume separate queues from Lua.
 
 ## Examples
 
