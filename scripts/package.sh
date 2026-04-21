@@ -95,6 +95,14 @@ if [ -z "$lockdc_version" ]; then
   resolve_version
 fi
 
+if [ "$package_lua" -eq 1 ]; then
+  run_cmake_script \
+    -DLOCKDC_BINARY_DIR="$repo_root/build/x86_64-linux-gnu-release" \
+    -DLOCKDC_ROOT="$repo_root" \
+    -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -P "$repo_root/cmake/package_lua_rock.cmake"
+fi
+
 run_cmake_script \
   -DLOCKDC_ROOT="$repo_root" \
   -DLOCKDC_DIST_DIR="$repo_root/dist" \

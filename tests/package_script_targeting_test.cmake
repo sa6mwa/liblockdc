@@ -91,3 +91,29 @@ assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-DLOCKD
 assert_log_not_contains("build\\|x86_64-linux-gnu-release\\|" "x86_64-linux-gnu release preset build")
 assert_log_not_contains("cmake\\|--preset\\|release\\|" "generic release configure preset")
 assert_log_not_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|.*cmake/package_archive\\.cmake\\|" "x86_64-linux-gnu package script")
+assert_log_not_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|.*cmake/package_lua_rock\\.cmake\\|" "x86_64-linux-gnu Lua package script for musl-only package")
+
+set(log_path "${test_root}/invocations-gnu.log")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        LOCKDC_TEST_LOG=${log_path}
+        CMAKE=${fake_cmake}
+        LOCKDC_BUILD_SCRIPT=${fake_build}
+        LOCKDC_VERSION=1.2.3
+        "${LOCKDC_ROOT}/scripts/package.sh" gnu
+    WORKING_DIRECTORY "${LOCKDC_ROOT}"
+    RESULT_VARIABLE package_gnu_result
+    OUTPUT_VARIABLE package_gnu_stdout
+    ERROR_VARIABLE package_gnu_stderr
+)
+if(NOT package_gnu_result EQUAL 0)
+    message(FATAL_ERROR
+        "expected package.sh gnu packaging to succeed\n"
+        "stdout:\n${package_gnu_stdout}\n"
+        "stderr:\n${package_gnu_stderr}")
+endif()
+
+file(READ "${log_path}" gnu_log_contents)
+if(NOT gnu_log_contents MATCHES "cmake\\|-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-P\\|.*/cmake/package_lua_rock\\.cmake\\|")
+    message(FATAL_ERROR "missing Lua packaging invocation for package.sh gnu:\n${gnu_log_contents}")
+endif()
