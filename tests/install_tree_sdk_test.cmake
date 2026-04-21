@@ -205,44 +205,47 @@ endif()
 separate_arguments(lockdc_pkgconfig_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_cflags}")
 separate_arguments(lockdc_pkgconfig_libs_list UNIX_COMMAND "${lockdc_pkgconfig_libs}")
 
-set(lockdc_pkgconfig_static_consumer "${consumer_bin_dir}/lockdc_install_tree_pkgconfig_static")
-execute_process(
-    COMMAND "${LOCKDC_C_COMPILER}"
-        ${lockdc_pkgconfig_cflags_list}
-        -static
-        "${consumer_src_dir}/pkgconfig_static_main.c"
-        -o "${lockdc_pkgconfig_static_consumer}"
-        ${lockdc_pkgconfig_libs_list}
-    RESULT_VARIABLE lockdc_pkgconfig_build_result
-    OUTPUT_VARIABLE lockdc_pkgconfig_build_stdout
-    ERROR_VARIABLE lockdc_pkgconfig_build_stderr
-)
-if(NOT lockdc_pkgconfig_build_result EQUAL 0)
-    message(FATAL_ERROR
-        "failed to build install-tree pkg-config static consumer\n"
-        "cflags: ${lockdc_pkgconfig_cflags}\n"
-        "libs: ${lockdc_pkgconfig_libs}\n"
-        "stdout:\n${lockdc_pkgconfig_build_stdout}\n"
-        "stderr:\n${lockdc_pkgconfig_build_stderr}")
-endif()
-
-if(DEFINED LOCKDC_TARGET_ID AND LOCKDC_TARGET_ID MATCHES "musl" AND LOCKDC_FILE_BIN)
+if(NOT DEFINED LOCKDC_SANITIZER_INSTRUMENTED OR LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "" OR
+   LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "0")
+    set(lockdc_pkgconfig_static_consumer "${consumer_bin_dir}/lockdc_install_tree_pkgconfig_static")
     execute_process(
-        COMMAND "${LOCKDC_FILE_BIN}" "${lockdc_pkgconfig_static_consumer}"
-        RESULT_VARIABLE lockdc_pkgconfig_file_result
-        OUTPUT_VARIABLE lockdc_pkgconfig_file_output
-        ERROR_VARIABLE lockdc_pkgconfig_file_stderr
-        OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND "${LOCKDC_C_COMPILER}"
+            ${lockdc_pkgconfig_cflags_list}
+            -static
+            "${consumer_src_dir}/pkgconfig_static_main.c"
+            -o "${lockdc_pkgconfig_static_consumer}"
+            ${lockdc_pkgconfig_libs_list}
+        RESULT_VARIABLE lockdc_pkgconfig_build_result
+        OUTPUT_VARIABLE lockdc_pkgconfig_build_stdout
+        ERROR_VARIABLE lockdc_pkgconfig_build_stderr
     )
-    if(NOT lockdc_pkgconfig_file_result EQUAL 0)
+    if(NOT lockdc_pkgconfig_build_result EQUAL 0)
         message(FATAL_ERROR
-            "failed to inspect install-tree pkg-config static consumer\n"
-            "stdout:\n${lockdc_pkgconfig_file_output}\n"
-            "stderr:\n${lockdc_pkgconfig_file_stderr}")
+            "failed to build install-tree pkg-config static consumer\n"
+            "cflags: ${lockdc_pkgconfig_cflags}\n"
+            "libs: ${lockdc_pkgconfig_libs}\n"
+            "stdout:\n${lockdc_pkgconfig_build_stdout}\n"
+            "stderr:\n${lockdc_pkgconfig_build_stderr}")
     endif()
-    if(NOT lockdc_pkgconfig_file_output MATCHES "statically linked")
-        message(FATAL_ERROR
-            "musl install-tree pkg-config static consumer is not fully static\n"
-            "file:\n${lockdc_pkgconfig_file_output}")
+
+    if(DEFINED LOCKDC_TARGET_ID AND LOCKDC_TARGET_ID MATCHES "musl" AND LOCKDC_FILE_BIN)
+        execute_process(
+            COMMAND "${LOCKDC_FILE_BIN}" "${lockdc_pkgconfig_static_consumer}"
+            RESULT_VARIABLE lockdc_pkgconfig_file_result
+            OUTPUT_VARIABLE lockdc_pkgconfig_file_output
+            ERROR_VARIABLE lockdc_pkgconfig_file_stderr
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(NOT lockdc_pkgconfig_file_result EQUAL 0)
+            message(FATAL_ERROR
+                "failed to inspect install-tree pkg-config static consumer\n"
+                "stdout:\n${lockdc_pkgconfig_file_output}\n"
+                "stderr:\n${lockdc_pkgconfig_file_stderr}")
+        endif()
+        if(NOT lockdc_pkgconfig_file_output MATCHES "statically linked")
+            message(FATAL_ERROR
+                "musl install-tree pkg-config static consumer is not fully static\n"
+                "file:\n${lockdc_pkgconfig_file_output}")
+        endif()
     endif()
 endif()
