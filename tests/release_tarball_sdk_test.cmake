@@ -138,6 +138,16 @@ foreach(forbidden_reference "${LOCKDC_ROOT}" "${LOCKDC_BINARY_DIR}" "${LOCKDC_RO
     endif()
 endforeach()
 
+if(lockdc_config_text MATCHES "atomic")
+    string(FIND "${lockdc_pkgconfig_text}" "-latomic" lockdc_pkgconfig_atomic_index)
+    if(lockdc_pkgconfig_atomic_index EQUAL -1)
+        message(FATAL_ERROR
+            "release tarball pkg-config metadata is missing -latomic even though the CMake package exports it\n"
+            "pkg-config:\n${lockdc_pkgconfig_text}\n"
+            "config:\n${lockdc_config_text}")
+    endif()
+endif()
+
 file(WRITE "${consumer_src_dir}/CMakeLists.txt" [=[
 cmake_minimum_required(VERSION 3.21)
 project(lockdc_release_tarball_consumer C)
@@ -207,6 +217,17 @@ int main(void) {
     }
 
     return 0;
+}
+]=])
+
+file(WRITE "${consumer_src_dir}/pkgconfig_static_main.c" [=[
+#include <lc/lc.h>
+
+int main(void) {
+    lonejson_int64 value;
+
+    value = 0;
+    return lc_version_string() != 0 && value == 0 ? 0 : 1;
 }
 ]=])
 
@@ -395,4 +416,87 @@ if(LOCKDC_RUN_DOWNSTREAM_BINARIES)
                 "stderr:\n${run_stderr}")
         endif()
     endforeach()
+endif()
+
+find_program(LOCKDC_PKG_CONFIG_BIN NAMES pkg-config)
+find_program(LOCKDC_FILE_BIN NAMES file)
+if(NOT LOCKDC_PKG_CONFIG_BIN)
+    message(FATAL_ERROR "pkg-config is required for release tarball static SDK validation")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PKG_CONFIG_PATH=${release_prefix}/lib/pkgconfig"
+        "${LOCKDC_PKG_CONFIG_BIN}" --static --cflags lockdc
+    RESULT_VARIABLE lockdc_pkgconfig_cflags_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_cflags
+    ERROR_VARIABLE lockdc_pkgconfig_cflags_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT lockdc_pkgconfig_cflags_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to resolve pkg-config cflags for release tarball static consumer\n"
+        "stdout:\n${lockdc_pkgconfig_cflags}\n"
+        "stderr:\n${lockdc_pkgconfig_cflags_stderr}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PKG_CONFIG_PATH=${release_prefix}/lib/pkgconfig"
+        "${LOCKDC_PKG_CONFIG_BIN}" --static --libs lockdc
+    RESULT_VARIABLE lockdc_pkgconfig_libs_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_libs
+    ERROR_VARIABLE lockdc_pkgconfig_libs_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT lockdc_pkgconfig_libs_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to resolve pkg-config libs for release tarball static consumer\n"
+        "stdout:\n${lockdc_pkgconfig_libs}\n"
+        "stderr:\n${lockdc_pkgconfig_libs_stderr}")
+endif()
+
+separate_arguments(lockdc_pkgconfig_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_cflags}")
+separate_arguments(lockdc_pkgconfig_libs_list UNIX_COMMAND "${lockdc_pkgconfig_libs}")
+
+set(lockdc_pkgconfig_static_consumer "${consumer_bin_dir}/release_tarball_pkgconfig_static")
+execute_process(
+    COMMAND "${CMAKE_C_COMPILER}"
+        ${lockdc_pkgconfig_cflags_list}
+        -static
+        "${consumer_src_dir}/pkgconfig_static_main.c"
+        -o "${lockdc_pkgconfig_static_consumer}"
+        ${lockdc_pkgconfig_libs_list}
+    RESULT_VARIABLE lockdc_pkgconfig_build_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_build_stdout
+    ERROR_VARIABLE lockdc_pkgconfig_build_stderr
+)
+if(NOT lockdc_pkgconfig_build_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to build release tarball pkg-config static consumer\n"
+        "cflags: ${lockdc_pkgconfig_cflags}\n"
+        "libs: ${lockdc_pkgconfig_libs}\n"
+        "stdout:\n${lockdc_pkgconfig_build_stdout}\n"
+        "stderr:\n${lockdc_pkgconfig_build_stderr}")
+endif()
+
+if(LOCKDC_TARGET_ID MATCHES "musl" AND LOCKDC_FILE_BIN)
+    execute_process(
+        COMMAND "${LOCKDC_FILE_BIN}" "${lockdc_pkgconfig_static_consumer}"
+        RESULT_VARIABLE lockdc_pkgconfig_file_result
+        OUTPUT_VARIABLE lockdc_pkgconfig_file_output
+        ERROR_VARIABLE lockdc_pkgconfig_file_stderr
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT lockdc_pkgconfig_file_result EQUAL 0)
+        message(FATAL_ERROR
+            "failed to inspect release tarball pkg-config static consumer\n"
+            "stdout:\n${lockdc_pkgconfig_file_output}\n"
+            "stderr:\n${lockdc_pkgconfig_file_stderr}")
+    endif()
+    if(NOT lockdc_pkgconfig_file_output MATCHES "statically linked")
+        message(FATAL_ERROR
+            "musl release tarball pkg-config static consumer is not fully static\n"
+            "file:\n${lockdc_pkgconfig_file_output}")
+    endif()
 endif()
