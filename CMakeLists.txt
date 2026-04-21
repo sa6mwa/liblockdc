@@ -461,6 +461,7 @@ configure_file(
 )
 
 set(LOCKDC_LUA_INCLUDE_DIR "")
+set(LOCKDC_LUA_LIBRARY "")
 if(LOCKDC_BUILD_LUA_BINDINGS)
     find_path(LOCKDC_LUA_INCLUDE_DIR
         NAMES lua.h
@@ -470,19 +471,38 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     if("${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "" AND EXISTS "/usr/local/include/lua.h")
         set(LOCKDC_LUA_INCLUDE_DIR "/usr/local/include")
     endif()
-    if(LOCKDC_BUILD_SHARED AND NOT "${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "")
-        add_library(lockdc_lua_core MODULE src/lua/lockdc_lua.c)
-        target_include_directories(lockdc_lua_core PRIVATE "${LOCKDC_LUA_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
-        target_link_libraries(lockdc_lua_core PRIVATE lc_shared)
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            target_link_options(lockdc_lua_core PRIVATE "LINKER:--allow-shlib-undefined")
-        endif()
-        lc_configure_c_target(lockdc_lua_core)
-        set_target_properties(lockdc_lua_core PROPERTIES
-            PREFIX ""
-            OUTPUT_NAME core
-            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc"
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_library(LOCKDC_LUA_LIBRARY
+            NAMES lua5.5 lua-5.5 lua55 lua5.4 lua-5.4 lua54 lua5.3 lua-5.3 lua53 lua
+            PATH_SUFFIXES lib lib64
+            PATHS /usr/local /usr /opt/local
         )
+    endif()
+    if(LOCKDC_BUILD_SHARED AND NOT "${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "")
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+           CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
+           NOT "${LOCKDC_LUA_LIBRARY}" STREQUAL "")
+            add_library(lockdc_lua_core MODULE src/lua/lockdc_lua.c)
+            target_include_directories(lockdc_lua_core PRIVATE "${LOCKDC_LUA_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
+            target_link_libraries(lockdc_lua_core PRIVATE lc_shared)
+            if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+                target_link_options(lockdc_lua_core PRIVATE "LINKER:--allow-shlib-undefined")
+            elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+                target_link_options(lockdc_lua_core PRIVATE "LINKER:-undefined,dynamic_lookup")
+            else()
+                target_link_libraries(lockdc_lua_core PRIVATE "${LOCKDC_LUA_LIBRARY}")
+            endif()
+            lc_configure_c_target(lockdc_lua_core)
+            set_target_properties(lockdc_lua_core PROPERTIES
+                PREFIX ""
+                OUTPUT_NAME core
+                LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc"
+            )
+        else()
+            message(STATUS
+                "Lua bindings requested but no Lua runtime library was found for ${CMAKE_SYSTEM_NAME}; "
+                "skipping lockdc_lua_core")
+        endif()
     endif()
 endif()
 
