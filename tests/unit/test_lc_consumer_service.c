@@ -68,6 +68,9 @@ typedef struct consumer_test_state {
   pthread_t extend_thread;
   long handler_delay_ms;
   FILE *log_fp;
+  int last_followup_rc;
+  int last_followup_error_code;
+  char last_followup_error_message[160];
 } consumer_test_state;
 
 enum {
@@ -82,7 +85,8 @@ enum {
   CONSUMER_HANDLER_MODE_EXPLICIT_ACK_ERROR_ONCE_THEN_SUCCESS = 8,
   CONSUMER_HANDLER_MODE_FAIL_TWICE_THEN_SUCCESS = 9,
   CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK = 10,
-  CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK = 11
+  CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK = 11,
+  CONSUMER_HANDLER_MODE_EXPLICIT_ACK_FAILS_THEN_FOLLOWUP_NACK = 12
 };
 
 enum {
@@ -638,6 +642,28 @@ static int handle_terminal_scenario(void *context, lc_consumer_message *message,
     if (rc == LC_OK) {
       stop_test_service(state);
     }
+    return rc;
+  case CONSUMER_HANDLER_MODE_EXPLICIT_ACK_FAILS_THEN_FOLLOWUP_NACK:
+    rc = message->message->ack(message->message, error);
+    if (rc != LC_OK) {
+      lc_error followup_error;
+
+      lc_error_init(&followup_error);
+      lc_nack_req_init(&nack_req);
+      nack_req.intent = LC_NACK_INTENT_FAILURE;
+      nack_req.delay_seconds = 0L;
+      state->last_followup_rc =
+          message->message->nack(message->message, &nack_req, &followup_error);
+      state->last_followup_error_code = followup_error.code;
+      if (followup_error.message != NULL) {
+        snprintf(state->last_followup_error_message,
+                 sizeof(state->last_followup_error_message), "%s",
+                 followup_error.message);
+      }
+      lc_error_cleanup(&followup_error);
+      return rc;
+    }
+    stop_test_service(state);
     return rc;
   case CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK:
     message->message->close(message->message);
@@ -2069,6 +2095,74 @@ test_consumer_service_explicit_ack_then_handler_error_surfaces_without_nack(
 }
 
 static void
+test_consumer_service_explicit_ack_failure_marks_terminal_outcome_indeterminate(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.handler_mode =
+      CONSUMER_HANDLER_MODE_EXPLICIT_ACK_FAILS_THEN_FOLLOWUP_NACK;
+  runtime_state.last_nack_intent = -1;
+  runtime_state.ack_should_fail = 1;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.visibility_timeout_seconds = 1L;
+  consumer.handle = handle_terminal_scenario;
+  consumer.on_error = fake_consumer_on_error_stop_after_first;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  consumer.restart_policy.immediate_retries = 0;
+  consumer.restart_policy.base_delay_ms = 1L;
+  consumer.restart_policy.max_delay_ms = 1L;
+  consumer.restart_policy.max_failures = 1;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.ack_calls, 1U);
+  assert_int_equal(runtime_state.nack_calls, 0U);
+  assert_int_equal(runtime_state.last_followup_rc, LC_ERR_INVALID);
+  assert_int_equal(runtime_state.last_followup_error_code, LC_ERR_INVALID);
+  assert_non_null(strstr(runtime_state.last_followup_error_message,
+                         "terminal outcome is indeterminate"));
+  assert_int_equal(runtime_state.error_events, 1U);
+  assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_OK);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
 test_consumer_service_subscribe_failures_consume_service_failure_budget(
     void **state) {
   tracked_allocator_state alloc_state;
@@ -2528,6 +2622,8 @@ int main(void) {
           test_consumer_service_repeated_handler_failures_do_not_consume_failure_budget),
       cmocka_unit_test(
           test_consumer_service_explicit_ack_then_handler_error_surfaces_without_nack),
+      cmocka_unit_test(
+          test_consumer_service_explicit_ack_failure_marks_terminal_outcome_indeterminate),
       cmocka_unit_test(
           test_consumer_service_subscribe_failures_consume_service_failure_budget),
       cmocka_unit_test(

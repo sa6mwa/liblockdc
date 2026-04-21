@@ -32,7 +32,8 @@ typedef enum lc_consumer_delivery_state {
   LC_CONSUMER_DELIVERY_STATE_OPEN = 0,
   LC_CONSUMER_DELIVERY_STATE_EXTENDER_STOPPED = 1,
   LC_CONSUMER_DELIVERY_STATE_TERMINAL_IN_PROGRESS = 2,
-  LC_CONSUMER_DELIVERY_STATE_TERMINAL = 3
+  LC_CONSUMER_DELIVERY_STATE_TERMINAL = 3,
+  LC_CONSUMER_DELIVERY_STATE_TERMINAL_INDETERMINATE = 4
 } lc_consumer_delivery_state;
 
 typedef struct lc_consumer_delivery_bridge {
@@ -147,7 +148,8 @@ static long lc_consumer_auto_extend_delay_ms(long visibility_timeout_seconds) {
 
 static int
 lc_consumer_delivery_state_is_terminal(lc_consumer_delivery_state state) {
-  return state == LC_CONSUMER_DELIVERY_STATE_TERMINAL;
+  return state == LC_CONSUMER_DELIVERY_STATE_TERMINAL ||
+         state == LC_CONSUMER_DELIVERY_STATE_TERMINAL_INDETERMINATE;
 }
 
 static int
@@ -166,6 +168,39 @@ static void lc_consumer_delivery_mark_terminal(lc_consumer_delivery_bridge *brid
   bridge->state = LC_CONSUMER_DELIVERY_STATE_TERMINAL;
   pthread_cond_broadcast(&bridge->state_cond);
   pthread_mutex_unlock(&bridge->state_mutex);
+}
+
+static void lc_consumer_delivery_mark_terminal_indeterminate(
+    lc_consumer_delivery_bridge *bridge) {
+  pthread_mutex_lock(&bridge->state_mutex);
+  if (bridge->state == LC_CONSUMER_DELIVERY_STATE_TERMINAL_IN_PROGRESS) {
+    bridge->state = LC_CONSUMER_DELIVERY_STATE_TERMINAL_INDETERMINATE;
+  }
+  pthread_cond_broadcast(&bridge->state_cond);
+  pthread_mutex_unlock(&bridge->state_mutex);
+}
+
+static int lc_consumer_runtime_message_set_unavailable_error(
+    lc_consumer_runtime_message *runtime_message, lc_error *error) {
+  lc_consumer_delivery_state state;
+
+  if (runtime_message == NULL || runtime_message->bridge == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "message is no longer available", NULL, NULL, NULL);
+  }
+  pthread_mutex_lock(&runtime_message->bridge->state_mutex);
+  state = runtime_message->bridge->state;
+  pthread_mutex_unlock(&runtime_message->bridge->state_mutex);
+  if (state == LC_CONSUMER_DELIVERY_STATE_TERMINAL_IN_PROGRESS ||
+      state == LC_CONSUMER_DELIVERY_STATE_TERMINAL_INDETERMINATE) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "message terminal outcome is indeterminate after terminal action "
+        "failure; do not retry locally",
+        NULL, NULL, NULL);
+  }
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "message is no longer available", NULL, NULL, NULL);
 }
 
 static void
@@ -263,13 +298,13 @@ static int lc_consumer_runtime_message_ack(lc_message *self, lc_error *error) {
   }
   runtime_message = (lc_consumer_runtime_message *)self;
   if (runtime_message->inner == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "message is no longer available", NULL, NULL, NULL);
+    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
+                                                             error);
   }
   if (lc_consumer_runtime_message_begin_terminal_action(
           runtime_message->bridge)) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "message is no longer available", NULL, NULL, NULL);
+    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
+                                                             error);
   }
   pthread_mutex_lock(&runtime_message->bridge->op_mutex);
   rc = runtime_message->inner->ack(runtime_message->inner, error);
@@ -277,6 +312,8 @@ static int lc_consumer_runtime_message_ack(lc_message *self, lc_error *error) {
     runtime_message->inner = NULL;
     runtime_message->bridge->inner_message = NULL;
     lc_consumer_delivery_mark_terminal(runtime_message->bridge);
+  } else {
+    lc_consumer_delivery_mark_terminal_indeterminate(runtime_message->bridge);
   }
   pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
   return rc;
@@ -295,13 +332,13 @@ static int lc_consumer_runtime_message_nack(lc_message *self,
   }
   runtime_message = (lc_consumer_runtime_message *)self;
   if (runtime_message->inner == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "message is no longer available", NULL, NULL, NULL);
+    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
+                                                             error);
   }
   if (lc_consumer_runtime_message_begin_terminal_action(
           runtime_message->bridge)) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "message is no longer available", NULL, NULL, NULL);
+    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
+                                                             error);
   }
   pthread_mutex_lock(&runtime_message->bridge->op_mutex);
   rc = runtime_message->inner->nack(runtime_message->inner, req, error);
@@ -309,6 +346,8 @@ static int lc_consumer_runtime_message_nack(lc_message *self,
     runtime_message->inner = NULL;
     runtime_message->bridge->inner_message = NULL;
     lc_consumer_delivery_mark_terminal(runtime_message->bridge);
+  } else {
+    lc_consumer_delivery_mark_terminal_indeterminate(runtime_message->bridge);
   }
   pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
   return rc;
@@ -335,14 +374,14 @@ static int lc_consumer_runtime_message_extend(lc_message *self,
          lc_consumer_is_stop_requested(runtime_message->bridge->worker->service);
   pthread_mutex_unlock(&runtime_message->bridge->state_mutex);
   if (skip) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "message is no longer available", NULL, NULL, NULL);
+    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
+                                                             error);
   }
   pthread_mutex_lock(&runtime_message->bridge->op_mutex);
   if (runtime_message->inner == NULL) {
     pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "message is no longer available", NULL, NULL, NULL);
+    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
+                                                             error);
   }
   rc = runtime_message->inner->extend(runtime_message->inner, req, error);
   pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
