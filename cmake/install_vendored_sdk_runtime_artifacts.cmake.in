@@ -1,5 +1,11 @@
 function(lockdc_install_optional_glob destination pattern)
-    file(GLOB _matching_files "${pattern}")
+    file(GLOB _matching_files
+        "${pattern}"
+        "${pattern}@CMAKE_SHARED_LIBRARY_SUFFIX@"
+        "${pattern}@CMAKE_SHARED_LIBRARY_SUFFIX@*"
+        "${pattern}*@CMAKE_SHARED_LIBRARY_SUFFIX@"
+    )
+    list(REMOVE_DUPLICATES _matching_files)
     if(_matching_files)
         file(INSTALL
             DESTINATION "${CMAKE_INSTALL_PREFIX}/${destination}"
@@ -9,11 +15,11 @@ function(lockdc_install_optional_glob destination pattern)
     endif()
 endfunction()
 
-lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/pslog/install/lib/libpslog@CMAKE_SHARED_LIBRARY_SUFFIX@*")
-lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/curl/install/lib/libcurl@CMAKE_SHARED_LIBRARY_SUFFIX@*")
-lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/openssl/install/lib/libssl@CMAKE_SHARED_LIBRARY_SUFFIX@*")
-lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/openssl/install/lib/libcrypto@CMAKE_SHARED_LIBRARY_SUFFIX@*")
-lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/nghttp2/install/lib/libnghttp2@CMAKE_SHARED_LIBRARY_SUFFIX@*")
-lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/libssh2/install/lib/libssh2@CMAKE_SHARED_LIBRARY_SUFFIX@*")
-lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/zlib/install/lib/libz@CMAKE_SHARED_LIBRARY_SUFFIX@*")
-lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/lonejson/install/lib/liblonejson@CMAKE_SHARED_LIBRARY_SUFFIX@*")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/pslog/install/lib/libpslog")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/curl/install/lib/libcurl")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/openssl/install/lib/libssl")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/openssl/install/lib/libcrypto")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/nghttp2/install/lib/libnghttp2")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/libssh2/install/lib/libssh2")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/zlib/install/lib/libz")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/lonejson/install/lib/liblonejson")

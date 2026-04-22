@@ -276,17 +276,6 @@ endif()
 if(NOT LOCKDC_COVERAGE_RUNTIME_LIBRARY STREQUAL "")
     list(APPEND LOCKDC_SYSTEM_LIBRARIES "${LOCKDC_COVERAGE_RUNTIME_LIBRARY}")
 endif()
-configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/lockdcConfig.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/lockdcConfig.cmake"
-    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/lockdc"
-)
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/lockdcConfigVersion.cmake"
-    VERSION "${PROJECT_VERSION}"
-    COMPATIBILITY SameMajorVersion
-)
-
 set(LOCKDC_PUBLIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/lc/lc.h")
 set(LOCKDC_PUBLIC_VERSION_HEADER "${lc_generated_include_dir}/lc/version.h")
 
@@ -432,6 +421,9 @@ endif()
 set(LOCKDC_SHARED_LIB_NAME "")
 set(LOCKDC_SHARED_SONAME "")
 set(LOCKDC_SHARED_LINK_NAME "")
+set(LOCKDC_PACKAGE_METADATA_SHARED_LIB_NAME "")
+set(LOCKDC_PACKAGE_METADATA_SHARED_SONAME "")
+set(LOCKDC_PACKAGE_METADATA_SHARED_LINK_NAME "")
 set(LOCKDC_ACTIVE_C_FLAGS "${CMAKE_C_FLAGS}")
 set(LOCKDC_SANITIZER_INSTRUMENTED 0)
 
@@ -444,15 +436,28 @@ if(LOCKDC_ACTIVE_C_FLAGS MATCHES "(^|[ \t])-fsanitize=([^ \t,]+,)*(address|undef
 endif()
 
 if(TARGET lc_shared)
-    set(LOCKDC_SHARED_LIB_NAME "${CMAKE_SHARED_LIBRARY_PREFIX}lockdc${CMAKE_SHARED_LIBRARY_SUFFIX}.${PROJECT_VERSION}")
-    set(LOCKDC_SHARED_SONAME "${CMAKE_SHARED_LIBRARY_PREFIX}lockdc${CMAKE_SHARED_LIBRARY_SUFFIX}.${PROJECT_VERSION_MAJOR}")
     set(LOCKDC_SHARED_LINK_NAME "${CMAKE_SHARED_LIBRARY_PREFIX}lockdc${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    set(LOCKDC_PACKAGE_METADATA_SHARED_LIB_NAME "$<TARGET_FILE_NAME:lc_shared>")
+    set(LOCKDC_PACKAGE_METADATA_SHARED_SONAME "$<TARGET_SONAME_FILE_NAME:lc_shared>")
+    set(LOCKDC_PACKAGE_METADATA_SHARED_LINK_NAME "$<TARGET_LINKER_FILE_NAME:lc_shared>")
 endif()
 
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/package_metadata.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/package-metadata.cmake"
-    @ONLY
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/lockdcConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/lockdcConfig.cmake"
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/lockdc"
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/lockdcConfigVersion.cmake"
+    VERSION "${PROJECT_VERSION}"
+    COMPATIBILITY SameMajorVersion
+)
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cmake/package_metadata.cmake.in" LOCKDC_PACKAGE_METADATA_TEMPLATE)
+string(CONFIGURE "${LOCKDC_PACKAGE_METADATA_TEMPLATE}" LOCKDC_PACKAGE_METADATA_CONTENT @ONLY)
+file(GENERATE
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/package-metadata.cmake"
+    CONTENT "${LOCKDC_PACKAGE_METADATA_CONTENT}"
 )
 
 set(SOURCE_URL "git+https://github.com/sa6mwa/liblockdc.git")

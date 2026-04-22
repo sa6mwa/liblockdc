@@ -82,6 +82,8 @@ endforeach()
 
 file(READ "${runtime_helper_path}" runtime_helper_text)
 foreach(required_snippet
+    ".so*"
+    "*.so"
     "libpslog"
     "libcurl"
     "libssl"

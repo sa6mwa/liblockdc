@@ -5,10 +5,10 @@ include(CMakeFindDependencyMacro)
 set(lockdc_INCLUDE_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@")
 set(lockdc_LIBRARY_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
 
-if(NOT TARGET lockdc::shared AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.so")
+if(NOT TARGET lockdc::shared AND EXISTS "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@")
   add_library(lockdc::shared SHARED IMPORTED)
   set_target_properties(lockdc::shared PROPERTIES
-    IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/liblockdc.so"
+    IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@"
     INTERFACE_INCLUDE_DIRECTORIES "${lockdc_INCLUDE_DIR}"
   )
 endif()
