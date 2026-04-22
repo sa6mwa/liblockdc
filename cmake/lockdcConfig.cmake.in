@@ -6,10 +6,25 @@ set(lockdc_INCLUDE_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@")
 set(lockdc_LIBRARY_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
 
 if(NOT TARGET lockdc::shared AND NOT "@LOCKDC_SHARED_LINK_NAME@" STREQUAL "" AND EXISTS "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@")
+  set(_lockdc_shared_links)
+  file(GLOB _lockdc_lonejson_shared_candidates
+    LIST_DIRECTORIES false
+    "${lockdc_LIBRARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}lonejson${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    "${lockdc_LIBRARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}lonejson${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+    "${lockdc_LIBRARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}lonejson*${CMAKE_SHARED_LIBRARY_SUFFIX}"
+  )
+  list(SORT _lockdc_lonejson_shared_candidates)
+  if(_lockdc_lonejson_shared_candidates)
+    list(GET _lockdc_lonejson_shared_candidates 0 _lockdc_lonejson_shared)
+    list(APPEND _lockdc_shared_links "${_lockdc_lonejson_shared}")
+  else()
+    list(APPEND _lockdc_shared_links lonejson)
+  endif()
   add_library(lockdc::shared SHARED IMPORTED)
   set_target_properties(lockdc::shared PROPERTIES
     IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@"
     INTERFACE_INCLUDE_DIRECTORIES "${lockdc_INCLUDE_DIR}"
+    INTERFACE_LINK_LIBRARIES "${_lockdc_shared_links}"
   )
 endif()
 

@@ -200,14 +200,19 @@ file(WRITE "${consumer_src_dir}/test.c" [=[
 
 int main(void) {
     lc_client_config config;
+    lonejson_parse_options parse_options;
     lonejson_int64 marker;
     const char *version;
 
     marker = 42;
     lc_client_config_init(&config);
+    parse_options = lonejson_default_parse_options();
     version = lc_version_string();
     if (marker != 42) {
         return 20;
+    }
+    if (parse_options.max_depth <= 0) {
+        return 23;
     }
     if (version == NULL) {
         return 21;
@@ -228,6 +233,17 @@ int main(void) {
 
     value = 0;
     return lc_version_string() != 0 && value == 0 ? 0 : 1;
+}
+]=])
+
+file(WRITE "${consumer_src_dir}/pkgconfig_shared_main.c" [=[
+#include <lc/lc.h>
+
+int main(void) {
+    lonejson_parse_options parse_options;
+
+    parse_options = lonejson_default_parse_options();
+    return lc_version_string() != 0 && parse_options.max_depth > 0 ? 0 : 1;
 }
 ]=])
 
@@ -478,6 +494,62 @@ if(NOT lockdc_pkgconfig_build_result EQUAL 0)
         "libs: ${lockdc_pkgconfig_libs}\n"
         "stdout:\n${lockdc_pkgconfig_build_stdout}\n"
         "stderr:\n${lockdc_pkgconfig_build_stderr}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PKG_CONFIG_PATH=${release_prefix}/lib/pkgconfig"
+        "${LOCKDC_PKG_CONFIG_BIN}" --cflags lockdc
+    RESULT_VARIABLE lockdc_pkgconfig_shared_cflags_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_shared_cflags
+    ERROR_VARIABLE lockdc_pkgconfig_shared_cflags_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT lockdc_pkgconfig_shared_cflags_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to resolve pkg-config cflags for release tarball shared consumer\n"
+        "stdout:\n${lockdc_pkgconfig_shared_cflags}\n"
+        "stderr:\n${lockdc_pkgconfig_shared_cflags_stderr}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PKG_CONFIG_PATH=${release_prefix}/lib/pkgconfig"
+        "${LOCKDC_PKG_CONFIG_BIN}" --libs lockdc
+    RESULT_VARIABLE lockdc_pkgconfig_shared_libs_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_shared_libs
+    ERROR_VARIABLE lockdc_pkgconfig_shared_libs_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT lockdc_pkgconfig_shared_libs_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to resolve pkg-config libs for release tarball shared consumer\n"
+        "stdout:\n${lockdc_pkgconfig_shared_libs}\n"
+        "stderr:\n${lockdc_pkgconfig_shared_libs_stderr}")
+endif()
+
+separate_arguments(lockdc_pkgconfig_shared_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_shared_cflags}")
+separate_arguments(lockdc_pkgconfig_shared_libs_list UNIX_COMMAND "${lockdc_pkgconfig_shared_libs}")
+
+set(lockdc_pkgconfig_shared_consumer "${consumer_bin_dir}/release_tarball_pkgconfig_shared")
+execute_process(
+    COMMAND "${CMAKE_C_COMPILER}"
+        ${lockdc_pkgconfig_shared_cflags_list}
+        "${consumer_src_dir}/pkgconfig_shared_main.c"
+        -Wl,-rpath,${release_prefix}/lib
+        -o "${lockdc_pkgconfig_shared_consumer}"
+        ${lockdc_pkgconfig_shared_libs_list}
+    RESULT_VARIABLE lockdc_pkgconfig_shared_build_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_shared_build_stdout
+    ERROR_VARIABLE lockdc_pkgconfig_shared_build_stderr
+)
+if(NOT lockdc_pkgconfig_shared_build_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to build release tarball pkg-config shared consumer\n"
+        "cflags: ${lockdc_pkgconfig_shared_cflags}\n"
+        "libs: ${lockdc_pkgconfig_shared_libs}\n"
+        "stdout:\n${lockdc_pkgconfig_shared_build_stdout}\n"
+        "stderr:\n${lockdc_pkgconfig_shared_build_stderr}")
 endif()
 
 if(LOCKDC_TARGET_ID MATCHES "musl" AND LOCKDC_FILE_BIN)

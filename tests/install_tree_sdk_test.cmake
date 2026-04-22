@@ -96,8 +96,11 @@ project(lockdc_install_tree_consumer C)
 
 find_package(lockdc CONFIG REQUIRED)
 
-add_executable(lockdc_install_tree_consumer main.c)
-target_link_libraries(lockdc_install_tree_consumer PRIVATE lockdc::static)
+add_executable(lockdc_install_tree_consumer_static main.c)
+target_link_libraries(lockdc_install_tree_consumer_static PRIVATE lockdc::static)
+
+add_executable(lockdc_install_tree_consumer_shared main.c)
+target_link_libraries(lockdc_install_tree_consumer_shared PRIVATE lockdc::shared)
 ]=])
 
 file(WRITE "${consumer_src_dir}/main.c" [=[
@@ -105,11 +108,13 @@ file(WRITE "${consumer_src_dir}/main.c" [=[
 
 int main(void) {
     lc_client_config config;
+    lonejson_parse_options parse_options;
     lonejson_int64 value;
 
     value = 0;
     lc_client_config_init(&config);
-    return value == 0 ? 0 : 1;
+    parse_options = lonejson_default_parse_options();
+    return value == 0 && parse_options.max_depth > 0 ? 0 : 1;
 }
 ]=])
 
@@ -121,6 +126,17 @@ int main(void) {
 
     value = 0;
     return lc_version_string() != 0 && value == 0 ? 0 : 1;
+}
+]=])
+
+file(WRITE "${consumer_src_dir}/pkgconfig_shared_main.c" [=[
+#include <lc/lc.h>
+
+int main(void) {
+    lonejson_parse_options parse_options;
+
+    parse_options = lonejson_default_parse_options();
+    return lc_version_string() != 0 && parse_options.max_depth > 0 ? 0 : 1;
 }
 ]=])
 
@@ -151,6 +167,12 @@ if(NOT configure_result EQUAL 0)
         "stderr:\n${configure_stderr}")
 endif()
 
+find_program(LOCKDC_PKG_CONFIG_BIN NAMES pkg-config)
+find_program(LOCKDC_FILE_BIN NAMES file)
+if(NOT LOCKDC_PKG_CONFIG_BIN)
+    message(FATAL_ERROR "pkg-config is required for install-tree static SDK validation")
+endif()
+
 execute_process(
     COMMAND "${CMAKE_COMMAND}" --build "${consumer_bin_dir}"
     RESULT_VARIABLE build_result
@@ -164,10 +186,60 @@ if(NOT build_result EQUAL 0)
         "stderr:\n${build_stderr}")
 endif()
 
-find_program(LOCKDC_PKG_CONFIG_BIN NAMES pkg-config)
-find_program(LOCKDC_FILE_BIN NAMES file)
-if(NOT LOCKDC_PKG_CONFIG_BIN)
-    message(FATAL_ERROR "pkg-config is required for install-tree static SDK validation")
+set(lockdc_pkgconfig_shared_consumer "${consumer_bin_dir}/lockdc_install_tree_pkgconfig_shared")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PKG_CONFIG_PATH=${install_prefix}/lib/pkgconfig"
+        "${LOCKDC_PKG_CONFIG_BIN}" --cflags lockdc
+    RESULT_VARIABLE lockdc_pkgconfig_shared_cflags_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_shared_cflags
+    ERROR_VARIABLE lockdc_pkgconfig_shared_cflags_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT lockdc_pkgconfig_shared_cflags_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to resolve pkg-config cflags for shared install-tree consumer\n"
+        "stdout:\n${lockdc_pkgconfig_shared_cflags}\n"
+        "stderr:\n${lockdc_pkgconfig_shared_cflags_stderr}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PKG_CONFIG_PATH=${install_prefix}/lib/pkgconfig"
+        "${LOCKDC_PKG_CONFIG_BIN}" --libs lockdc
+    RESULT_VARIABLE lockdc_pkgconfig_shared_libs_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_shared_libs
+    ERROR_VARIABLE lockdc_pkgconfig_shared_libs_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT lockdc_pkgconfig_shared_libs_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to resolve pkg-config libs for shared install-tree consumer\n"
+        "stdout:\n${lockdc_pkgconfig_shared_libs}\n"
+        "stderr:\n${lockdc_pkgconfig_shared_libs_stderr}")
+endif()
+
+separate_arguments(lockdc_pkgconfig_shared_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_shared_cflags}")
+separate_arguments(lockdc_pkgconfig_shared_libs_list UNIX_COMMAND "${lockdc_pkgconfig_shared_libs}")
+
+execute_process(
+    COMMAND "${LOCKDC_C_COMPILER}"
+        ${lockdc_pkgconfig_shared_cflags_list}
+        "${consumer_src_dir}/pkgconfig_shared_main.c"
+        -Wl,-rpath,${install_prefix}/lib
+        -o "${lockdc_pkgconfig_shared_consumer}"
+        ${lockdc_pkgconfig_shared_libs_list}
+    RESULT_VARIABLE lockdc_pkgconfig_shared_build_result
+    OUTPUT_VARIABLE lockdc_pkgconfig_shared_build_stdout
+    ERROR_VARIABLE lockdc_pkgconfig_shared_build_stderr
+)
+if(NOT lockdc_pkgconfig_shared_build_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to build install-tree pkg-config shared consumer\n"
+        "cflags: ${lockdc_pkgconfig_shared_cflags}\n"
+        "libs: ${lockdc_pkgconfig_shared_libs}\n"
+        "stdout:\n${lockdc_pkgconfig_shared_build_stdout}\n"
+        "stderr:\n${lockdc_pkgconfig_shared_build_stderr}")
 endif()
 
 execute_process(

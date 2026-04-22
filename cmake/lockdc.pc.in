@@ -7,5 +7,5 @@ Name: lockdc
 Description: lockd client library for C
 Version: @PROJECT_VERSION@
 Cflags: -I${includedir}
-Libs: -L${libdir} -llockdc
+Libs: -L${libdir} -llockdc -llonejson
 Libs.private: -L${libdir} -lpslog -llonejson -lcurl -lssh2 -lz -lssl -lcrypto -lnghttp2 -lpthread @LOCKDC_PC_PRIVATE_EXTRA_LIBS@

@@ -480,7 +480,7 @@ set(LOCKDC_LUA_LIBRARY "")
 if(LOCKDC_BUILD_LUA_BINDINGS)
     find_path(LOCKDC_LUA_INCLUDE_DIR
         NAMES lua.h
-        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 include/lua5.4 include/lua-5.4 include/lua5.3 include/lua-5.3 include/lua lua5.5 lua-5.5 lua5.4 lua-5.4 lua5.3 lua-5.3 lua
+        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 include/lua lua5.5 lua-5.5 lua
         PATHS /usr/local /usr /usr/local/include /usr/include
     )
     if("${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "" AND EXISTS "/usr/local/include/lua.h")
@@ -488,7 +488,7 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     endif()
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
         find_library(LOCKDC_LUA_LIBRARY
-            NAMES lua5.5 lua-5.5 lua55 lua5.4 lua-5.4 lua54 lua5.3 lua-5.3 lua53 lua
+            NAMES lua5.5 lua-5.5 lua55 lua
             PATH_SUFFIXES lib lib64
             PATHS /usr/local /usr /opt/local
         )
