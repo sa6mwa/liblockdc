@@ -225,6 +225,10 @@ stage_dependency_license() {
   cp "$source_path" "$destination_path"
 }
 
+prune_dependency_install_trees() {
+  cmake -DLOCKDC_EXTERNAL_ROOT="$deps_root" -P "$repo_root/cmake/prune_dependency_install_tree.cmake"
+}
+
 reset_dependency_build_root() {
   local attempt=1
 
@@ -289,6 +293,7 @@ done
 if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ]; then
   existing_manifest=$(cat "$manifest_path")
   if [ "$existing_manifest" = "$manifest" ]; then
+    prune_dependency_install_trees
     exit 0
   fi
 
@@ -298,6 +303,7 @@ if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ]; then
       && [ "$(manifest_value version "$manifest_path")" = "$compiler_version" ] \
       && [ "$(manifest_value preset "$manifest_path")" = "$preset" ] \
       && [ "$(manifest_value zlib_version "$manifest_path")" = "$zlib_version" ]; then
+      prune_dependency_install_trees
       printf '%s\n' "$manifest" > "$manifest_path"
       exit 0
     fi
@@ -315,5 +321,5 @@ stage_dependency_license "zlib" "zlib" "$deps_build_root/zlib/src/LICENSE"
 stage_dependency_license "pslog" "libpslog" "$deps_root/pslog/install/share/doc/libpslog/LICENSE"
 stage_dependency_license "nghttp2" "nghttp2" "$deps_build_root/nghttp2/src/COPYING"
 stage_dependency_license "lonejson" "lonejson" "$deps_root/lonejson/install/share/doc/liblonejson/LICENSE"
-cmake -DLOCKDC_EXTERNAL_ROOT="$deps_root" -P "$repo_root/cmake/prune_dependency_install_tree.cmake"
+prune_dependency_install_trees
 printf '%s\n' "$manifest" > "$manifest_path"
