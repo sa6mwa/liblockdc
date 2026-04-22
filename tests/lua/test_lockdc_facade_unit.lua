@@ -24,6 +24,9 @@ local function make_lonejson_stub()
       end,
       decode = function(_, text)
         local payload = assert(text:match('^%{"value":(.*)%}$'), 'decode payload missing wrapper')
+        if payload == 'null' then
+          return { value = nil }
+        end
         return { value = payload }
       end,
     }
@@ -65,6 +68,7 @@ local function test_json_helpers()
   assert_eq(lockdc.version_string(), 'test-version', 'version_string should delegate to core')
   assert_eq(lockdc.encode_json('123'), '123', 'encode_json should strip wrapper envelope')
   assert_eq(lockdc.decode_json('{"k":1}'), '{"k":1}', 'decode_json should unwrap envelope payload')
+  assert_eq(lockdc.decode_json('null'), lockdc.json_null, 'decode_json should preserve top-level JSON null')
 end
 
 local function test_request_flattening_and_default_content_type()
@@ -423,8 +427,47 @@ local function test_watch_queue_change_detection()
   assert_truthy(sleep_calls >= 1, 'watch_queue should sleep between polls')
 end
 
+local function test_json_null_roundtrip_helpers()
+  local client_core = {
+    get = function()
+      return 'null', { etag = 'etag-1' }
+    end,
+    dequeue = function()
+      return {
+        info = function()
+          return {
+            namespace_name = 'default',
+            queue = 'jobs',
+            message_id = 'msg-1',
+          }
+        end,
+        payload = function()
+          return 'null', 4
+        end,
+        close = function() end,
+      }
+    end,
+    close = function() end,
+  }
+
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  local value, meta = client:get_json({ key = 'state-key' })
+  assert_eq(value, lockdc.json_null, 'client:get_json should preserve top-level JSON null')
+  assert_eq(meta.etag, 'etag-1', 'client:get_json should still return metadata')
+
+  local message = assert(client:dequeue({ queue = 'jobs' }))
+  local payload, written = message:payload_json()
+  assert_eq(payload, lockdc.json_null, 'message:payload_json should preserve top-level JSON null')
+  assert_eq(written, 4, 'message:payload_json should preserve byte count')
+end
+
 test_json_helpers()
 test_request_flattening_and_default_content_type()
 test_subscribe_ack_and_error_paths()
 test_subscribe_with_state_and_service_lifecycle()
 test_watch_queue_change_detection()
+test_json_null_roundtrip_helpers()

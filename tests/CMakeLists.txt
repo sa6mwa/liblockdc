@@ -72,6 +72,12 @@ add_test(NAME packaging_portability_source_test
     -P "${CMAKE_SOURCE_DIR}/tests/packaging_portability_source_test.cmake"
 )
 
+add_test(NAME coverage_pkgconfig_metadata_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/coverage_pkgconfig_metadata_test.cmake"
+)
+
 set(LOCKDC_LUA_TEST_ENV_COMMON "")
 set(lockdc_lua_test_sanitizer_flags "${CMAKE_C_FLAGS}")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

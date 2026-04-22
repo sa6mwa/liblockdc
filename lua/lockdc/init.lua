@@ -19,6 +19,12 @@ Message.__index = Message
 local Service = {}
 Service.__index = Service
 
+local JSON_NULL = setmetatable({}, {
+  __tostring = function()
+    return "lockdc.json_null"
+  end,
+})
+
 local function wrap_client(core_client)
   return setmetatable({ _core = core_client }, Client)
 end
@@ -50,6 +56,9 @@ end
 
 local function decode_json(payload)
   local doc = JsonEnvelope:decode('{"value":' .. payload .. "}")
+  if doc.value == nil then
+    return JSON_NULL
+  end
   return doc.value
 end
 
@@ -151,6 +160,8 @@ end
 function M.version_string()
   return core.version_string()
 end
+
+M.json_null = JSON_NULL
 
 function M.open(config)
   local client, err = core.open(config)

@@ -71,6 +71,7 @@ Primary entrypoints:
 - `lockdc.version_string()`
 - `lockdc.encode_json(value)`
 - `lockdc.decode_json(payload)`
+- `lockdc.json_null`
 
 Primary handle types:
 
@@ -188,6 +189,10 @@ Use:
 These helpers are for idiomatic Lua workflow code. They do not replace the
 mapped `lonejson` APIs in the C SDK; they sit on top of the public `liblockdc`
 JSON transport surface.
+
+Top-level JSON `null` is returned as `lockdc.json_null`. That keeps successful
+JSON `null` payloads distinct from the binding's existing `nil, err` and
+`nil, meta` return conventions.
 
 ## Consumer model
 

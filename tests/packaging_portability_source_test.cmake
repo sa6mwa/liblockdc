@@ -13,6 +13,11 @@ if(NOT lockdc_config_template_text MATCHES "@LOCKDC_SHARED_LINK_NAME@")
         "installed CMake package template does not use the platform-aware shared linker name placeholder\n"
         "template:\n${lockdc_config_template_text}")
 endif()
+if(NOT lockdc_config_template_text MATCHES "NOT \"@LOCKDC_SHARED_LINK_NAME@\" STREQUAL \"\"")
+    message(FATAL_ERROR
+        "installed CMake package template does not guard against static-only SDK exports creating a bogus shared target\n"
+        "template:\n${lockdc_config_template_text}")
+endif()
 
 file(READ "${LOCKDC_ROOT}/CMakeLists.txt" lockdc_root_cmake_text)
 foreach(forbidden_snippet
