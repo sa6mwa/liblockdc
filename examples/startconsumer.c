@@ -1,7 +1,7 @@
 #include "lc/lc.h"
 #include "pslog.h"
-#include <yajl/yajl_tree.h>
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +28,25 @@ typedef struct startconsumer_context {
   size_t counter_count;
 } startconsumer_context;
 
+typedef struct example_counter_doc {
+  lonejson_int64 counter;
+} example_counter_doc;
+
+typedef struct example_hello_doc {
+  char *hello;
+} example_hello_doc;
+
+static const lonejson_field example_counter_fields[] = {
+    LONEJSON_FIELD_I64(example_counter_doc, counter, "counter")};
+
+LONEJSON_MAP_DEFINE(example_counter_map, example_counter_doc,
+                    example_counter_fields);
+
+static const lonejson_field example_hello_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(example_hello_doc, hello, "hello")};
+
+LONEJSON_MAP_DEFINE(example_hello_map, example_hello_doc, example_hello_fields);
+
 static int fail_with_error(pslog_logger *logger, const char *step,
                            lc_error *error) {
   logger->errorf(logger, step, "code=%d http_status=%ld message=%s detail=%s",
@@ -38,56 +57,12 @@ static int fail_with_error(pslog_logger *logger, const char *step,
   return 1;
 }
 
-static int parse_counter_json(const char *json_text, long *counter_out) {
-  static const char *path_counter[] = {"counter", NULL};
-  yajl_val root;
-  yajl_val value;
-  long parsed;
-  char *endptr;
-  const char *number_text;
-  char errbuf[256];
-
-  if (counter_out == NULL) {
-    return 1;
-  }
-  *counter_out = 0L;
-  if (json_text == NULL || json_text[0] == '\0' ||
-      strcmp(json_text, "{}") == 0 || strcmp(json_text, "null") == 0) {
-    return 0;
-  }
-  memset(errbuf, 0, sizeof(errbuf));
-  root = yajl_tree_parse(json_text, errbuf, sizeof(errbuf));
-  if (root == NULL) {
-    return 1;
-  }
-  value = yajl_tree_get(root, path_counter, yajl_t_number);
-  if (value == NULL || YAJL_GET_NUMBER(value) == NULL) {
-    yajl_tree_free(root);
-    return 1;
-  }
-  number_text = YAJL_GET_NUMBER(value);
-  if (number_text == NULL || number_text[0] == '\0') {
-    yajl_tree_free(root);
-    return 1;
-  }
-  parsed = strtol(number_text, &endptr, 10);
-  if (endptr == NULL || *endptr != '\0') {
-    yajl_tree_free(root);
-    return 1;
-  }
-  *counter_out = parsed;
-  yajl_tree_free(root);
-  return 0;
-}
-
 static int parse_hello_json(const char *json_text, char *hello_out,
                             size_t hello_out_size) {
-  static const char *path_hello[] = {"hello", NULL};
-  yajl_val root;
-  yajl_val value;
-  const char *hello_text;
+  example_hello_doc parsed;
+  lonejson_error error;
+  lonejson_status status;
   size_t hello_length;
-  char errbuf[256];
 
   if (hello_out == NULL || hello_out_size == 0U) {
     return 1;
@@ -96,31 +71,27 @@ static int parse_hello_json(const char *json_text, char *hello_out,
   if (json_text == NULL || json_text[0] == '\0') {
     return 1;
   }
-  memset(errbuf, 0, sizeof(errbuf));
-  root = yajl_tree_parse(json_text, errbuf, sizeof(errbuf));
-  if (root == NULL) {
+  memset(&parsed, 0, sizeof(parsed));
+  memset(&error, 0, sizeof(error));
+  status =
+      lonejson_parse_cstr(&example_hello_map, &parsed, json_text, NULL, &error);
+  if (status != LONEJSON_STATUS_OK || parsed.hello == NULL) {
+    lonejson_cleanup(&example_hello_map, &parsed);
     return 1;
   }
-  value = yajl_tree_get(root, path_hello, yajl_t_string);
-  if (value == NULL || YAJL_GET_STRING(value) == NULL) {
-    yajl_tree_free(root);
-    return 1;
-  }
-  hello_text = YAJL_GET_STRING(value);
-  hello_length = strlen(hello_text);
+  hello_length = strlen(parsed.hello);
   if (hello_length >= hello_out_size) {
     hello_length = hello_out_size - 1U;
   }
-  memcpy(hello_out, hello_text, hello_length);
+  memcpy(hello_out, parsed.hello, hello_length);
   hello_out[hello_length] = '\0';
-  yajl_tree_free(root);
+  lonejson_cleanup(&example_hello_map, &parsed);
   return 0;
 }
 
 static int load_state_counter(lc_lease *state, long *counter_out,
                               lc_error *error) {
-  char *json_text;
-  size_t json_length;
+  example_counter_doc doc;
   lc_get_res get_res;
   int rc;
 
@@ -133,10 +104,10 @@ static int load_state_counter(lc_lease *state, long *counter_out,
     return LC_ERR_INVALID;
   }
 
-  json_text = NULL;
-  json_length = 0U;
+  memset(&doc, 0, sizeof(doc));
   memset(&get_res, 0, sizeof(get_res));
-  rc = state->load(state, &json_text, &json_length, NULL, &get_res, error);
+  rc = state->load(state, &example_counter_map, &doc, NULL, NULL, &get_res,
+                   error);
   if (rc != LC_OK) {
     if (error != NULL &&
         (error->http_status == 204L || error->http_status == 404L)) {
@@ -149,11 +120,16 @@ static int load_state_counter(lc_lease *state, long *counter_out,
     return rc;
   }
 
-  rc =
-      parse_counter_json(json_text, counter_out) == 0 ? LC_OK : LC_ERR_PROTOCOL;
-  free(json_text);
+  if (doc.counter < (lonejson_int64)LONG_MIN ||
+      doc.counter > (lonejson_int64)LONG_MAX) {
+    lonejson_cleanup(&example_counter_map, &doc);
+    lc_get_res_cleanup(&get_res);
+    return LC_ERR_PROTOCOL;
+  }
+  *counter_out = (long)doc.counter;
+  lonejson_cleanup(&example_counter_map, &doc);
   lc_get_res_cleanup(&get_res);
-  return rc;
+  return LC_OK;
 }
 
 static void record_counter(startconsumer_context *context, long counter) {
@@ -192,6 +168,7 @@ static int handle_message(void *context, lc_consumer_message *delivery,
   char state_json[64];
   char payload_text[128];
   char hello_value[64];
+  example_counter_doc counter_doc;
   lc_nack_req nack;
   int rc;
 
@@ -262,7 +239,9 @@ static int handle_message(void *context, lc_consumer_message *delivery,
   counter += 1L;
   record_counter(example, counter);
   snprintf(state_json, sizeof(state_json), "{\"counter\":%ld}", counter);
-  rc = delivery->state->save(delivery->state, state_json, error);
+  counter_doc.counter = (lonejson_int64)counter;
+  rc = delivery->state->save(delivery->state, &example_counter_map,
+                             &counter_doc, NULL, error);
   if (rc != LC_OK) {
     return rc;
   }

@@ -31,12 +31,7 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "LOCKDC_BUILD_EXAMPLES": "ON",
-        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/host-debug",
-        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/host-debug",
-        "LOCKDC_TARGET_ARCH": "x86_64",
-        "LOCKDC_TARGET_OS": "linux",
-        "LOCKDC_TARGET_LIBC": "gnu"
+        "LOCKDC_BUILD_EXAMPLES": "ON"
       }
     },
     {

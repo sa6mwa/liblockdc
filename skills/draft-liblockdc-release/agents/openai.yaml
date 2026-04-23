@@ -1,0 +1,4 @@
+interface:
+  display_name: "Draft liblockdc Release"
+  short_description: "Validate and draft a GitHub release"
+  default_prompt: "Use $draft-liblockdc-release to validate the tagged liblockdc release, draft it on GitHub, and optionally publish it."

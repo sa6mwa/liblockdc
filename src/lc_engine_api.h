@@ -1,5 +1,15 @@
-#ifndef LC_ENGINE_LEGACY_API_H
-#define LC_ENGINE_LEGACY_API_H
+#ifndef LC_ENGINE_INTERNAL_API_H
+#define LC_ENGINE_INTERNAL_API_H
+
+/*
+ * Private implementation interface for the built-in HTTP transport.
+ *
+ * This is not a second public API. The only supported public client contract is
+ * declared in include/lc/lc.h. Everything in this header is internal plumbing
+ * used by the concrete SDK implementation under src/.
+ */
+
+#include "lc/lc.h"
 
 #include <pslog.h>
 #include <stddef.h>
@@ -12,6 +22,7 @@ typedef void *(*lc_engine_realloc_fn)(void *context, void *ptr, size_t size);
 typedef void (*lc_engine_free_fn)(void *context, void *ptr);
 typedef size_t (*lc_engine_read_callback)(void *context, void *buffer,
                                           size_t count, lc_engine_error *error);
+typedef int (*lc_engine_reset_callback)(void *context, lc_engine_error *error);
 typedef int (*lc_engine_write_callback)(void *context, const void *bytes,
                                         size_t count, lc_engine_error *error);
 
@@ -41,6 +52,7 @@ typedef struct lc_engine_client_config {
   int disable_mtls;
   int insecure_skip_verify;
   int prefer_http_2;
+  size_t http_json_response_limit_bytes;
   pslog_logger *logger;
   int disable_logger_sys_field;
   lc_engine_allocator allocator;
@@ -63,8 +75,8 @@ typedef struct lc_engine_acquire_request {
   const char *namespace_name;
   const char *key;
   const char *owner;
-  long ttl_seconds;
-  long block_seconds;
+  lonejson_int64 ttl_seconds;
+  lonejson_int64 block_seconds;
   int if_not_exists;
   const char *txn_id;
 } lc_engine_acquire_request;
@@ -75,10 +87,10 @@ typedef struct lc_engine_acquire_response {
   char *owner;
   char *lease_id;
   char *txn_id;
-  long lease_expires_at_unix;
-  long version;
+  lonejson_int64 lease_expires_at_unix;
+  lonejson_int64 version;
   char *state_etag;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   char *correlation_id;
 } lc_engine_acquire_response;
 
@@ -86,7 +98,7 @@ typedef struct lc_engine_get_request {
   const char *namespace_name;
   const char *key;
   const char *lease_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   int public_read;
 } lc_engine_get_request;
 
@@ -96,8 +108,8 @@ typedef struct lc_engine_get_response {
   int no_content;
   char *content_type;
   char *etag;
-  long version;
-  long fencing_token;
+  lonejson_int64 version;
+  lonejson_int64 fencing_token;
   char *correlation_id;
 } lc_engine_get_response;
 
@@ -105,8 +117,8 @@ typedef struct lc_engine_get_stream_response {
   int no_content;
   char *content_type;
   char *etag;
-  long version;
-  long fencing_token;
+  lonejson_int64 version;
+  lonejson_int64 fencing_token;
   char *correlation_id;
 } lc_engine_get_stream_response;
 
@@ -115,13 +127,13 @@ typedef struct lc_engine_keepalive_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long ttl_seconds;
-  long fencing_token;
+  lonejson_int64 ttl_seconds;
+  lonejson_int64 fencing_token;
 } lc_engine_keepalive_request;
 
 typedef struct lc_engine_keepalive_response {
-  long lease_expires_at_unix;
-  long version;
+  lonejson_int64 lease_expires_at_unix;
+  lonejson_int64 version;
   char *state_etag;
   char *correlation_id;
 } lc_engine_keepalive_response;
@@ -131,7 +143,7 @@ typedef struct lc_engine_release_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   int rollback;
 } lc_engine_release_request;
 
@@ -145,9 +157,9 @@ typedef struct lc_engine_update_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   const char *if_state_etag;
-  long if_version;
+  lonejson_int64 if_version;
   int has_if_version;
   const void *body;
   size_t body_length;
@@ -155,9 +167,9 @@ typedef struct lc_engine_update_request {
 } lc_engine_update_request;
 
 typedef struct lc_engine_update_response {
-  long new_version;
+  lonejson_int64 new_version;
   char *new_state_etag;
-  long bytes;
+  lonejson_int64 bytes;
   char *correlation_id;
 } lc_engine_update_response;
 
@@ -166,18 +178,18 @@ typedef struct lc_engine_mutate_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   const char *if_state_etag;
-  long if_version;
+  lonejson_int64 if_version;
   int has_if_version;
   const char *const *mutations;
   size_t mutation_count;
 } lc_engine_mutate_request;
 
 typedef struct lc_engine_mutate_response {
-  long new_version;
+  lonejson_int64 new_version;
   char *new_state_etag;
-  long bytes;
+  lonejson_int64 bytes;
   char *correlation_id;
 } lc_engine_mutate_response;
 
@@ -186,8 +198,8 @@ typedef struct lc_engine_metadata_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
-  long if_version;
+  lonejson_int64 fencing_token;
+  lonejson_int64 if_version;
   int has_if_version;
   int has_query_hidden;
   int query_hidden;
@@ -196,7 +208,7 @@ typedef struct lc_engine_metadata_request {
 typedef struct lc_engine_metadata_response {
   char *namespace_name;
   char *key;
-  long version;
+  lonejson_int64 version;
   int has_query_hidden;
   int query_hidden;
   char *correlation_id;
@@ -207,15 +219,15 @@ typedef struct lc_engine_remove_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   const char *if_state_etag;
-  long if_version;
+  lonejson_int64 if_version;
   int has_if_version;
 } lc_engine_remove_request;
 
 typedef struct lc_engine_remove_response {
   int removed;
-  long new_version;
+  lonejson_int64 new_version;
   char *correlation_id;
 } lc_engine_remove_response;
 
@@ -229,10 +241,10 @@ typedef struct lc_engine_describe_response {
   char *key;
   char *owner;
   char *lease_id;
-  long expires_at_unix;
-  long version;
+  lonejson_int64 expires_at_unix;
+  lonejson_int64 version;
   char *state_etag;
-  long updated_at_unix;
+  lonejson_int64 updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   char *correlation_id;
@@ -241,14 +253,13 @@ typedef struct lc_engine_describe_response {
 typedef struct lc_engine_query_request {
   const char *namespace_name;
   const char *selector_json;
-  long limit;
+  lonejson_int64 limit;
   const char *cursor;
   const char *fields_json;
   const char *return_mode;
 } lc_engine_query_request;
 
 typedef struct lc_engine_query_response {
-  char *raw_json;
   char *cursor;
   unsigned long index_seq;
   char *correlation_id;
@@ -266,11 +277,9 @@ typedef struct lc_engine_query_stream_response {
 typedef struct lc_engine_enqueue_request {
   const char *namespace_name;
   const char *queue;
-  const void *payload;
-  size_t payload_length;
-  long delay_seconds;
-  long visibility_timeout_seconds;
-  long ttl_seconds;
+  lonejson_int64 delay_seconds;
+  lonejson_int64 visibility_timeout_seconds;
+  lonejson_int64 ttl_seconds;
   int max_attempts;
   const char *payload_content_type;
 } lc_engine_enqueue_request;
@@ -282,9 +291,9 @@ typedef struct lc_engine_enqueue_response {
   int attempts;
   int max_attempts;
   int failure_attempts;
-  long not_visible_until_unix;
-  long visibility_timeout_seconds;
-  long payload_bytes;
+  lonejson_int64 not_visible_until_unix;
+  lonejson_int64 visibility_timeout_seconds;
+  lonejson_int64 payload_bytes;
   char *correlation_id;
 } lc_engine_enqueue_response;
 
@@ -293,8 +302,8 @@ typedef struct lc_engine_dequeue_request {
   const char *queue;
   const char *owner;
   const char *txn_id;
-  long visibility_timeout_seconds;
-  long wait_seconds;
+  lonejson_int64 visibility_timeout_seconds;
+  lonejson_int64 wait_seconds;
   int page_size;
   const char *start_after;
 } lc_engine_dequeue_request;
@@ -306,21 +315,21 @@ typedef struct lc_engine_dequeue_response {
   int attempts;
   int max_attempts;
   int failure_attempts;
-  long not_visible_until_unix;
-  long visibility_timeout_seconds;
+  lonejson_int64 not_visible_until_unix;
+  lonejson_int64 visibility_timeout_seconds;
   char *payload_content_type;
-  unsigned char *payload;
+  lc_source *payload;
   size_t payload_length;
   char *correlation_id;
   char *lease_id;
-  long lease_expires_at_unix;
-  long fencing_token;
+  lonejson_int64 lease_expires_at_unix;
+  lonejson_int64 fencing_token;
   char *txn_id;
   char *meta_etag;
   char *state_etag;
   char *state_lease_id;
-  long state_lease_expires_at_unix;
-  long state_fencing_token;
+  lonejson_int64 state_lease_expires_at_unix;
+  lonejson_int64 state_fencing_token;
   char *state_txn_id;
   char *next_cursor;
 } lc_engine_dequeue_response;
@@ -339,9 +348,9 @@ typedef struct lc_engine_queue_stats_response {
   int has_active_watcher;
   int available;
   char *head_message_id;
-  long head_enqueued_at_unix;
-  long head_not_visible_until_unix;
-  long head_age_seconds;
+  lonejson_int64 head_enqueued_at_unix;
+  lonejson_int64 head_not_visible_until_unix;
+  lonejson_int64 head_age_seconds;
   char *correlation_id;
 } lc_engine_queue_stats_response;
 
@@ -351,11 +360,11 @@ typedef struct lc_engine_queue_ack_request {
   const char *message_id;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   const char *meta_etag;
   const char *state_etag;
   const char *state_lease_id;
-  long state_fencing_token;
+  lonejson_int64 state_fencing_token;
 } lc_engine_queue_ack_request;
 
 typedef struct lc_engine_queue_ack_response {
@@ -369,14 +378,14 @@ typedef struct lc_engine_queue_nack_request {
   const char *message_id;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   const char *meta_etag;
   const char *state_etag;
-  long delay_seconds;
+  lonejson_int64 delay_seconds;
   const char *intent;
   const char *last_error_json;
   const char *state_lease_id;
-  long state_fencing_token;
+  lonejson_int64 state_fencing_token;
 } lc_engine_queue_nack_request;
 
 typedef struct lc_engine_queue_nack_response {
@@ -391,11 +400,11 @@ typedef struct lc_engine_queue_extend_request {
   const char *message_id;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   const char *meta_etag;
-  long extend_by_seconds;
+  lonejson_int64 extend_by_seconds;
   const char *state_lease_id;
-  long state_fencing_token;
+  lonejson_int64 state_fencing_token;
 } lc_engine_queue_extend_request;
 
 typedef struct lc_engine_queue_extend_response {
@@ -414,11 +423,11 @@ typedef struct lc_engine_attachment_selector {
 typedef struct lc_engine_attachment_info {
   char *id;
   char *name;
-  long size;
+  lonejson_int64 size;
   char *plaintext_sha256;
   char *content_type;
-  long created_at_unix;
-  long updated_at_unix;
+  lonejson_int64 created_at_unix;
+  lonejson_int64 updated_at_unix;
 } lc_engine_attachment_info;
 
 typedef struct lc_engine_attach_request {
@@ -426,10 +435,10 @@ typedef struct lc_engine_attach_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   const char *name;
   const char *content_type;
-  long max_bytes;
+  lonejson_int64 max_bytes;
   int has_max_bytes;
   int prevent_overwrite;
 } lc_engine_attach_request;
@@ -437,7 +446,7 @@ typedef struct lc_engine_attach_request {
 typedef struct lc_engine_attach_response {
   lc_engine_attachment_info attachment;
   int noop;
-  long version;
+  lonejson_int64 version;
   char *correlation_id;
 } lc_engine_attach_response;
 
@@ -446,7 +455,7 @@ typedef struct lc_engine_list_attachments_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   int public_read;
 } lc_engine_list_attachments_request;
 
@@ -463,7 +472,7 @@ typedef struct lc_engine_get_attachment_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   int public_read;
   lc_engine_attachment_selector selector;
 } lc_engine_get_attachment_request;
@@ -478,13 +487,13 @@ typedef struct lc_engine_delete_attachment_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
   lc_engine_attachment_selector selector;
 } lc_engine_delete_attachment_request;
 
 typedef struct lc_engine_delete_attachment_response {
   int deleted;
-  long version;
+  lonejson_int64 version;
   char *correlation_id;
 } lc_engine_delete_attachment_response;
 
@@ -493,12 +502,12 @@ typedef struct lc_engine_delete_all_attachments_request {
   const char *key;
   const char *lease_id;
   const char *txn_id;
-  long fencing_token;
+  lonejson_int64 fencing_token;
 } lc_engine_delete_all_attachments_request;
 
 typedef struct lc_engine_delete_all_attachments_response {
   int deleted;
-  long version;
+  lonejson_int64 version;
   char *correlation_id;
 } lc_engine_delete_all_attachments_response;
 
@@ -512,7 +521,7 @@ typedef struct lc_engine_queue_watch_event {
   char *queue;
   int available;
   char *head_message_id;
-  long changed_at_unix;
+  lonejson_int64 changed_at_unix;
   char *correlation_id;
 } lc_engine_queue_watch_event;
 
@@ -592,8 +601,8 @@ typedef struct lc_engine_txn_decision_request {
   const char *state;
   const lc_engine_txn_participant *participants;
   size_t participant_count;
-  long expires_at_unix;
-  unsigned long tc_term;
+  lonejson_int64 expires_at_unix;
+  lonejson_int64 tc_term;
   const char *target_backend_hash;
 } lc_engine_txn_decision_request;
 
@@ -606,37 +615,37 @@ typedef struct lc_engine_txn_decision_response {
 typedef struct lc_engine_tc_lease_acquire_request {
   const char *candidate_id;
   const char *candidate_endpoint;
-  unsigned long term;
-  long ttl_ms;
+  lonejson_int64 term;
+  lonejson_int64 ttl_ms;
 } lc_engine_tc_lease_acquire_request;
 
 typedef struct lc_engine_tc_lease_acquire_response {
   int granted;
   char *leader_id;
   char *leader_endpoint;
-  unsigned long term;
-  long expires_at_unix;
+  lonejson_int64 term;
+  lonejson_int64 expires_at_unix;
   char *correlation_id;
 } lc_engine_tc_lease_acquire_response;
 
 typedef struct lc_engine_tc_lease_renew_request {
   const char *leader_id;
-  unsigned long term;
-  long ttl_ms;
+  lonejson_int64 term;
+  lonejson_int64 ttl_ms;
 } lc_engine_tc_lease_renew_request;
 
 typedef struct lc_engine_tc_lease_renew_response {
   int renewed;
   char *leader_id;
   char *leader_endpoint;
-  unsigned long term;
-  long expires_at_unix;
+  lonejson_int64 term;
+  lonejson_int64 expires_at_unix;
   char *correlation_id;
 } lc_engine_tc_lease_renew_response;
 
 typedef struct lc_engine_tc_lease_release_request {
   const char *leader_id;
-  unsigned long term;
+  lonejson_int64 term;
 } lc_engine_tc_lease_release_request;
 
 typedef struct lc_engine_tc_lease_release_response {
@@ -647,8 +656,8 @@ typedef struct lc_engine_tc_lease_release_response {
 typedef struct lc_engine_tc_leader_response {
   char *leader_id;
   char *leader_endpoint;
-  unsigned long term;
-  long expires_at_unix;
+  lonejson_int64 term;
+  lonejson_int64 expires_at_unix;
   char *correlation_id;
 } lc_engine_tc_leader_response;
 
@@ -658,8 +667,8 @@ typedef struct lc_engine_tc_cluster_announce_request {
 
 typedef struct lc_engine_tc_cluster_response {
   lc_engine_string_array endpoints;
-  long updated_at_unix;
-  long expires_at_unix;
+  lonejson_int64 updated_at_unix;
+  lonejson_int64 expires_at_unix;
   char *correlation_id;
 } lc_engine_tc_cluster_response;
 
@@ -671,7 +680,7 @@ typedef struct lc_engine_tcrm_register_request {
 typedef struct lc_engine_tcrm_register_response {
   char *backend_hash;
   lc_engine_string_array endpoints;
-  long updated_at_unix;
+  lonejson_int64 updated_at_unix;
   char *correlation_id;
 } lc_engine_tcrm_register_response;
 
@@ -683,20 +692,20 @@ typedef struct lc_engine_tcrm_unregister_request {
 typedef struct lc_engine_tcrm_unregister_response {
   char *backend_hash;
   lc_engine_string_array endpoints;
-  long updated_at_unix;
+  lonejson_int64 updated_at_unix;
   char *correlation_id;
 } lc_engine_tcrm_unregister_response;
 
 typedef struct lc_engine_tcrm_backend {
   char *backend_hash;
   lc_engine_string_array endpoints;
-  long updated_at_unix;
+  lonejson_int64 updated_at_unix;
 } lc_engine_tcrm_backend;
 
 typedef struct lc_engine_tcrm_list_response {
   lc_engine_tcrm_backend *backends;
   size_t backend_count;
-  long updated_at_unix;
+  lonejson_int64 updated_at_unix;
   char *correlation_id;
 } lc_engine_tcrm_list_response;
 
@@ -837,10 +846,6 @@ int lc_engine_client_query_into(lc_engine_client *client,
                                 void *writer_context,
                                 lc_engine_query_stream_response *response,
                                 lc_engine_error *error);
-int lc_engine_client_enqueue(lc_engine_client *client,
-                             const lc_engine_enqueue_request *request,
-                             lc_engine_enqueue_response *response,
-                             lc_engine_error *error);
 int lc_engine_client_enqueue_from(lc_engine_client *client,
                                   const lc_engine_enqueue_request *request,
                                   lc_engine_read_callback reader,

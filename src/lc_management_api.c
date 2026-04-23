@@ -1,66 +1,295 @@
 #include "lc_internal.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <yajl/yajl_gen.h>
-#include <yajl/yajl_tree.h>
+typedef struct lc_engine_namespace_query_json {
+  char *preferred_engine;
+  char *fallback_engine;
+} lc_engine_namespace_query_json;
 
-static int lc_engine_mgmt_gen_ok(yajl_gen_status status) {
-  return status == yajl_gen_status_ok;
-}
+typedef struct lc_engine_namespace_config_response_json {
+  char *namespace_name;
+  lc_engine_namespace_query_json query;
+} lc_engine_namespace_config_response_json;
 
-static int lc_engine_mgmt_gen_key(yajl_gen gen, const char *key) {
-  return lc_engine_mgmt_gen_ok(
-      yajl_gen_string(gen, (const unsigned char *)key, strlen(key)));
-}
+typedef struct lc_engine_index_flush_response_json {
+  char *namespace_name;
+  char *mode;
+  char *flush_id;
+  bool accepted;
+  bool flushed;
+  bool pending;
+  lonejson_int64 index_seq;
+} lc_engine_index_flush_response_json;
 
-static int lc_engine_mgmt_gen_string_field(yajl_gen gen, const char *key,
-                                           const char *value) {
-  if (!lc_engine_mgmt_gen_key(gen, key)) {
-    return 0;
+typedef struct lc_engine_txn_response_json {
+  char *txn_id;
+  char *state;
+} lc_engine_txn_response_json;
+
+typedef struct lc_engine_tc_lease_response_json {
+  bool granted;
+  char *leader_id;
+  char *leader_endpoint;
+  lonejson_int64 term;
+  lonejson_int64 expires_at;
+} lc_engine_tc_lease_response_json;
+
+typedef struct lc_engine_tc_release_response_json {
+  bool released;
+} lc_engine_tc_release_response_json;
+
+typedef struct lc_engine_tc_cluster_response_json {
+  lonejson_string_array endpoints;
+  lonejson_int64 updated_at_unix;
+  lonejson_int64 expires_at_unix;
+} lc_engine_tc_cluster_response_json;
+
+typedef struct lc_engine_tcrm_register_response_json {
+  char *backend_hash;
+  lonejson_string_array endpoints;
+  lonejson_int64 updated_at_unix;
+} lc_engine_tcrm_register_response_json;
+
+typedef struct lc_engine_tcrm_backend_json {
+  char *backend_hash;
+  lonejson_string_array endpoints;
+  lonejson_int64 updated_at_unix;
+} lc_engine_tcrm_backend_json;
+
+typedef struct lc_engine_tcrm_list_response_json {
+  lonejson_object_array backends;
+  lonejson_int64 updated_at_unix;
+} lc_engine_tcrm_list_response_json;
+static const lonejson_field lc_engine_txn_participant_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, key, "key"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, backend_hash,
+                                "backend_hash")};
+LONEJSON_MAP_DEFINE(lc_engine_txn_participant_map, lc_engine_txn_participant,
+                    lc_engine_txn_participant_fields);
+typedef struct lc_engine_txn_decision_body_json {
+  char *txn_id;
+  char *state;
+  lonejson_object_array participants;
+  lonejson_int64 expires_at_unix;
+  lonejson_int64 tc_term;
+  char *target_backend_hash;
+} lc_engine_txn_decision_body_json;
+
+static const lonejson_field lc_engine_namespace_query_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_query_json,
+                                preferred_engine, "preferred_engine"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_query_json, fallback_engine,
+                                "fallback_engine")};
+
+LONEJSON_MAP_DEFINE(lc_engine_namespace_query_map,
+                    lc_engine_namespace_query_json,
+                    lc_engine_namespace_query_fields);
+
+static const lonejson_field lc_engine_namespace_config_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_OBJECT(lc_engine_namespace_config_response_json, query,
+                          "query", &lc_engine_namespace_query_map)};
+
+LONEJSON_MAP_DEFINE(lc_engine_namespace_config_response_map,
+                    lc_engine_namespace_config_response_json,
+                    lc_engine_namespace_config_response_fields);
+
+static const lonejson_field lc_engine_index_flush_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_response_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_response_json, mode,
+                                "mode"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_response_json, flush_id,
+                                "flush_id"),
+    LONEJSON_FIELD_BOOL(lc_engine_index_flush_response_json, accepted,
+                        "accepted"),
+    LONEJSON_FIELD_BOOL(lc_engine_index_flush_response_json, flushed,
+                        "flushed"),
+    LONEJSON_FIELD_BOOL(lc_engine_index_flush_response_json, pending,
+                        "pending"),
+    LONEJSON_FIELD_I64(lc_engine_index_flush_response_json, index_seq,
+                       "index_seq")};
+
+LONEJSON_MAP_DEFINE(lc_engine_index_flush_response_map,
+                    lc_engine_index_flush_response_json,
+                    lc_engine_index_flush_response_fields);
+
+static const lonejson_field lc_engine_txn_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_response_json, txn_id, "txn_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_response_json, state, "state")};
+
+static const lonejson_field lc_engine_namespace_config_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json,
+                                namespace_name, "namespace"),
+    LONEJSON_FIELD_OBJECT(lc_engine_namespace_config_response_json, query,
+                          "query", &lc_engine_namespace_query_map)};
+
+static const lonejson_field lc_engine_index_flush_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_request, namespace_name,
+                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_request, mode, "mode")};
+
+static const lonejson_field lc_engine_txn_replay_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_replay_request, txn_id,
+                                "txn_id")};
+
+static const lonejson_field lc_engine_txn_decision_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_decision_body_json, txn_id,
+                                "txn_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_decision_body_json, state,
+                                "state"),
+    LONEJSON_FIELD_OBJECT_ARRAY(lc_engine_txn_decision_body_json, participants,
+                                "participants", lc_engine_txn_participant,
+                                &lc_engine_txn_participant_map,
+                                LONEJSON_OVERFLOW_FAIL),
+    LONEJSON_FIELD_I64(lc_engine_txn_decision_body_json, expires_at_unix,
+                       "expires_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_txn_decision_body_json, tc_term, "tc_term"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_decision_body_json,
+                                target_backend_hash, "target_backend_hash")};
+
+static const lonejson_field lc_engine_tc_lease_acquire_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_acquire_request,
+                                candidate_id, "candidate_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_acquire_request,
+                                candidate_endpoint, "candidate_endpoint"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_acquire_request, term, "term"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_acquire_request, ttl_ms, "ttl_ms")};
+
+static const lonejson_field lc_engine_tc_lease_renew_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_renew_request, leader_id,
+                                "leader_id"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_renew_request, term, "term"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_renew_request, ttl_ms, "ttl_ms")};
+
+static const lonejson_field lc_engine_tc_lease_release_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_release_request, leader_id,
+                                "leader_id"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_release_request, term, "term")};
+
+static const lonejson_field lc_engine_tc_cluster_announce_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_cluster_announce_request,
+                                self_endpoint, "self_endpoint")};
+
+static const lonejson_field lc_engine_tcrm_register_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_register_request, backend_hash,
+                                "backend_hash"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_register_request, endpoint,
+                                "endpoint")};
+
+static const lonejson_field lc_engine_tcrm_unregister_body_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_unregister_request, backend_hash,
+                                "backend_hash"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_unregister_request, endpoint,
+                                "endpoint")};
+
+LONEJSON_MAP_DEFINE(lc_engine_namespace_config_body_map,
+                    lc_engine_namespace_config_response_json,
+                    lc_engine_namespace_config_body_fields);
+
+LONEJSON_MAP_DEFINE(lc_engine_txn_response_map, lc_engine_txn_response_json,
+                    lc_engine_txn_response_fields);
+
+static const lonejson_field lc_engine_tc_lease_response_fields[] = {
+    LONEJSON_FIELD_BOOL(lc_engine_tc_lease_response_json, granted, "granted"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_response_json, leader_id,
+                                "leader_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_response_json,
+                                leader_endpoint, "leader_endpoint"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_response_json, term, "term"),
+    LONEJSON_FIELD_I64(lc_engine_tc_lease_response_json, expires_at,
+                       "expires_at")};
+
+LONEJSON_MAP_DEFINE(lc_engine_tc_lease_response_map,
+                    lc_engine_tc_lease_response_json,
+                    lc_engine_tc_lease_response_fields);
+
+static const lonejson_field lc_engine_tc_release_response_fields[] = {
+    LONEJSON_FIELD_BOOL(lc_engine_tc_release_response_json, released,
+                        "released")};
+
+LONEJSON_MAP_DEFINE(lc_engine_tc_release_response_map,
+                    lc_engine_tc_release_response_json,
+                    lc_engine_tc_release_response_fields);
+
+static const lonejson_field lc_engine_tc_cluster_response_fields[] = {
+    LONEJSON_FIELD_STRING_ARRAY(lc_engine_tc_cluster_response_json, endpoints,
+                                "endpoints", LONEJSON_OVERFLOW_FAIL),
+    LONEJSON_FIELD_I64(lc_engine_tc_cluster_response_json, updated_at_unix,
+                       "updated_at_unix"),
+    LONEJSON_FIELD_I64(lc_engine_tc_cluster_response_json, expires_at_unix,
+                       "expires_at_unix")};
+
+LONEJSON_MAP_DEFINE(lc_engine_tc_cluster_response_map,
+                    lc_engine_tc_cluster_response_json,
+                    lc_engine_tc_cluster_response_fields);
+
+static const lonejson_field lc_engine_tcrm_register_response_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_register_response_json,
+                                backend_hash, "backend_hash"),
+    LONEJSON_FIELD_STRING_ARRAY(lc_engine_tcrm_register_response_json,
+                                endpoints, "endpoints", LONEJSON_OVERFLOW_FAIL),
+    LONEJSON_FIELD_I64(lc_engine_tcrm_register_response_json, updated_at_unix,
+                       "updated_at_unix")};
+
+LONEJSON_MAP_DEFINE(lc_engine_tcrm_register_response_map,
+                    lc_engine_tcrm_register_response_json,
+                    lc_engine_tcrm_register_response_fields);
+
+static const lonejson_field lc_engine_tcrm_backend_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_tcrm_backend_json, backend_hash,
+                                "backend_hash"),
+    LONEJSON_FIELD_STRING_ARRAY(lc_engine_tcrm_backend_json, endpoints,
+                                "endpoints", LONEJSON_OVERFLOW_FAIL),
+    LONEJSON_FIELD_I64(lc_engine_tcrm_backend_json, updated_at_unix,
+                       "updated_at_unix")};
+
+LONEJSON_MAP_DEFINE(lc_engine_tcrm_backend_map, lc_engine_tcrm_backend_json,
+                    lc_engine_tcrm_backend_fields);
+
+static const lonejson_field lc_engine_tcrm_list_response_fields[] = {
+    LONEJSON_FIELD_OBJECT_ARRAY(lc_engine_tcrm_list_response_json, backends,
+                                "backends", lc_engine_tcrm_backend_json,
+                                &lc_engine_tcrm_backend_map,
+                                LONEJSON_OVERFLOW_FAIL),
+    LONEJSON_FIELD_I64(lc_engine_tcrm_list_response_json, updated_at_unix,
+                       "updated_at_unix")};
+
+LONEJSON_MAP_DEFINE(lc_engine_tcrm_list_response_map,
+                    lc_engine_tcrm_list_response_json,
+                    lc_engine_tcrm_list_response_fields);
+
+static int lc_engine_mgmt_i64_to_long_checked(lonejson_int64 value,
+                                              const char *label,
+                                              lonejson_int64 *out_value,
+                                              lc_engine_error *error) {
+  (void)label;
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing i64 output");
   }
-  return lc_engine_mgmt_gen_ok(
-      yajl_gen_string(gen, (const unsigned char *)value, strlen(value)));
-}
-
-static int lc_engine_mgmt_gen_long_field(yajl_gen gen, const char *key,
-                                         unsigned long value) {
-  char scratch[32];
-  int written;
-
-  if (!lc_engine_mgmt_gen_key(gen, key)) {
-    return 0;
-  }
-  written = snprintf(scratch, sizeof(scratch), "%lu", value);
-  if (written < 0 || (size_t)written >= sizeof(scratch)) {
-    return 0;
-  }
-  return lc_engine_mgmt_gen_ok(yajl_gen_number(gen, scratch, (size_t)written));
-}
-
-static int lc_engine_mgmt_parse_long_number(yajl_val value, const char *label,
-                                            long *out_value,
-                                            lc_engine_error *error) {
-  if (value == NULL) {
-    return LC_ENGINE_OK;
-  }
-  if (!lc_parse_long_base10_checked(YAJL_GET_NUMBER(value), out_value)) {
-    return lc_engine_set_protocol_error(error, label);
-  }
+  *out_value = value;
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_mgmt_parse_ulong_number(yajl_val value, const char *label,
-                                             unsigned long *out_value,
-                                             lc_engine_error *error) {
-  if (value == NULL) {
-    return LC_ENGINE_OK;
+static int lc_engine_mgmt_i64_to_int64_checked(lonejson_int64 value,
+                                               const char *label,
+                                               lonejson_int64 *out_value,
+                                               lc_engine_error *error) {
+  (void)label;
+
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing i64 output");
   }
-  if (!lc_parse_ulong_base10_checked(YAJL_GET_NUMBER(value), out_value)) {
-    return lc_engine_set_protocol_error(error, label);
-  }
+  *out_value = value;
   return LC_ENGINE_OK;
 }
 
@@ -75,54 +304,14 @@ lc_engine_mgmt_request_headers(const lc_engine_header_pair **out_headers,
   return 1;
 }
 
-static int lc_engine_mgmt_finish_body(yajl_gen gen, lc_engine_buffer *buffer,
-                                      lc_engine_error *error) {
-  const unsigned char *data;
-  size_t length;
-
-  if (!lc_engine_mgmt_gen_ok(yajl_gen_map_close(gen))) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(buffer);
-    return lc_engine_set_protocol_error(
-        error, "failed to finish management request body");
-  }
-  yajl_gen_get_buf(gen, &data, &length);
-  if (lc_engine_buffer_append(buffer, (const char *)data, length) !=
-      LC_ENGINE_OK) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(buffer);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to copy management request body");
-  }
-  yajl_gen_free(gen);
-  return LC_ENGINE_OK;
-}
-
-static int lc_engine_mgmt_start_body(yajl_gen *out_gen,
-                                     lc_engine_buffer *buffer,
-                                     lc_engine_error *error) {
-  yajl_gen gen = NULL;
-
-  lc_engine_buffer_init(buffer);
-  gen = yajl_gen_alloc(NULL);
-  if (gen == NULL) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to allocate YAJL generator");
-  }
-  if (!lc_engine_mgmt_gen_ok(yajl_gen_map_open(gen))) {
-    yajl_gen_free(gen);
-    return lc_engine_set_protocol_error(
-        error, "failed to open management request body");
-  }
-  *out_gen = gen;
-  return LC_ENGINE_OK;
-}
-
-static int lc_engine_mgmt_call(lc_engine_client *client, const char *method,
-                               const char *path, const lc_engine_buffer *body,
-                               void *response, lc_engine_error *error,
-                               int (*parse_fn)(const lc_engine_http_result *,
-                                               void *, lc_engine_error *)) {
+static int lc_engine_mgmt_call_json_stream(
+    lc_engine_client *client, const char *method, const char *path,
+    const lonejson_map *body_map, const void *body_src,
+    const lonejson_write_options *body_options,
+    const lonejson_map *response_map, void *response_json, void *response,
+    lc_engine_error *error,
+    int (*copy_fn)(const void *, const lc_engine_http_result *, void *,
+                   lc_engine_error *)) {
   lc_engine_http_result result;
   const lc_engine_header_pair *headers;
   size_t header_count;
@@ -130,53 +319,22 @@ static int lc_engine_mgmt_call(lc_engine_client *client, const char *method,
 
   memset(&result, 0, sizeof(result));
   lc_engine_mgmt_request_headers(&headers, &header_count);
-  rc = lc_engine_http_request(client, method, path,
-                              body != NULL ? body->data : NULL,
-                              body != NULL ? body->length : 0U, headers,
-                              body != NULL ? header_count : 0U, &result, error);
+  rc = lc_engine_http_json_request_stream(
+      client, method, path, body_map, body_src, body_options, headers,
+      header_count, response_map, response_json, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status < 200L || result.http_status >= 300L) {
     rc = lc_engine_set_server_error_from_result(error, &result);
+    lonejson_cleanup(response_map, response_json);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = parse_fn(&result, response, error);
+  rc = copy_fn(response_json, &result, response, error);
+  lonejson_cleanup(response_map, response_json);
   lc_engine_http_result_cleanup(&result);
   return rc;
-}
-
-static int lc_engine_mgmt_parse_tree(const lc_engine_http_result *result,
-                                     yajl_val *out_root,
-                                     lc_engine_error *error) {
-  char errbuf[128];
-  yajl_val root = NULL;
-
-  errbuf[0] = '\0';
-  root = yajl_tree_parse(result->body.data, errbuf, sizeof(errbuf));
-  if (root == NULL) {
-    if (errbuf[0] != '\0') {
-      return lc_engine_set_protocol_error(error, errbuf);
-    }
-    return lc_engine_set_protocol_error(
-        error, "failed to parse management response JSON");
-  }
-  *out_root = root;
-  return LC_ENGINE_OK;
-}
-
-static int lc_engine_mgmt_dup_tree_string(yajl_val root,
-                                          const char *const *path,
-                                          char **out_value) {
-  yajl_val value;
-
-  value = yajl_tree_get(root, (const char **)path, yajl_t_string);
-  if (value == NULL || YAJL_GET_STRING(value) == NULL) {
-    return 1;
-  }
-  *out_value = lc_engine_strdup_local(YAJL_GET_STRING(value));
-  return *out_value != NULL;
 }
 
 static void
@@ -185,38 +343,6 @@ lc_engine_mgmt_capture_correlation(const lc_engine_http_result *result,
   if (result->correlation_id != NULL && *out_value == NULL) {
     *out_value = lc_engine_strdup_local(result->correlation_id);
   }
-}
-
-static int lc_engine_mgmt_parse_string_array(yajl_val root,
-                                             const char *field_name,
-                                             lc_engine_string_array *array) {
-  const char *path[2];
-  yajl_val value;
-  size_t index;
-
-  path[0] = field_name;
-  path[1] = NULL;
-  value = yajl_tree_get(root, path, yajl_t_array);
-  if (value == NULL || value->u.array.len == 0U) {
-    array->items = NULL;
-    array->count = 0U;
-    return 1;
-  }
-  array->items = (char **)calloc(value->u.array.len, sizeof(char *));
-  if (array->items == NULL) {
-    return 0;
-  }
-  array->count = value->u.array.len;
-  for (index = 0U; index < value->u.array.len; ++index) {
-    if (YAJL_IS_STRING(value->u.array.values[index])) {
-      array->items[index] =
-          lc_engine_strdup_local(YAJL_GET_STRING(value->u.array.values[index]));
-      if (array->items[index] == NULL) {
-        return 0;
-      }
-    }
-  }
-  return 1;
 }
 
 void lc_engine_string_array_cleanup(lc_engine_string_array *array) {
@@ -360,169 +486,124 @@ void lc_engine_tcrm_list_response_cleanup(
 }
 
 static int
-lc_engine_parse_namespace_response(const lc_engine_http_result *result,
+lc_engine_parse_namespace_response(const void *parsed_json,
+                                   const lc_engine_http_result *result,
                                    void *out_response, lc_engine_error *error) {
   lc_engine_namespace_config_response *response;
-  yajl_val root = NULL;
-  static const char *path_namespace[] = {"namespace", NULL};
-  static const char *path_preferred[] = {"query", "preferred_engine", NULL};
-  static const char *path_fallback[] = {"query", "fallback_engine", NULL};
-  int rc;
+  const lc_engine_namespace_config_response_json *parsed;
 
+  (void)error;
   response = (lc_engine_namespace_config_response *)out_response;
-  rc = lc_engine_mgmt_parse_tree(result, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_dup_tree_string(root, path_namespace,
-                                      &response->namespace_name) ||
-      !lc_engine_mgmt_dup_tree_string(root, path_preferred,
-                                      &response->preferred_engine) ||
-      !lc_engine_mgmt_dup_tree_string(root, path_fallback,
-                                      &response->fallback_engine)) {
-    yajl_tree_free(root);
+  parsed = (const lc_engine_namespace_config_response_json *)parsed_json;
+  response->namespace_name = lc_engine_strdup_local(parsed->namespace_name);
+  response->preferred_engine =
+      lc_engine_strdup_local(parsed->query.preferred_engine);
+  response->fallback_engine =
+      lc_engine_strdup_local(parsed->query.fallback_engine);
+  if ((parsed->namespace_name != NULL && response->namespace_name == NULL) ||
+      (parsed->query.preferred_engine != NULL &&
+       response->preferred_engine == NULL) ||
+      (parsed->query.fallback_engine != NULL &&
+       response->fallback_engine == NULL)) {
+    lc_engine_namespace_config_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate namespace response");
   }
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
-  yajl_tree_free(root);
   return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_parse_index_flush_response(const lc_engine_http_result *result,
-                                     void *out_response,
-                                     lc_engine_error *error) {
+static int lc_engine_parse_index_flush_response(
+    const void *parsed_json, const lc_engine_http_result *result,
+    void *out_response, lc_engine_error *error) {
   lc_engine_index_flush_response *response;
-  yajl_val root = NULL;
-  static const char *path_namespace[] = {"namespace", NULL};
-  static const char *path_mode[] = {"mode", NULL};
-  static const char *path_flush_id[] = {"flush_id", NULL};
-  static const char *path_accepted[] = {"accepted", NULL};
-  static const char *path_flushed[] = {"flushed", NULL};
-  static const char *path_pending[] = {"pending", NULL};
-  static const char *path_index_seq[] = {"index_seq", NULL};
-  yajl_val value;
-  int rc;
+  const lc_engine_index_flush_response_json *parsed;
 
+  (void)error;
   response = (lc_engine_index_flush_response *)out_response;
-  rc = lc_engine_mgmt_parse_tree(result, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_dup_tree_string(root, path_namespace,
-                                      &response->namespace_name) ||
-      !lc_engine_mgmt_dup_tree_string(root, path_mode, &response->mode) ||
-      !lc_engine_mgmt_dup_tree_string(root, path_flush_id,
-                                      &response->flush_id)) {
-    yajl_tree_free(root);
+  parsed = (const lc_engine_index_flush_response_json *)parsed_json;
+  response->namespace_name = lc_engine_strdup_local(parsed->namespace_name);
+  response->mode = lc_engine_strdup_local(parsed->mode);
+  response->flush_id = lc_engine_strdup_local(parsed->flush_id);
+  if ((parsed->namespace_name != NULL && response->namespace_name == NULL) ||
+      (parsed->mode != NULL && response->mode == NULL) ||
+      (parsed->flush_id != NULL && response->flush_id == NULL)) {
+    lc_engine_index_flush_response_cleanup(response);
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_NO_MEMORY,
         "failed to allocate index flush response");
   }
-  value = yajl_tree_get(root, path_accepted, yajl_t_true);
-  response->accepted = value != NULL;
-  value = yajl_tree_get(root, path_flushed, yajl_t_true);
-  response->flushed = value != NULL;
-  value = yajl_tree_get(root, path_pending, yajl_t_true);
-  response->pending = value != NULL;
-  value = yajl_tree_get(root, path_index_seq, yajl_t_number);
-  rc = lc_engine_mgmt_parse_ulong_number(
-      value, "index_flush index_seq is out of range", &response->index_seq,
-      error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    return rc;
-  }
+  response->accepted = parsed->accepted ? 1 : 0;
+  response->flushed = parsed->flushed ? 1 : 0;
+  response->pending = parsed->pending ? 1 : 0;
+  response->index_seq = (unsigned long)parsed->index_seq;
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
-  yajl_tree_free(root);
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_parse_txn_response(const lc_engine_http_result *result,
+static int lc_engine_parse_txn_response(const void *parsed_json,
+                                        const lc_engine_http_result *result,
                                         void *out_response,
                                         lc_engine_error *error) {
   lc_engine_txn_replay_response *response;
-  yajl_val root = NULL;
-  static const char *path_txn_id[] = {"txn_id", NULL};
-  static const char *path_state[] = {"state", NULL};
-  int rc;
+  const lc_engine_txn_response_json *parsed;
 
+  (void)error;
   response = (lc_engine_txn_replay_response *)out_response;
-  rc = lc_engine_mgmt_parse_tree(result, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_dup_tree_string(root, path_txn_id, &response->txn_id) ||
-      !lc_engine_mgmt_dup_tree_string(root, path_state, &response->state)) {
-    yajl_tree_free(root);
+  parsed = (const lc_engine_txn_response_json *)parsed_json;
+  response->txn_id = lc_engine_strdup_local(parsed->txn_id);
+  response->state = lc_engine_strdup_local(parsed->state);
+  if ((parsed->txn_id != NULL && response->txn_id == NULL) ||
+      (parsed->state != NULL && response->state == NULL)) {
+    lc_engine_txn_replay_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate txn response");
   }
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
-  yajl_tree_free(root);
   return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_parse_tc_lease_acquire_response(const lc_engine_http_result *result,
-                                          void *out_response,
-                                          lc_engine_error *error) {
+static int lc_engine_parse_tc_lease_acquire_response(
+    const void *parsed_json, const lc_engine_http_result *result,
+    void *out_response, lc_engine_error *error) {
   lc_engine_tc_lease_acquire_response *response;
-  yajl_val root = NULL;
-  static const char *path_granted[] = {"granted", NULL};
-  static const char *path_leader_id[] = {"leader_id", NULL};
-  static const char *path_leader_endpoint[] = {"leader_endpoint", NULL};
-  static const char *path_term[] = {"term", NULL};
-  static const char *path_expires_at[] = {"expires_at", NULL};
-  yajl_val value;
-  int rc;
+  const lc_engine_tc_lease_response_json *parsed;
 
   response = (lc_engine_tc_lease_acquire_response *)out_response;
-  rc = lc_engine_mgmt_parse_tree(result, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_dup_tree_string(root, path_leader_id,
-                                      &response->leader_id) ||
-      !lc_engine_mgmt_dup_tree_string(root, path_leader_endpoint,
-                                      &response->leader_endpoint)) {
-    yajl_tree_free(root);
+  parsed = (const lc_engine_tc_lease_response_json *)parsed_json;
+  response->granted = parsed->granted ? 1 : 0;
+  response->leader_id = lc_engine_strdup_local(parsed->leader_id);
+  response->leader_endpoint = lc_engine_strdup_local(parsed->leader_endpoint);
+  if ((parsed->leader_id != NULL && response->leader_id == NULL) ||
+      (parsed->leader_endpoint != NULL && response->leader_endpoint == NULL)) {
+    lc_engine_tc_lease_acquire_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate tc lease response");
   }
-  value = yajl_tree_get(root, path_granted, yajl_t_true);
-  response->granted = value != NULL;
-  value = yajl_tree_get(root, path_term, yajl_t_number);
-  rc = lc_engine_mgmt_parse_ulong_number(value, "tc lease term is out of range",
-                                         &response->term, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    return rc;
+  if (lc_engine_mgmt_i64_to_int64_checked(
+          parsed->term, "tc lease term is out of range", &response->term,
+          error) != LC_ENGINE_OK) {
+    return LC_ENGINE_ERROR_PROTOCOL;
   }
-  value = yajl_tree_get(root, path_expires_at, yajl_t_number);
-  rc = lc_engine_mgmt_parse_long_number(value,
-                                        "tc lease expires_at is out of range",
-                                        &response->expires_at_unix, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    return rc;
+  if (lc_engine_mgmt_i64_to_long_checked(
+          parsed->expires_at, "tc lease expires_at is out of range",
+          &response->expires_at_unix, error) != LC_ENGINE_OK) {
+    return LC_ENGINE_ERROR_PROTOCOL;
   }
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
-  yajl_tree_free(root);
   return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_parse_tc_lease_renew_response(const lc_engine_http_result *result,
-                                        void *out_response,
-                                        lc_engine_error *error) {
+static int lc_engine_parse_tc_lease_renew_response(
+    const void *parsed_json, const lc_engine_http_result *result,
+    void *out_response, lc_engine_error *error) {
   lc_engine_tc_lease_renew_response *response;
   lc_engine_tc_lease_acquire_response temp;
   int rc;
 
   memset(&temp, 0, sizeof(temp));
-  rc = lc_engine_parse_tc_lease_acquire_response(result, &temp, error);
+  rc = lc_engine_parse_tc_lease_acquire_response(parsed_json, result, &temp,
+                                                 error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -536,37 +617,31 @@ lc_engine_parse_tc_lease_renew_response(const lc_engine_http_result *result,
   return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_parse_tc_lease_release_response(const lc_engine_http_result *result,
-                                          void *out_response,
-                                          lc_engine_error *error) {
+static int lc_engine_parse_tc_lease_release_response(
+    const void *parsed_json, const lc_engine_http_result *result,
+    void *out_response, lc_engine_error *error) {
   lc_engine_tc_lease_release_response *response;
-  yajl_val root = NULL;
-  static const char *path_released[] = {"released", NULL};
-  yajl_val value;
-  int rc;
+  const lc_engine_tc_release_response_json *parsed;
 
+  (void)error;
   response = (lc_engine_tc_lease_release_response *)out_response;
-  rc = lc_engine_mgmt_parse_tree(result, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  value = yajl_tree_get(root, path_released, yajl_t_true);
-  response->released = value != NULL;
+  parsed = (const lc_engine_tc_release_response_json *)parsed_json;
+  response->released = parsed->released ? 1 : 0;
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
-  yajl_tree_free(root);
   return LC_ENGINE_OK;
 }
 
 static int
-lc_engine_parse_tc_leader_response(const lc_engine_http_result *result,
+lc_engine_parse_tc_leader_response(const void *parsed_json,
+                                   const lc_engine_http_result *result,
                                    void *out_response, lc_engine_error *error) {
   lc_engine_tc_leader_response *response;
   lc_engine_tc_lease_acquire_response temp;
   int rc;
 
   memset(&temp, 0, sizeof(temp));
-  rc = lc_engine_parse_tc_lease_acquire_response(result, &temp, error);
+  rc = lc_engine_parse_tc_lease_acquire_response(parsed_json, result, &temp,
+                                                 error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -579,151 +654,160 @@ lc_engine_parse_tc_leader_response(const lc_engine_http_result *result,
   return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_parse_tc_cluster_response(const lc_engine_http_result *result,
-                                    void *out_response,
-                                    lc_engine_error *error) {
+static int lc_engine_parse_tc_cluster_response(
+    const void *parsed_json, const lc_engine_http_result *result,
+    void *out_response, lc_engine_error *error) {
   lc_engine_tc_cluster_response *response;
-  yajl_val root = NULL;
-  static const char *path_updated[] = {"updated_at_unix", NULL};
-  static const char *path_expires[] = {"expires_at_unix", NULL};
-  yajl_val value;
-  int rc;
+  const lc_engine_tc_cluster_response_json *parsed;
+  size_t index;
 
   response = (lc_engine_tc_cluster_response *)out_response;
-  rc = lc_engine_mgmt_parse_tree(result, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
+  parsed = (const lc_engine_tc_cluster_response_json *)parsed_json;
+  response->endpoints.count = parsed->endpoints.count;
+  if (parsed->endpoints.count > 0U) {
+    response->endpoints.items =
+        (char **)calloc(parsed->endpoints.count, sizeof(char *));
+    if (response->endpoints.items == NULL) {
+      return lc_engine_set_client_error(
+          error, LC_ENGINE_ERROR_NO_MEMORY,
+          "failed to allocate tc cluster endpoints");
+    }
+    for (index = 0U; index < parsed->endpoints.count; ++index) {
+      response->endpoints.items[index] =
+          lc_engine_strdup_local(parsed->endpoints.items[index]);
+      if (response->endpoints.items[index] == NULL) {
+        return lc_engine_set_client_error(
+            error, LC_ENGINE_ERROR_NO_MEMORY,
+            "failed to allocate tc cluster endpoint");
+      }
+    }
   }
-  if (!lc_engine_mgmt_parse_string_array(root, "endpoints",
-                                         &response->endpoints)) {
-    yajl_tree_free(root);
-    return lc_engine_set_client_error(
-        error, LC_ENGINE_ERROR_NO_MEMORY,
-        "failed to allocate tc cluster endpoints");
+  if (lc_engine_mgmt_i64_to_long_checked(
+          parsed->updated_at_unix, "tc cluster updated_at_unix is out of range",
+          &response->updated_at_unix, error) != LC_ENGINE_OK) {
+    return LC_ENGINE_ERROR_PROTOCOL;
   }
-  value = yajl_tree_get(root, path_updated, yajl_t_number);
-  rc = lc_engine_mgmt_parse_long_number(
-      value, "tc cluster updated_at_unix is out of range",
-      &response->updated_at_unix, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    return rc;
-  }
-  value = yajl_tree_get(root, path_expires, yajl_t_number);
-  rc = lc_engine_mgmt_parse_long_number(
-      value, "tc cluster expires_at_unix is out of range",
-      &response->expires_at_unix, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    return rc;
+  if (lc_engine_mgmt_i64_to_long_checked(
+          parsed->expires_at_unix, "tc cluster expires_at_unix is out of range",
+          &response->expires_at_unix, error) != LC_ENGINE_OK) {
+    return LC_ENGINE_ERROR_PROTOCOL;
   }
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
-  yajl_tree_free(root);
   return LC_ENGINE_OK;
 }
 
-static int
-lc_engine_parse_tcrm_register_response(const lc_engine_http_result *result,
-                                       void *out_response,
-                                       lc_engine_error *error) {
+static int lc_engine_parse_tcrm_register_response(
+    const void *parsed_json, const lc_engine_http_result *result,
+    void *out_response, lc_engine_error *error) {
   lc_engine_tcrm_register_response *response;
-  yajl_val root = NULL;
-  static const char *path_backend_hash[] = {"backend_hash", NULL};
-  static const char *path_updated[] = {"updated_at_unix", NULL};
-  yajl_val value;
-  int rc;
+  const lc_engine_tcrm_register_response_json *parsed;
+  size_t index;
 
   response = (lc_engine_tcrm_register_response *)out_response;
-  rc = lc_engine_mgmt_parse_tree(result, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_dup_tree_string(root, path_backend_hash,
-                                      &response->backend_hash) ||
-      !lc_engine_mgmt_parse_string_array(root, "endpoints",
-                                         &response->endpoints)) {
-    yajl_tree_free(root);
+  parsed = (const lc_engine_tcrm_register_response_json *)parsed_json;
+  response->backend_hash = lc_engine_strdup_local(parsed->backend_hash);
+  if (parsed->backend_hash != NULL && response->backend_hash == NULL) {
+    lc_engine_tcrm_register_response_cleanup(response);
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_NO_MEMORY,
         "failed to allocate tcrm register response");
   }
-  value = yajl_tree_get(root, path_updated, yajl_t_number);
-  rc = lc_engine_mgmt_parse_long_number(
-      value, "tcrm register updated_at_unix is out of range",
-      &response->updated_at_unix, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    return rc;
+  response->endpoints.count = parsed->endpoints.count;
+  if (parsed->endpoints.count > 0U) {
+    response->endpoints.items =
+        (char **)calloc(parsed->endpoints.count, sizeof(char *));
+    if (response->endpoints.items == NULL) {
+      return lc_engine_set_client_error(
+          error, LC_ENGINE_ERROR_NO_MEMORY,
+          "failed to allocate tcrm register endpoints");
+    }
+    for (index = 0U; index < parsed->endpoints.count; ++index) {
+      response->endpoints.items[index] =
+          lc_engine_strdup_local(parsed->endpoints.items[index]);
+      if (response->endpoints.items[index] == NULL) {
+        return lc_engine_set_client_error(
+            error, LC_ENGINE_ERROR_NO_MEMORY,
+            "failed to allocate tcrm register endpoint");
+      }
+    }
+  }
+  if (lc_engine_mgmt_i64_to_long_checked(
+          parsed->updated_at_unix,
+          "tcrm register updated_at_unix is out of range",
+          &response->updated_at_unix, error) != LC_ENGINE_OK) {
+    return LC_ENGINE_ERROR_PROTOCOL;
   }
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
-  yajl_tree_free(root);
   return LC_ENGINE_OK;
 }
 
 static int
-lc_engine_parse_tcrm_list_response(const lc_engine_http_result *result,
+lc_engine_parse_tcrm_list_response(const void *parsed_json,
+                                   const lc_engine_http_result *result,
                                    void *out_response, lc_engine_error *error) {
   lc_engine_tcrm_list_response *response;
-  yajl_val root = NULL;
-  static const char *path_backends[] = {"backends", NULL};
-  static const char *path_updated[] = {"updated_at_unix", NULL};
-  yajl_val backends;
-  yajl_val value;
+  const lc_engine_tcrm_list_response_json *parsed;
   size_t index;
-  int rc;
 
   response = (lc_engine_tcrm_list_response *)out_response;
-  rc = lc_engine_mgmt_parse_tree(result, &root, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  backends = yajl_tree_get(root, path_backends, yajl_t_array);
-  if (backends != NULL && backends->u.array.len > 0U) {
+  parsed = (const lc_engine_tcrm_list_response_json *)parsed_json;
+  if (parsed->backends.count > 0U) {
     response->backends = (lc_engine_tcrm_backend *)calloc(
-        backends->u.array.len, sizeof(lc_engine_tcrm_backend));
+        parsed->backends.count, sizeof(lc_engine_tcrm_backend));
     if (response->backends == NULL) {
-      yajl_tree_free(root);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate tcrm backend list");
     }
-    response->backend_count = backends->u.array.len;
-    for (index = 0U; index < backends->u.array.len; ++index) {
-      yajl_val backend;
-      static const char *path_backend_hash[] = {"backend_hash", NULL};
-      static const char *path_backend_updated[] = {"updated_at_unix", NULL};
+    response->backend_count = parsed->backends.count;
+    for (index = 0U; index < parsed->backends.count; ++index) {
+      const lc_engine_tcrm_backend_json *backend;
+      size_t endpoint_index;
 
-      backend = backends->u.array.values[index];
-      if (!lc_engine_mgmt_dup_tree_string(
-              backend, path_backend_hash,
-              &response->backends[index].backend_hash) ||
-          !lc_engine_mgmt_parse_string_array(
-              backend, "endpoints", &response->backends[index].endpoints)) {
-        yajl_tree_free(root);
+      backend =
+          &((const lc_engine_tcrm_backend_json *)parsed->backends.items)[index];
+      response->backends[index].backend_hash =
+          lc_engine_strdup_local(backend->backend_hash);
+      response->backends[index].endpoints.count = backend->endpoints.count;
+      if (response->backends[index].backend_hash == NULL) {
         return lc_engine_set_client_error(
             error, LC_ENGINE_ERROR_NO_MEMORY,
             "failed to allocate tcrm backend item");
       }
-      value = yajl_tree_get(backend, path_backend_updated, yajl_t_number);
-      rc = lc_engine_mgmt_parse_long_number(
-          value, "tcrm backend updated_at_unix is out of range",
-          &response->backends[index].updated_at_unix, error);
-      if (rc != LC_ENGINE_OK) {
-        yajl_tree_free(root);
-        return rc;
+      if (backend->endpoints.count > 0U) {
+        response->backends[index].endpoints.items =
+            (char **)calloc(backend->endpoints.count, sizeof(char *));
+        if (response->backends[index].endpoints.items == NULL) {
+          return lc_engine_set_client_error(
+              error, LC_ENGINE_ERROR_NO_MEMORY,
+              "failed to allocate tcrm backend endpoints");
+        }
+        for (endpoint_index = 0U; endpoint_index < backend->endpoints.count;
+             ++endpoint_index) {
+          response->backends[index].endpoints.items[endpoint_index] =
+              lc_engine_strdup_local(backend->endpoints.items[endpoint_index]);
+          if (response->backends[index].endpoints.items[endpoint_index] ==
+              NULL) {
+            return lc_engine_set_client_error(
+                error, LC_ENGINE_ERROR_NO_MEMORY,
+                "failed to allocate tcrm backend endpoint");
+          }
+        }
+      }
+      if (lc_engine_mgmt_i64_to_long_checked(
+              backend->updated_at_unix,
+              "tcrm backend updated_at_unix is out of range",
+              &response->backends[index].updated_at_unix,
+              error) != LC_ENGINE_OK) {
+        return LC_ENGINE_ERROR_PROTOCOL;
       }
     }
   }
-  value = yajl_tree_get(root, path_updated, yajl_t_number);
-  rc = lc_engine_mgmt_parse_long_number(
-      value, "tcrm list updated_at_unix is out of range",
-      &response->updated_at_unix, error);
-  if (rc != LC_ENGINE_OK) {
-    yajl_tree_free(root);
-    return rc;
+  if (lc_engine_mgmt_i64_to_long_checked(
+          parsed->updated_at_unix, "tcrm list updated_at_unix is out of range",
+          &response->updated_at_unix, error) != LC_ENGINE_OK) {
+    return LC_ENGINE_ERROR_PROTOCOL;
   }
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
-  yajl_tree_free(root);
   return LC_ENGINE_OK;
 }
 
@@ -732,6 +816,7 @@ int lc_engine_client_get_namespace_config(
     lc_engine_namespace_config_response *response, lc_engine_error *error) {
   lc_engine_buffer path;
   char *encoded;
+  lc_engine_namespace_config_response_json parsed;
   int rc;
 
   if (client == NULL || response == NULL || error == NULL) {
@@ -745,6 +830,7 @@ int lc_engine_client_get_namespace_config(
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate namespace path");
   }
+  memset(&parsed, 0, sizeof(parsed));
   if (namespace_name != NULL && namespace_name[0] != '\0') {
     encoded = lc_engine_url_encode(namespace_name);
     if (encoded == NULL) {
@@ -756,8 +842,10 @@ int lc_engine_client_get_namespace_config(
     lc_engine_buffer_append_cstr(&path, encoded);
     free(encoded);
   }
-  rc = lc_engine_mgmt_call(client, "GET", path.data, NULL, response, error,
-                           lc_engine_parse_namespace_response);
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "GET", path.data, NULL, NULL, NULL,
+      &lc_engine_namespace_config_response_map, &parsed, response, error,
+      lc_engine_parse_namespace_response);
   lc_engine_buffer_cleanup(&path);
   return rc;
 }
@@ -765,8 +853,10 @@ int lc_engine_client_get_namespace_config(
 int lc_engine_client_update_namespace_config(
     lc_engine_client *client, const lc_engine_namespace_config_request *request,
     lc_engine_namespace_config_response *response, lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_namespace_config_response_json body_src;
+  lc_engine_namespace_config_response_json parsed;
+  lc_engine_http_result result;
+  lc_engine_header_pair headers[1];
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -774,58 +864,35 @@ int lc_engine_client_update_namespace_config(
                                       "update_namespace_config requires "
                                       "client, request, response, and error");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
+  if (request->preferred_engine == NULL && request->fallback_engine == NULL) {
+    return lc_engine_client_get_namespace_config(
+        client, request->namespace_name, response, error);
+  }
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  memset(&result, 0, sizeof(result));
+  body_src.namespace_name =
+      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.query.preferred_engine = (char *)request->preferred_engine;
+  body_src.query.fallback_engine = (char *)request->fallback_engine;
+  headers[0].name = "Content-Type";
+  headers[0].value = "application/json";
+  rc = lc_engine_http_json_request_stream(
+      client, "PUT", "/v1/namespace", &lc_engine_namespace_config_body_map,
+      &body_src, NULL, headers, 1U, &lc_engine_namespace_config_response_map,
+      &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  if (request->namespace_name != NULL && request->namespace_name[0] != '\0' &&
-      !lc_engine_mgmt_gen_string_field(gen, "namespace",
-                                       request->namespace_name)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add namespace name");
-  }
-  if (request->preferred_engine != NULL || request->fallback_engine != NULL) {
-    if (!lc_engine_mgmt_gen_key(gen, "query") ||
-        !lc_engine_mgmt_gen_ok(yajl_gen_map_open(gen))) {
-      yajl_gen_free(gen);
-      lc_engine_buffer_cleanup(&body);
-      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                        "failed to add namespace query config");
-    }
-    if (request->preferred_engine != NULL &&
-        request->preferred_engine[0] != '\0' &&
-        !lc_engine_mgmt_gen_string_field(gen, "preferred_engine",
-                                         request->preferred_engine)) {
-      yajl_gen_free(gen);
-      lc_engine_buffer_cleanup(&body);
-      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                        "failed to add preferred engine");
-    }
-    if (request->fallback_engine != NULL &&
-        request->fallback_engine[0] != '\0' &&
-        !lc_engine_mgmt_gen_string_field(gen, "fallback_engine",
-                                         request->fallback_engine)) {
-      yajl_gen_free(gen);
-      lc_engine_buffer_cleanup(&body);
-      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                        "failed to add fallback engine");
-    }
-    if (!lc_engine_mgmt_gen_ok(yajl_gen_map_close(gen))) {
-      yajl_gen_free(gen);
-      lc_engine_buffer_cleanup(&body);
-      return lc_engine_set_protocol_error(
-          error, "failed to close namespace query config");
-    }
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
+  if (result.http_status != 200L) {
+    rc = lc_engine_set_server_error_from_result(error, &result);
+    lonejson_cleanup(&lc_engine_namespace_config_response_map, &parsed);
+    lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  rc = lc_engine_mgmt_call(client, "PUT", "/v1/namespace", &body, response,
-                           error, lc_engine_parse_namespace_response);
-  lc_engine_buffer_cleanup(&body);
+  rc = lc_engine_parse_namespace_response(&parsed, &result, response, error);
+  lonejson_cleanup(&lc_engine_namespace_config_response_map, &parsed);
+  lc_engine_http_result_cleanup(&result);
   return rc;
 }
 
@@ -833,8 +900,11 @@ int lc_engine_client_index_flush(lc_engine_client *client,
                                  const lc_engine_index_flush_request *request,
                                  lc_engine_index_flush_response *response,
                                  lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_index_flush_request body_src;
+  lonejson_field body_fields[2];
+  lonejson_map body_map;
+  lc_engine_index_flush_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -842,32 +912,26 @@ int lc_engine_client_index_flush(lc_engine_client *client,
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "index_flush requires client, request, response, and error");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  body_src.namespace_name =
+      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.mode = (char *)request->mode;
+  body_field_count = 0U;
+  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+    body_fields[body_field_count++] = lc_engine_index_flush_body_fields[0];
   }
-  if (request->namespace_name != NULL && request->namespace_name[0] != '\0' &&
-      !lc_engine_mgmt_gen_string_field(gen, "namespace",
-                                       request->namespace_name)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add flush namespace");
+  if (body_src.mode != NULL && body_src.mode[0] != '\0') {
+    body_fields[body_field_count++] = lc_engine_index_flush_body_fields[1];
   }
-  if (request->mode != NULL && request->mode[0] != '\0' &&
-      !lc_engine_mgmt_gen_string_field(gen, "mode", request->mode)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add flush mode");
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  rc = lc_engine_mgmt_call(client, "POST", "/v1/index/flush", &body, response,
-                           error, lc_engine_parse_index_flush_response);
-  lc_engine_buffer_cleanup(&body);
+  body_map.name = "lc_engine_index_flush_request";
+  body_map.struct_size = sizeof(body_src);
+  body_map.fields = body_fields;
+  body_map.field_count = body_field_count;
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/index/flush", &body_map, &body_src, NULL,
+      &lc_engine_index_flush_response_map, &parsed, response, error,
+      lc_engine_parse_index_flush_response);
   return rc;
 }
 
@@ -875,8 +939,11 @@ int lc_engine_client_txn_replay(lc_engine_client *client,
                                 const lc_engine_txn_replay_request *request,
                                 lc_engine_txn_replay_response *response,
                                 lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_txn_replay_request body_src;
+  lonejson_field body_fields[1];
+  lonejson_map body_map;
+  lc_engine_txn_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL ||
@@ -885,119 +952,92 @@ int lc_engine_client_txn_replay(lc_engine_client *client,
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "txn_replay requires client, request, response, error, and txn_id");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_gen_string_field(gen, "txn_id", request->txn_id)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add txn_id");
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  rc = lc_engine_mgmt_call(client, "POST", "/v1/txn/replay", &body, response,
-                           error, lc_engine_parse_txn_response);
-  lc_engine_buffer_cleanup(&body);
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  body_src.txn_id = (char *)request->txn_id;
+  body_field_count = 0U;
+  body_fields[body_field_count++] = lc_engine_txn_replay_body_fields[0];
+  body_map.name = "lc_engine_txn_replay_request";
+  body_map.struct_size = sizeof(body_src);
+  body_map.fields = body_fields;
+  body_map.field_count = body_field_count;
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/txn/replay", &body_map, &body_src, NULL,
+      &lc_engine_txn_response_map, &parsed, response, error,
+      lc_engine_parse_txn_response);
   return rc;
 }
 
 static int lc_engine_mgmt_build_txn_decision_body(
-    const lc_engine_txn_decision_request *request, lc_engine_buffer *body,
-    lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  size_t index;
-  int rc;
+    const lc_engine_txn_decision_request *request,
+    lc_engine_txn_decision_body_json *body_src, lonejson_field *body_fields,
+    size_t body_field_capacity, size_t *out_body_field_count,
+    lonejson_map *body_map, lc_engine_error *error) {
+  size_t body_field_count;
 
-  rc = lc_engine_mgmt_start_body(&gen, body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
+  if (request == NULL || body_src == NULL || body_fields == NULL ||
+      out_body_field_count == NULL || body_map == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "txn decision body inputs are required");
   }
-  if (!lc_engine_mgmt_gen_string_field(gen, "txn_id", request->txn_id) ||
-      !lc_engine_mgmt_gen_string_field(gen, "state", request->state)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add txn decision basics");
+  if (body_field_capacity < 6U) {
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "txn decision body field capacity too small");
   }
-  if (request->participant_count > 0U && request->participants != NULL) {
-    if (!lc_engine_mgmt_gen_key(gen, "participants") ||
-        !lc_engine_mgmt_gen_ok(yajl_gen_array_open(gen))) {
-      yajl_gen_free(gen);
-      lc_engine_buffer_cleanup(body);
-      return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                        "failed to open participants array");
+
+  memset(body_src, 0, sizeof(*body_src));
+  body_src->txn_id = (char *)request->txn_id;
+  body_src->state = (char *)request->state;
+  body_src->expires_at_unix = request->expires_at_unix;
+  body_src->tc_term = request->tc_term;
+  body_src->target_backend_hash = (char *)request->target_backend_hash;
+  if (request->participant_count > 0U) {
+    if (request->participants == NULL) {
+      return lc_engine_set_client_error(
+          error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+          "txn decision participants require a non-null array");
     }
-    for (index = 0U; index < request->participant_count; ++index) {
-      if (!lc_engine_mgmt_gen_ok(yajl_gen_map_open(gen)) ||
-          !lc_engine_mgmt_gen_string_field(
-              gen, "namespace", request->participants[index].namespace_name) ||
-          !lc_engine_mgmt_gen_string_field(gen, "key",
-                                           request->participants[index].key)) {
-        yajl_gen_free(gen);
-        lc_engine_buffer_cleanup(body);
-        return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                          "failed to add txn participant");
-      }
-      if (request->participants[index].backend_hash != NULL &&
-          request->participants[index].backend_hash[0] != '\0' &&
-          !lc_engine_mgmt_gen_string_field(
-              gen, "backend_hash", request->participants[index].backend_hash)) {
-        yajl_gen_free(gen);
-        lc_engine_buffer_cleanup(body);
-        return lc_engine_set_client_error(
-            error, LC_ENGINE_ERROR_NO_MEMORY,
-            "failed to add txn participant backend_hash");
-      }
-      if (!lc_engine_mgmt_gen_ok(yajl_gen_map_close(gen))) {
-        yajl_gen_free(gen);
-        lc_engine_buffer_cleanup(body);
-        return lc_engine_set_protocol_error(error,
-                                            "failed to close txn participant");
-      }
-    }
-    if (!lc_engine_mgmt_gen_ok(yajl_gen_array_close(gen))) {
-      yajl_gen_free(gen);
-      lc_engine_buffer_cleanup(body);
-      return lc_engine_set_protocol_error(error,
-                                          "failed to close participants array");
-    }
+    body_src->participants.items = (void *)request->participants;
+    body_src->participants.count = request->participant_count;
+    body_src->participants.capacity = request->participant_count;
+    body_src->participants.elem_size = sizeof(lc_engine_txn_participant);
+    body_src->participants.flags = LONEJSON_ARRAY_FIXED_CAPACITY;
   }
-  if (request->expires_at_unix > 0L &&
-      !lc_engine_mgmt_gen_long_field(gen, "expires_at_unix",
-                                     (unsigned long)request->expires_at_unix)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add txn expires_at_unix");
+
+  body_field_count = 0U;
+  body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[0];
+  body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[1];
+  if (request->participant_count > 0U) {
+    body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[2];
   }
-  if (request->tc_term > 0UL &&
-      !lc_engine_mgmt_gen_long_field(gen, "tc_term", request->tc_term)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add txn tc_term");
+  if (request->expires_at_unix > 0L) {
+    body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[3];
+  }
+  if (request->tc_term > 0 && request->tc_term <= (lonejson_int64)LONG_MAX) {
+    body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[4];
   }
   if (request->target_backend_hash != NULL &&
-      request->target_backend_hash[0] != '\0' &&
-      !lc_engine_mgmt_gen_string_field(gen, "target_backend_hash",
-                                       request->target_backend_hash)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add txn target_backend_hash");
+      request->target_backend_hash[0] != '\0') {
+    body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[5];
   }
-  return lc_engine_mgmt_finish_body(gen, body, error);
+  body_map->name = "lc_engine_txn_decision_body_json";
+  body_map->struct_size = sizeof(*body_src);
+  body_map->fields = body_fields;
+  body_map->field_count = body_field_count;
+  *out_body_field_count = body_field_count;
+  return LC_ENGINE_OK;
 }
 
 int lc_engine_client_txn_decide(lc_engine_client *client,
                                 const lc_engine_txn_decision_request *request,
                                 lc_engine_txn_decision_response *response,
                                 lc_engine_error *error) {
-  lc_engine_buffer body;
+  lc_engine_txn_decision_body_json body_src;
+  lonejson_field body_fields[6];
+  lonejson_map body_map;
+  lc_engine_txn_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL ||
@@ -1006,15 +1046,19 @@ int lc_engine_client_txn_decide(lc_engine_client *client,
                                       "txn_decide requires client, request, "
                                       "response, error, txn_id, and state");
   }
-  rc = lc_engine_mgmt_build_txn_decision_body(request, &body, error);
+  rc = lc_engine_mgmt_build_txn_decision_body(
+      request, &body_src, body_fields,
+      sizeof(body_fields) / sizeof(body_fields[0]), &body_field_count,
+      &body_map, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  rc = lc_engine_mgmt_call(
-      client, "POST", "/v1/txn/decide", &body, response, error,
-      (int (*)(const lc_engine_http_result *, void *,
-               lc_engine_error *))lc_engine_parse_txn_response);
-  lc_engine_buffer_cleanup(&body);
+  (void)body_field_count;
+  memset(&parsed, 0, sizeof(parsed));
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/txn/decide", &body_map, &body_src, NULL,
+      &lc_engine_txn_response_map, &parsed, response, error,
+      lc_engine_parse_txn_response);
   return rc;
 }
 
@@ -1022,8 +1066,12 @@ int lc_engine_client_txn_commit(lc_engine_client *client,
                                 const lc_engine_txn_decision_request *request,
                                 lc_engine_txn_decision_response *response,
                                 lc_engine_error *error) {
-  lc_engine_buffer body;
   lc_engine_txn_decision_request effective_request;
+  lc_engine_txn_decision_body_json body_src;
+  lonejson_field body_fields[6];
+  lonejson_map body_map;
+  lc_engine_txn_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -1033,15 +1081,19 @@ int lc_engine_client_txn_commit(lc_engine_client *client,
   }
   effective_request = *request;
   effective_request.state = "commit";
-  rc = lc_engine_mgmt_build_txn_decision_body(&effective_request, &body, error);
+  rc = lc_engine_mgmt_build_txn_decision_body(
+      &effective_request, &body_src, body_fields,
+      sizeof(body_fields) / sizeof(body_fields[0]), &body_field_count,
+      &body_map, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  rc = lc_engine_mgmt_call(
-      client, "POST", "/v1/txn/commit", &body, response, error,
-      (int (*)(const lc_engine_http_result *, void *,
-               lc_engine_error *))lc_engine_parse_txn_response);
-  lc_engine_buffer_cleanup(&body);
+  (void)body_field_count;
+  memset(&parsed, 0, sizeof(parsed));
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/txn/commit", &body_map, &body_src, NULL,
+      &lc_engine_txn_response_map, &parsed, response, error,
+      lc_engine_parse_txn_response);
   return rc;
 }
 
@@ -1049,8 +1101,12 @@ int lc_engine_client_txn_rollback(lc_engine_client *client,
                                   const lc_engine_txn_decision_request *request,
                                   lc_engine_txn_decision_response *response,
                                   lc_engine_error *error) {
-  lc_engine_buffer body;
   lc_engine_txn_decision_request effective_request;
+  lc_engine_txn_decision_body_json body_src;
+  lonejson_field body_fields[6];
+  lonejson_map body_map;
+  lc_engine_txn_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -1060,23 +1116,30 @@ int lc_engine_client_txn_rollback(lc_engine_client *client,
   }
   effective_request = *request;
   effective_request.state = "rollback";
-  rc = lc_engine_mgmt_build_txn_decision_body(&effective_request, &body, error);
+  rc = lc_engine_mgmt_build_txn_decision_body(
+      &effective_request, &body_src, body_fields,
+      sizeof(body_fields) / sizeof(body_fields[0]), &body_field_count,
+      &body_map, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  rc = lc_engine_mgmt_call(
-      client, "POST", "/v1/txn/rollback", &body, response, error,
-      (int (*)(const lc_engine_http_result *, void *,
-               lc_engine_error *))lc_engine_parse_txn_response);
-  lc_engine_buffer_cleanup(&body);
+  (void)body_field_count;
+  memset(&parsed, 0, sizeof(parsed));
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/txn/rollback", &body_map, &body_src, NULL,
+      &lc_engine_txn_response_map, &parsed, response, error,
+      lc_engine_parse_txn_response);
   return rc;
 }
 
 int lc_engine_client_tc_lease_acquire(
     lc_engine_client *client, const lc_engine_tc_lease_acquire_request *request,
     lc_engine_tc_lease_acquire_response *response, lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_tc_lease_acquire_request body_src;
+  lonejson_field body_fields[4];
+  lonejson_map body_map;
+  lc_engine_tc_lease_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -1084,38 +1147,36 @@ int lc_engine_client_tc_lease_acquire(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tc_lease_acquire requires client, request, response, and error");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_gen_string_field(gen, "candidate_id",
-                                       request->candidate_id) ||
-      !lc_engine_mgmt_gen_string_field(gen, "candidate_endpoint",
-                                       request->candidate_endpoint) ||
-      !lc_engine_mgmt_gen_long_field(gen, "term", request->term) ||
-      !lc_engine_mgmt_gen_long_field(gen, "ttl_ms",
-                                     (unsigned long)request->ttl_ms)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to build tc lease acquire body");
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  rc = lc_engine_mgmt_call(client, "POST", "/v1/tc/lease/acquire", &body,
-                           response, error,
-                           lc_engine_parse_tc_lease_acquire_response);
-  lc_engine_buffer_cleanup(&body);
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  body_src.candidate_id = request->candidate_id;
+  body_src.candidate_endpoint = request->candidate_endpoint;
+  body_src.term = request->term;
+  body_src.ttl_ms = request->ttl_ms;
+  body_field_count = 0U;
+  body_fields[body_field_count++] = lc_engine_tc_lease_acquire_body_fields[0];
+  body_fields[body_field_count++] = lc_engine_tc_lease_acquire_body_fields[1];
+  body_fields[body_field_count++] = lc_engine_tc_lease_acquire_body_fields[2];
+  body_fields[body_field_count++] = lc_engine_tc_lease_acquire_body_fields[3];
+  body_map.name = "lc_engine_tc_lease_acquire_request";
+  body_map.struct_size = sizeof(body_src);
+  body_map.fields = body_fields;
+  body_map.field_count = body_field_count;
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/tc/lease/acquire", &body_map, &body_src, NULL,
+      &lc_engine_tc_lease_response_map, &parsed, response, error,
+      lc_engine_parse_tc_lease_acquire_response);
   return rc;
 }
 
 int lc_engine_client_tc_lease_renew(
     lc_engine_client *client, const lc_engine_tc_lease_renew_request *request,
     lc_engine_tc_lease_renew_response *response, lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_tc_lease_renew_request body_src;
+  lonejson_field body_fields[3];
+  lonejson_map body_map;
+  lc_engine_tc_lease_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -1123,35 +1184,34 @@ int lc_engine_client_tc_lease_renew(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tc_lease_renew requires client, request, response, and error");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_gen_string_field(gen, "leader_id", request->leader_id) ||
-      !lc_engine_mgmt_gen_long_field(gen, "term", request->term) ||
-      !lc_engine_mgmt_gen_long_field(gen, "ttl_ms",
-                                     (unsigned long)request->ttl_ms)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to build tc lease renew body");
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  rc =
-      lc_engine_mgmt_call(client, "POST", "/v1/tc/lease/renew", &body, response,
-                          error, lc_engine_parse_tc_lease_renew_response);
-  lc_engine_buffer_cleanup(&body);
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  body_src.leader_id = request->leader_id;
+  body_src.term = request->term;
+  body_src.ttl_ms = request->ttl_ms;
+  body_field_count = 0U;
+  body_fields[body_field_count++] = lc_engine_tc_lease_renew_body_fields[0];
+  body_fields[body_field_count++] = lc_engine_tc_lease_renew_body_fields[1];
+  body_fields[body_field_count++] = lc_engine_tc_lease_renew_body_fields[2];
+  body_map.name = "lc_engine_tc_lease_renew_request";
+  body_map.struct_size = sizeof(body_src);
+  body_map.fields = body_fields;
+  body_map.field_count = body_field_count;
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/tc/lease/renew", &body_map, &body_src, NULL,
+      &lc_engine_tc_lease_response_map, &parsed, response, error,
+      lc_engine_parse_tc_lease_renew_response);
   return rc;
 }
 
 int lc_engine_client_tc_lease_release(
     lc_engine_client *client, const lc_engine_tc_lease_release_request *request,
     lc_engine_tc_lease_release_response *response, lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_tc_lease_release_request body_src;
+  lonejson_field body_fields[2];
+  lonejson_map body_map;
+  lc_engine_tc_release_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -1159,46 +1219,49 @@ int lc_engine_client_tc_lease_release(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tc_lease_release requires client, request, response, and error");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_gen_string_field(gen, "leader_id", request->leader_id) ||
-      !lc_engine_mgmt_gen_long_field(gen, "term", request->term)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to build tc lease release body");
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  rc = lc_engine_mgmt_call(client, "POST", "/v1/tc/lease/release", &body,
-                           response, error,
-                           lc_engine_parse_tc_lease_release_response);
-  lc_engine_buffer_cleanup(&body);
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  body_src.leader_id = request->leader_id;
+  body_src.term = request->term;
+  body_field_count = 0U;
+  body_fields[body_field_count++] = lc_engine_tc_lease_release_body_fields[0];
+  body_fields[body_field_count++] = lc_engine_tc_lease_release_body_fields[1];
+  body_map.name = "lc_engine_tc_lease_release_request";
+  body_map.struct_size = sizeof(body_src);
+  body_map.fields = body_fields;
+  body_map.field_count = body_field_count;
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/tc/lease/release", &body_map, &body_src, NULL,
+      &lc_engine_tc_release_response_map, &parsed, response, error,
+      lc_engine_parse_tc_lease_release_response);
   return rc;
 }
 
 int lc_engine_client_tc_leader(lc_engine_client *client,
                                lc_engine_tc_leader_response *response,
                                lc_engine_error *error) {
+  lc_engine_tc_lease_response_json parsed;
   if (client == NULL || response == NULL || error == NULL) {
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tc_leader requires client, response, and error");
   }
-  return lc_engine_mgmt_call(client, "GET", "/v1/tc/leader", NULL, response,
-                             error, lc_engine_parse_tc_leader_response);
+  memset(&parsed, 0, sizeof(parsed));
+  return lc_engine_mgmt_call_json_stream(
+      client, "GET", "/v1/tc/leader", NULL, NULL, NULL,
+      &lc_engine_tc_lease_response_map, &parsed, response, error,
+      lc_engine_parse_tc_leader_response);
 }
 
 int lc_engine_client_tc_cluster_announce(
     lc_engine_client *client,
     const lc_engine_tc_cluster_announce_request *request,
     lc_engine_tc_cluster_response *response, lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_tc_cluster_announce_request body_src;
+  lonejson_field body_fields[1];
+  lonejson_map body_map;
+  lc_engine_tc_cluster_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL ||
@@ -1208,62 +1271,64 @@ int lc_engine_client_tc_cluster_announce(
         "tc_cluster_announce requires client, request, response, error, and "
         "self_endpoint");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_gen_string_field(gen, "self_endpoint",
-                                       request->self_endpoint)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to add self_endpoint");
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  rc =
-      lc_engine_mgmt_call(client, "POST", "/v1/tc/cluster/announce", &body,
-                          response, error, lc_engine_parse_tc_cluster_response);
-  lc_engine_buffer_cleanup(&body);
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  body_src.self_endpoint = request->self_endpoint;
+  body_field_count = 0U;
+  body_fields[body_field_count++] =
+      lc_engine_tc_cluster_announce_body_fields[0];
+  body_map.name = "lc_engine_tc_cluster_announce_request";
+  body_map.struct_size = sizeof(body_src);
+  body_map.fields = body_fields;
+  body_map.field_count = body_field_count;
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/tc/cluster/announce", &body_map, &body_src, NULL,
+      &lc_engine_tc_cluster_response_map, &parsed, response, error,
+      lc_engine_parse_tc_cluster_response);
   return rc;
 }
 
 int lc_engine_client_tc_cluster_leave(lc_engine_client *client,
                                       lc_engine_tc_cluster_response *response,
                                       lc_engine_error *error) {
-  lc_engine_buffer body;
+  lc_engine_tc_cluster_response_json parsed;
 
   if (client == NULL || response == NULL || error == NULL) {
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tc_cluster_leave requires client, response, and error");
   }
-  lc_engine_buffer_init(&body);
-  return lc_engine_mgmt_call(client, "POST", "/v1/tc/cluster/leave", &body,
-                             response, error,
-                             lc_engine_parse_tc_cluster_response);
+  memset(&parsed, 0, sizeof(parsed));
+  return lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/tc/cluster/leave", NULL, NULL, NULL,
+      &lc_engine_tc_cluster_response_map, &parsed, response, error,
+      lc_engine_parse_tc_cluster_response);
 }
 
 int lc_engine_client_tc_cluster_list(lc_engine_client *client,
                                      lc_engine_tc_cluster_response *response,
                                      lc_engine_error *error) {
+  lc_engine_tc_cluster_response_json parsed;
   if (client == NULL || response == NULL || error == NULL) {
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tc_cluster_list requires client, response, and error");
   }
-  return lc_engine_mgmt_call(client, "GET", "/v1/tc/cluster/list", NULL,
-                             response, error,
-                             lc_engine_parse_tc_cluster_response);
+  memset(&parsed, 0, sizeof(parsed));
+  return lc_engine_mgmt_call_json_stream(
+      client, "GET", "/v1/tc/cluster/list", NULL, NULL, NULL,
+      &lc_engine_tc_cluster_response_map, &parsed, response, error,
+      lc_engine_parse_tc_cluster_response);
 }
 
 int lc_engine_client_tcrm_register(
     lc_engine_client *client, const lc_engine_tcrm_register_request *request,
     lc_engine_tcrm_register_response *response, lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_tcrm_register_request body_src;
+  lonejson_field body_fields[2];
+  lonejson_map body_map;
+  lc_engine_tcrm_register_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -1271,34 +1336,32 @@ int lc_engine_client_tcrm_register(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tcrm_register requires client, request, response, and error");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_gen_string_field(gen, "backend_hash",
-                                       request->backend_hash) ||
-      !lc_engine_mgmt_gen_string_field(gen, "endpoint", request->endpoint)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to build tcrm register body");
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  rc =
-      lc_engine_mgmt_call(client, "POST", "/v1/tc/rm/register", &body, response,
-                          error, lc_engine_parse_tcrm_register_response);
-  lc_engine_buffer_cleanup(&body);
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  body_src.backend_hash = request->backend_hash;
+  body_src.endpoint = request->endpoint;
+  body_field_count = 0U;
+  body_fields[body_field_count++] = lc_engine_tcrm_register_body_fields[0];
+  body_fields[body_field_count++] = lc_engine_tcrm_register_body_fields[1];
+  body_map.name = "lc_engine_tcrm_register_request";
+  body_map.struct_size = sizeof(body_src);
+  body_map.fields = body_fields;
+  body_map.field_count = body_field_count;
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/tc/rm/register", &body_map, &body_src, NULL,
+      &lc_engine_tcrm_register_response_map, &parsed, response, error,
+      lc_engine_parse_tcrm_register_response);
   return rc;
 }
 
 int lc_engine_client_tcrm_unregister(
     lc_engine_client *client, const lc_engine_tcrm_unregister_request *request,
     lc_engine_tcrm_unregister_response *response, lc_engine_error *error) {
-  yajl_gen gen = NULL;
-  lc_engine_buffer body;
+  lc_engine_tcrm_unregister_request body_src;
+  lonejson_field body_fields[2];
+  lonejson_map body_map;
+  lc_engine_tcrm_register_response_json parsed;
+  size_t body_field_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -1306,38 +1369,36 @@ int lc_engine_client_tcrm_unregister(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tcrm_unregister requires client, request, response, and error");
   }
-  rc = lc_engine_mgmt_start_body(&gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  if (!lc_engine_mgmt_gen_string_field(gen, "backend_hash",
-                                       request->backend_hash) ||
-      !lc_engine_mgmt_gen_string_field(gen, "endpoint", request->endpoint)) {
-    yajl_gen_free(gen);
-    lc_engine_buffer_cleanup(&body);
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
-                                      "failed to build tcrm unregister body");
-  }
-  rc = lc_engine_mgmt_finish_body(gen, &body, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  rc = lc_engine_mgmt_call(
-      client, "POST", "/v1/tc/rm/unregister", &body, response, error,
-      (int (*)(const lc_engine_http_result *, void *,
-               lc_engine_error *))lc_engine_parse_tcrm_register_response);
-  lc_engine_buffer_cleanup(&body);
+  memset(&body_src, 0, sizeof(body_src));
+  memset(&parsed, 0, sizeof(parsed));
+  body_src.backend_hash = request->backend_hash;
+  body_src.endpoint = request->endpoint;
+  body_field_count = 0U;
+  body_fields[body_field_count++] = lc_engine_tcrm_unregister_body_fields[0];
+  body_fields[body_field_count++] = lc_engine_tcrm_unregister_body_fields[1];
+  body_map.name = "lc_engine_tcrm_unregister_request";
+  body_map.struct_size = sizeof(body_src);
+  body_map.fields = body_fields;
+  body_map.field_count = body_field_count;
+  rc = lc_engine_mgmt_call_json_stream(
+      client, "POST", "/v1/tc/rm/unregister", &body_map, &body_src, NULL,
+      &lc_engine_tcrm_register_response_map, &parsed, response, error,
+      lc_engine_parse_tcrm_register_response);
   return rc;
 }
 
 int lc_engine_client_tcrm_list(lc_engine_client *client,
                                lc_engine_tcrm_list_response *response,
                                lc_engine_error *error) {
+  lc_engine_tcrm_list_response_json parsed;
   if (client == NULL || response == NULL || error == NULL) {
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
         "tcrm_list requires client, response, and error");
   }
-  return lc_engine_mgmt_call(client, "GET", "/v1/tc/rm/list", NULL, response,
-                             error, lc_engine_parse_tcrm_list_response);
+  memset(&parsed, 0, sizeof(parsed));
+  return lc_engine_mgmt_call_json_stream(
+      client, "GET", "/v1/tc/rm/list", NULL, NULL, NULL,
+      &lc_engine_tcrm_list_response_map, &parsed, response, error,
+      lc_engine_parse_tcrm_list_response);
 }

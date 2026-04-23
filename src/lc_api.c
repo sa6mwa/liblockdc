@@ -15,15 +15,15 @@ int lc_get(lc_client *client, const char *key, const lc_get_opts *opts,
   return client->get(client, key, opts, dst, out, error);
 }
 
-int lc_load(lc_client *client, const char *key, const lc_get_opts *opts,
-            char **json_text, size_t *json_length, lc_get_res *out,
-            lc_error *error) {
-  return client->load(client, key, opts, json_text, json_length, out, error);
+int lc_load(lc_client *client, const char *key, const lonejson_map *map,
+            void *dst, const lonejson_parse_options *parse_options,
+            const lc_get_opts *opts, lc_get_res *out, lc_error *error) {
+  return client->load(client, key, map, dst, parse_options, opts, out, error);
 }
 
-int lc_update(lc_client *client, const lc_update_req *req, lc_json *json,
+int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error) {
-  return client->update(client, req, json, out, error);
+  return client->update(client, req, src, out, error);
 }
 
 int lc_mutate(lc_client *client, const lc_mutate_op *req, lc_mutate_res *out,
@@ -239,18 +239,22 @@ int lc_lease_get(lc_lease *lease, lc_sink *dst, const lc_get_opts *opts,
   return lease->get(lease, dst, opts, out, error);
 }
 
-int lc_lease_load(lc_lease *lease, char **json_text, size_t *json_length,
+int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
+                  const lonejson_parse_options *parse_options,
                   const lc_get_opts *opts, lc_get_res *out, lc_error *error) {
-  return lease->load(lease, json_text, json_length, opts, out, error);
+  return lease->load(lease, map, dst, parse_options, opts, out, error);
 }
 
-int lc_lease_save(lc_lease *lease, const char *json_text, lc_error *error) {
-  return lease->save(lease, json_text, error);
+int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
+                  const lonejson_write_options *write_options,
+                  lc_error *error) {
+  return lease->save(lease, map, src, write_options, error);
 }
 
-int lc_lease_update(lc_lease *lease, lc_json *json, const lc_update_opts *opts,
+int lc_lease_update(lc_lease *lease, lc_source *src,
+                    const lc_update_opts *opts,
                     lc_error *error) {
-  return lease->update(lease, json, opts, error);
+  return lease->update(lease, src, opts, error);
 }
 
 int lc_lease_mutate(lc_lease *lease, const lc_mutate_req *req,
@@ -400,12 +404,6 @@ void lc_source_close(lc_source *source) {
 void lc_sink_close(lc_sink *sink) {
   if (sink != NULL) {
     sink->close(sink);
-  }
-}
-
-void lc_json_close(lc_json *json) {
-  if (json != NULL) {
-    json->close(json);
   }
 }
 

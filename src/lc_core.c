@@ -26,11 +26,6 @@ typedef struct lc_sink_impl {
   void (*close_impl)(struct lc_sink_impl *self);
 } lc_sink_impl;
 
-typedef struct lc_json_impl {
-  lc_json pub;
-  lc_source *source;
-} lc_json_impl;
-
 typedef struct lc_memory_source {
   lc_source_impl base;
   unsigned char *bytes;
@@ -244,24 +239,24 @@ int lc_error_set(lc_error *error, int code, long http_status,
   return code;
 }
 
-int lc_error_from_legacy(lc_error *error, lc_engine_error *legacy) {
+int lc_error_from_engine(lc_error *error, lc_engine_error *engine) {
   int code;
 
   code = LC_ERR_SERVER;
-  if (legacy->code == LC_ENGINE_OK) {
+  if (engine->code == LC_ENGINE_OK) {
     code = LC_OK;
-  } else if (legacy->code == LC_ENGINE_ERROR_INVALID_ARGUMENT) {
+  } else if (engine->code == LC_ENGINE_ERROR_INVALID_ARGUMENT) {
     code = LC_ERR_INVALID;
-  } else if (legacy->code == LC_ENGINE_ERROR_NO_MEMORY) {
+  } else if (engine->code == LC_ENGINE_ERROR_NO_MEMORY) {
     code = LC_ERR_NOMEM;
-  } else if (legacy->code == LC_ENGINE_ERROR_TRANSPORT) {
+  } else if (engine->code == LC_ENGINE_ERROR_TRANSPORT) {
     code = LC_ERR_TRANSPORT;
-  } else if (legacy->code == LC_ENGINE_ERROR_PROTOCOL) {
+  } else if (engine->code == LC_ENGINE_ERROR_PROTOCOL) {
     code = LC_ERR_PROTOCOL;
   }
-  return lc_error_set(error, code, legacy->http_status, legacy->message,
-                      legacy->detail, legacy->server_error_code,
-                      legacy->correlation_id);
+  return lc_error_set(error, code, engine->http_status, engine->message,
+                      engine->detail, engine->server_error_code,
+                      engine->correlation_id);
 }
 
 char *lc_strdup_local(const char *value) {
@@ -593,35 +588,7 @@ static void lc_memory_sink_close(lc_sink_impl *base) {
   free(sink);
 }
 
-static size_t lc_json_pub_read(lc_json *self, void *buffer, size_t count,
-                               lc_error *error) {
-  lc_json_impl *json;
-
-  json = (lc_json_impl *)self;
-  return json->source->read(json->source, buffer, count, error);
-}
-
-static int lc_json_pub_reset(lc_json *self, lc_error *error) {
-  lc_json_impl *json;
-
-  json = (lc_json_impl *)self;
-  return json->source->reset(json->source, error);
-}
-
-static void lc_json_pub_close(lc_json *self) {
-  lc_json_impl *json;
-
-  if (self == NULL) {
-    return;
-  }
-  json = (lc_json_impl *)self;
-  if (json->source != NULL) {
-    json->source->close(json->source);
-  }
-  free(json);
-}
-
-size_t lc_legacy_read_bridge(void *context, void *buffer, size_t count,
+size_t lc_engine_read_bridge(void *context, void *buffer, size_t count,
                              lc_engine_error *error) {
   lc_read_bridge *bridge;
   lc_error public_error;
@@ -638,7 +605,47 @@ size_t lc_legacy_read_bridge(void *context, void *buffer, size_t count,
   return nread;
 }
 
-int lc_legacy_write_bridge(void *context, const void *bytes, size_t count,
+int lc_engine_reset_bridge(void *context, lc_engine_error *error) {
+  lc_read_bridge *bridge;
+  lc_error public_error;
+  int rc;
+
+  bridge = (lc_read_bridge *)context;
+  if (bridge == NULL || bridge->source == NULL) {
+    if (error != NULL) {
+      if (error->message != NULL) {
+        free(error->message);
+        error->message = NULL;
+      }
+      error->code = LC_ENGINE_ERROR_INVALID_ARGUMENT;
+      error->http_status = 0L;
+      error->message = lc_strdup_local("payload reset requires source");
+    }
+    return LC_ENGINE_ERROR_INVALID_ARGUMENT;
+  }
+  if (bridge->source->reset == NULL) {
+    if (error != NULL) {
+      if (error->message != NULL) {
+        free(error->message);
+        error->message = NULL;
+      }
+      error->code = LC_ENGINE_ERROR_INVALID_ARGUMENT;
+      error->http_status = 0L;
+      error->message = lc_strdup_local("payload source is not rewindable");
+    }
+    return LC_ENGINE_ERROR_INVALID_ARGUMENT;
+  }
+  lc_error_init(&public_error);
+  rc = bridge->source->reset(bridge->source, &public_error);
+  if (rc != LC_OK && public_error.code != LC_OK) {
+    error->code = LC_ENGINE_ERROR_TRANSPORT;
+    error->message = lc_strdup_local(public_error.message);
+  }
+  lc_error_cleanup(&public_error);
+  return rc;
+}
+
+int lc_engine_write_bridge(void *context, const void *bytes, size_t count,
                            lc_engine_error *error) {
   lc_write_bridge *bridge;
   lc_error public_error;
@@ -733,7 +740,7 @@ static char *lc_queue_state_key_new(lc_client_handle *client, const char *queue,
 }
 
 lc_message *lc_message_new(lc_client_handle *client,
-                           const lc_engine_dequeue_response *legacy,
+                           const lc_engine_dequeue_response *engine,
                            lc_source *payload, int *terminal_flag) {
   lc_message_handle *message;
   char *state_key;
@@ -751,38 +758,38 @@ lc_message *lc_message_new(lc_client_handle *client,
   message->pub.write_payload = lc_message_write_payload_method;
   message->pub.close = lc_message_close_method;
   message->client = client;
-  message->namespace_name = lc_client_strdup(client, legacy->namespace_name);
-  message->queue = lc_client_strdup(client, legacy->queue);
-  message->message_id = lc_client_strdup(client, legacy->message_id);
-  message->attempts = legacy->attempts;
-  message->max_attempts = legacy->max_attempts;
-  message->failure_attempts = legacy->failure_attempts;
-  message->not_visible_until_unix = legacy->not_visible_until_unix;
-  message->visibility_timeout_seconds = legacy->visibility_timeout_seconds;
+  message->namespace_name = lc_client_strdup(client, engine->namespace_name);
+  message->queue = lc_client_strdup(client, engine->queue);
+  message->message_id = lc_client_strdup(client, engine->message_id);
+  message->attempts = engine->attempts;
+  message->max_attempts = engine->max_attempts;
+  message->failure_attempts = engine->failure_attempts;
+  message->not_visible_until_unix = engine->not_visible_until_unix;
+  message->visibility_timeout_seconds = engine->visibility_timeout_seconds;
   message->payload_content_type =
-      lc_client_strdup(client, legacy->payload_content_type);
-  message->correlation_id = lc_client_strdup(client, legacy->correlation_id);
-  message->lease_id = lc_client_strdup(client, legacy->lease_id);
-  message->lease_expires_at_unix = legacy->lease_expires_at_unix;
-  message->fencing_token = legacy->fencing_token;
-  message->txn_id = lc_client_strdup(client, legacy->txn_id);
-  message->meta_etag = lc_client_strdup(client, legacy->meta_etag);
-  message->next_cursor = lc_client_strdup(client, legacy->next_cursor);
+      lc_client_strdup(client, engine->payload_content_type);
+  message->correlation_id = lc_client_strdup(client, engine->correlation_id);
+  message->lease_id = lc_client_strdup(client, engine->lease_id);
+  message->lease_expires_at_unix = engine->lease_expires_at_unix;
+  message->fencing_token = engine->fencing_token;
+  message->txn_id = lc_client_strdup(client, engine->txn_id);
+  message->meta_etag = lc_client_strdup(client, engine->meta_etag);
+  message->next_cursor = lc_client_strdup(client, engine->next_cursor);
   message->payload = payload;
   message->terminal_flag = terminal_flag;
-  message->state_etag = lc_client_strdup(client, legacy->state_etag);
-  message->state_lease_id = lc_client_strdup(client, legacy->state_lease_id);
-  message->state_lease_expires_at_unix = legacy->state_lease_expires_at_unix;
-  message->state_fencing_token = legacy->state_fencing_token;
-  message->state_txn_id = lc_client_strdup(client, legacy->state_txn_id);
+  message->state_etag = lc_client_strdup(client, engine->state_etag);
+  message->state_lease_id = lc_client_strdup(client, engine->state_lease_id);
+  message->state_lease_expires_at_unix = engine->state_lease_expires_at_unix;
+  message->state_fencing_token = engine->state_fencing_token;
+  message->state_txn_id = lc_client_strdup(client, engine->state_txn_id);
   state_key = NULL;
-  if (legacy->state_lease_id != NULL && legacy->state_lease_id[0] != '\0') {
+  if (engine->state_lease_id != NULL && engine->state_lease_id[0] != '\0') {
     state_key =
-        lc_queue_state_key_new(client, legacy->queue, legacy->message_id);
+        lc_queue_state_key_new(client, engine->queue, engine->message_id);
     message->state_lease =
-        lc_lease_new(client, legacy->namespace_name, state_key, NULL,
-                     legacy->state_lease_id, legacy->state_txn_id,
-                     legacy->state_fencing_token, 0L, NULL, legacy->state_etag);
+        lc_lease_new(client, engine->namespace_name, state_key, NULL,
+                     engine->state_lease_id, engine->state_txn_id,
+                     engine->state_fencing_token, 0L, NULL, engine->state_etag);
     lc_client_free(client, state_key);
   }
   message->pub.namespace_name = message->namespace_name;
@@ -837,6 +844,7 @@ void lc_client_config_init(lc_client_config *config) {
   memset(config, 0, sizeof(*config));
   config->timeout_ms = 30000L;
   config->prefer_http_2 = 1;
+  config->http_json_response_limit_bytes = 0U;
 }
 
 #define LC_INIT_STRUCT_FUNC(type_name, func_name)                              \
@@ -955,8 +963,8 @@ void lc_consumer_config_init(lc_consumer_config *config) {
 
 int lc_client_open(const lc_client_config *config, lc_client **out,
                    lc_error *error) {
-  lc_engine_client_config legacy_config;
-  lc_engine_error legacy_error;
+  lc_engine_client_config engine_config;
+  lc_engine_error engine_error;
   lc_client_handle *client;
   size_t i;
   int rc;
@@ -966,35 +974,37 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                         "lc_client_open requires config and out", NULL, NULL,
                         NULL);
   }
-  memset(&legacy_config, 0, sizeof(legacy_config));
-  legacy_config.endpoints = config->endpoints;
-  legacy_config.endpoint_count = config->endpoint_count;
-  legacy_config.unix_socket_path = config->unix_socket_path;
-  legacy_config.client_bundle_path = config->client_bundle_path;
-  legacy_config.default_namespace = config->default_namespace;
-  legacy_config.timeout_ms = config->timeout_ms;
-  legacy_config.disable_mtls = config->disable_mtls;
-  legacy_config.insecure_skip_verify = config->insecure_skip_verify;
-  legacy_config.prefer_http_2 = config->prefer_http_2;
-  legacy_config.logger = config->logger;
-  legacy_config.disable_logger_sys_field = config->disable_logger_sys_field;
-  legacy_config.allocator.malloc_fn = config->allocator.malloc_fn;
-  legacy_config.allocator.realloc_fn = config->allocator.realloc_fn;
-  legacy_config.allocator.free_fn = config->allocator.free_fn;
-  legacy_config.allocator.context = config->allocator.context;
+  memset(&engine_config, 0, sizeof(engine_config));
+  engine_config.endpoints = config->endpoints;
+  engine_config.endpoint_count = config->endpoint_count;
+  engine_config.unix_socket_path = config->unix_socket_path;
+  engine_config.client_bundle_path = config->client_bundle_path;
+  engine_config.default_namespace = config->default_namespace;
+  engine_config.timeout_ms = config->timeout_ms;
+  engine_config.disable_mtls = config->disable_mtls;
+  engine_config.insecure_skip_verify = config->insecure_skip_verify;
+  engine_config.prefer_http_2 = config->prefer_http_2;
+  engine_config.http_json_response_limit_bytes =
+      config->http_json_response_limit_bytes;
+  engine_config.logger = config->logger;
+  engine_config.disable_logger_sys_field = config->disable_logger_sys_field;
+  engine_config.allocator.malloc_fn = config->allocator.malloc_fn;
+  engine_config.allocator.realloc_fn = config->allocator.realloc_fn;
+  engine_config.allocator.free_fn = config->allocator.free_fn;
+  engine_config.allocator.context = config->allocator.context;
 
-  lc_engine_error_init(&legacy_error);
+  lc_engine_error_init(&engine_error);
   client = (lc_client_handle *)lc_calloc_with_allocator(&config->allocator, 1U,
                                                         sizeof(*client));
   if (client == NULL) {
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to allocate client",
                         NULL, NULL, NULL);
   }
-  rc = lc_engine_client_open(&legacy_config, &client->legacy, &legacy_error);
+  rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    lc_error_from_legacy(error, &legacy_error);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_error_from_engine(error, &engine_error);
+    lc_engine_error_cleanup(&engine_error);
     lc_free_with_allocator(&config->allocator, client);
     return error->code;
   }
@@ -1003,8 +1013,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->endpoints = (char **)lc_calloc_with_allocator(
         &config->allocator, config->endpoint_count, sizeof(char *));
     if (client->endpoints == NULL) {
-      lc_engine_client_close(client->legacy);
-      lc_engine_error_cleanup(&legacy_error);
+      lc_engine_client_close(client->engine);
+      lc_engine_error_cleanup(&engine_error);
       lc_free_with_allocator(&config->allocator, client);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate client endpoint copy", NULL, NULL,
@@ -1015,7 +1025,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
           lc_strdup_with_allocator(&config->allocator, config->endpoints[i]);
       if (client->endpoints[i] == NULL && config->endpoints[i] != NULL) {
         lc_client_close_method(&client->pub);
-        lc_engine_error_cleanup(&legacy_error);
+        lc_engine_error_cleanup(&engine_error);
         return lc_error_set(error, LC_ERR_NOMEM, 0L,
                             "failed to copy client endpoint", NULL, NULL, NULL);
       }
@@ -1025,7 +1035,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
       lc_strdup_with_allocator(&config->allocator, config->unix_socket_path);
   if (config->unix_socket_path != NULL && client->unix_socket_path == NULL) {
     lc_client_close_method(&client->pub);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy unix_socket_path", NULL, NULL, NULL);
   }
@@ -1034,7 +1044,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   if (config->client_bundle_path != NULL &&
       client->client_bundle_path == NULL) {
     lc_client_close_method(&client->pub);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy client bundle path", NULL, NULL, NULL);
   }
@@ -1042,7 +1052,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
       lc_strdup_with_allocator(&config->allocator, config->default_namespace);
   if (config->default_namespace != NULL && client->default_namespace == NULL) {
     lc_client_close_method(&client->pub);
-    lc_engine_error_cleanup(&legacy_error);
+    lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy default namespace", NULL, NULL, NULL);
   }
@@ -1053,7 +1063,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->disable_logger_sys_field = config->disable_logger_sys_field;
   client->base_logger =
       config->logger != NULL ? config->logger : lc_log_noop_logger();
-  client->logger = lc_engine_client_logger(client->legacy);
+  client->logger = lc_engine_client_logger(client->engine);
+  client->http_json_response_limit_bytes =
+      config->http_json_response_limit_bytes;
   client->allocator = config->allocator;
   client->pub.acquire = lc_client_acquire_method;
   client->pub.describe = lc_client_describe_method;
@@ -1104,7 +1116,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.close = lc_client_close_method;
   client->pub.default_namespace = client->default_namespace;
   *out = &client->pub;
-  lc_engine_error_cleanup(&legacy_error);
+  lc_engine_error_cleanup(&engine_error);
   return LC_OK;
 }
 
@@ -1300,65 +1312,6 @@ int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error) {
     }
     total += nread;
   }
-}
-
-int lc_json_from_string(const char *json_text, lc_json **out, lc_error *error) {
-  lc_source *source;
-
-  if (json_text == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "json_from_string requires json_text", NULL, NULL,
-                        NULL);
-  }
-  if (lc_source_from_memory(json_text, strlen(json_text), &source, error) !=
-      LC_OK) {
-    return error->code;
-  }
-  return lc_json_from_source(source, out, error);
-}
-
-int lc_json_from_file(const char *path, lc_json **out, lc_error *error) {
-  lc_source *source;
-  int rc;
-
-  rc = lc_source_from_file(path, &source, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_json_from_source(source, out, error);
-}
-
-int lc_json_from_fd(int fd, lc_json **out, lc_error *error) {
-  lc_source *source;
-  int rc;
-
-  rc = lc_source_from_fd(fd, &source, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_json_from_source(source, out, error);
-}
-
-int lc_json_from_source(lc_source *source, lc_json **out, lc_error *error) {
-  lc_json_impl *json;
-
-  if (source == NULL || out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "json_from_source requires source and out", NULL, NULL,
-                        NULL);
-  }
-  json = (lc_json_impl *)calloc(1U, sizeof(*json));
-  if (json == NULL) {
-    source->close(source);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate json source", NULL, NULL, NULL);
-  }
-  json->source = source;
-  json->pub.read = lc_json_pub_read;
-  json->pub.reset = lc_json_pub_reset;
-  json->pub.close = lc_json_pub_close;
-  *out = &json->pub;
-  return LC_OK;
 }
 
 void lc_describe_res_cleanup(lc_describe_res *response) {

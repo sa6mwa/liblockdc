@@ -27,8 +27,7 @@ run_target() {
     cmake --preset "$preset"
     cmake --build --preset "$preset"
     ctest --preset "$preset"
-    cmake -DLOCKDC_BINARY_DIR="$build_dir" -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_runtime.cmake"
-    cmake -DLOCKDC_BINARY_DIR="$build_dir" -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_dev.cmake"
+    cmake -DLOCKDC_BINARY_DIR="$build_dir" -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_archive.cmake"
 }
 
 require_command cmake
@@ -55,6 +54,8 @@ run_target aarch64-linux-gnu-release
 run_target aarch64-linux-musl-release
 run_target armhf-linux-gnu-release
 run_target armhf-linux-musl-release
+
+cmake     -DLOCKDC_BINARY_DIR="$repo_root/build/x86_64-linux-gnu-release"     -DLOCKDC_ROOT="$repo_root"     -DLOCKDC_DIST_DIR="$repo_root/dist"     -P "$repo_root/cmake/package_lua_rock.cmake"
 
 cmake -DLOCKDC_ROOT="$repo_root" -DLOCKDC_BINARY_DIR="$repo_root/build/x86_64-linux-gnu-release" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_checksums.cmake"
 cmake \

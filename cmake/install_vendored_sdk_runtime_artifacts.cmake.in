@@ -1,0 +1,25 @@
+function(lockdc_install_optional_glob destination pattern)
+    file(GLOB _matching_files
+        "${pattern}"
+        "${pattern}@CMAKE_SHARED_LIBRARY_SUFFIX@"
+        "${pattern}@CMAKE_SHARED_LIBRARY_SUFFIX@*"
+        "${pattern}*@CMAKE_SHARED_LIBRARY_SUFFIX@"
+    )
+    list(REMOVE_DUPLICATES _matching_files)
+    if(_matching_files)
+        file(INSTALL
+            DESTINATION "${CMAKE_INSTALL_PREFIX}/${destination}"
+            TYPE FILE
+            FILES ${_matching_files}
+        )
+    endif()
+endfunction()
+
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/pslog/install/lib/libpslog")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/curl/install/lib/libcurl")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/openssl/install/lib/libssl")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/openssl/install/lib/libcrypto")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/nghttp2/install/lib/libnghttp2")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/libssh2/install/lib/libssh2")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/zlib/install/lib/libz")
+lockdc_install_optional_glob("lib" "@LOCKDC_EXTERNAL_ROOT@/lonejson/install/lib/liblonejson")

@@ -38,15 +38,12 @@ run_target() {
     -DLOCKDC_BINARY_DIR="$build_dir" \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -P "$repo_root/cmake/package_runtime.cmake"
-  "$cmake_bin" \
-    -DLOCKDC_BINARY_DIR="$build_dir" \
-    -DLOCKDC_ROOT="$repo_root" \
-    -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -P "$repo_root/cmake/package_dev.cmake"
+    -P "$repo_root/cmake/package_archive.cmake"
 }
 
 run_cmake_script -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_clean_dist.cmake"
+
+package_lua=0
 
 case "$requested_abi" in
   all)
@@ -56,11 +53,13 @@ case "$requested_abi" in
     run_target aarch64-linux-musl-release
     run_target armhf-linux-gnu-release
     run_target armhf-linux-musl-release
+    package_lua=1
     ;;
   gnu)
     run_target x86_64-linux-gnu-release
     run_target aarch64-linux-gnu-release
     run_target armhf-linux-gnu-release
+    package_lua=1
     ;;
   musl)
     run_target x86_64-linux-musl-release
@@ -69,6 +68,7 @@ case "$requested_abi" in
     ;;
   x86_64-linux-gnu)
     run_target x86_64-linux-gnu-release
+    package_lua=1
     ;;
   x86_64-linux-musl)
     run_target x86_64-linux-musl-release
@@ -93,6 +93,14 @@ esac
 
 if [ -z "$lockdc_version" ]; then
   resolve_version
+fi
+
+if [ "$package_lua" -eq 1 ]; then
+  run_cmake_script \
+    -DLOCKDC_BINARY_DIR="$repo_root/build/x86_64-linux-gnu-release" \
+    -DLOCKDC_ROOT="$repo_root" \
+    -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -P "$repo_root/cmake/package_lua_rock.cmake"
 fi
 
 run_cmake_script \

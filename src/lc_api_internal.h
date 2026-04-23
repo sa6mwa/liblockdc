@@ -1,6 +1,17 @@
 #ifndef LC_API_INTERNAL_H
 #define LC_API_INTERNAL_H
 
+/*
+ * Private SDK implementation details.
+ *
+ * Public callers should only include include/lc/lc.h. The structs and helpers
+ * in this header are internal to the shipped HTTP/curl/lonejson implementation
+ * of that public contract.
+ */
+
+#ifndef LONEJSON_WITH_CURL
+#define LONEJSON_WITH_CURL
+#endif
 #include "lc/lc.h"
 #include "lc_engine_api.h"
 
@@ -16,17 +27,10 @@ typedef struct lc_client_handle lc_client_handle;
 typedef struct lc_lease_handle lc_lease_handle;
 typedef struct lc_message_handle lc_message_handle;
 typedef struct lc_consumer_service_handle lc_consumer_service_handle;
-typedef int (*lc_consumer_clone_client_fn)(lc_consumer_service_handle *service,
-                                           lc_client **out, lc_error *error);
-typedef int (*lc_consumer_subscribe_fn)(
-    lc_consumer_service_handle *service, const lc_dequeue_req *request,
-    int with_state, lc_client_handle *client,
-    const lc_engine_queue_stream_handler *handler, void *handler_context,
-    lc_engine_error *legacy_error);
 
 struct lc_client_handle {
   lc_client pub;
-  lc_engine_client *legacy;
+  lc_engine_client *engine;
   char **endpoints;
   size_t endpoint_count;
   char *unix_socket_path;
@@ -36,6 +40,7 @@ struct lc_client_handle {
   int disable_mtls;
   int insecure_skip_verify;
   int prefer_http_2;
+  size_t http_json_response_limit_bytes;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
@@ -106,7 +111,8 @@ typedef struct lc_single_delivery_bridge {
   lc_dequeue_batch_res *batch;
   lc_error *error;
   lc_engine_dequeue_response meta;
-  lc_sink *sink;
+  lc_source *payload;
+  lc_stream_pipe *pipe;
   int mode_batch;
 } lc_single_delivery_bridge;
 
@@ -126,7 +132,7 @@ typedef struct lc_subscribe_bridge {
 int lc_error_set(lc_error *error, int code, long http_status,
                  const char *message, const char *detail,
                  const char *server_code, const char *correlation_id);
-int lc_error_from_legacy(lc_error *error, lc_engine_error *legacy);
+int lc_error_from_engine(lc_error *error, lc_engine_error *engine);
 const char *lc_nack_intent_to_string(lc_nack_intent intent);
 int lc_nack_intent_to_wire_string(lc_nack_intent intent, const char **out,
                                   lc_error *error);
@@ -149,9 +155,10 @@ char *lc_strdup_local(const char *value);
 char *lc_dup_bytes_as_text(const void *bytes, size_t length);
 void lc_attachment_info_copy(lc_attachment_info *dst,
                              const lc_engine_attachment_info *src);
-size_t lc_legacy_read_bridge(void *context, void *buffer, size_t count,
+size_t lc_engine_read_bridge(void *context, void *buffer, size_t count,
                              lc_engine_error *error);
-int lc_legacy_write_bridge(void *context, const void *bytes, size_t count,
+int lc_engine_reset_bridge(void *context, lc_engine_error *error);
+int lc_engine_write_bridge(void *context, const void *bytes, size_t count,
                            lc_engine_error *error);
 lc_source *lc_source_from_open_file(FILE *fp, int close_file);
 int lc_stream_pipe_open(size_t capacity, const lc_allocator *allocator,
@@ -166,7 +173,7 @@ lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
                        const char *txn_id, long fencing_token, long version,
                        const char *state_etag, const char *queue_state_etag);
 lc_message *lc_message_new(lc_client_handle *client,
-                           const lc_engine_dequeue_response *legacy,
+                           const lc_engine_dequeue_response *engine,
                            lc_source *payload, int *terminal_flag);
 
 int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
@@ -177,11 +184,13 @@ int lc_client_get_method(lc_client *self, const char *key,
                          const lc_get_opts *opts, lc_sink *dst, lc_get_res *out,
                          lc_error *error);
 int lc_client_load_method(lc_client *self, const char *key,
-                          const lc_get_opts *opts, char **json_text,
-                          size_t *json_length, lc_get_res *out,
+                          const lonejson_map *map, void *dst,
+                          const lonejson_parse_options *parse_options,
+                          const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error);
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
-                            lc_json *json, lc_update_res *out, lc_error *error);
+                            lc_source *src, lc_update_res *out,
+                            lc_error *error);
 int lc_client_mutate_method(lc_client *self, const lc_mutate_op *req,
                             lc_mutate_res *out, lc_error *error);
 int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
@@ -295,12 +304,15 @@ void lc_client_close_method(lc_client *self);
 int lc_lease_describe_method(lc_lease *self, lc_error *error);
 int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
                         lc_get_res *out, lc_error *error);
-int lc_lease_load_method(lc_lease *self, char **json_text, size_t *json_length,
+int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
+                         const lonejson_parse_options *parse_options,
                          const lc_get_opts *opts, lc_get_res *out,
                          lc_error *error);
-int lc_lease_save_method(lc_lease *self, const char *json_text,
+int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
+                         const void *src,
+                         const lonejson_write_options *write_options,
                          lc_error *error);
-int lc_lease_update_method(lc_lease *self, lc_json *json,
+int lc_lease_update_method(lc_lease *self, lc_source *src,
                            const lc_update_opts *opts, lc_error *error);
 int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
                            lc_error *error);
@@ -339,6 +351,19 @@ lc_source *lc_message_payload_reader_method(lc_message *self);
 int lc_message_rewind_payload_method(lc_message *self, lc_error *error);
 int lc_message_write_payload_method(lc_message *self, lc_sink *dst,
                                     size_t *written, lc_error *error);
+
+int lc_lonejson_error_from_status(lc_error *error, lonejson_status status,
+                                  const lonejson_error *lj_error,
+                                  const char *message);
+int lc_engine_file_write_callback(void *context, const void *bytes,
+                                  size_t count, lc_engine_error *error);
+int lc_lonejson_parse_file(FILE *fp, const lonejson_map *map, void *dst,
+                           const lonejson_parse_options *options,
+                           lc_error *error, const char *message);
+int lc_lonejson_serialize_file(FILE *fp, const lonejson_map *map,
+                               const void *src,
+                               const lonejson_write_options *options,
+                               lc_error *error, const char *message);
 void lc_message_close_method(lc_message *self);
 
 int lc_consumer_service_run_method(lc_consumer_service *self, lc_error *error);
@@ -347,8 +372,5 @@ int lc_consumer_service_start_method(lc_consumer_service *self,
 int lc_consumer_service_stop_method(lc_consumer_service *self);
 int lc_consumer_service_wait_method(lc_consumer_service *self, lc_error *error);
 void lc_consumer_service_close_method(lc_consumer_service *self);
-void lc_consumer_service_set_test_hooks(lc_consumer_service *self,
-                                        lc_consumer_clone_client_fn clone_fn,
-                                        lc_consumer_subscribe_fn subscribe_fn);
 
 #endif

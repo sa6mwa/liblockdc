@@ -2,12 +2,12 @@ if(TARGET lc_static)
   set(lc_example_link_target lc_static)
   set(lc_example_curl_target lc::curl_static)
   set(lc_example_pslog_target lc::pslog_static)
-  set(lc_example_yajl_target lc::yajl_static)
+  set(lc_example_lonejson_target lc::lonejson_static)
 elseif(TARGET lc_shared)
   set(lc_example_link_target lc_shared)
   set(lc_example_curl_target lc::curl_shared)
   set(lc_example_pslog_target lc::pslog_shared)
-  set(lc_example_yajl_target lc::yajl_shared)
+  set(lc_example_lonejson_target lc::lonejson_shared)
 else()
   return()
 endif()
@@ -20,6 +20,14 @@ function(lc_configure_example_target target)
     LC_EXAMPLE_DEFAULT_FETCH_CA="${PROJECT_SOURCE_DIR}/devenv/volumes/lockd-disk-a-config/ca.pem"
     LC_EXAMPLE_DEFAULT_INPUT_JSON="${PROJECT_SOURCE_DIR}/examples/data/state_stream_input.json"
     LC_EXAMPLE_DEFAULT_FETCH_URL="file://${PROJECT_SOURCE_DIR}/examples/data/state_stream_input.json"
+  )
+endfunction()
+
+function(lc_configure_minimal_example_target target)
+  target_link_libraries(${target} PRIVATE ${lc_example_link_target})
+  lc_configure_c_target(${target})
+  target_compile_definitions(${target} PRIVATE
+    LC_EXAMPLE_DEFAULT_CLIENT_PEM="${PROJECT_SOURCE_DIR}/devenv/volumes/lockd-disk-a-config/client.pem"
   )
 endfunction()
 
@@ -40,7 +48,7 @@ lc_configure_example_target(lc_example_consumer_service)
 
 add_executable(lc_example_startconsumer startconsumer.c)
 lc_configure_example_target(lc_example_startconsumer)
-target_link_libraries(lc_example_startconsumer PRIVATE Threads::Threads ${lc_example_yajl_target})
+target_link_libraries(lc_example_startconsumer PRIVATE Threads::Threads ${lc_example_lonejson_target})
 
 add_executable(lc_example_management_admin management_admin.c)
 lc_configure_example_target(lc_example_management_admin)
@@ -48,3 +56,6 @@ lc_configure_example_target(lc_example_management_admin)
 add_executable(lc_example_curl_fetch_into_lockd curl_fetch_into_lockd.c)
 lc_configure_example_target(lc_example_curl_fetch_into_lockd)
 target_link_libraries(lc_example_curl_fetch_into_lockd PRIVATE ${lc_example_curl_target})
+
+add_executable(lc_example_local_mutate local_mutate.c)
+lc_configure_minimal_example_target(lc_example_local_mutate)

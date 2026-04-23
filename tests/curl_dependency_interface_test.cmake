@@ -1,0 +1,81 @@
+if(NOT DEFINED LOCKDC_BINARY_DIR)
+    message(FATAL_ERROR "LOCKDC_BINARY_DIR is required")
+endif()
+
+if(NOT DEFINED LOCKDC_EXTERNAL_ROOT OR LOCKDC_EXTERNAL_ROOT STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_EXTERNAL_ROOT is required")
+endif()
+
+if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT OR LOCKDC_DEPENDENCY_BUILD_ROOT STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_DEPENDENCY_BUILD_ROOT is required")
+endif()
+
+set(curl_root "${LOCKDC_EXTERNAL_ROOT}/curl/install")
+set(curl_build_root "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl/build")
+set(curl_static_pc "${curl_build_root}/libcurl.pc")
+set(curl_cfgcmd "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl/tmp/lc_curl_project-cfgcmd.txt")
+set(curl_lib_cmake "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl/src/lib/CMakeLists.txt")
+set(curl_build_ninja "${curl_build_root}/build.ninja")
+set(curl_header "${curl_root}/include/curl/curl.h")
+set(curl_static_archive "${curl_root}/lib/libcurl.a")
+set(curl_shared_library "${curl_root}/lib/libcurl.so")
+
+function(assert_not_contains text pattern description)
+    if(text MATCHES "${pattern}")
+        message(FATAL_ERROR "curl dependency metadata unexpectedly contains ${description}")
+    endif()
+endfunction()
+
+function(assert_contains text pattern description)
+    if(NOT text MATCHES "${pattern}")
+        message(FATAL_ERROR "curl dependency metadata is missing ${description}")
+    endif()
+endfunction()
+
+function(assert_not_empty value description)
+    if("${value}" STREQUAL "")
+        message(FATAL_ERROR "expected non-empty ${description}")
+    endif()
+endfunction()
+
+function(assert_literal_contains text needle description)
+    string(FIND "${text}" "${needle}" found_at)
+    if(found_at EQUAL -1)
+        message(FATAL_ERROR "curl dependency metadata is missing ${description}")
+    endif()
+endfunction()
+
+foreach(path IN ITEMS "${curl_static_pc}" "${curl_cfgcmd}" "${curl_lib_cmake}" "${curl_build_ninja}")
+    if(NOT EXISTS "${path}")
+        message(FATAL_ERROR "missing curl dependency artifact: ${path}")
+    endif()
+endforeach()
+
+foreach(path IN ITEMS "${curl_header}" "${curl_static_archive}" "${curl_shared_library}")
+    if(NOT EXISTS "${path}")
+        message(FATAL_ERROR "missing curl public dependency artifact: ${path}")
+    endif()
+endforeach()
+
+foreach(path IN ITEMS
+    "${curl_root}/bin"
+    "${curl_root}/lib/pkgconfig"
+    "${curl_root}/lib/cmake")
+    if(EXISTS "${path}")
+        message(FATAL_ERROR "curl install tree still exposes non-public artifact: ${path}")
+    endif()
+endforeach()
+
+file(READ "${curl_static_pc}" curl_static_pc_text)
+file(READ "${curl_cfgcmd}" curl_cfgcmd_text)
+file(READ "${curl_lib_cmake}" curl_lib_cmake_text)
+file(READ "${curl_build_ninja}" curl_build_ninja_text)
+
+assert_contains("${curl_static_pc_text}" "libssh2" "libssh2 dependency in static libcurl.pc")
+assert_contains("${curl_static_pc_text}" "Libs\\.private:.*-lssh2" "libssh2 link flags in libcurl.pc")
+assert_contains("${curl_static_pc_text}" "Libs\\.private:.*-lz" "zlib link flags in libcurl.pc")
+assert_contains("${curl_static_pc_text}" "supported_protocols=\"[^\"]*SCP" "SCP protocol support")
+assert_contains("${curl_static_pc_text}" "supported_protocols=\"[^\"]*SFTP" "SFTP protocol support")
+assert_contains("${curl_cfgcmd_text}" "-DSHARE_LIB_OBJECT=ON" "shared-object configure flag for curl")
+assert_literal_contains("${curl_lib_cmake_text}" "add_library(\${LIB_OBJECT} OBJECT" "curl object-library support in upstream build files")
+assert_contains("${curl_build_ninja_text}" "lib/CMakeFiles/libcurl_object\\.dir/" "curl object-library build outputs")

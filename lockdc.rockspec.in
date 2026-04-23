@@ -1,0 +1,31 @@
+package = "lockdc"
+version = "@PROJECT_VERSION@-1"
+source = {
+  url = "@SOURCE_URL@",
+@SOURCE_TAG_LINE@
+}
+description = {
+  summary = "Lua frontend for liblockdc",
+  detailed = [[
+Idiomatic Lua client bindings for liblockdc, including lease, queue, attachment,
+namespace configuration, and consumer helper APIs backed by the liblockdc C SDK.
+]],
+  homepage = "https://github.com/sa6mwa/liblockdc",
+  license = "MIT",
+}
+dependencies = {
+  "lua >= 5.5, < 5.6",
+  "lonejson == 0.4.1-1",
+}
+build = {
+  type = "command",
+  build_command = "sh scripts/build_lockdc_lua_rock.sh \"$(CC)\" \"$(CFLAGS)\" \"$(LIBFLAG)\" \"$(OBJ_EXTENSION)\" \"$(LIB_EXTENSION)\" \"$(LUA_INCDIR)\" \"@PROJECT_VERSION@\"",
+  install = {
+    lua = {
+      ["lockdc.init"] = "lua/lockdc/init.lua",
+    },
+    lib = {
+      ["lockdc.core"] = ".luarocks-build/lockdc/core.so",
+    },
+  },
+}

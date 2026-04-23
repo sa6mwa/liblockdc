@@ -2,8 +2,12 @@
 #define LC_LOCKDC_H
 
 #include <lc/version.h>
+#include <lonejson.h>
 #include <pslog.h>
 #include <stddef.h>
+
+/** Default maximum bytes accepted while parsing a typed JSON HTTP response. */
+#define LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT (1024UL * 1024UL)
 
 /** Opaque client handle. */
 typedef struct lc_client lc_client;
@@ -13,8 +17,7 @@ typedef struct lc_lease lc_lease;
 typedef struct lc_message lc_message;
 /** Opaque managed queue consumer service. */
 typedef struct lc_consumer_service lc_consumer_service;
-/** Opaque JSON input stream used for large state updates. */
-typedef struct lc_json lc_json;
+/** Opaque raw JSON input stream used for large state updates. */
 /** Opaque byte source used for uploads and streamed request bodies. */
 typedef struct lc_source lc_source;
 /** Opaque byte sink used for downloads and streamed response bodies. */
@@ -81,6 +84,10 @@ typedef struct lc_client_config {
   int insecure_skip_verify;
   /** Prefers HTTP/2 when the endpoint and libcurl build support it. */
   int prefer_http_2;
+  /** Maximum typed JSON response bytes parsed through lonejson. Zero uses
+   * `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`.
+   */
+  size_t http_json_response_limit_bytes;
   /** Borrowed client logger used for SDK diagnostics. Defaults to a no-op
    * logger. */
   pslog_logger *logger;
@@ -121,19 +128,6 @@ struct lc_source {
 struct lc_sink {
   int (*write)(lc_sink *self, const void *bytes, size_t count, lc_error *error);
   void (*close)(lc_sink *self);
-  void *impl;
-};
-
-/**
- * Rewindable JSON source used for streamed state updates.
- *
- * This is the preferred input type for large JSON documents that must not be
- * fully materialized in memory.
- */
-struct lc_json {
-  size_t (*read)(lc_json *self, void *buffer, size_t count, lc_error *error);
-  int (*reset)(lc_json *self, lc_error *error);
-  void (*close)(lc_json *self);
   void *impl;
 };
 
@@ -896,9 +890,16 @@ typedef struct lc_consumer_restart_policy {
  * Delivery object passed to managed consumer callbacks.
  *
  * All pointers are borrowed for the duration of the callback only. The handler
- * should terminate the delivery with `message->ack()` or `message->nack()`.
- * When `state` is non-NULL, it is the lease handle associated with the
- * delivery and is owned by `message`.
+ * may leave the delivery open and return `LC_OK`; the managed consumer will
+ * then acknowledge it automatically on success. If the handler returns a
+ * non-`LC_OK` error, the managed consumer treats it as a failure, negatively
+ * acknowledges the open delivery after the callback unwinds, reports the
+ * error, and resumes consuming without counting that delivery against the
+ * service restart budget.
+ * Explicit `message->ack()`/`message->nack()` remain available for handlers
+ * that want to terminalize the delivery themselves. When `state` is non-NULL,
+ * it is the lease handle associated with the delivery and is owned by
+ * `message`.
  */
 typedef struct lc_consumer_message {
   /** Active SDK client for this consumer loop. Safe to reuse inside the
@@ -920,7 +921,7 @@ typedef struct lc_consumer_message {
 } lc_consumer_message;
 
 /**
- * Recoverable consumer-loop failure reported before restart.
+ * Recoverable consumer service error reported to `on_error`.
  *
  * The `cause` object is borrowed for the duration of the callback only.
  */
@@ -931,10 +932,11 @@ typedef struct lc_consumer_error {
   const char *queue;
   /** Non-zero when the failing loop used `dequeue_with_state()`. */
   int with_state;
-  /** Current consecutive failure count for this consumer. */
+  /** Current consecutive loop failure count. Zero means the error was scoped to
+   * one delivery and did not consume the service restart budget. */
   int attempt;
-  /** Delay before the next retry, in milliseconds. Zero means immediate retry.
-   */
+  /** Delay before the next retry, in milliseconds. Zero means immediate retry
+   * or a delivery-level error with no service-level backoff. */
   long restart_in_ms;
   /** Error that caused the failure. */
   const lc_error *cause;
@@ -984,16 +986,23 @@ typedef struct lc_consumer_config {
   /**
    * Handles one delivery.
    *
-   * Return `LC_OK` after successfully terminating the message with `ack()` or
-   * `nack()`. Returning a non-`LC_OK` code marks the attempt as failed and
-   * enters the restart/error path.
+   * Return `LC_OK` after successfully processing the delivery. If the handler
+   * leaves the delivery open, the managed consumer acknowledges it
+   * automatically on success and negatively acknowledges it automatically on
+   * failure before reporting the delivery error and resuming consumption.
+   * Explicit
+   * `message->nack()`/`message->ack()` are still available when a handler wants
+   * to terminalize the delivery itself before returning.
    */
   int (*handle)(void *context, lc_consumer_message *message, lc_error *error);
   /**
-   * Observes a failed loop before restart.
+   * Observes a failed delivery or failed loop.
    *
-   * Return `LC_OK` to continue restarting. Returning a non-`LC_OK` code stops
-   * the service and returns that error from `run()`/`wait()`.
+   * Delivery-level errors are reported with `attempt == 0` and do not consume
+   * the service restart budget. Loop/runtime failures are reported with a
+   * positive `attempt` and may back off according to `restart_policy`.
+   * Return `LC_OK` to continue. Returning a non-`LC_OK` code stops the service
+   * and returns that error from `run()`/`wait()`.
    */
   int (*on_error)(void *context, const lc_consumer_error *event,
                   lc_error *error);
@@ -1003,7 +1012,7 @@ typedef struct lc_consumer_config {
   void (*on_stop)(void *context, const lc_consumer_lifecycle_event *event);
   /** Opaque user context passed to all callbacks for this consumer. */
   void *context;
-  /** Restart behavior after handler or transport failures. */
+  /** Restart behavior after loop/runtime transport failures. */
   lc_consumer_restart_policy restart_policy;
 } lc_consumer_config;
 
@@ -1137,27 +1146,37 @@ struct lc_lease {
   int (*get)(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
              lc_get_res *out, lc_error *error);
   /**
-   * Convenience variant of `get()` that materializes the state document into a
-   * newly allocated JSON text buffer.
+   * Parses the current state document into `dst` through a lonejson map.
    *
-   * The caller owns `*json_text` on success and frees it with the client
-   * allocator or the default allocator.
+   * Callers define their struct and map with `LONEJSON_FIELD_*` and
+   * `LONEJSON_MAP_DEFINE(...)`, then release lonejson-owned field storage with
+   * `lonejson_cleanup(map, dst)` when finished. For very large string or byte
+   * values, use lonejson spool-backed field mappings so load can spill those
+   * fields instead of forcing them to stay resident in memory.
    */
-  int (*load)(lc_lease *self, char **json_text, size_t *json_length,
+  int (*load)(lc_lease *self, const lonejson_map *map, void *dst,
+              const lonejson_parse_options *parse_options,
               const lc_get_opts *opts, lc_get_res *out, lc_error *error);
   /**
-   * Convenience variant of `update()` for small in-memory JSON documents.
+   * Convenience mapped-struct variant of `update()`.
    *
-   * For large documents, prefer `update()` with an `lc_json`.
+   * The caller supplies the same lonejson map and struct shape used for
+   * `load()`. lonejson serializes the mapped struct to JSON, and liblockdc
+   * streams that JSON into the bound lease update. For very large outbound text
+   * or byte values, use lonejson source-backed fields so serialization can read
+   * from files or file descriptors without first materializing those bytes in
+   * memory.
    */
-  int (*save)(lc_lease *self, const char *json_text, lc_error *error);
+  int (*save)(lc_lease *self, const lonejson_map *map, const void *src,
+              const lonejson_write_options *write_options, lc_error *error);
   /**
    * Replaces the state document from a streamed JSON source.
    *
    * Use this for large JSON payloads. `opts` may be `NULL` for default update
    * behavior. On success, `self->version` and `self->state_etag` are refreshed.
    */
-  int (*update)(lc_lease *self, lc_json *json, const lc_update_opts *opts,
+  int (*update)(lc_lease *self, lc_source *src,
+                const lc_update_opts *opts,
                 lc_error *error);
   /**
    * Applies one or more server-side mutations to the current state.
@@ -1430,12 +1449,19 @@ struct lc_client {
   /** Streams the current state document for `key` into `dst`. */
   int (*get)(lc_client *self, const char *key, const lc_get_opts *opts,
              lc_sink *dst, lc_get_res *out, lc_error *error);
-  /** Convenience variant of `get()` that materializes the state into memory. */
-  int (*load)(lc_client *self, const char *key, const lc_get_opts *opts,
-              char **json_text, size_t *json_length, lc_get_res *out,
-              lc_error *error);
+  /**
+   * Convenience variant of `get()` that parses the current state into `dst`
+   * through a lonejson map.
+   *
+   * Callers define their struct and map with `LONEJSON_FIELD_*` and
+   * `LONEJSON_MAP_DEFINE(...)`, then release lonejson-owned field storage with
+   * `lonejson_cleanup(map, dst)` when finished.
+   */
+  int (*load)(lc_client *self, const char *key, const lonejson_map *map,
+              void *dst, const lonejson_parse_options *parse_options,
+              const lc_get_opts *opts, lc_get_res *out, lc_error *error);
   /** Updates an existing lease reference from a streamed JSON source. */
-  int (*update)(lc_client *self, const lc_update_req *req, lc_json *json,
+  int (*update)(lc_client *self, const lc_update_req *req, lc_source *src,
                 lc_update_res *out, lc_error *error);
   /** Applies one or more server-side mutations to an existing lease reference.
    */
@@ -1728,15 +1754,6 @@ int lc_sink_memory_bytes(lc_sink *sink, const void **bytes, size_t *length,
 /** Copies all bytes from a source into a sink. */
 int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error);
 
-/** Creates a rewindable JSON stream from a UTF-8 JSON string. */
-int lc_json_from_string(const char *json_text, lc_json **out, lc_error *error);
-/** Creates a rewindable JSON stream from a file path. */
-int lc_json_from_file(const char *path, lc_json **out, lc_error *error);
-/** Creates a rewindable JSON stream from a file descriptor. */
-int lc_json_from_fd(int fd, lc_json **out, lc_error *error);
-/** Adapts a generic source into a JSON stream and takes ownership of the source
- * handle. */
-int lc_json_from_source(lc_source *source, lc_json **out, lc_error *error);
 /** Closes and frees a client handle. */
 void lc_client_close(lc_client *client);
 /** Closes and frees a lease handle. */
@@ -1747,8 +1764,6 @@ void lc_message_close(lc_message *message);
 void lc_source_close(lc_source *source);
 /** Closes and frees a sink. */
 void lc_sink_close(lc_sink *sink);
-/** Closes and frees a JSON source. */
-void lc_json_close(lc_json *json);
 
 /** Cleanup helpers for responses and metadata structs that own heap memory. */
 void lc_describe_res_cleanup(lc_describe_res *response);
@@ -1796,11 +1811,11 @@ int lc_describe(lc_client *client, const lc_describe_req *req,
 int lc_get(lc_client *client, const char *key, const lc_get_opts *opts,
            lc_sink *dst, lc_get_res *out, lc_error *error);
 /** Convenience `get()` variant that materializes the state into memory. */
-int lc_load(lc_client *client, const char *key, const lc_get_opts *opts,
-            char **json_text, size_t *json_length, lc_get_res *out,
-            lc_error *error);
-/** Updates a lease reference from a streamed JSON source. */
-int lc_update(lc_client *client, const lc_update_req *req, lc_json *json,
+int lc_load(lc_client *client, const char *key, const lonejson_map *map,
+            void *dst, const lonejson_parse_options *parse_options,
+            const lc_get_opts *opts, lc_get_res *out, lc_error *error);
+/** Updates a lease reference from a streamed source. */
+int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error);
 /** Applies one or more server-side mutations to a lease reference. */
 int lc_mutate(lc_client *client, const lc_mutate_op *req, lc_mutate_res *out,
@@ -1946,12 +1961,16 @@ int lc_lease_get(lc_lease *lease, lc_sink *dst, const lc_get_opts *opts,
                  lc_get_res *out, lc_error *error);
 /** Convenience `get()` variant that materializes a bound lease state in memory.
  */
-int lc_lease_load(lc_lease *lease, char **json_text, size_t *json_length,
+int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
+                  const lonejson_parse_options *parse_options,
                   const lc_get_opts *opts, lc_get_res *out, lc_error *error);
-/** Convenience `update()` variant for small in-memory JSON documents. */
-int lc_lease_save(lc_lease *lease, const char *json_text, lc_error *error);
-/** Streams a replacement JSON state document into a bound lease. */
-int lc_lease_update(lc_lease *lease, lc_json *json, const lc_update_opts *opts,
+/** Convenience mapped-struct `update()` variant for lonejson-compatible data.
+ */
+int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
+                  const lonejson_write_options *write_options, lc_error *error);
+/** Streams a replacement state document into a bound lease. */
+int lc_lease_update(lc_lease *lease, lc_source *src,
+                    const lc_update_opts *opts,
                     lc_error *error);
 /** Applies server-side mutations to the current state of a bound lease. */
 int lc_lease_mutate(lc_lease *lease, const lc_mutate_req *req, lc_error *error);

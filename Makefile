@@ -29,29 +29,38 @@ FUZZ_TIME ?= 30
 	help \
 	__deps-debug __deps-release __deps-cross \
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
-	__test-debug __test-e2e __test-all __test-asan __test-coverage \
+	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__asan __coverage __fuzz __benchmarks \
-	__package-runtime __package-dev __package-checksums __clean-dist \
-	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __clean \
+	__package __package-checksums __clean-dist \
+	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __release-package-only __clean __world \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
-	test test-debug test-e2e test-all test-asan test-coverage \
+	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
 	asan coverage fuzz benchmarks \
-	package-runtime package-dev package-checksums verify-release-archives clean-dist \
-	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release clean
+	package package-checksums verify-release-archives clean-dist \
+	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release clean world
 
 help:
 	@printf '%s\n' \
 		'make build              Configure and build the debug preset.' \
+		'make build-debug        Configure and build the debug preset.' \
 		'make build-release      Configure and build the full shipped Linux release matrix.' \
 		'make build-e2e          Configure and build the e2e preset.' \
 		'make build-asan         Configure and build the ASan/UBSan preset.' \
+		'make build-coverage     Configure and build the coverage preset.' \
+		'make build-fuzz         Configure and build the fuzz preset.' \
+		'make deps-debug         Provision the host-native release dependency tree used by debug/e2e/asan/coverage/fuzz.' \
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
-		'make test               Run the dependency-backed debug/unit suite.' \
+		'make test-debug         Run the debug preset test suite.' \
+		'make test               Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
+		'make test-host          Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
+		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
-		'make test-all           Run the full host verification path: unit plus mTLS/libcurl e2e.' \
+		'make test-all           Run host release suites plus non-host cross release suites.' \
+		'make test-asan          Run the ASan/UBSan preset test suite.' \
+		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
 		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
@@ -60,15 +69,15 @@ help:
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
-		'make package-runtime    Build the shipped x86_64-linux-gnu release preset and write the runtime archive to dist/.' \
-		'make package-dev        Build the shipped x86_64-linux-gnu release preset and write the development archive to dist/.' \
+		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive to dist/.' \
 		'make package-checksums  Refresh the dist/ checksum manifest.' \
 		'make verify-release-archives  Assert the complete shipped Linux release archive set and checksums.' \
 		'make clean-dist         Reset dist/ release artifacts.' \
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host debug/asan cross-preset packaging-isolation check.' \
-		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests.' \
+		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
 		'make release            Run the full Linux release matrix and package generation.' \
+		'make world              Run the full clean-slate workflow: clean, builds, tests, e2e, benchmarks, and final release verification; fuzz is included when Clang/libFuzzer is available.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
 
 build: build-debug
@@ -140,13 +149,25 @@ __build-fuzz: __deps-debug
 	$(CMAKE) --preset $(FUZZ_PRESET)
 	$(CMAKE) --build --preset $(FUZZ_PRESET)
 
-test: test-debug
+test: test-host
 
 test-debug:
 	$(TIMED) test-debug $(MAKE) __test-debug
 
 __test-debug: __build-debug
 	$(CTEST) --preset $(DEBUG_PRESET)
+
+test-host:
+	$(TIMED) test-host $(MAKE) __test-host
+
+__test-host:
+	bash ./scripts/host_test.sh
+
+test-cross:
+	$(TIMED) test-cross $(MAKE) __test-cross
+
+__test-cross: __cross-build
+	bash ./scripts/cross_test.sh release
 
 test-e2e:
 	$(TIMED) test-e2e $(MAKE) __test-e2e
@@ -157,7 +178,7 @@ __test-e2e:
 test-all:
 	$(TIMED) test-all $(MAKE) __test-all
 
-__test-all: __test-debug __test-e2e
+__test-all: __test-host __test-cross
 
 dev-up:
 	$(TIMED) dev-up $(MAKE) __dev-up
@@ -215,23 +236,19 @@ benchmarks:
 __benchmarks: __build-x86_64-linux-gnu-release
 	./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench $(BENCH_ITERS) all
 
-package-runtime:
-	$(TIMED) package-runtime $(MAKE) __package-runtime
+package:
+	$(TIMED) package $(MAKE) __package
 
-__package-runtime: __build-x86_64-linux-gnu-release
-	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_runtime.cmake
-
-package-dev:
-	$(TIMED) package-dev $(MAKE) __package-dev
-
-__package-dev: __build-x86_64-linux-gnu-release
-	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_dev.cmake
+__package: __build-x86_64-linux-gnu-release
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_archive.cmake
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
 
 package-checksums:
 	$(TIMED) package-checksums $(MAKE) __package-checksums
 
 __package-checksums: __deps-release
 	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_checksums.cmake
 
 verify-release-archives:
@@ -258,14 +275,23 @@ __cross-preset-test:
 cross-test:
 	$(TIMED) cross-test $(MAKE) __cross-test
 
-__cross-test: __deps-cross
+__cross-test: __cross-build
 	bash ./scripts/cross_test.sh all
 
 release:
 	$(TIMED) release $(MAKE) __release
 
-__release: __deps-release __deps-cross
+__release: __build-release
 	bash ./scripts/run_linux_release_matrix.sh
+
+__release-package-only: __build-release
+	bash ./scripts/run_linux_package_matrix.sh
+
+world:
+	$(TIMED) world $(MAKE) __world
+
+__world:
+	bash ./scripts/world.sh
 
 clean:
 	$(TIMED) clean $(MAKE) __clean

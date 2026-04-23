@@ -12,16 +12,18 @@ cross_release_presets=(
   armhf-linux-musl-release
 )
 
-cross_preset_package_regex='dist_dir_configure_test|package_archives_test|package_script_targeting_test|runtime_license_fallback_test|pslog_build_modes_test'
+cross_preset_package_regex='dist_dir_configure_test|package_archives_test|package_script_targeting_test|runtime_license_install_tree_test|pslog_build_modes_test'
 
 unset LD_LIBRARY_PATH
+
+ctest_timeout=${LOCKDC_CTEST_TIMEOUT:-300}
 
 run_ctest_background() {
   local out_var="$1"
   local preset="$2"
   local regex="$3"
 
-  ctest --preset "$preset" --output-on-failure -R "$regex" &
+  ctest --preset "$preset" --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout" -R "$regex" &
   printf -v "$out_var" '%s' "$!"
 }
 
@@ -31,6 +33,17 @@ wait_for_pid() {
 
   if ! wait "$pid"; then
     printf '%s\n' "${label} failed" >&2
+    return 1
+  fi
+}
+
+require_release_build_tree() {
+  local preset="$1"
+  local build_dir="$repo_root/build/$preset"
+  local cache_file="$build_dir/CMakeCache.txt"
+
+  if [ ! -f "$cache_file" ]; then
+    printf '%s\n' "missing build tree for $preset at $build_dir; run scripts/cross_build.sh first" >&2
     return 1
   fi
 }
@@ -56,8 +69,8 @@ run_cross_release_matrix() {
   local preset
 
   for preset in "${cross_release_presets[@]}"; do
-    "$script_dir/build.sh" "$preset"
-    ctest --preset "$preset" --output-on-failure
+    require_release_build_tree "$preset"
+    ctest --preset "$preset" --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout"
   done
 }
 

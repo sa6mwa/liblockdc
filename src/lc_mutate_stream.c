@@ -16,17 +16,63 @@ extern time_t timegm(struct tm *tm_value);
 
 #define LC_MS_SCRATCH 65536U
 
-typedef struct lc_ms_reader {
-  FILE *fp;
-  int has_peek;
-  int peek;
-} lc_ms_reader;
-
 typedef struct lc_ms_utf8_state {
   int remaining;
   unsigned int codepoint;
   unsigned int min_codepoint;
 } lc_ms_utf8_state;
+
+typedef struct lc_ms_lonejson_sink_file {
+  FILE *fp;
+} lc_ms_lonejson_sink_file;
+
+typedef struct lc_ms_lonejson_scalar_sink {
+  FILE *fp;
+  size_t prefix_offset;
+  int has_tail;
+  unsigned char tail;
+} lc_ms_lonejson_scalar_sink;
+
+typedef struct lc_ms_string_value_json {
+  char *value;
+} lc_ms_string_value_json;
+
+typedef struct lc_ms_text_source_json {
+  lonejson_source value;
+} lc_ms_text_source_json;
+
+typedef struct lc_ms_base64_source_json {
+  lonejson_source value;
+} lc_ms_base64_source_json;
+
+typedef struct lc_ms_i64_value_json {
+  lonejson_int64 value;
+} lc_ms_i64_value_json;
+
+typedef struct lc_ms_f64_value_json {
+  double value;
+} lc_ms_f64_value_json;
+
+static const lonejson_field lc_ms_string_value_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_ms_string_value_json, value, "v")};
+static const lonejson_field lc_ms_text_source_fields[] = {
+    LONEJSON_FIELD_STRING_SOURCE_REQ(lc_ms_text_source_json, value, "v")};
+static const lonejson_field lc_ms_base64_source_fields[] = {
+    LONEJSON_FIELD_BASE64_SOURCE_REQ(lc_ms_base64_source_json, value, "v")};
+static const lonejson_field lc_ms_i64_value_fields[] = {
+    LONEJSON_FIELD_I64_REQ(lc_ms_i64_value_json, value, "v")};
+static const lonejson_field lc_ms_f64_value_fields[] = {
+    LONEJSON_FIELD_F64_REQ(lc_ms_f64_value_json, value, "v")};
+LONEJSON_MAP_DEFINE(lc_ms_string_value_map, lc_ms_string_value_json,
+                    lc_ms_string_value_fields);
+LONEJSON_MAP_DEFINE(lc_ms_text_source_map, lc_ms_text_source_json,
+                    lc_ms_text_source_fields);
+LONEJSON_MAP_DEFINE(lc_ms_base64_source_map, lc_ms_base64_source_json,
+                    lc_ms_base64_source_fields);
+LONEJSON_MAP_DEFINE(lc_ms_i64_value_map, lc_ms_i64_value_json,
+                    lc_ms_i64_value_fields);
+LONEJSON_MAP_DEFINE(lc_ms_f64_value_map, lc_ms_f64_value_json,
+                    lc_ms_f64_value_fields);
 
 static int lc_ms_set_error(lc_error *error, const char *message,
                            const char *detail) {
@@ -98,31 +144,6 @@ void lc_mutation_plan_close(lc_mutation_plan *plan) {
   free(plan);
 }
 
-static int lc_ms_reader_get(lc_ms_reader *reader) {
-  int ch;
-
-  if (reader->has_peek) {
-    reader->has_peek = 0;
-    return reader->peek;
-  }
-  ch = fgetc(reader->fp);
-  return ch;
-}
-
-static void lc_ms_reader_unget(lc_ms_reader *reader, int ch) {
-  reader->has_peek = 1;
-  reader->peek = ch;
-}
-
-static int lc_ms_skip_ws(lc_ms_reader *reader) {
-  int ch;
-
-  do {
-    ch = lc_ms_reader_get(reader);
-  } while (ch != EOF && isspace((unsigned char)ch));
-  return ch;
-}
-
 static int lc_ms_write_bytes(FILE *out, const void *bytes, size_t length,
                              lc_error *error) {
   if (length == 0U) {
@@ -151,35 +172,83 @@ static int lc_ms_write_char(FILE *out, int ch, lc_error *error) {
   return LC_OK;
 }
 
-static int lc_ms_emit_json_escaped_byte(FILE *out, unsigned char byte,
-                                        lc_error *error) {
-  static const char hex[] = "0123456789abcdef";
-  char escaped[6];
+static lonejson_status lc_ms_lonejson_scalar_sink_write(void *user,
+                                                        const void *data,
+                                                        size_t len,
+                                                        lonejson_error *error) {
+  static const unsigned char prefix[] = {'{', '"', 'v', '"', ':'};
+  lc_ms_lonejson_scalar_sink *sink;
+  const unsigned char *bytes;
+  size_t offset;
 
-  switch (byte) {
-  case '"':
-    return lc_ms_write_bytes(out, "\\\"", 2U, error);
-  case '\\':
-    return lc_ms_write_bytes(out, "\\\\", 2U, error);
-  case '\b':
-    return lc_ms_write_bytes(out, "\\b", 2U, error);
-  case '\f':
-    return lc_ms_write_bytes(out, "\\f", 2U, error);
-  case '\n':
-    return lc_ms_write_bytes(out, "\\n", 2U, error);
-  case '\r':
-    return lc_ms_write_bytes(out, "\\r", 2U, error);
-  case '\t':
-    return lc_ms_write_bytes(out, "\\t", 2U, error);
-  default:
-    escaped[0] = '\\';
-    escaped[1] = 'u';
-    escaped[2] = '0';
-    escaped[3] = '0';
-    escaped[4] = hex[(byte >> 4) & 0x0fU];
-    escaped[5] = hex[byte & 0x0fU];
-    return lc_ms_write_bytes(out, escaped, sizeof(escaped), error);
+  sink = (lc_ms_lonejson_scalar_sink *)user;
+  bytes = (const unsigned char *)data;
+  if (sink == NULL || sink->fp == NULL || (len > 0U && data == NULL)) {
+    if (error != NULL) {
+      lonejson_error_init(error);
+    }
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
+  offset = 0U;
+  while (sink->prefix_offset < sizeof(prefix) && offset < len) {
+    if (bytes[offset] != prefix[sink->prefix_offset]) {
+      if (error != NULL) {
+        lonejson_error_init(error);
+        snprintf(error->message, sizeof(error->message),
+                 "unexpected lonejson scalar wrapper shape");
+      }
+      return LONEJSON_STATUS_INVALID_JSON;
+    }
+    sink->prefix_offset += 1U;
+    offset += 1U;
+  }
+  while (offset < len) {
+    if (sink->has_tail) {
+      if (fputc((int)sink->tail, sink->fp) == EOF) {
+        if (error != NULL) {
+          lonejson_error_init(error);
+          error->system_errno = errno;
+          snprintf(error->message, sizeof(error->message),
+                   "failed to write mutate stream output");
+        }
+        return LONEJSON_STATUS_IO_ERROR;
+      }
+    }
+    sink->tail = bytes[offset++];
+    sink->has_tail = 1;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static int lc_ms_lonejson_status(lc_error *error, lonejson_status status,
+                                 const lonejson_error *lj_error,
+                                 const char *message) {
+  return lc_lonejson_error_from_status(error, status, lj_error, message);
+}
+
+static int lc_ms_serialize_scalar_json(FILE *out, const lonejson_map *map,
+                                       const void *src, lc_error *error,
+                                       const char *message) {
+  lc_ms_lonejson_scalar_sink sink;
+  lonejson_error lj_error;
+  lonejson_status status;
+  lonejson_write_options options;
+
+  memset(&sink, 0, sizeof(sink));
+  sink.fp = out;
+  memset(&lj_error, 0, sizeof(lj_error));
+  options = lonejson_default_write_options();
+  status = lonejson_serialize_sink(map, src, lc_ms_lonejson_scalar_sink_write,
+                                   &sink, &options, &lj_error);
+  if (status == LONEJSON_STATUS_OK) {
+    if (sink.prefix_offset != 5U || !sink.has_tail || sink.tail != '}') {
+      memset(&lj_error, 0, sizeof(lj_error));
+      snprintf(lj_error.message, sizeof(lj_error.message),
+               "unexpected lonejson scalar wrapper shape");
+      status = LONEJSON_STATUS_INVALID_JSON;
+    }
+  }
+  return lc_ms_lonejson_status(error, status, &lj_error, message);
 }
 
 static int lc_ms_utf8_push(lc_ms_utf8_state *state, unsigned char byte,
@@ -226,128 +295,58 @@ static int lc_ms_utf8_push(lc_ms_utf8_state *state, unsigned char byte,
   return LC_OK;
 }
 
-static int lc_ms_emit_utf8_json_string(FILE *out, lc_source *source,
-                                       lc_error *error) {
+static int lc_ms_copy_source_bytes(FILE *out, lc_source *source,
+                                   int validate_text, int strict_text,
+                                   int *out_text_ok, lc_error *error) {
   unsigned char buffer[LC_MS_SCRATCH];
   size_t nread;
   size_t i;
   lc_ms_utf8_state utf8;
-  int rc;
+  int text_ok;
 
   memset(&utf8, 0, sizeof(utf8));
-  rc = lc_ms_write_char(out, '"', error);
-  if (rc != LC_OK) {
-    return rc;
-  }
+  text_ok = validate_text ? 1 : 0;
   for (;;) {
     nread = source->read(source, buffer, sizeof(buffer), error);
     if (nread == 0U) {
       break;
+    }
+    if (lc_ms_write_bytes(out, buffer, nread, error) != LC_OK) {
+      return LC_ERR_TRANSPORT;
     }
     for (i = 0; i < nread; ++i) {
-      if (buffer[i] == '\0') {
-        return lc_ms_set_error(
-            error, "textfile mutation does not accept NUL bytes", NULL);
-      }
-      rc = lc_ms_utf8_push(&utf8, buffer[i], error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      if (buffer[i] < 0x20U || buffer[i] == '"' || buffer[i] == '\\') {
-        rc = lc_ms_emit_json_escaped_byte(out, buffer[i], error);
-      } else {
-        rc = lc_ms_write_bytes(out, buffer + i, 1U, error);
-      }
-      if (rc != LC_OK) {
-        return rc;
-      }
-    }
-  }
-  if (utf8.remaining != 0) {
-    return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
-  }
-  return lc_ms_write_char(out, '"', error);
-}
-
-static int lc_ms_emit_base64_string(FILE *out, lc_source *source,
-                                    lc_error *error) {
-  static const char base64_table[] =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  unsigned char buffer[LC_MS_SCRATCH];
-  unsigned char tail[3];
-  size_t nread;
-  size_t i;
-  size_t tail_len;
-  int rc;
-  char encoded[4];
-
-  tail_len = 0U;
-  rc = lc_ms_write_char(out, '"', error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  for (;;) {
-    nread = source->read(source, buffer, sizeof(buffer), error);
-    if (nread == 0U) {
-      break;
-    }
-    i = 0U;
-    if (tail_len != 0U) {
-      while (tail_len < 3U && i < nread) {
-        tail[tail_len++] = buffer[i++];
-      }
-      if (tail_len == 3U) {
-        encoded[0] = base64_table[(tail[0] >> 2) & 0x3fU];
-        encoded[1] =
-            base64_table[((tail[0] & 0x03U) << 4) | ((tail[1] >> 4) & 0x0fU)];
-        encoded[2] =
-            base64_table[((tail[1] & 0x0fU) << 2) | ((tail[2] >> 6) & 0x03U)];
-        encoded[3] = base64_table[tail[2] & 0x3fU];
-        rc = lc_ms_write_bytes(out, encoded, sizeof(encoded), error);
-        if (rc != LC_OK) {
-          return rc;
+      if (validate_text && text_ok) {
+        if (buffer[i] == '\0') {
+          text_ok = 0;
+          if (strict_text) {
+            return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation",
+                                   NULL);
+          }
+          continue;
         }
-        tail_len = 0U;
+        if (lc_ms_utf8_push(&utf8, buffer[i], error) != LC_OK) {
+          if (strict_text) {
+            return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation",
+                                   NULL);
+          }
+          lc_error_cleanup(error);
+          lc_error_init(error);
+          text_ok = 0;
+        }
       }
     }
-    while (i + 3U <= nread) {
-      encoded[0] = base64_table[(buffer[i] >> 2) & 0x3fU];
-      encoded[1] = base64_table[((buffer[i] & 0x03U) << 4) |
-                                ((buffer[i + 1U] >> 4) & 0x0fU)];
-      encoded[2] = base64_table[((buffer[i + 1U] & 0x0fU) << 2) |
-                                ((buffer[i + 2U] >> 6) & 0x03U)];
-      encoded[3] = base64_table[buffer[i + 2U] & 0x3fU];
-      rc = lc_ms_write_bytes(out, encoded, sizeof(encoded), error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      i += 3U;
+  }
+  if (validate_text && text_ok && utf8.remaining != 0) {
+    if (strict_text) {
+      return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation",
+                             NULL);
     }
-    tail_len = nread - i;
-    if (tail_len != 0U) {
-      memcpy(tail, buffer + i, tail_len);
-    }
+    text_ok = 0;
   }
-  if (tail_len == 1U) {
-    encoded[0] = base64_table[(tail[0] >> 2) & 0x3fU];
-    encoded[1] = base64_table[(tail[0] & 0x03U) << 4];
-    encoded[2] = '=';
-    encoded[3] = '=';
-    rc = lc_ms_write_bytes(out, encoded, sizeof(encoded), error);
-  } else if (tail_len == 2U) {
-    encoded[0] = base64_table[(tail[0] >> 2) & 0x3fU];
-    encoded[1] =
-        base64_table[((tail[0] & 0x03U) << 4) | ((tail[1] >> 4) & 0x0fU)];
-    encoded[2] = base64_table[(tail[1] & 0x0fU) << 2];
-    encoded[3] = '=';
-    rc = lc_ms_write_bytes(out, encoded, sizeof(encoded), error);
-  } else {
-    rc = LC_OK;
+  if (out_text_ok != NULL) {
+    *out_text_ok = text_ok;
   }
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_ms_write_char(out, '"', error);
+  return LC_OK;
 }
 
 static int lc_ms_open_file_source(const lc_mutation_value *value,
@@ -360,73 +359,114 @@ static int lc_ms_open_file_source(const lc_mutation_value *value,
   return lc_source_from_file(value->file_path, out, error);
 }
 
-static int lc_ms_detect_auto_file_mode(const lc_mutation_value *value,
-                                       lc_mutation_file_mode *out_mode,
-                                       lc_error *error) {
+static int lc_ms_emit_json_string_bytes(FILE *out, const char *text,
+                                        lc_error *error) {
+  lc_ms_string_value_json doc;
+
+  doc.value = (char *)text;
+  return lc_ms_serialize_scalar_json(out, &lc_ms_string_value_map, &doc, error,
+                                     "failed to serialize mutate string");
+}
+
+static int lc_ms_emit_file_mutation_value(FILE *out,
+                                          const lc_mutation_value *value,
+                                          lc_mutation_file_mode requested_mode,
+                                          lc_error *error) {
   lc_source *source;
-  unsigned char buffer[LC_MS_SCRATCH];
-  size_t nread;
-  size_t i;
-  int saw_nul;
-  lc_ms_utf8_state utf8;
+  FILE *scratch;
+  int validate_text;
+  int text_ok;
+  lc_mutation_file_mode actual_mode;
+  lonejson_source lj_source;
+  lc_ms_text_source_json text_doc;
+  lc_ms_base64_source_json base64_doc;
   int rc;
 
-  *out_mode = LC_MUTATION_FILE_BASE64;
-  saw_nul = 0;
-  memset(&utf8, 0, sizeof(utf8));
+  source = NULL;
+  scratch = NULL;
+  actual_mode = requested_mode;
+  if (actual_mode == LC_MUTATION_FILE_BASE64 &&
+      value->file_value_resolver == NULL) {
+    lonejson_source_init(&lj_source);
+    base64_doc.value = lj_source;
+    rc = lc_ms_lonejson_status(
+        error,
+        lonejson_source_set_path(&base64_doc.value, value->file_path, NULL),
+        NULL, "failed to open base64file mutation");
+    if (rc != LC_OK) {
+      lonejson_source_cleanup(&base64_doc.value);
+      return rc;
+    }
+    rc = lc_ms_serialize_scalar_json(out, &lc_ms_base64_source_map, &base64_doc,
+                                     error,
+                                     "failed to serialize base64file mutation");
+    lonejson_source_cleanup(&base64_doc.value);
+    return rc;
+  }
+
   rc = lc_ms_open_file_source(value, &source, error);
   if (rc != LC_OK) {
     return rc;
   }
-  for (;;) {
-    nread = source->read(source, buffer, sizeof(buffer), error);
-    if (nread == 0U) {
-      break;
-    }
-    for (i = 0; i < nread; ++i) {
-      if (buffer[i] == '\0') {
-        saw_nul = 1;
-        break;
-      }
-      rc = lc_ms_utf8_push(&utf8, buffer[i], error);
-      if (rc != LC_OK) {
-        source->close(source);
-        return LC_OK;
-      }
-    }
-    if (saw_nul) {
-      break;
-    }
+  scratch = tmpfile();
+  if (scratch == NULL) {
+    source->close(source);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create file-backed mutation spool",
+                        strerror(errno), NULL, NULL);
   }
+  validate_text =
+      actual_mode == LC_MUTATION_FILE_TEXT || actual_mode == LC_MUTATION_FILE_AUTO;
+  text_ok = 0;
+  rc = lc_ms_copy_source_bytes(scratch, source, validate_text,
+                               actual_mode == LC_MUTATION_FILE_TEXT, &text_ok,
+                               error);
   source->close(source);
-  if (!saw_nul && utf8.remaining == 0) {
-    *out_mode = LC_MUTATION_FILE_TEXT;
-  }
-  return LC_OK;
-}
-
-static int lc_ms_emit_json_string_bytes(FILE *out, const char *text,
-                                        lc_error *error) {
-  const unsigned char *bytes;
-  size_t i;
-  int rc;
-
-  rc = lc_ms_write_char(out, '"', error);
   if (rc != LC_OK) {
+    fclose(scratch);
     return rc;
   }
-  bytes = (const unsigned char *)text;
-  for (i = 0U; bytes[i] != '\0'; ++i) {
-    if (bytes[i] < 0x20U || bytes[i] == '"' || bytes[i] == '\\') {
-      rc = lc_ms_emit_json_escaped_byte(out, bytes[i], error);
-    } else {
-      rc = lc_ms_write_bytes(out, bytes + i, 1U, error);
-    }
-    if (rc != LC_OK) {
-      return rc;
-    }
+  if (actual_mode == LC_MUTATION_FILE_AUTO) {
+    actual_mode = text_ok ? LC_MUTATION_FILE_TEXT : LC_MUTATION_FILE_BASE64;
+  } else if (actual_mode == LC_MUTATION_FILE_TEXT && !text_ok) {
+    fclose(scratch);
+    return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
   }
-  return lc_ms_write_char(out, '"', error);
+  if (fflush(scratch) != 0 || fseek(scratch, 0L, SEEK_SET) != 0) {
+    fclose(scratch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to rewind file-backed mutation spool",
+                        strerror(errno), NULL, NULL);
+  }
+
+  lonejson_source_init(&lj_source);
+  if (actual_mode == LC_MUTATION_FILE_TEXT) {
+    text_doc.value = lj_source;
+    rc = lc_ms_lonejson_status(error,
+                               lonejson_source_set_file(&text_doc.value,
+                                                        scratch, NULL),
+                               NULL, "failed to open textfile mutation");
+    if (rc == LC_OK) {
+      rc = lc_ms_serialize_scalar_json(out, &lc_ms_text_source_map, &text_doc,
+                                       error,
+                                       "failed to serialize textfile mutation");
+    }
+    lonejson_source_cleanup(&text_doc.value);
+  } else {
+    base64_doc.value = lj_source;
+    rc = lc_ms_lonejson_status(
+        error,
+        lonejson_source_set_file(&base64_doc.value, scratch, NULL), NULL,
+        "failed to open base64file mutation");
+    if (rc == LC_OK) {
+      rc = lc_ms_serialize_scalar_json(out, &lc_ms_base64_source_map,
+                                       &base64_doc, error,
+                                       "failed to serialize base64file mutation");
+    }
+    lonejson_source_cleanup(&base64_doc.value);
+  }
+  fclose(scratch);
+  return rc;
 }
 
 static int lc_ms_plan_append(lc_mutation_plan *plan,
@@ -446,31 +486,20 @@ static int lc_ms_plan_append(lc_mutation_plan *plan,
 }
 
 static int lc_ms_emit_number(FILE *out, double number, lc_error *error) {
-  char buffer[64];
-  int length;
-  double integral_part;
+  lc_ms_f64_value_json doc;
 
   if (!isfinite(number)) {
     return lc_ms_set_error(error, "mutation produced non-finite number", NULL);
   }
-  if (modf(number, &integral_part) == 0.0 &&
-      integral_part >= (double)LONG_MIN && integral_part <= (double)LONG_MAX) {
-    length = snprintf(buffer, sizeof(buffer), "%ld", (long)integral_part);
-  } else {
-    length = snprintf(buffer, sizeof(buffer), "%.17g", number);
-  }
-  if (length < 0) {
-    return lc_ms_set_error(error, "failed to format mutation number", NULL);
-  }
-  return lc_ms_write_bytes(out, buffer, (size_t)length, error);
+  doc.value = number;
+  return lc_ms_serialize_scalar_json(out, &lc_ms_f64_value_map, &doc, error,
+                                     "failed to serialize mutate number");
 }
 
 static int lc_ms_emit_mutation_value(FILE *out, const lc_mutation *mutation,
                                      double existing_value, int has_existing,
                                      lc_error *error) {
-  lc_source *source;
   lc_mutation_file_mode mode;
-  int rc;
 
   switch (mutation->kind) {
   case LC_MUTATION_REMOVE:
@@ -489,15 +518,12 @@ static int lc_ms_emit_mutation_value(FILE *out, const lc_mutation *mutation,
                                mutation->value.bool_value ? "true" : "false",
                                mutation->value.bool_value ? 4U : 5U, error);
     case LC_MUTATION_VALUE_LONG: {
-      char buffer[64];
-      int length;
-      length = lc_i64_format_base10(mutation->value.long_value, buffer,
-                                    sizeof(buffer));
-      if (length < 0) {
-        return lc_ms_set_error(error, "failed to format mutation integer",
-                               NULL);
-      }
-      return lc_ms_write_bytes(out, buffer, (size_t)length, error);
+      lc_ms_i64_value_json doc;
+
+      doc.value = mutation->value.long_value;
+      return lc_ms_serialize_scalar_json(out, &lc_ms_i64_value_map, &doc,
+                                         error,
+                                         "failed to serialize mutate integer");
     }
     case LC_MUTATION_VALUE_DOUBLE:
       return lc_ms_emit_number(out, mutation->value.double_value, error);
@@ -506,352 +532,13 @@ static int lc_ms_emit_mutation_value(FILE *out, const lc_mutation *mutation,
                                           error);
     case LC_MUTATION_VALUE_FILE:
       mode = mutation->value.file_mode;
-      if (mode == LC_MUTATION_FILE_AUTO) {
-        rc = lc_ms_detect_auto_file_mode(&mutation->value, &mode, error);
-        if (rc != LC_OK) {
-          return rc;
-        }
-      }
-      rc = lc_ms_open_file_source(&mutation->value, &source, error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      if (mode == LC_MUTATION_FILE_TEXT) {
-        rc = lc_ms_emit_utf8_json_string(out, source, error);
-      } else {
-        rc = lc_ms_emit_base64_string(out, source, error);
-      }
-      source->close(source);
-      return rc;
+      return lc_ms_emit_file_mutation_value(out, &mutation->value, mode, error);
     default:
       return lc_ms_set_error(error, "unsupported mutation value type", NULL);
     }
   default:
     return lc_ms_set_error(error, "unsupported mutation kind", NULL);
   }
-}
-
-static int lc_ms_is_prefix(const lc_mutation *mutation, char **path,
-                           size_t path_count) {
-  size_t i;
-
-  if (path_count > mutation->path_segment_count) {
-    return 0;
-  }
-  for (i = 0U; i < path_count; ++i) {
-    if (strcmp(mutation->path_segments[i], path[i]) != 0) {
-      return 0;
-    }
-  }
-  return 1;
-}
-
-static int lc_ms_is_exact(const lc_mutation *mutation, char **path,
-                          size_t path_count) {
-  return mutation->path_segment_count == path_count &&
-         lc_ms_is_prefix(mutation, path, path_count);
-}
-
-static int lc_ms_has_descendant(const lc_mutation *mutation, char **path,
-                                size_t path_count) {
-  return mutation->path_segment_count > path_count &&
-         lc_ms_is_prefix(mutation, path, path_count);
-}
-
-static int lc_ms_read_json_string(lc_ms_reader *reader, char **out,
-                                  lc_error *error) {
-  char *buffer;
-  size_t length;
-  size_t capacity;
-  int ch;
-  int hex_value;
-  unsigned codepoint;
-
-  buffer = NULL;
-  length = 0U;
-  capacity = 0U;
-  ch = lc_ms_reader_get(reader);
-  if (ch != '"') {
-    return lc_ms_set_error(error, "expected JSON string", NULL);
-  }
-  for (;;) {
-    ch = lc_ms_reader_get(reader);
-    if (ch == EOF) {
-      free(buffer);
-      return lc_ms_set_error(error, "unexpected EOF in JSON string", NULL);
-    }
-    if (ch == '"') {
-      break;
-    }
-    if (ch == '\\') {
-      ch = lc_ms_reader_get(reader);
-      if (ch == EOF) {
-        free(buffer);
-        return lc_ms_set_error(error, "unexpected EOF in JSON escape", NULL);
-      }
-      switch (ch) {
-      case '"':
-      case '\\':
-      case '/':
-        break;
-      case 'b':
-        ch = '\b';
-        break;
-      case 'f':
-        ch = '\f';
-        break;
-      case 'n':
-        ch = '\n';
-        break;
-      case 'r':
-        ch = '\r';
-        break;
-      case 't':
-        ch = '\t';
-        break;
-      case 'u':
-        codepoint = 0U;
-        for (hex_value = 0; hex_value < 4; ++hex_value) {
-          ch = lc_ms_reader_get(reader);
-          if (ch == EOF || !isxdigit((unsigned char)ch)) {
-            free(buffer);
-            return lc_ms_set_error(error, "invalid Unicode escape", NULL);
-          }
-          codepoint <<= 4;
-          if (ch >= '0' && ch <= '9')
-            codepoint |= (unsigned)(ch - '0');
-          else if (ch >= 'a' && ch <= 'f')
-            codepoint |= (unsigned)(10 + ch - 'a');
-          else
-            codepoint |= (unsigned)(10 + ch - 'A');
-        }
-        if (codepoint > 0x7fU) {
-          free(buffer);
-          return lc_ms_set_error(
-              error,
-              "non-ASCII object keys in local mutate are not supported yet",
-              NULL);
-        }
-        ch = (int)codepoint;
-        break;
-      default:
-        free(buffer);
-        return lc_ms_set_error(error, "invalid JSON escape", NULL);
-      }
-    }
-    if (length + 2U > capacity) {
-      size_t next_capacity;
-      char *next_buffer;
-
-      next_capacity = capacity == 0U ? 32U : capacity * 2U;
-      next_buffer = (char *)realloc(buffer, next_capacity);
-      if (next_buffer == NULL) {
-        free(buffer);
-        return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                            "failed to allocate JSON string", NULL, NULL, NULL);
-      }
-      buffer = next_buffer;
-      capacity = next_capacity;
-    }
-    buffer[length++] = (char)ch;
-  }
-  if (buffer == NULL) {
-    buffer = (char *)malloc(1U);
-    if (buffer == NULL) {
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate empty JSON string", NULL, NULL,
-                          NULL);
-    }
-  }
-  buffer[length] = '\0';
-  *out = buffer;
-  return LC_OK;
-}
-
-static int lc_ms_copy_json_string_raw(lc_ms_reader *reader, FILE *out,
-                                      lc_error *error) {
-  int ch;
-  int rc;
-
-  ch = lc_ms_reader_get(reader);
-  if (ch != '"') {
-    return lc_ms_set_error(error, "expected JSON string", NULL);
-  }
-  rc = lc_ms_write_char(out, ch, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  for (;;) {
-    ch = lc_ms_reader_get(reader);
-    if (ch == EOF) {
-      return lc_ms_set_error(error, "unexpected EOF in JSON string", NULL);
-    }
-    rc = lc_ms_write_char(out, ch, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    if (ch == '\\') {
-      ch = lc_ms_reader_get(reader);
-      if (ch == EOF) {
-        return lc_ms_set_error(error, "unexpected EOF in JSON escape", NULL);
-      }
-      rc = lc_ms_write_char(out, ch, error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      if (ch == 'u') {
-        int i;
-        for (i = 0; i < 4; ++i) {
-          ch = lc_ms_reader_get(reader);
-          if (ch == EOF) {
-            return lc_ms_set_error(error, "unexpected EOF in JSON escape",
-                                   NULL);
-          }
-          rc = lc_ms_write_char(out, ch, error);
-          if (rc != LC_OK) {
-            return rc;
-          }
-        }
-      }
-      continue;
-    }
-    if (ch == '"') {
-      return LC_OK;
-    }
-  }
-}
-
-static int lc_ms_copy_raw_value(lc_ms_reader *reader, FILE *out,
-                                lc_error *error);
-
-static int lc_ms_copy_raw_compound(lc_ms_reader *reader, FILE *out, int open_ch,
-                                   int close_ch, lc_error *error) {
-  int ch;
-  int first;
-  int rc;
-
-  rc = lc_ms_write_char(out, open_ch, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  first = 1;
-  for (;;) {
-    ch = lc_ms_skip_ws(reader);
-    if (ch == close_ch) {
-      return lc_ms_write_char(out, close_ch, error);
-    }
-    if (!first) {
-      if (ch != ',') {
-        return lc_ms_set_error(error, "invalid JSON separator", NULL);
-      }
-      rc = lc_ms_write_char(out, ',', error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      ch = lc_ms_skip_ws(reader);
-    }
-    lc_ms_reader_unget(reader, ch);
-    if (open_ch == '{') {
-      rc = lc_ms_copy_json_string_raw(reader, out, error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      ch = lc_ms_skip_ws(reader);
-      if (ch != ':') {
-        return lc_ms_set_error(error, "expected object colon", NULL);
-      }
-      rc = lc_ms_write_char(out, ':', error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-    }
-    rc = lc_ms_copy_raw_value(reader, out, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    first = 0;
-  }
-}
-
-static int lc_ms_copy_raw_literal(lc_ms_reader *reader, FILE *out, int first_ch,
-                                  lc_error *error) {
-  int ch;
-  int rc;
-
-  rc = lc_ms_write_char(out, first_ch, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  for (;;) {
-    ch = lc_ms_reader_get(reader);
-    if (ch == EOF) {
-      return LC_OK;
-    }
-    if (isspace((unsigned char)ch) || ch == ',' || ch == ']' || ch == '}') {
-      lc_ms_reader_unget(reader, ch);
-      return LC_OK;
-    }
-    rc = lc_ms_write_char(out, ch, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-  }
-}
-
-static int lc_ms_copy_raw_value(lc_ms_reader *reader, FILE *out,
-                                lc_error *error) {
-  int ch;
-
-  ch = lc_ms_skip_ws(reader);
-  if (ch == EOF) {
-    return lc_ms_set_error(error, "unexpected EOF in JSON value", NULL);
-  }
-  switch (ch) {
-  case '{':
-    return lc_ms_copy_raw_compound(reader, out, '{', '}', error);
-  case '[':
-    return lc_ms_copy_raw_compound(reader, out, '[', ']', error);
-  case '"':
-    lc_ms_reader_unget(reader, ch);
-    return lc_ms_copy_json_string_raw(reader, out, error);
-  default:
-    return lc_ms_copy_raw_literal(reader, out, ch, error);
-  }
-}
-
-static int lc_ms_read_number_value(lc_ms_reader *reader, double *out,
-                                   lc_error *error) {
-  char buffer[128];
-  size_t length;
-  int ch;
-  char *endptr;
-  double number;
-
-  length = 0U;
-  ch = lc_ms_skip_ws(reader);
-  if (ch == EOF) {
-    return lc_ms_set_error(error, "unexpected EOF in numeric mutation target",
-                           NULL);
-  }
-  do {
-    if (length + 1U >= sizeof(buffer)) {
-      return lc_ms_set_error(error, "numeric value too long", NULL);
-    }
-    buffer[length++] = (char)ch;
-    ch = lc_ms_reader_get(reader);
-  } while (ch != EOF && !isspace((unsigned char)ch) && ch != ',' && ch != ']' &&
-           ch != '}');
-  if (ch != EOF) {
-    lc_ms_reader_unget(reader, ch);
-  }
-  buffer[length] = '\0';
-  errno = 0;
-  number = strtod(buffer, &endptr);
-  if (errno != 0 || endptr == buffer || *endptr != '\0') {
-    return lc_ms_set_error(error, "increment target is not numeric", buffer);
-  }
-  *out = number;
-  return LC_OK;
 }
 
 static int lc_ms_emit_missing_chain(FILE *out, const lc_mutation *mutation,
@@ -883,236 +570,1035 @@ static int lc_ms_emit_missing_chain(FILE *out, const lc_mutation *mutation,
   return rc;
 }
 
-static int lc_ms_transform_value(lc_ms_reader *reader, FILE *out,
-                                 const lc_mutation *mutation, char **path,
-                                 size_t path_count, lc_error *error);
+typedef enum lc_ms_visit_container_kind {
+  LC_MS_VISIT_CONTAINER_OBJECT = 1,
+  LC_MS_VISIT_CONTAINER_ARRAY = 2
+} lc_ms_visit_container_kind;
 
-static int lc_ms_transform_object(lc_ms_reader *reader, FILE *out,
-                                  const lc_mutation *mutation, char **path,
-                                  size_t path_count, lc_error *error) {
-  int ch;
-  int first;
-  int rc;
+typedef struct lc_ms_visit_frame {
+  lc_ms_visit_container_kind kind;
+  size_t path_len;
+  size_t array_index;
+  int first_kept;
   int saw_target_child;
-  char *key;
+  char *pending_key;
+  char index_text[32];
+} lc_ms_visit_frame;
 
-  rc = lc_ms_write_char(out, '{', error);
-  if (rc != LC_OK) {
-    return rc;
+typedef struct lc_ms_visit_context {
+  FILE *out;
+  const lc_mutation *mutation;
+  char **path;
+  size_t path_len;
+  lc_ms_visit_frame frames[128];
+  size_t frame_count;
+  size_t skip_depth;
+  int capture_increment;
+  char *key_buffer;
+  size_t key_len;
+  size_t key_cap;
+  char *number_buffer;
+  size_t number_len;
+  size_t number_cap;
+} lc_ms_visit_context;
+
+static int lc_ms_is_prefix(const lc_mutation *mutation, char **path,
+                           size_t path_count) {
+  size_t i;
+
+  if (path_count > mutation->path_segment_count) {
+    return 0;
   }
-  first = 1;
-  saw_target_child = 0;
-  for (;;) {
-    ch = lc_ms_skip_ws(reader);
-    if (ch == '}') {
+  for (i = 0U; i < path_count; ++i) {
+    if (strcmp(mutation->path_segments[i], path[i]) != 0) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int lc_ms_is_exact(const lc_mutation *mutation, char **path,
+                          size_t path_count) {
+  return mutation->path_segment_count == path_count &&
+         lc_ms_is_prefix(mutation, path, path_count);
+}
+
+static int lc_ms_has_descendant(const lc_mutation *mutation, char **path,
+                                size_t path_count) {
+  return mutation->path_segment_count > path_count &&
+         lc_ms_is_prefix(mutation, path, path_count);
+}
+
+static lonejson_status lc_ms_visit_fail(lonejson_error *error,
+                                        lonejson_status status,
+                                        const char *message) {
+  if (error != NULL) {
+    lonejson_error_init(error);
+    snprintf(error->message, sizeof(error->message), "%s", message);
+  }
+  return status;
+}
+
+static lonejson_status lc_ms_visit_io_fail(lonejson_error *error,
+                                           const char *message) {
+  if (error != NULL) {
+    lonejson_error_init(error);
+    error->system_errno = errno;
+    snprintf(error->message, sizeof(error->message), "%s", message);
+  }
+  return LONEJSON_STATUS_IO_ERROR;
+}
+
+static lonejson_status lc_ms_visit_write_bytes(FILE *out, const void *bytes,
+                                               size_t len,
+                                               lonejson_error *error) {
+  if (len == 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (out == NULL || (bytes == NULL && len != 0U)) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_ARGUMENT,
+                            "invalid mutate output stream");
+  }
+  if (fwrite(bytes, 1U, len, out) != len) {
+    return lc_ms_visit_io_fail(error, "failed to write mutate output");
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_write_char(FILE *out, int ch,
+                                              lonejson_error *error) {
+  unsigned char byte;
+
+  byte = (unsigned char)ch;
+  return lc_ms_visit_write_bytes(out, &byte, 1U, error);
+}
+
+static lonejson_status lc_ms_visit_write_escaped_json(FILE *out,
+                                                      const unsigned char *data,
+                                                      size_t len,
+                                                      lonejson_error *error) {
+  size_t i;
+  char buffer[7];
+  lonejson_status status;
+
+  for (i = 0U; i < len; ++i) {
+    switch (data[i]) {
+    case '"':
+      status = lc_ms_visit_write_bytes(out, "\\\"", 2U, error);
+      break;
+    case '\\':
+      status = lc_ms_visit_write_bytes(out, "\\\\", 2U, error);
+      break;
+    case '\b':
+      status = lc_ms_visit_write_bytes(out, "\\b", 2U, error);
+      break;
+    case '\f':
+      status = lc_ms_visit_write_bytes(out, "\\f", 2U, error);
+      break;
+    case '\n':
+      status = lc_ms_visit_write_bytes(out, "\\n", 2U, error);
+      break;
+    case '\r':
+      status = lc_ms_visit_write_bytes(out, "\\r", 2U, error);
+      break;
+    case '\t':
+      status = lc_ms_visit_write_bytes(out, "\\t", 2U, error);
+      break;
+    default:
+      if (data[i] < 0x20U) {
+        snprintf(buffer, sizeof(buffer), "\\u%04x", (unsigned)data[i]);
+        status = lc_ms_visit_write_bytes(out, buffer, 6U, error);
+      } else {
+        status = lc_ms_visit_write_bytes(out, &data[i], 1U, error);
+      }
       break;
     }
-    if (!first) {
-      if (ch != ',') {
-        return lc_ms_set_error(error, "invalid object separator", NULL);
-      }
-      ch = lc_ms_skip_ws(reader);
-    }
-    lc_ms_reader_unget(reader, ch);
-    key = NULL;
-    rc = lc_ms_read_json_string(reader, &key, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    ch = lc_ms_skip_ws(reader);
-    if (ch != ':') {
-      free(key);
-      return lc_ms_set_error(error, "expected object colon", NULL);
-    }
-
-    path[path_count] = key;
-    if ((mutation->path_segment_count > path_count &&
-         strcmp(mutation->path_segments[path_count], key) == 0) ||
-        (mutation->path_segment_count == path_count + 1U &&
-         strcmp(mutation->path_segments[path_count], key) == 0)) {
-      saw_target_child = 1;
-    }
-    if (lc_ms_is_exact(mutation, path, path_count + 1U) &&
-        mutation->kind == LC_MUTATION_REMOVE) {
-      rc = lc_ms_copy_raw_value(reader, NULL, error);
-      free(key);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      continue;
-    }
-
-    if (!first) {
-      rc = lc_ms_write_char(out, ',', error);
-      if (rc != LC_OK) {
-        free(key);
-        return rc;
-      }
-    }
-    rc = lc_ms_emit_json_string_bytes(out, key, error);
-    if (rc == LC_OK) {
-      rc = lc_ms_write_char(out, ':', error);
-    }
-    if (rc == LC_OK) {
-      rc = lc_ms_transform_value(reader, out, mutation, path, path_count + 1U,
-                                 error);
-    }
-    free(key);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    first = 0;
-  }
-
-  if (!saw_target_child && lc_ms_has_descendant(mutation, path, path_count) &&
-      mutation->kind != LC_MUTATION_REMOVE) {
-    if (!first) {
-      rc = lc_ms_write_char(out, ',', error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-    }
-    rc = lc_ms_emit_json_string_bytes(out, mutation->path_segments[path_count],
-                                      error);
-    if (rc == LC_OK) {
-      rc = lc_ms_write_char(out, ':', error);
-    }
-    if (rc == LC_OK) {
-      rc = lc_ms_emit_missing_chain(out, mutation, path_count + 1U, error);
-    }
-    if (rc != LC_OK) {
-      return rc;
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
     }
   }
-
-  return lc_ms_write_char(out, '}', error);
+  return LONEJSON_STATUS_OK;
 }
 
-static int lc_ms_transform_array(lc_ms_reader *reader, FILE *out,
-                                 const lc_mutation *mutation, char **path,
-                                 size_t path_count, lc_error *error) {
-  size_t index;
-  int ch;
-  int first;
-  int rc;
-  char index_buffer[32];
+static lonejson_status lc_ms_visit_buffer_append(char **buffer, size_t *length,
+                                                 size_t *capacity,
+                                                 const char *data, size_t len,
+                                                 lonejson_error *error) {
+  char *next;
+  size_t next_capacity;
 
-  rc = lc_ms_write_char(out, '[', error);
+  if (len == 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (*buffer == NULL && *capacity != 0U) {
+    *capacity = 0U;
+  }
+  if (*length + len + 1U > *capacity) {
+    next_capacity = *capacity == 0U ? 32U : *capacity * 2U;
+    while (next_capacity < *length + len + 1U) {
+      next_capacity *= 2U;
+    }
+    next = (char *)realloc(*buffer, next_capacity);
+    if (next == NULL) {
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_OVERFLOW,
+                              "failed to allocate local mutate buffer");
+    }
+    *buffer = next;
+    *capacity = next_capacity;
+  }
+  memcpy(*buffer + *length, data, len);
+  *length += len;
+  (*buffer)[*length] = '\0';
+  return LONEJSON_STATUS_OK;
+}
+
+static void lc_ms_visit_context_cleanup(lc_ms_visit_context *ctx) {
+  size_t i;
+
+  if (ctx == NULL) {
+    return;
+  }
+  for (i = 0U; i < ctx->frame_count; ++i) {
+    free(ctx->frames[i].pending_key);
+    ctx->frames[i].pending_key = NULL;
+  }
+  free(ctx->key_buffer);
+  ctx->key_buffer = NULL;
+  free(ctx->number_buffer);
+  ctx->number_buffer = NULL;
+  free(ctx->path);
+  ctx->path = NULL;
+}
+
+static lc_ms_visit_frame *lc_ms_visit_top(lc_ms_visit_context *ctx) {
+  if (ctx->frame_count == 0U) {
+    return NULL;
+  }
+  return &ctx->frames[ctx->frame_count - 1U];
+}
+
+static lonejson_status lc_ms_visit_push_frame(lc_ms_visit_context *ctx,
+                                              lc_ms_visit_container_kind kind,
+                                              lonejson_error *error) {
+  lc_ms_visit_frame *frame;
+
+  if (ctx->frame_count >= sizeof(ctx->frames) / sizeof(ctx->frames[0])) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_OVERFLOW,
+                            "local mutate nesting is too deep");
+  }
+  frame = &ctx->frames[ctx->frame_count++];
+  memset(frame, 0, sizeof(*frame));
+  frame->kind = kind;
+  frame->path_len = ctx->path_len;
+  frame->first_kept = 1;
+  return LONEJSON_STATUS_OK;
+}
+
+static void lc_ms_visit_pop_frame(lc_ms_visit_context *ctx) {
+  if (ctx->frame_count != 0U) {
+    ctx->frame_count -= 1U;
+  }
+}
+
+static void lc_ms_visit_finalize_parent_child(lc_ms_visit_context *ctx) {
+  lc_ms_visit_frame *frame;
+
+  frame = lc_ms_visit_top(ctx);
+  if (frame == NULL) {
+    ctx->path_len = 0U;
+    return;
+  }
+  if (frame->kind == LC_MS_VISIT_CONTAINER_OBJECT) {
+    free(frame->pending_key);
+    frame->pending_key = NULL;
+    ctx->key_buffer = NULL;
+    ctx->key_len = 0U;
+  } else if (frame->kind == LC_MS_VISIT_CONTAINER_ARRAY) {
+    frame->array_index += 1U;
+  }
+  ctx->path_len = frame->path_len;
+}
+
+static lonejson_status lc_ms_visit_prepare_child(lc_ms_visit_context *ctx,
+                                                 lc_ms_visit_frame *frame,
+                                                 lc_ms_visit_container_kind kind,
+                                                 lonejson_error *error) {
+  if (frame->path_len >= 127U) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_OVERFLOW,
+                            "local mutate nesting is too deep");
+  }
+  if (kind == LC_MS_VISIT_CONTAINER_OBJECT) {
+    if (frame->pending_key == NULL) {
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "unexpected object visitor state");
+    }
+    ctx->path[frame->path_len] = frame->pending_key;
+    ctx->path_len = frame->path_len + 1U;
+  } else {
+    snprintf(frame->index_text, sizeof(frame->index_text), "%lu",
+             (unsigned long)frame->array_index);
+    ctx->path[frame->path_len] = frame->index_text;
+    ctx->path_len = frame->path_len + 1U;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_emit_prefix(lc_ms_visit_context *ctx,
+                                               lc_ms_visit_frame *frame,
+                                               lonejson_error *error) {
+  lonejson_status status;
+
+  if (frame->kind == LC_MS_VISIT_CONTAINER_OBJECT) {
+    if (frame->pending_key == NULL) {
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "unexpected object visitor state");
+    }
+    if (!frame->first_kept) {
+      status = lc_ms_visit_write_char(ctx->out, ',', error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+    } else {
+      frame->first_kept = 0;
+    }
+    status = lc_ms_visit_write_char(ctx->out, '"', error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    status = lc_ms_visit_write_escaped_json(
+        ctx->out, (const unsigned char *)frame->pending_key,
+        strlen(frame->pending_key), error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    status = lc_ms_visit_write_char(ctx->out, '"', error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    return lc_ms_visit_write_char(ctx->out, ':', error);
+  }
+  if (!frame->first_kept) {
+    status = lc_ms_visit_write_char(ctx->out, ',', error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+  } else {
+    frame->first_kept = 0;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_emit_mutation_value_status(
+    FILE *out, const lc_mutation *mutation, double existing_value,
+    int has_existing, lonejson_error *error) {
+  lc_error lc_error_value;
+  int rc;
+
+  lc_error_init(&lc_error_value);
+  rc = lc_ms_emit_mutation_value(out, mutation, existing_value, has_existing,
+                                 &lc_error_value);
   if (rc != LC_OK) {
-    return rc;
-  }
-  index = 0U;
-  first = 1;
-  for (;;) {
-    ch = lc_ms_skip_ws(reader);
-    if (ch == ']') {
-      break;
-    }
-    if (!first) {
-      if (ch != ',') {
-        return lc_ms_set_error(error, "invalid array separator", NULL);
+    if (error != NULL) {
+      lonejson_error_init(error);
+      if (lc_error_value.message != NULL) {
+        snprintf(error->message, sizeof(error->message), "%s",
+                 lc_error_value.message);
+      } else {
+        snprintf(error->message, sizeof(error->message),
+                 "failed to serialize mutation value");
       }
-      ch = lc_ms_skip_ws(reader);
-    }
-    lc_ms_reader_unget(reader, ch);
-    if (!first) {
-      rc = lc_ms_write_char(out, ',', error);
-      if (rc != LC_OK) {
-        return rc;
+      if (lc_error_value.code == LC_ERR_TRANSPORT) {
+        error->system_errno = errno;
       }
     }
-    snprintf(index_buffer, sizeof(index_buffer), "%lu", (unsigned long)index);
-    path[path_count] = index_buffer;
-    rc = lc_ms_transform_value(reader, out, mutation, path, path_count + 1U,
-                               error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    first = 0;
-    index += 1U;
+    lc_error_cleanup(&lc_error_value);
+    return lc_error_value.code == LC_ERR_TRANSPORT ? LONEJSON_STATUS_IO_ERROR
+                                                   : LONEJSON_STATUS_INVALID_JSON;
   }
-  return lc_ms_write_char(out, ']', error);
+  lc_error_cleanup(&lc_error_value);
+  return LONEJSON_STATUS_OK;
 }
 
-static int lc_ms_transform_value(lc_ms_reader *reader, FILE *out,
-                                 const lc_mutation *mutation, char **path,
-                                 size_t path_count, lc_error *error) {
-  int ch;
-  int rc;
-  double existing_number = 0.0;
-
-  if (lc_ms_is_exact(mutation, path, path_count)) {
-    if (mutation->kind == LC_MUTATION_INCREMENT) {
-      rc = lc_ms_read_number_value(reader, &existing_number, error);
-      if (rc != LC_OK) {
-        return rc;
-      }
-      return lc_ms_emit_mutation_value(out, mutation, existing_number, 1,
-                                       error);
-    }
-    rc = lc_ms_copy_raw_value(reader, NULL, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    return lc_ms_emit_mutation_value(out, mutation, 0.0, 0, error);
-  }
-
-  if (!lc_ms_has_descendant(mutation, path, path_count)) {
-    return lc_ms_copy_raw_value(reader, out, error);
-  }
-
-  ch = lc_ms_skip_ws(reader);
-  if (ch == EOF) {
-    return lc_ms_set_error(error, "unexpected EOF in JSON value", NULL);
-  }
-  switch (ch) {
-  case '{':
-    return lc_ms_transform_object(reader, out, mutation, path, path_count,
-                                  error);
-  case '[':
-    return lc_ms_transform_array(reader, out, mutation, path, path_count,
-                                 error);
-  default:
-    lc_ms_reader_unget(reader, ch);
-    rc = lc_ms_copy_raw_value(reader, NULL, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    return lc_ms_emit_missing_chain(out, mutation, path_count, error);
-  }
-}
-
-static int lc_ms_apply_single(const lc_mutation *mutation, FILE *input,
-                              FILE *output, lc_error *error) {
-  lc_ms_reader reader;
-  char *path_stack[128];
-  int ch;
+static lonejson_status lc_ms_visit_emit_missing_chain_status(
+    FILE *out, const lc_mutation *mutation, size_t path_index,
+    lonejson_error *error) {
+  lc_error lc_error_value;
   int rc;
 
-  memset(&reader, 0, sizeof(reader));
-  reader.fp = input;
-  ch = lc_ms_skip_ws(&reader);
-  if (ch == EOF) {
-    return lc_ms_set_error(error, "local mutate input is empty", NULL);
-  }
-  if (ch != '{') {
-    return lc_ms_set_error(
-        error, "local mutate currently requires a JSON object root", NULL);
-  }
-  rc = lc_ms_transform_object(&reader, output, mutation, path_stack, 0U, error);
+  lc_error_init(&lc_error_value);
+  rc = lc_ms_emit_missing_chain(out, mutation, path_index, &lc_error_value);
   if (rc != LC_OK) {
-    return rc;
+    if (error != NULL) {
+      lonejson_error_init(error);
+      if (lc_error_value.message != NULL) {
+        snprintf(error->message, sizeof(error->message), "%s",
+                 lc_error_value.message);
+      } else {
+        snprintf(error->message, sizeof(error->message),
+                 "failed to synthesize missing mutation chain");
+      }
+    }
+    lc_error_cleanup(&lc_error_value);
+    return LONEJSON_STATUS_INVALID_JSON;
   }
-  ch = lc_ms_skip_ws(&reader);
-  if (ch != EOF) {
-    return lc_ms_set_error(
-        error, "local mutate input must contain exactly one JSON object", NULL);
+  lc_error_cleanup(&lc_error_value);
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_object_key_begin(void *user,
+                                                   lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *frame;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  frame = lc_ms_visit_top(ctx);
+  if (frame == NULL || frame->kind != LC_MS_VISIT_CONTAINER_OBJECT) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "unexpected object key");
+  }
+  free(frame->pending_key);
+  frame->pending_key = NULL;
+  free(ctx->key_buffer);
+  ctx->key_buffer = NULL;
+  ctx->key_len = 0U;
+  ctx->key_cap = 0U;
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_object_key_chunk(void *user,
+                                                    const char *data,
+                                                    size_t len,
+                                                    lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *frame;
+  lonejson_status status;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  frame = lc_ms_visit_top(ctx);
+  if (frame == NULL || frame->kind != LC_MS_VISIT_CONTAINER_OBJECT) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "unexpected object key chunk");
+  }
+  if (memchr(data, '\0', len) != NULL) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "local mutate object keys cannot contain NUL");
+  }
+  status = lc_ms_visit_buffer_append(&ctx->key_buffer, &ctx->key_len,
+                                     &ctx->key_cap, data, len, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_object_key_end(void *user,
+                                                  lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *frame;
+
+  (void)error;
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  frame = lc_ms_visit_top(ctx);
+  if (frame == NULL || frame->kind != LC_MS_VISIT_CONTAINER_OBJECT ||
+      ctx->key_buffer == NULL) {
+    return LONEJSON_STATUS_INVALID_JSON;
+  }
+  frame->pending_key = ctx->key_buffer;
+  ctx->key_buffer = NULL;
+  ctx->key_len = 0U;
+  ctx->key_cap = 0U;
+  if (ctx->mutation->path_segment_count > frame->path_len &&
+      strcmp(ctx->mutation->path_segments[frame->path_len], frame->pending_key) ==
+          0) {
+    frame->saw_target_child = 1;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_object_begin(void *user,
+                                                lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *parent;
+  lonejson_status status;
+  int exact;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    ctx->skip_depth += 1U;
+    return LONEJSON_STATUS_OK;
+  }
+  if (ctx->frame_count == 0U) {
+    status = lc_ms_visit_write_char(ctx->out, '{', error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    return lc_ms_visit_push_frame(ctx, LC_MS_VISIT_CONTAINER_OBJECT, error);
+  }
+
+  parent = lc_ms_visit_top(ctx);
+  status = lc_ms_visit_prepare_child(ctx, parent, LC_MS_VISIT_CONTAINER_OBJECT,
+                                     error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  exact = lc_ms_is_exact(ctx->mutation, ctx->path, ctx->path_len);
+  if (exact) {
+    switch (ctx->mutation->kind) {
+    case LC_MUTATION_REMOVE:
+      ctx->skip_depth = 1U;
+      return LONEJSON_STATUS_OK;
+    case LC_MUTATION_SET:
+      status = lc_ms_visit_emit_prefix(ctx, parent, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      status = lc_ms_visit_emit_mutation_value_status(ctx->out, ctx->mutation,
+                                                      0.0, 0, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      ctx->skip_depth = 1U;
+      return LONEJSON_STATUS_OK;
+    case LC_MUTATION_INCREMENT:
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "increment target is not numeric");
+    default:
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "unsupported mutation kind");
+    }
+  }
+
+  status = lc_ms_visit_emit_prefix(ctx, parent, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  status = lc_ms_visit_write_char(ctx->out, '{', error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  return lc_ms_visit_push_frame(ctx, LC_MS_VISIT_CONTAINER_OBJECT, error);
+}
+
+static lonejson_status lc_ms_visit_object_end(void *user,
+                                              lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *frame;
+  lonejson_status status;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    ctx->skip_depth -= 1U;
+    if (ctx->skip_depth == 0U) {
+      lc_ms_visit_finalize_parent_child(ctx);
+    }
+    return LONEJSON_STATUS_OK;
+  }
+  frame = lc_ms_visit_top(ctx);
+  if (frame == NULL || frame->kind != LC_MS_VISIT_CONTAINER_OBJECT) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "unexpected object end");
+  }
+  if (!frame->saw_target_child &&
+      lc_ms_has_descendant(ctx->mutation, ctx->path, frame->path_len) &&
+      ctx->mutation->kind != LC_MUTATION_REMOVE) {
+    if (!frame->first_kept) {
+      status = lc_ms_visit_write_char(ctx->out, ',', error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+    } else {
+      frame->first_kept = 0;
+    }
+    status = lc_ms_visit_write_char(ctx->out, '"', error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    status = lc_ms_visit_write_escaped_json(
+        ctx->out,
+        (const unsigned char *)ctx->mutation->path_segments[frame->path_len],
+        strlen(ctx->mutation->path_segments[frame->path_len]), error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    status = lc_ms_visit_write_char(ctx->out, '"', error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    status = lc_ms_visit_write_char(ctx->out, ':', error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    status = lc_ms_visit_emit_missing_chain_status(ctx->out, ctx->mutation,
+                                                   frame->path_len + 1U, error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+  }
+  status = lc_ms_visit_write_char(ctx->out, '}', error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  lc_ms_visit_pop_frame(ctx);
+  lc_ms_visit_finalize_parent_child(ctx);
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_array_begin(void *user,
+                                               lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *parent;
+  lonejson_status status;
+  int exact;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    ctx->skip_depth += 1U;
+    return LONEJSON_STATUS_OK;
+  }
+  if (ctx->frame_count == 0U) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "local mutate currently requires a JSON object root");
+  }
+  parent = lc_ms_visit_top(ctx);
+  status = lc_ms_visit_prepare_child(ctx, parent, LC_MS_VISIT_CONTAINER_ARRAY,
+                                     error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  exact = lc_ms_is_exact(ctx->mutation, ctx->path, ctx->path_len);
+  if (exact) {
+    switch (ctx->mutation->kind) {
+    case LC_MUTATION_REMOVE:
+      ctx->skip_depth = 1U;
+      return LONEJSON_STATUS_OK;
+    case LC_MUTATION_SET:
+      status = lc_ms_visit_emit_prefix(ctx, parent, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      status = lc_ms_visit_emit_mutation_value_status(ctx->out, ctx->mutation,
+                                                      0.0, 0, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      ctx->skip_depth = 1U;
+      return LONEJSON_STATUS_OK;
+    case LC_MUTATION_INCREMENT:
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "increment target is not numeric");
+    default:
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "unsupported mutation kind");
+    }
+  }
+  status = lc_ms_visit_emit_prefix(ctx, parent, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  status = lc_ms_visit_write_char(ctx->out, '[', error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  return lc_ms_visit_push_frame(ctx, LC_MS_VISIT_CONTAINER_ARRAY, error);
+}
+
+static lonejson_status lc_ms_visit_array_end(void *user,
+                                             lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *frame;
+  lonejson_status status;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    ctx->skip_depth -= 1U;
+    if (ctx->skip_depth == 0U) {
+      lc_ms_visit_finalize_parent_child(ctx);
+    }
+    return LONEJSON_STATUS_OK;
+  }
+  frame = lc_ms_visit_top(ctx);
+  if (frame == NULL || frame->kind != LC_MS_VISIT_CONTAINER_ARRAY) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "unexpected array end");
+  }
+  status = lc_ms_visit_write_char(ctx->out, ']', error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  lc_ms_visit_pop_frame(ctx);
+  lc_ms_visit_finalize_parent_child(ctx);
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_string_begin(void *user,
+                                                lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *parent;
+  lonejson_status status;
+  int exact;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    ctx->skip_depth += 1U;
+    return LONEJSON_STATUS_OK;
+  }
+  if (ctx->frame_count == 0U) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "local mutate currently requires a JSON object root");
+  }
+  parent = lc_ms_visit_top(ctx);
+  status = lc_ms_visit_prepare_child(ctx, parent, parent->kind, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  exact = lc_ms_is_exact(ctx->mutation, ctx->path, ctx->path_len);
+  if (exact) {
+    switch (ctx->mutation->kind) {
+    case LC_MUTATION_REMOVE:
+      ctx->skip_depth = 1U;
+      return LONEJSON_STATUS_OK;
+    case LC_MUTATION_SET:
+      status = lc_ms_visit_emit_prefix(ctx, parent, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      status = lc_ms_visit_emit_mutation_value_status(ctx->out, ctx->mutation,
+                                                      0.0, 0, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      ctx->skip_depth = 1U;
+      return LONEJSON_STATUS_OK;
+    case LC_MUTATION_INCREMENT:
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "increment target is not numeric");
+    default:
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "unsupported mutation kind");
+    }
+  }
+  status = lc_ms_visit_emit_prefix(ctx, parent, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  return lc_ms_visit_write_char(ctx->out, '"', error);
+}
+
+static lonejson_status lc_ms_visit_string_chunk(void *user, const char *data,
+                                                size_t len,
+                                                lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  return lc_ms_visit_write_escaped_json(ctx->out,
+                                        (const unsigned char *)data, len,
+                                        error);
+}
+
+static lonejson_status lc_ms_visit_string_end(void *user,
+                                              lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lonejson_status status;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    ctx->skip_depth -= 1U;
+    if (ctx->skip_depth == 0U) {
+      lc_ms_visit_finalize_parent_child(ctx);
+    }
+    return LONEJSON_STATUS_OK;
+  }
+  status = lc_ms_visit_write_char(ctx->out, '"', error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  lc_ms_visit_finalize_parent_child(ctx);
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_number_begin(void *user,
+                                                lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *parent;
+  lonejson_status status;
+  int exact;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    ctx->skip_depth += 1U;
+    return LONEJSON_STATUS_OK;
+  }
+  if (ctx->frame_count == 0U) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "local mutate currently requires a JSON object root");
+  }
+  parent = lc_ms_visit_top(ctx);
+  status = lc_ms_visit_prepare_child(ctx, parent, parent->kind, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  exact = lc_ms_is_exact(ctx->mutation, ctx->path, ctx->path_len);
+  if (exact) {
+    switch (ctx->mutation->kind) {
+    case LC_MUTATION_REMOVE:
+      ctx->skip_depth = 1U;
+      return LONEJSON_STATUS_OK;
+    case LC_MUTATION_SET:
+      status = lc_ms_visit_emit_prefix(ctx, parent, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      status = lc_ms_visit_emit_mutation_value_status(ctx->out, ctx->mutation,
+                                                      0.0, 0, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      ctx->skip_depth = 1U;
+      return LONEJSON_STATUS_OK;
+    case LC_MUTATION_INCREMENT:
+      status = lc_ms_visit_emit_prefix(ctx, parent, error);
+      if (status != LONEJSON_STATUS_OK) {
+        return status;
+      }
+      free(ctx->number_buffer);
+      ctx->number_buffer = NULL;
+      ctx->number_len = 0U;
+      ctx->number_cap = 0U;
+      ctx->capture_increment = 1;
+      return LONEJSON_STATUS_OK;
+    default:
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "unsupported mutation kind");
+    }
+  }
+  status = lc_ms_visit_emit_prefix(ctx, parent, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_number_chunk(void *user, const char *data,
+                                                size_t len,
+                                                lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (ctx->capture_increment) {
+    return lc_ms_visit_buffer_append(&ctx->number_buffer, &ctx->number_len,
+                                     &ctx->number_cap, data, len, error);
+  }
+  return lc_ms_visit_write_bytes(ctx->out, data, len, error);
+}
+
+static lonejson_status lc_ms_visit_number_end(void *user, lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  double existing;
+  char *endptr;
+  lonejson_status status;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    ctx->skip_depth -= 1U;
+    if (ctx->skip_depth == 0U) {
+      lc_ms_visit_finalize_parent_child(ctx);
+    }
+    return LONEJSON_STATUS_OK;
+  }
+  if (ctx->capture_increment) {
+    ctx->capture_increment = 0;
+    errno = 0;
+    existing = strtod(ctx->number_buffer != NULL ? ctx->number_buffer : "",
+                      &endptr);
+    if (errno != 0 || endptr == ctx->number_buffer || *endptr != '\0') {
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "increment target is not numeric");
+    }
+    status = lc_ms_visit_emit_mutation_value_status(ctx->out, ctx->mutation,
+                                                    existing, 1, error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    lc_ms_visit_finalize_parent_child(ctx);
+    return LONEJSON_STATUS_OK;
+  }
+  lc_ms_visit_finalize_parent_child(ctx);
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_boolean_value(void *user, int value,
+                                                 lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *parent;
+  lonejson_status status;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (ctx->frame_count == 0U) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "local mutate currently requires a JSON object root");
+  }
+  parent = lc_ms_visit_top(ctx);
+  status = lc_ms_visit_prepare_child(ctx, parent, parent->kind, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  if (lc_ms_is_exact(ctx->mutation, ctx->path, ctx->path_len)) {
+    if (ctx->mutation->kind == LC_MUTATION_REMOVE) {
+      lc_ms_visit_finalize_parent_child(ctx);
+      return LONEJSON_STATUS_OK;
+    }
+    if (ctx->mutation->kind != LC_MUTATION_SET) {
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "increment target is not numeric");
+    }
+    status = lc_ms_visit_emit_prefix(ctx, parent, error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    status = lc_ms_visit_emit_mutation_value_status(ctx->out, ctx->mutation,
+                                                    0.0, 0, error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    lc_ms_visit_finalize_parent_child(ctx);
+    return LONEJSON_STATUS_OK;
+  }
+  status = lc_ms_visit_emit_prefix(ctx, parent, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  status = lc_ms_visit_write_bytes(ctx->out, value ? "true" : "false",
+                                   value ? 4U : 5U, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  lc_ms_visit_finalize_parent_child(ctx);
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_ms_visit_null_value(void *user,
+                                              lonejson_error *error) {
+  lc_ms_visit_context *ctx;
+  lc_ms_visit_frame *parent;
+  lonejson_status status;
+
+  ctx = (lc_ms_visit_context *)user;
+  if (ctx->skip_depth != 0U) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (ctx->frame_count == 0U) {
+    return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                            "local mutate currently requires a JSON object root");
+  }
+  parent = lc_ms_visit_top(ctx);
+  status = lc_ms_visit_prepare_child(ctx, parent, parent->kind, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  if (lc_ms_is_exact(ctx->mutation, ctx->path, ctx->path_len)) {
+    if (ctx->mutation->kind == LC_MUTATION_REMOVE) {
+      lc_ms_visit_finalize_parent_child(ctx);
+      return LONEJSON_STATUS_OK;
+    }
+    if (ctx->mutation->kind != LC_MUTATION_SET) {
+      return lc_ms_visit_fail(error, LONEJSON_STATUS_INVALID_JSON,
+                              "increment target is not numeric");
+    }
+    status = lc_ms_visit_emit_prefix(ctx, parent, error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    status = lc_ms_visit_emit_mutation_value_status(ctx->out, ctx->mutation,
+                                                    0.0, 0, error);
+    if (status != LONEJSON_STATUS_OK) {
+      return status;
+    }
+    lc_ms_visit_finalize_parent_child(ctx);
+    return LONEJSON_STATUS_OK;
+  }
+  status = lc_ms_visit_emit_prefix(ctx, parent, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  status = lc_ms_visit_write_bytes(ctx->out, "null", 4U, error);
+  if (status != LONEJSON_STATUS_OK) {
+    return status;
+  }
+  lc_ms_visit_finalize_parent_child(ctx);
+  return LONEJSON_STATUS_OK;
+}
+
+static int lc_ms_visit_apply_single(const lc_mutation *mutation, FILE *input,
+                                    FILE *output, lc_error *error) {
+  lc_ms_visit_context ctx;
+  lonejson_value_visitor visitor;
+  lonejson_value_limits limits;
+  lonejson_error lj_error;
+  lonejson_status status;
+
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.out = output;
+  ctx.mutation = mutation;
+  ctx.path = (char **)calloc(128U, sizeof(char *));
+  if (ctx.path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate local mutate path stack", NULL,
+                        NULL, NULL);
+  }
+  visitor = lonejson_default_value_visitor();
+  visitor.object_begin = lc_ms_visit_object_begin;
+  visitor.object_end = lc_ms_visit_object_end;
+  visitor.object_key_begin = lc_ms_visit_object_key_begin;
+  visitor.object_key_chunk = lc_ms_visit_object_key_chunk;
+  visitor.object_key_end = lc_ms_visit_object_key_end;
+  visitor.array_begin = lc_ms_visit_array_begin;
+  visitor.array_end = lc_ms_visit_array_end;
+  visitor.string_begin = lc_ms_visit_string_begin;
+  visitor.string_chunk = lc_ms_visit_string_chunk;
+  visitor.string_end = lc_ms_visit_string_end;
+  visitor.number_begin = lc_ms_visit_number_begin;
+  visitor.number_chunk = lc_ms_visit_number_chunk;
+  visitor.number_end = lc_ms_visit_number_end;
+  visitor.boolean_value = lc_ms_visit_boolean_value;
+  visitor.null_value = lc_ms_visit_null_value;
+  limits = lonejson_default_value_limits();
+  memset(&lj_error, 0, sizeof(lj_error));
+  status = lonejson_visit_value_filep(input, &visitor, &ctx, &limits, &lj_error);
+  if (status != LONEJSON_STATUS_OK) {
+    lc_ms_visit_context_cleanup(&ctx);
+    if (lj_error.message[0] != '\0') {
+      return lc_error_set(error, LC_ERR_INVALID, 0L, lj_error.message, NULL,
+                          NULL, NULL);
+    }
+    return lc_lonejson_error_from_status(error, status, &lj_error,
+                                          "failed to transform local mutate "
+                                          "document");
   }
   if (fflush(output) != 0) {
+    lc_ms_visit_context_cleanup(&ctx);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to flush mutate stream output", strerror(errno),
                         NULL, NULL);
   }
+  lc_ms_visit_context_cleanup(&ctx);
   return LC_OK;
 }
 
@@ -1975,7 +2461,7 @@ int lc_mutation_plan_apply(const lc_mutation_plan *plan, FILE *input,
                           strerror(errno), NULL, NULL);
     }
     rewind(current);
-    rc = lc_ms_apply_single(&plan->items[i], current, next, error);
+    rc = lc_ms_visit_apply_single(&plan->items[i], current, next, error);
     if (rc != LC_OK) {
       fclose(next);
       if (current != input) {

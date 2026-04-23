@@ -31,7 +31,7 @@ int main(void) {
   lc_client_config config;
   lc_client *client;
   lc_lease *lease;
-  lc_json *json;
+  lc_source *src;
   lc_error error;
   lc_acquire_req acquire;
   lc_lease_ref lease_ref;
@@ -105,7 +105,7 @@ int main(void) {
   lc_error_init(&error);
   client = NULL;
   lease = NULL;
-  json = NULL;
+  src = NULL;
   memset(&updated, 0, sizeof(updated));
   memset(&describe, 0, sizeof(describe));
   lc_acquire_req_init(&acquire);
@@ -143,9 +143,9 @@ int main(void) {
   lease_ref.txn_id = lease->txn_id;
   lease_ref.fencing_token = lease->fencing_token;
 
-  rc = lc_json_from_string(document, &json, &error);
+  rc = lc_source_from_memory(document, strlen(document), &src, &error);
   if (rc != LC_OK) {
-    rc = fail_with_error(example_logger, "lc_json_from_string", &error);
+    rc = fail_with_error(example_logger, "lc_source_from_memory", &error);
     lease->close(lease);
     client->close(client);
     lc_error_cleanup(&error);
@@ -156,10 +156,10 @@ int main(void) {
 
   update.lease = lease_ref;
   update.content_type = "application/json";
-  rc = client->update(client, &update, json, &updated, &error);
+  rc = client->update(client, &update, src, &updated, &error);
   if (rc != LC_OK) {
     rc = fail_with_error(example_logger, "client->update", &error);
-    lc_json_close(json);
+    lc_source_close(src);
     lease->close(lease);
     client->close(client);
     lc_error_cleanup(&error);
@@ -167,8 +167,8 @@ int main(void) {
     sdk_logger->destroy(sdk_logger);
     return rc;
   }
-  lc_json_close(json);
-  json = NULL;
+  lc_source_close(src);
+  src = NULL;
 
   example_logger->infof(
       example_logger, "example.client_and_lease_methods.updated",

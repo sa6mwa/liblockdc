@@ -288,6 +288,102 @@ static void test_mutation_plan_rejects_invalid_time_literal(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_mutation_plan_increments_and_removes_fields(void **state) {
+  const char *exprs[2];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  char *json_text;
+  int rc;
+
+  (void)state;
+  exprs[0] = "/counter++";
+  exprs[1] = "rm:/drop";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 2U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{\"counter\":1,\"drop\":2,\"keep\":3}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_OK);
+  json_text = slurp_file(output);
+  assert_string_equal(json_text, "{\"counter\":2,\"keep\":3}");
+
+  free(json_text);
+  fclose(output);
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void test_mutation_plan_rejects_missing_array_path(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "/items/0=\"x\"";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_non_null(error.message);
+  assert_non_null(strstr(error.message, "missing array paths"));
+  assert_null(output);
+
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void test_mutation_plan_rejects_truncated_object_key_without_crashing(
+    void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "time:/ts=NOW";
+  memset(&options, 0, sizeof(options));
+  options.now.tv_sec = 1700000000;
+  options.now.tv_nsec = 123456789L;
+  options.has_now = 1;
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{\"broken");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_null(output);
+  assert_non_null(error.message);
+
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
 static void test_mutation_plan_streams_base64file_value(void **state) {
   const char *exprs[1];
   const unsigned char payload[] = {0x00, 0x01, 0x02, 'a'};
@@ -337,7 +433,8 @@ static void test_mutation_plan_streams_base64file_value(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_mutation_plan_auto_file_mode_sweeps_and_reopens(void **state) {
+static void
+test_mutation_plan_auto_file_mode_streams_in_one_pass(void **state) {
   const char *text_exprs[1];
   const char *bin_exprs[1];
   const unsigned char text_payload[] = "hello world";
@@ -397,10 +494,57 @@ static void test_mutation_plan_auto_file_mode_sweeps_and_reopens(void **state) {
   assert_int_equal(rc, LC_OK);
   json_text = slurp_file(output);
   assert_string_equal(json_text, "{\"payload\":\"AP8B\"}");
-  assert_int_equal(stores[0].opens, 2);
-  assert_int_equal(stores[1].opens, 2);
+  assert_int_equal(stores[0].opens, 1);
+  assert_int_equal(stores[1].opens, 1);
   free(json_text);
   fclose(output);
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void test_mutation_plan_rejects_invalid_utf8_textfile(void **state) {
+  const char *exprs[1];
+  const unsigned char payload[] = {0xff, 0xfe, 'x'};
+  test_file_store store;
+  test_resolver_context resolver;
+  lc_file_value_resolver file_resolver;
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "textfile:/payload=blob.bin";
+  memset(&store, 0, sizeof(store));
+  store.resolved_path = "/virtual/blob.bin";
+  store.bytes = payload;
+  store.length = sizeof(payload);
+  memset(&resolver, 0, sizeof(resolver));
+  resolver.stores = &store;
+  resolver.count = 1U;
+  memset(&file_resolver, 0, sizeof(file_resolver));
+  file_resolver.open = test_resolver_open;
+  file_resolver.context = &resolver;
+  memset(&options, 0, sizeof(options));
+  options.file_value_base_dir = "/virtual";
+  options.file_value_resolver = &file_resolver;
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_non_null(error.message);
+  assert_true(strstr(error.message, "invalid UTF-8") != NULL);
+  assert_null(output);
+  assert_int_equal(store.opens, 1);
+
   fclose(input);
   lc_mutation_plan_close(plan);
   lc_error_cleanup(&error);
@@ -493,8 +637,13 @@ int main(void) {
       cmocka_unit_test(test_mutation_plan_normalizes_rfc3339_offset),
       cmocka_unit_test(test_mutation_plan_normalizes_rfc3339nano_literal),
       cmocka_unit_test(test_mutation_plan_rejects_invalid_time_literal),
+      cmocka_unit_test(test_mutation_plan_increments_and_removes_fields),
+      cmocka_unit_test(test_mutation_plan_rejects_missing_array_path),
+      cmocka_unit_test(
+          test_mutation_plan_rejects_truncated_object_key_without_crashing),
       cmocka_unit_test(test_mutation_plan_streams_base64file_value),
-      cmocka_unit_test(test_mutation_plan_auto_file_mode_sweeps_and_reopens),
+      cmocka_unit_test(test_mutation_plan_auto_file_mode_streams_in_one_pass),
+      cmocka_unit_test(test_mutation_plan_rejects_invalid_utf8_textfile),
       cmocka_unit_test(test_mutation_plan_expands_home_prefix),
       cmocka_unit_test(test_intcompat_roundtrips_large_decimal_literal),
       cmocka_unit_test(test_intcompat_rejects_out_of_range_narrowing),
