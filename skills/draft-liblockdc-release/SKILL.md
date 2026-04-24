@@ -27,7 +27,7 @@ skills/draft-liblockdc-release/scripts/draft_liblockdc_release.sh draft
    - rerun the release-package tests
    - verify `dist/` filenames and `CHECKSUMS`
    - only then check whether the tagged commit and tag are present on `origin`
-   - create a GitHub draft release and upload every file named in `CHECKSUMS` plus the checksum file itself
+   - create or update a GitHub draft release, upload exactly every file named in `CHECKSUMS` plus the checksum file itself, and verify the GitHub asset list matches that manifest exactly
 
 3. If the helper stops because the current tag is not a semantic bump over the previous release tag, ask the user whether the tag is correct. Only continue if the user explicitly confirms. Then rerun:
 
@@ -59,6 +59,8 @@ skills/draft-liblockdc-release/scripts/draft_liblockdc_release.sh publish
 - Use the exact tag value as the GitHub release title.
 - Derive the release notes from the commit message on `HEAD`.
 - Treat `dist/liblockdc-<version>-CHECKSUMS` as the source of truth for uploaded assets.
+- Do not upload every file under `dist/`; unrelated versions or stale local artifacts may be present.
+- Fail if the GitHub draft is missing any manifest asset or has any asset outside the manifest.
 
 ## Notes
 

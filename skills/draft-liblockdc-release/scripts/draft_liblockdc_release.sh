@@ -143,12 +143,15 @@ collect_release_assets() {
   local checksum_file="$1"
   local asset
   RELEASE_ASSETS=()
-  while read -r _ _ asset; do
+  RELEASE_ASSET_NAMES=()
+  while read -r _ asset; do
     [ -n "$asset" ] || continue
     [ -f "dist/$asset" ] || die "checksum file references missing asset dist/$asset"
     RELEASE_ASSETS+=("dist/$asset")
+    RELEASE_ASSET_NAMES+=("$asset")
   done <"$checksum_file"
   RELEASE_ASSETS+=("$checksum_file")
+  RELEASE_ASSET_NAMES+=("$(basename "$checksum_file")")
 }
 
 validate_dist() {
@@ -202,16 +205,72 @@ create_draft_release() {
   local repo="$1"
   local tag="$2"
   local notes_file="$3"
+  local is_draft
 
-  gh release view "$tag" --repo "$repo" >/dev/null 2>&1 && die "release '$tag' already exists on GitHub. Delete or update it manually before re-running."
+  if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+    is_draft="$(gh release view "$tag" --repo "$repo" --json isDraft --jq '.isDraft')"
+    [ "$is_draft" = "true" ] || die "release '$tag' already exists on GitHub and is not a draft. Refusing to mutate a published release."
+    info "updating existing GitHub draft release $tag"
+    gh release edit "$tag" \
+      --repo "$repo" \
+      --title "$tag" \
+      --notes-file "$notes_file" >/dev/null
+  else
+    info "creating GitHub draft release $tag"
+    gh release create "$tag" \
+      --repo "$repo" \
+      --title "$tag" \
+      --notes-file "$notes_file" \
+      --draft \
+      --verify-tag >/dev/null
+  fi
 
-  info "creating GitHub draft release $tag"
-  gh release create "$tag" "${RELEASE_ASSETS[@]}" \
-    --repo "$repo" \
-    --title "$tag" \
-    --notes-file "$notes_file" \
-    --draft \
-    --verify-tag
+  info "uploading release assets from checksum manifest"
+  gh release upload "$tag" "${RELEASE_ASSETS[@]}" --repo "$repo" --clobber
+  verify_release_assets "$repo" "$tag"
+}
+
+verify_release_assets() {
+  local repo="$1"
+  local tag="$2"
+  local expected actual name
+  local missing=()
+  local unexpected=()
+  local -A expected_names=()
+  local -A actual_names=()
+
+  for expected in "${RELEASE_ASSET_NAMES[@]}"; do
+    expected_names["$expected"]=1
+  done
+
+  while IFS= read -r actual; do
+    [ -n "$actual" ] || continue
+    actual_names["$actual"]=1
+  done < <(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name')
+
+  for expected in "${RELEASE_ASSET_NAMES[@]}"; do
+    if [ -z "${actual_names[$expected]:-}" ]; then
+      missing+=("$expected")
+    fi
+  done
+
+  for name in "${!actual_names[@]}"; do
+    if [ -z "${expected_names[$name]:-}" ]; then
+      unexpected+=("$name")
+    fi
+  done
+
+  if [ "${#missing[@]}" -gt 0 ] || [ "${#unexpected[@]}" -gt 0 ]; then
+    if [ "${#missing[@]}" -gt 0 ]; then
+      printf 'error: release %s is missing expected asset(s): %s\n' "$tag" "${missing[*]}" >&2
+    fi
+    if [ "${#unexpected[@]}" -gt 0 ]; then
+      printf 'error: release %s has unexpected asset(s): %s\n' "$tag" "${unexpected[*]}" >&2
+    fi
+    exit 1
+  fi
+
+  info "verified GitHub release asset set matches checksum manifest"
 }
 
 publish_release() {
