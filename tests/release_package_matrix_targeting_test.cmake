@@ -29,6 +29,7 @@ foreach(preset
 endforeach()
 
 file(COPY "${LOCKDC_ROOT}/scripts/run_linux_package_matrix.sh" DESTINATION "${fake_script_dir}")
+file(COPY "${LOCKDC_ROOT}/scripts/osxcross_available.sh" DESTINATION "${fake_script_dir}")
 
 file(WRITE "${fake_cmake}" [=[
 #!/usr/bin/env bash

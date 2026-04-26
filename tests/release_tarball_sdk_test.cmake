@@ -21,6 +21,9 @@ function(lockdc_import_cache_value var_name)
 endfunction()
 
 lockdc_import_cache_value(CMAKE_C_COMPILER)
+lockdc_import_cache_value(CMAKE_TOOLCHAIN_FILE)
+lockdc_import_cache_value(CMAKE_LINKER)
+lockdc_import_cache_value(CMAKE_EXE_LINKER_FLAGS)
 lockdc_import_cache_value(CMAKE_BUILD_TYPE)
 
 if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
@@ -98,7 +101,7 @@ foreach(required_path
     "${release_prefix}/include/lc/version.h"
     "${release_prefix}/include/lonejson.h"
     "${release_prefix}/lib/liblockdc.a"
-    "${release_prefix}/lib/liblockdc.so"
+    "${release_prefix}/lib/${LOCKDC_SHARED_LINK_NAME}"
     "${release_prefix}/lib/pkgconfig/lockdc.pc"
     "${release_prefix}/lib/cmake/lockdc/lockdcConfig.cmake"
 )
@@ -378,8 +381,7 @@ int lockdc_release_tarball_touch_lease_api(lc_lease *lease, lc_source *src,
 }
 ]=])
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
+set(lockdc_consumer_configure_args
         -S "${consumer_src_dir}"
         -B "${consumer_bin_dir}"
         "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
@@ -388,7 +390,17 @@ execute_process(
         "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF"
         "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"
         "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON"
-        "-DLOCKDC_RELEASE_PREFIX=${release_prefix}"
+        "-Dlockdc_DIR=${release_prefix}/lib/cmake/lockdc"
+        "-DLOCKDC_RELEASE_PREFIX=${release_prefix}")
+if(LOCKDC_TARGET_ID MATCHES "apple-darwin$"
+        AND DEFINED CMAKE_TOOLCHAIN_FILE
+        AND NOT "${CMAKE_TOOLCHAIN_FILE}" STREQUAL "")
+    list(APPEND lockdc_consumer_configure_args
+        "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" ${lockdc_consumer_configure_args}
     RESULT_VARIABLE configure_result
     OUTPUT_VARIABLE configure_stdout
     ERROR_VARIABLE configure_stderr
@@ -470,14 +482,28 @@ endif()
 
 separate_arguments(lockdc_pkgconfig_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_cflags}")
 separate_arguments(lockdc_pkgconfig_libs_list UNIX_COMMAND "${lockdc_pkgconfig_libs}")
+set(lockdc_direct_link_flags)
+if(DEFINED CMAKE_EXE_LINKER_FLAGS AND NOT "${CMAKE_EXE_LINKER_FLAGS}" STREQUAL "")
+    separate_arguments(lockdc_direct_link_flags UNIX_COMMAND "${CMAKE_EXE_LINKER_FLAGS}")
+endif()
+if(LOCKDC_TARGET_ID MATCHES "apple-darwin$"
+        AND DEFINED CMAKE_LINKER
+        AND NOT "${CMAKE_LINKER}" STREQUAL "")
+    list(PREPEND lockdc_direct_link_flags "-fuse-ld=${CMAKE_LINKER}")
+endif()
 
 set(lockdc_pkgconfig_static_consumer "${consumer_bin_dir}/release_tarball_pkgconfig_static")
+set(lockdc_pkgconfig_static_link_flags)
+if(NOT LOCKDC_TARGET_ID MATCHES "apple-darwin$")
+    list(APPEND lockdc_pkgconfig_static_link_flags -static)
+endif()
 execute_process(
     COMMAND "${CMAKE_C_COMPILER}"
         ${lockdc_pkgconfig_cflags_list}
-        -static
+        ${lockdc_pkgconfig_static_link_flags}
         "${consumer_src_dir}/pkgconfig_static_main.c"
         -o "${lockdc_pkgconfig_static_consumer}"
+        ${lockdc_direct_link_flags}
         ${lockdc_pkgconfig_libs_list}
     RESULT_VARIABLE lockdc_pkgconfig_build_result
     OUTPUT_VARIABLE lockdc_pkgconfig_build_stdout
@@ -528,12 +554,14 @@ separate_arguments(lockdc_pkgconfig_shared_cflags_list UNIX_COMMAND "${lockdc_pk
 separate_arguments(lockdc_pkgconfig_shared_libs_list UNIX_COMMAND "${lockdc_pkgconfig_shared_libs}")
 
 set(lockdc_pkgconfig_shared_consumer "${consumer_bin_dir}/release_tarball_pkgconfig_shared")
+set(lockdc_pkgconfig_shared_rpath_flag "-Wl,-rpath,${release_prefix}/lib")
 execute_process(
     COMMAND "${CMAKE_C_COMPILER}"
         ${lockdc_pkgconfig_shared_cflags_list}
         "${consumer_src_dir}/pkgconfig_shared_main.c"
-        -Wl,-rpath,${release_prefix}/lib
+        ${lockdc_pkgconfig_shared_rpath_flag}
         -o "${lockdc_pkgconfig_shared_consumer}"
+        ${lockdc_direct_link_flags}
         ${lockdc_pkgconfig_shared_libs_list}
     RESULT_VARIABLE lockdc_pkgconfig_shared_build_result
     OUTPUT_VARIABLE lockdc_pkgconfig_shared_build_stdout

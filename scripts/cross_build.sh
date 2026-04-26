@@ -12,6 +12,12 @@ presets=(
 
 unset LD_LIBRARY_PATH
 
+if "$script_dir/osxcross_available.sh"; then
+  presets+=(arm64-apple-darwin-release)
+else
+  printf '[cross-build] skipping arm64-apple-darwin-release: osxcross toolchain not available\n'
+fi
+
 for preset in "${presets[@]}"; do
   "$script_dir/build.sh" "$preset"
 done

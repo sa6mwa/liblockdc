@@ -20,6 +20,7 @@ endif()
 include("${LOCKDC_ROOT}/tests/package_archive_assertions.cmake")
 
 set(lockdc_expected_artifacts "")
+set(lockdc_expected_checksum_artifacts "")
 set(lockdc_release_version "")
 
 foreach(lockdc_preset IN LISTS lockdc_release_presets)
@@ -52,6 +53,14 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
     list(APPEND lockdc_expected_artifacts
         "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz"
     )
+    list(APPEND lockdc_expected_checksum_artifacts
+        "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz"
+    )
+    if(LOCKDC_TARGET_ID MATCHES "apple-darwin$")
+        list(APPEND lockdc_expected_artifacts
+            "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}-smoke.zip"
+        )
+    endif()
 endforeach()
 
 if(lockdc_release_version STREQUAL "")
@@ -62,8 +71,13 @@ list(APPEND lockdc_expected_artifacts
     "lockdc-${lockdc_release_version}-1.rockspec"
     "lockdc-${lockdc_release_version}-1.src.rock"
 )
+list(APPEND lockdc_expected_checksum_artifacts
+    "lockdc-${lockdc_release_version}-1.rockspec"
+    "lockdc-${lockdc_release_version}-1.src.rock"
+)
 list(SORT lockdc_expected_artifacts)
-list(LENGTH lockdc_expected_artifacts lockdc_expected_artifact_count)
+list(SORT lockdc_expected_checksum_artifacts)
+list(LENGTH lockdc_expected_checksum_artifacts lockdc_expected_checksum_artifact_count)
 
 file(GLOB lockdc_actual_artifacts RELATIVE "${lockdc_dist_dir}" "${lockdc_dist_dir}/*")
 list(FILTER lockdc_actual_artifacts EXCLUDE REGEX "^liblockdc-${lockdc_release_version}-CHECKSUMS$")
@@ -120,12 +134,12 @@ endif()
 
 file(STRINGS "${lockdc_checksums_path}" lockdc_checksum_lines)
 list(LENGTH lockdc_checksum_lines lockdc_checksum_line_count)
-if(NOT lockdc_checksum_line_count EQUAL lockdc_expected_artifact_count)
+if(NOT lockdc_checksum_line_count EQUAL lockdc_expected_checksum_artifact_count)
     message(FATAL_ERROR
-        "checksum manifest line count mismatch for ${lockdc_checksums_path}: expected ${lockdc_expected_artifact_count}, got ${lockdc_checksum_line_count}")
+        "checksum manifest line count mismatch for ${lockdc_checksums_path}: expected ${lockdc_expected_checksum_artifact_count}, got ${lockdc_checksum_line_count}")
 endif()
 
-foreach(lockdc_expected_artifact IN LISTS lockdc_expected_artifacts)
+foreach(lockdc_expected_artifact IN LISTS lockdc_expected_checksum_artifacts)
     set(lockdc_found_checksum 0)
     foreach(lockdc_checksum_line IN LISTS lockdc_checksum_lines)
         if(lockdc_checksum_line MATCHES "^[0-9a-f]+[ \t]+\\*?${lockdc_expected_artifact}$")

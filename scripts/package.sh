@@ -41,6 +41,21 @@ run_target() {
     -P "$repo_root/cmake/package_archive.cmake"
 }
 
+run_target_if_osxcross() {
+  local preset="$1"
+
+  if "$script_dir/osxcross_available.sh"; then
+    run_target "$preset"
+    "$cmake_bin" \
+      -DLOCKDC_BINARY_DIR="$repo_root/build/$preset" \
+      -DLOCKDC_ROOT="$repo_root" \
+      -DLOCKDC_DIST_DIR="$repo_root/dist" \
+      -P "$repo_root/cmake/package_darwin_smoke_bundle.cmake"
+  else
+    printf '[package] skipping %s: osxcross toolchain not available\n' "$preset"
+  fi
+}
+
 run_cmake_script -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_clean_dist.cmake"
 
 package_lua=0
@@ -53,6 +68,7 @@ case "$requested_abi" in
     run_target aarch64-linux-musl-release
     run_target armhf-linux-gnu-release
     run_target armhf-linux-musl-release
+    run_target_if_osxcross arm64-apple-darwin-release
     package_lua=1
     ;;
   gnu)
@@ -85,8 +101,15 @@ case "$requested_abi" in
   armhf-linux-musl)
     run_target armhf-linux-musl-release
     ;;
+  arm64-apple-darwin)
+    if ! "$script_dir/osxcross_available.sh"; then
+      echo "missing arm64 Apple Darwin osxcross toolchain; set OSXCROSS_ROOT or install it under \$HOME/.local/cross/osxcross" >&2
+      exit 1
+    fi
+    run_target_if_osxcross arm64-apple-darwin-release
+    ;;
   *)
-    echo "usage: scripts/package.sh [all|gnu|musl|x86_64-linux-gnu|x86_64-linux-musl|aarch64-linux-gnu|aarch64-linux-musl|armhf-linux-gnu|armhf-linux-musl]" >&2
+    echo "usage: scripts/package.sh [all|gnu|musl|x86_64-linux-gnu|x86_64-linux-musl|aarch64-linux-gnu|aarch64-linux-musl|armhf-linux-gnu|armhf-linux-musl|arm64-apple-darwin]" >&2
     exit 2
     ;;
 esac

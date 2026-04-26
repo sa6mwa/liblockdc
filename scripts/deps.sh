@@ -116,8 +116,22 @@ case "$preset" in
       -DLOCKDC_BUILD_FUZZERS=OFF
     )
     ;;
+  deps-arm64-apple-darwin)
+    cmake_preset="arm64-apple-darwin-release"
+    deps_root="$repo_root/.cache/deps/arm64-apple-darwin"
+    deps_build_root="$repo_root/.cache/deps-build/arm64-apple-darwin"
+    cmake_extra_args=(
+      -DLOCKDC_BUILD_DEPENDENCIES=ON
+      -DLOCKDC_BUILD_TESTS=OFF
+      -DLOCKDC_BUILD_E2E_TESTS=OFF
+      -DLOCKDC_BUILD_EXAMPLES=OFF
+      -DLOCKDC_BUILD_BENCHMARKS=OFF
+      -DLOCKDC_BUILD_FUZZERS=OFF
+      -DLOCKDC_BUILD_LUA_BINDINGS=OFF
+    )
+    ;;
   *)
-    echo "usage: scripts/deps.sh [deps-x86_64-linux-gnu|deps-host-debug|deps-x86_64-linux-musl|deps-aarch64-linux-gnu|deps-aarch64-linux-musl|deps-armhf-linux-gnu|deps-armhf-linux-musl]" >&2
+    echo "usage: scripts/deps.sh [deps-x86_64-linux-gnu|deps-host-debug|deps-x86_64-linux-musl|deps-aarch64-linux-gnu|deps-aarch64-linux-musl|deps-armhf-linux-gnu|deps-armhf-linux-musl|deps-arm64-apple-darwin]" >&2
     exit 2
     ;;
 esac
@@ -245,7 +259,30 @@ reset_dependency_build_root() {
   exit 1
 }
 
-shared_ext=so
+case "$preset" in
+  deps-arm64-apple-darwin)
+    shared_ext=dylib
+    libssh2_shared_path="$deps_root/libssh2/install/lib/libssh2.1.${shared_ext}"
+    libssh2_shared_soname_path="$deps_root/libssh2/install/lib/libssh2.1.${shared_ext}"
+    libssh2_shared_versioned_path="$deps_root/libssh2/install/lib/libssh2.1.${shared_ext}"
+    zlib_shared_path="$deps_root/zlib/install/lib/libz.${shared_ext}"
+    zlib_shared_soname_path="$deps_root/zlib/install/lib/libz.1.${shared_ext}"
+    zlib_shared_versioned_path="$deps_root/zlib/install/lib/libz.$zlib_version.${shared_ext}"
+    pslog_shared_path="$deps_root/pslog/install/lib/libpslog.0.${shared_ext}"
+    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.0.${shared_ext}"
+    ;;
+  *)
+    shared_ext=so
+    libssh2_shared_path="$deps_root/libssh2/install/lib/libssh2.so"
+    libssh2_shared_soname_path="$deps_root/libssh2/install/lib/libssh2.so.1"
+    libssh2_shared_versioned_path="$deps_root/libssh2/install/lib/libssh2.so.1.0.1"
+    zlib_shared_path="$deps_root/zlib/install/lib/libz.so"
+    zlib_shared_soname_path="$deps_root/zlib/install/lib/libz.so.1"
+    zlib_shared_versioned_path="$deps_root/zlib/install/lib/libz.so.$zlib_version"
+    pslog_shared_path="$deps_root/pslog/install/lib/libpslog.so.0"
+    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.so.0"
+    ;;
+esac
 curl_shared_path="$deps_root/curl/install/lib/libcurl.${shared_ext}"
 openssl_ssl_shared_path="$deps_root/openssl/install/lib/libssl.${shared_ext}"
 openssl_crypto_shared_path="$deps_root/openssl/install/lib/libcrypto.${shared_ext}"
@@ -260,28 +297,30 @@ required_paths=(
   "$deps_root/nghttp2/install/lib/libnghttp2.a"
   "$nghttp2_shared_path"
   "$deps_root/libssh2/install/lib/libssh2.a"
-  "$deps_root/libssh2/install/lib/libssh2.so"
-  "$deps_root/libssh2/install/lib/libssh2.so.1"
-  "$deps_root/libssh2/install/lib/libssh2.so.1.0.1"
+  "$libssh2_shared_path"
+  "$libssh2_shared_soname_path"
+  "$libssh2_shared_versioned_path"
   "$deps_root/libssh2/install/include/libssh2.h"
   "$deps_root/libssh2/install/include/libssh2_publickey.h"
   "$deps_root/libssh2/install/include/libssh2_sftp.h"
   "$deps_root/zlib/install/lib/libz.a"
-  "$deps_root/zlib/install/lib/libz.so"
-  "$deps_root/zlib/install/lib/libz.so.1"
-  "$deps_root/zlib/install/lib/libz.so.$zlib_version"
+  "$zlib_shared_path"
+  "$zlib_shared_soname_path"
+  "$zlib_shared_versioned_path"
   "$deps_root/zlib/install/include/zlib.h"
   "$deps_root/zlib/install/include/zconf.h"
   "$deps_root/curl/install/lib/libcurl.a"
   "$curl_shared_path"
   "$deps_root/pslog/install/lib/libpslog.a"
   "$deps_root/pslog/install/include/pslog.h"
-  "$deps_root/pslog/install/lib/libpslog.so.0"
+  "$pslog_shared_path"
   "$deps_root/lonejson/install/lib/liblonejson.a"
   "$deps_root/lonejson/install/include/lonejson.h"
-  "$deps_root/lonejson/install/lib/liblonejson.so.0"
-  "$deps_root/cmocka/install/lib/libcmocka.a"
+  "$lonejson_shared_path"
 )
+if [ "$preset" != "deps-arm64-apple-darwin" ]; then
+  required_paths+=("$deps_root/cmocka/install/lib/libcmocka.a")
+fi
 
 for path in "${required_paths[@]}"; do
   if [ ! -f "$path" ]; then

@@ -75,14 +75,33 @@ require_command cmake
 
 cd "$repo_root"
 
+release_presets=(
+    x86_64-linux-gnu-release
+    x86_64-linux-musl-release
+    aarch64-linux-gnu-release
+    aarch64-linux-musl-release
+    armhf-linux-gnu-release
+    armhf-linux-musl-release
+)
+if "$script_dir/osxcross_available.sh"; then
+    release_presets+=(arm64-apple-darwin-release)
+else
+    printf '[package] skipping arm64-apple-darwin-release: osxcross toolchain not available\n'
+fi
+release_preset_list=$(IFS=';'; printf '%s' "${release_presets[*]}")
+
 cmake -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_clean_dist.cmake"
 
-package_target x86_64-linux-gnu-release
-package_target x86_64-linux-musl-release
-package_target aarch64-linux-gnu-release
-package_target aarch64-linux-musl-release
-package_target armhf-linux-gnu-release
-package_target armhf-linux-musl-release
+for release_preset in "${release_presets[@]}"; do
+    package_target "$release_preset"
+    if [ "$release_preset" = "arm64-apple-darwin-release" ]; then
+        cmake \
+            -DLOCKDC_BINARY_DIR="$repo_root/build/$release_preset" \
+            -DLOCKDC_ROOT="$repo_root" \
+            -DLOCKDC_DIST_DIR="$repo_root/dist" \
+            -P "$repo_root/cmake/package_darwin_smoke_bundle.cmake"
+    fi
+done
 
 host_release_preset="$(detect_host_release_preset)"
 cmake \
@@ -98,12 +117,12 @@ cmake \
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -DLOCKDC_RELEASE_PRESETS="x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release" \
+    -DLOCKDC_RELEASE_PRESETS="$release_preset_list" \
     -P "$repo_root/tests/release_matrix_archives_test.cmake"
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -DLOCKDC_RELEASE_PRESETS="x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release" \
+    -DLOCKDC_RELEASE_PRESETS="$release_preset_list" \
     -P "$repo_root/tests/release_tarball_sdk_matrix_test.cmake"
 cmake \
     -DLOCKDC_ROOT="$repo_root" \

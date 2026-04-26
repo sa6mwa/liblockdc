@@ -30,6 +30,22 @@ run_target() {
     cmake -DLOCKDC_BINARY_DIR="$build_dir" -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_archive.cmake"
 }
 
+run_darwin_target_if_available() {
+    local preset="arm64-apple-darwin-release"
+    local build_dir="$repo_root/build/$preset"
+
+    if ! "$script_dir/osxcross_available.sh"; then
+        printf '[release] skipping %s: osxcross toolchain not available\n' "$preset"
+        return 0
+    fi
+
+    printf '\n== %s ==\n' "$preset"
+    cmake --preset "$preset"
+    cmake --build --preset "$preset"
+    cmake -DLOCKDC_BINARY_DIR="$build_dir" -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_archive.cmake"
+    cmake -DLOCKDC_BINARY_DIR="$build_dir" -DLOCKDC_ROOT="$repo_root" -DLOCKDC_DIST_DIR="$repo_root/dist" -P "$repo_root/cmake/package_darwin_smoke_bundle.cmake"
+}
+
 require_command cmake
 require_command ctest
 require_command musl-gcc
@@ -54,6 +70,12 @@ run_target aarch64-linux-gnu-release
 run_target aarch64-linux-musl-release
 run_target armhf-linux-gnu-release
 run_target armhf-linux-musl-release
+run_darwin_target_if_available
+
+release_presets="x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release"
+if "$script_dir/osxcross_available.sh"; then
+    release_presets="${release_presets};arm64-apple-darwin-release"
+fi
 
 cmake     -DLOCKDC_BINARY_DIR="$repo_root/build/x86_64-linux-gnu-release"     -DLOCKDC_ROOT="$repo_root"     -DLOCKDC_DIST_DIR="$repo_root/dist"     -P "$repo_root/cmake/package_lua_rock.cmake"
 
@@ -61,7 +83,7 @@ cmake -DLOCKDC_ROOT="$repo_root" -DLOCKDC_BINARY_DIR="$repo_root/build/x86_64-li
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -DLOCKDC_RELEASE_PRESETS="x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release" \
+    -DLOCKDC_RELEASE_PRESETS="$release_presets" \
     -P "$repo_root/tests/release_matrix_archives_test.cmake"
 
 printf '\nLinux release matrix completed successfully.\n'

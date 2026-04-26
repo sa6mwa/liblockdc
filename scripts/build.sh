@@ -16,10 +16,10 @@ case "$preset" in
 esac
 
 case "$preset" in
-  debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|asan|coverage|fuzz)
+  debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|arm64-apple-darwin-release|asan|coverage|fuzz)
     ;;
   *)
-    echo "usage: scripts/build.sh [debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|asan|coverage|fuzz]" >&2
+    echo "usage: scripts/build.sh [debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|arm64-apple-darwin-release|asan|coverage|fuzz]" >&2
     exit 2
     ;;
 esac

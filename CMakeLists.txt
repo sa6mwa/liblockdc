@@ -19,8 +19,13 @@ find_library(LOCKDC_ATOMIC_LIBRARY NAMES atomic)
 set(LOCKDC_EXPORTED_ATOMIC_LIBRARY "")
 set(LOCKDC_PC_PRIVATE_EXTRA_LIBS "")
 set(LOCKDC_PC_SYSTEM_LIBS "")
+set(LOCKDC_EXPORTED_DARWIN_FRAMEWORKS "")
 if(LOCKDC_ATOMIC_LIBRARY AND NOT LOCKDC_ATOMIC_LIBRARY MATCHES "-NOTFOUND$")
     set(LOCKDC_EXPORTED_ATOMIC_LIBRARY "atomic")
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(LOCKDC_EXPORTED_DARWIN_FRAMEWORKS "-framework CoreFoundation;-framework SystemConfiguration")
+    list(APPEND LOCKDC_PC_SYSTEM_LIBS "-framework CoreFoundation" "-framework SystemConfiguration")
 endif()
 
 set(LOCKDC_COVERAGE_RUNTIME_LIBRARY "")
@@ -102,7 +107,7 @@ string(TOLOWER "${LOCKDC_TARGET_ARCH}" LOCKDC_TARGET_ARCH_LOWER)
 if(LOCKDC_TARGET_ARCH_LOWER STREQUAL "amd64")
     set(LOCKDC_TARGET_ARCH_LOWER "x86_64")
 endif()
-if(LOCKDC_TARGET_ARCH_LOWER STREQUAL "arm64")
+if(LOCKDC_TARGET_ARCH_LOWER STREQUAL "arm64" AND NOT LOCKDC_TARGET_OS_LOWER STREQUAL "darwin")
     set(LOCKDC_TARGET_ARCH_LOWER "aarch64")
 endif()
 if(LOCKDC_TARGET_ARCH_LOWER STREQUAL "arm")
@@ -126,7 +131,7 @@ if(LOCKDC_TARGET_OS_LOWER STREQUAL "linux" AND NOT LOCKDC_TARGET_LIBC)
 endif()
 
 if(LOCKDC_TARGET_OS_LOWER STREQUAL "darwin")
-    set(LOCKDC_TARGET_ID "${LOCKDC_TARGET_ARCH_LOWER}-darwin")
+    set(LOCKDC_TARGET_ID "${LOCKDC_TARGET_ARCH_LOWER}-apple-darwin")
 elseif(LOCKDC_TARGET_OS_LOWER STREQUAL "freebsd")
     set(LOCKDC_TARGET_ID "${LOCKDC_TARGET_ARCH_LOWER}-freebsd")
 elseif(LOCKDC_TARGET_OS_LOWER STREQUAL "linux")
@@ -149,6 +154,9 @@ endif()
 function(lc_configure_c_target target)
     if(UNIX OR APPLE OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
         target_compile_definitions(${target} PRIVATE _POSIX_C_SOURCE=200809L)
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_compile_definitions(${target} PRIVATE _DARWIN_C_SOURCE=1)
     endif()
     set_target_properties(${target} PROPERTIES
         C_STANDARD 90
@@ -384,7 +392,14 @@ if(LOCKDC_BUILD_SHARED)
     add_library(lc_shared SHARED)
     add_library(lockdc::shared ALIAS lc_shared)
     lc_configure_library_target(lc_shared)
-    target_link_options(lc_shared PRIVATE "LINKER:--enable-new-dtags")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(lc_shared PRIVATE "LINKER:--enable-new-dtags")
+        set(lockdc_shared_install_rpath "$ORIGIN")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        set(lockdc_shared_install_rpath "@loader_path")
+    else()
+        set(lockdc_shared_install_rpath "")
+    endif()
     target_link_libraries(lc_shared PRIVATE
         lc::curl_shared
         lc::openssl_ssl_shared
@@ -397,7 +412,7 @@ if(LOCKDC_BUILD_SHARED)
         OUTPUT_NAME lockdc
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
-        INSTALL_RPATH "$ORIGIN"
+        INSTALL_RPATH "${lockdc_shared_install_rpath}"
         INSTALL_RPATH_USE_LINK_PATH OFF
     )
 endif()

@@ -119,6 +119,21 @@
       }
     },
     {
+      "name": "arm64-apple-darwin-release",
+      "inherits": "x86_64-linux-gnu-release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/arm64-apple-darwin.cmake",
+      "cacheVariables": {
+        "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/arm64-apple-darwin",
+        "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/arm64-apple-darwin",
+        "LOCKDC_TARGET_ARCH": "arm64",
+        "LOCKDC_TARGET_OS": "darwin",
+        "LOCKDC_TARGET_LIBC": "",
+        "LOCKDC_BUILD_TESTS": "OFF",
+        "LOCKDC_BUILD_BENCHMARKS": "OFF",
+        "LOCKDC_BUILD_LUA_BINDINGS": "OFF"
+      }
+    },
+    {
       "name": "asan",
       "inherits": "debug",
       "cacheVariables": {
@@ -185,6 +200,10 @@
     {
       "name": "armhf-linux-musl-release",
       "configurePreset": "armhf-linux-musl-release"
+    },
+    {
+      "name": "arm64-apple-darwin-release",
+      "configurePreset": "arm64-apple-darwin-release"
     },
     {
       "name": "asan",

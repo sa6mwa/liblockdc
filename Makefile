@@ -103,6 +103,7 @@ __deps-cross:
 	bash ./scripts/deps.sh deps-aarch64-linux-musl
 	bash ./scripts/deps.sh deps-armhf-linux-gnu
 	bash ./scripts/deps.sh deps-armhf-linux-musl
+	if bash ./scripts/osxcross_available.sh; then bash ./scripts/deps.sh deps-arm64-apple-darwin; else printf '[deps] skipping deps-arm64-apple-darwin: osxcross toolchain not available\n'; fi
 
 build-debug:
 	$(TIMED) build-debug $(MAKE) __build-debug
@@ -252,7 +253,9 @@ __package-checksums: __deps-release
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_checksums.cmake
 
 verify-release-archives:
-	$(CMAKE) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -DLOCKDC_RELEASE_PRESETS='x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release' -P $(ROOT)/tests/release_matrix_archives_test.cmake
+	release_presets='x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release'; \
+	if bash ./scripts/osxcross_available.sh; then release_presets="$$release_presets;arm64-apple-darwin-release"; fi; \
+	$(CMAKE) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -DLOCKDC_RELEASE_PRESETS="$$release_presets" -P $(ROOT)/tests/release_matrix_archives_test.cmake
 
 clean-dist:
 	$(TIMED) clean-dist $(MAKE) __clean-dist

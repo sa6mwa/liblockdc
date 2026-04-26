@@ -28,6 +28,8 @@ endfunction()
 
 lockdc_import_cache_path(LOCKDC_EXTERNAL_ROOT)
 lockdc_import_cache_path(LOCKDC_DEPENDENCY_BUILD_ROOT)
+lockdc_import_cache_path(CMAKE_INSTALL_NAME_TOOL)
+lockdc_import_cache_path(LOCKDC_OTOOL)
 
 function(lockdc_copy_required_license_named package_name destination_dir output_name)
     set(candidates ${ARGN})
@@ -77,6 +79,83 @@ execute_process(
 if(NOT lockdc_dev_install_result EQUAL 0)
     message(FATAL_ERROR "failed to install development package payload")
 endif()
+
+function(lockdc_fix_darwin_install_names package_root)
+    if(NOT LOCKDC_TARGET_ID MATCHES "apple-darwin$")
+        return()
+    endif()
+    if(NOT CMAKE_INSTALL_NAME_TOOL OR NOT EXISTS "${CMAKE_INSTALL_NAME_TOOL}")
+        message(FATAL_ERROR "CMAKE_INSTALL_NAME_TOOL is required for Darwin package fixups")
+    endif()
+    if(NOT LOCKDC_OTOOL OR NOT EXISTS "${LOCKDC_OTOOL}")
+        if(DEFINED ENV{OSXCROSS_ROOT} AND NOT "$ENV{OSXCROSS_ROOT}" STREQUAL "")
+            set(_lockdc_osxcross_bin_hint "$ENV{OSXCROSS_ROOT}/bin")
+        elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+            set(_lockdc_osxcross_bin_hint "$ENV{HOME}/.local/cross/osxcross/bin")
+        else()
+            set(_lockdc_osxcross_bin_hint "")
+        endif()
+        find_program(LOCKDC_OTOOL NAMES arm64-apple-darwin25-otool otool HINTS "${_lockdc_osxcross_bin_hint}")
+    endif()
+    if(NOT LOCKDC_OTOOL OR NOT EXISTS "${LOCKDC_OTOOL}")
+        message(FATAL_ERROR "otool is required for Darwin package fixups")
+    endif()
+
+    file(GLOB _lockdc_dylibs LIST_DIRECTORIES false "${package_root}/lib/*.dylib")
+    foreach(_lockdc_dylib IN LISTS _lockdc_dylibs)
+        get_filename_component(_lockdc_dylib_name "${_lockdc_dylib}" NAME)
+        execute_process(
+            COMMAND "${CMAKE_INSTALL_NAME_TOOL}" -id "@rpath/${_lockdc_dylib_name}" "${_lockdc_dylib}"
+            RESULT_VARIABLE _lockdc_id_result
+            ERROR_VARIABLE _lockdc_id_error
+        )
+        if(NOT _lockdc_id_result EQUAL 0)
+            message(FATAL_ERROR "failed to rewrite install name for ${_lockdc_dylib}\n${_lockdc_id_error}")
+        endif()
+
+        execute_process(
+            COMMAND "${LOCKDC_OTOOL}" -L "${_lockdc_dylib}"
+            RESULT_VARIABLE _lockdc_otool_result
+            OUTPUT_VARIABLE _lockdc_otool_output
+            ERROR_VARIABLE _lockdc_otool_error
+        )
+        if(NOT _lockdc_otool_result EQUAL 0)
+            message(FATAL_ERROR "failed to inspect Darwin dylib ${_lockdc_dylib}\n${_lockdc_otool_error}")
+        endif()
+        string(REGEX REPLACE "\n$" "" _lockdc_otool_output "${_lockdc_otool_output}")
+        string(REPLACE "\n" ";" _lockdc_otool_lines "${_lockdc_otool_output}")
+        foreach(_lockdc_otool_line IN LISTS _lockdc_otool_lines)
+            string(STRIP "${_lockdc_otool_line}" _lockdc_dependency_line)
+            if(NOT _lockdc_dependency_line MATCHES "^/")
+                continue()
+            endif()
+            string(REGEX MATCH "^[^ \t]+" _lockdc_dependency_path "${_lockdc_dependency_line}")
+            if(_lockdc_dependency_path STREQUAL "")
+                continue()
+            endif()
+            if(_lockdc_dependency_path MATCHES "^/usr/lib/" OR
+               _lockdc_dependency_path MATCHES "^/System/Library/")
+                continue()
+            endif()
+            get_filename_component(_lockdc_dependency_name "${_lockdc_dependency_path}" NAME)
+            if(EXISTS "${package_root}/lib/${_lockdc_dependency_name}")
+                execute_process(
+                    COMMAND "${CMAKE_INSTALL_NAME_TOOL}"
+                        -change "${_lockdc_dependency_path}" "@rpath/${_lockdc_dependency_name}" "${_lockdc_dylib}"
+                    RESULT_VARIABLE _lockdc_change_result
+                    ERROR_VARIABLE _lockdc_change_error
+                )
+                if(NOT _lockdc_change_result EQUAL 0)
+                    message(FATAL_ERROR
+                        "failed to rewrite Darwin dependency ${_lockdc_dependency_path} in ${_lockdc_dylib}\n"
+                        "${_lockdc_change_error}")
+                endif()
+            endif()
+        endforeach()
+    endforeach()
+endfunction()
+
+lockdc_fix_darwin_install_names("${package_root}")
 
 lockdc_copy_required_license_named(
     "libpslog"
