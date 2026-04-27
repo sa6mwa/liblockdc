@@ -74,13 +74,11 @@ static int lc_client_lonejson_load_write_callback(void *context,
   return 1;
 }
 
-static int lc_client_duplicate_get_metadata(const char *content_type,
-                                            const char *etag,
-                                            const char *correlation_id,
-                                            char **out_content_type,
-                                            char **out_etag,
-                                            char **out_correlation_id,
-                                            lc_error *error) {
+static int
+lc_client_duplicate_get_metadata(const char *content_type, const char *etag,
+                                 const char *correlation_id,
+                                 char **out_content_type, char **out_etag,
+                                 char **out_correlation_id, lc_error *error) {
   char *content_type_copy;
   char *etag_copy;
   char *correlation_id_copy;
@@ -2390,6 +2388,7 @@ void lc_client_close_method(lc_client *self) {
     lc_client_free(client, client->endpoints);
   }
   lc_client_free(client, client->unix_socket_path);
+  lc_client_free(client, client->client_bundle_bytes);
   lc_client_free(client, client->client_bundle_path);
   lc_client_free(client, client->default_namespace);
   lc_client_free(client, client);

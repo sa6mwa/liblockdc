@@ -32,6 +32,18 @@ typedef struct lcdc_output {
   size_t written;
 } lcdc_output;
 
+typedef struct lcdc_lua_source {
+  lua_State *L;
+  int read_ref;
+  int reset_ref;
+  int close_ref;
+} lcdc_lua_source;
+
+static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
+                                   lc_error *error);
+static int lcdc_lua_source_reset(void *context, lc_error *error);
+static void lcdc_lua_source_close(void *context);
+
 static int lcdc_push_error(lua_State *L, const lc_error *error) {
   lua_newtable(L);
   lua_pushinteger(L, (lua_Integer)(error != NULL ? error->code : 0));
@@ -175,8 +187,7 @@ static int lcdc_require_string_field(lua_State *L, int index, const char *name,
 }
 
 static int lcdc_parse_string_array(lua_State *L, int index, const char *name,
-                                   const char ***items_out,
-                                   size_t *count_out) {
+                                   const char ***items_out, size_t *count_out) {
   const char **items;
   size_t count;
   size_t i;
@@ -288,14 +299,129 @@ static void lcdc_push_output(lua_State *L, lcdc_output *output) {
   }
 }
 
+static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
+                                   lc_error *error) {
+  lcdc_lua_source *source;
+  lua_State *L;
+  const char *chunk;
+  const char *message;
+  size_t length;
+
+  source = (lcdc_lua_source *)context;
+  L = source->L;
+  lua_rawgeti(L, LUA_REGISTRYINDEX, source->read_ref);
+  lua_pushinteger(L, (lua_Integer)count);
+  if (lua_pcall(L, 1, 2, 0) != 0) {
+    message = lua_tostring(L, -1);
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 message != NULL ? message : "Lua source read failed", NULL,
+                 NULL, NULL);
+    lua_pop(L, 1);
+    return 0U;
+  }
+  if (lua_isnil(L, -2)) {
+    if (!lua_isnil(L, -1)) {
+      message = lua_tostring(L, -1);
+      lc_error_set(error, LC_ERR_INVALID, 0L,
+                   message != NULL ? message : "Lua source read failed", NULL,
+                   NULL, NULL);
+    }
+    lua_pop(L, 2);
+    return 0U;
+  }
+  if (!lua_isstring(L, -2)) {
+    lua_pop(L, 2);
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "Lua source read must return a string, nil, or nil plus an "
+                 "error message",
+                 NULL, NULL, NULL);
+    return 0U;
+  }
+  chunk = lua_tolstring(L, -2, &length);
+  if (length > count) {
+    lua_pop(L, 2);
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "Lua source read returned more bytes than requested", NULL,
+                 NULL, NULL);
+    return 0U;
+  }
+  if (length != 0U) {
+    memcpy(buffer, chunk, length);
+  }
+  lua_pop(L, 2);
+  return length;
+}
+
+static int lcdc_lua_source_reset(void *context, lc_error *error) {
+  lcdc_lua_source *source;
+  lua_State *L;
+  const char *message;
+
+  source = (lcdc_lua_source *)context;
+  if (source->reset_ref == LUA_NOREF) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "Lua source is not resettable", NULL, NULL, NULL);
+  }
+  L = source->L;
+  lua_rawgeti(L, LUA_REGISTRYINDEX, source->reset_ref);
+  if (lua_pcall(L, 0, 2, 0) != 0) {
+    message = lua_tostring(L, -1);
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 message != NULL ? message : "Lua source reset failed", NULL,
+                 NULL, NULL);
+    lua_pop(L, 1);
+    return LC_ERR_INVALID;
+  }
+  if (lua_toboolean(L, -2) || (lua_isnil(L, -2) && lua_isnil(L, -1))) {
+    lua_pop(L, 2);
+    return LC_OK;
+  }
+  message = lua_tostring(L, -1);
+  lc_error_set(error, LC_ERR_INVALID, 0L,
+               message != NULL ? message : "Lua source reset failed", NULL,
+               NULL, NULL);
+  lua_pop(L, 2);
+  return LC_ERR_INVALID;
+}
+
+static void lcdc_lua_source_close(void *context) {
+  lcdc_lua_source *source;
+  lua_State *L;
+
+  source = (lcdc_lua_source *)context;
+  if (source == NULL) {
+    return;
+  }
+  L = source->L;
+  if (source->close_ref != LUA_NOREF) {
+    lua_rawgeti(L, LUA_REGISTRYINDEX, source->close_ref);
+    if (lua_pcall(L, 0, 0, 0) != 0) {
+      lua_pop(L, 1);
+    }
+    luaL_unref(L, LUA_REGISTRYINDEX, source->close_ref);
+  }
+  if (source->reset_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, source->reset_ref);
+  }
+  if (source->read_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, source->read_ref);
+  }
+  free(source);
+}
+
 static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
                                   lc_error *error) {
   size_t len;
   const char *bytes;
   long fd;
   const char *path;
+  lcdc_lua_source *lua_source;
+  int rc;
 
   *out = NULL;
+  if (index < 0) {
+    index = lua_gettop(L) + index + 1;
+  }
   if (lua_isstring(L, index)) {
     bytes = lua_tolstring(L, index, &len);
     return lc_source_from_memory(bytes, len, out, error);
@@ -326,6 +452,42 @@ static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
     return lc_source_from_fd((int)fd, out, error);
   }
   lua_pop(L, 1);
+  lua_getfield(L, index, "read");
+  if (!lua_isnil(L, -1)) {
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+    lua_source = (lcdc_lua_source *)calloc(1U, sizeof(*lua_source));
+    if (lua_source == NULL) {
+      lua_pop(L, 1);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate Lua source", NULL, NULL, NULL);
+    }
+    lua_source->L = L;
+    lua_source->reset_ref = LUA_NOREF;
+    lua_source->close_ref = LUA_NOREF;
+    lua_source->read_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_getfield(L, index, "reset");
+    if (!lua_isnil(L, -1)) {
+      luaL_checktype(L, -1, LUA_TFUNCTION);
+      lua_source->reset_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    } else {
+      lua_pop(L, 1);
+    }
+    lua_getfield(L, index, "close");
+    if (!lua_isnil(L, -1)) {
+      luaL_checktype(L, -1, LUA_TFUNCTION);
+      lua_source->close_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    } else {
+      lua_pop(L, 1);
+    }
+    rc =
+        lc_source_from_callbacks(lcdc_lua_source_read, lcdc_lua_source_reset,
+                                 lcdc_lua_source_close, lua_source, out, error);
+    if (rc != LC_OK) {
+      lcdc_lua_source_close(lua_source);
+    }
+    return rc;
+  }
+  lua_pop(L, 1);
   (void)error;
   luaL_error(L, "expected bytes, path, or fd input");
   return LC_ERR_INVALID;
@@ -340,7 +502,8 @@ static void lcdc_push_lease_info(lua_State *L, lc_lease *lease) {
   lcdc_set_string_field(L, "txn_id", lease->txn_id);
   lcdc_set_integer_field(L, "fencing_token", lease->fencing_token);
   lcdc_set_integer_field(L, "version", lease->version);
-  lcdc_set_integer_field(L, "lease_expires_at_unix", lease->lease_expires_at_unix);
+  lcdc_set_integer_field(L, "lease_expires_at_unix",
+                         lease->lease_expires_at_unix);
   lcdc_set_string_field(L, "state_etag", lease->state_etag);
   lcdc_set_bool_field(L, "has_query_hidden", lease->has_query_hidden);
   lcdc_set_bool_field(L, "query_hidden", lease->query_hidden);
@@ -416,9 +579,8 @@ static int lcdc_push_cloned_lease(lua_State *L, const lc_lease *lease) {
   lease_handle = (const lc_lease_handle *)lease;
   lease_copy = lc_lease_new(lease_handle->client, lease->namespace_name,
                             lease->key, lease->owner, lease->lease_id,
-                            lease->txn_id, lease->fencing_token,
-                            lease->version, lease->state_etag,
-                            lease_handle->queue_state_etag);
+                            lease->txn_id, lease->fencing_token, lease->version,
+                            lease->state_etag, lease_handle->queue_state_etag);
   if (lease_copy == NULL) {
     return luaL_error(L, "failed to clone message state lease");
   }
@@ -542,6 +704,7 @@ static int lcdc_open(lua_State *L) {
   lc_client_config config;
   lc_error error;
   lc_client *client;
+  lc_source *client_bundle_source;
   size_t i;
   size_t endpoint_count;
   const char **endpoints;
@@ -550,6 +713,7 @@ static int lcdc_open(lua_State *L) {
   lc_client_config_init(&config);
   lc_error_init(&error);
   client = NULL;
+  client_bundle_source = NULL;
   endpoints = NULL;
   endpoint_count = 0U;
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -575,6 +739,19 @@ static int lcdc_open(lua_State *L) {
   lua_pop(L, 1);
   config.unix_socket_path = lcdc_opt_string_field(L, 1, "unix_socket_path");
   config.client_bundle_path = lcdc_opt_string_field(L, 1, "client_bundle_path");
+  lua_getfield(L, 1, "client_bundle_source");
+  if (!lua_isnil(L, -1)) {
+    rc = lcdc_source_from_value(L, -1, &client_bundle_source, &error);
+    if (rc != LC_OK) {
+      lua_pop(L, 1);
+      free(endpoints);
+      lcdc_push_status_error(L, rc, &error);
+      lc_error_cleanup(&error);
+      return 3;
+    }
+    config.client_bundle_source = client_bundle_source;
+  }
+  lua_pop(L, 1);
   config.default_namespace = lcdc_opt_string_field(L, 1, "default_namespace");
   lcdc_opt_integer_field(L, 1, "timeout_ms", &config.timeout_ms);
   lcdc_opt_boolean_field(L, 1, "disable_mtls", &config.disable_mtls);
@@ -587,11 +764,13 @@ static int lcdc_open(lua_State *L) {
     long limit;
 
     limit = 0L;
-    if (lcdc_opt_integer_field(L, 1, "http_json_response_limit_bytes", &limit)) {
+    if (lcdc_opt_integer_field(L, 1, "http_json_response_limit_bytes",
+                               &limit)) {
       config.http_json_response_limit_bytes = (size_t)limit;
     }
   }
   rc = lc_client_open(&config, &client, &error);
+  lc_source_close(client_bundle_source);
   free(endpoints);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
@@ -616,9 +795,7 @@ static int lcdc_client_info(lua_State *L) {
   return 1;
 }
 
-static int lcdc_client_close(lua_State *L) {
-  return lcdc_client_gc(L);
-}
+static int lcdc_client_close(lua_State *L) { return lcdc_client_gc(L); }
 
 static int lcdc_client_acquire(lua_State *L) {
   lcdc_client_ud *ud;
@@ -1451,7 +1628,8 @@ static int lcdc_client_enqueue(lua_State *L) {
   lcdc_set_integer_field(L, "attempts", res.attempts);
   lcdc_set_integer_field(L, "max_attempts", res.max_attempts);
   lcdc_set_integer_field(L, "failure_attempts", res.failure_attempts);
-  lcdc_set_integer_field(L, "not_visible_until_unix", res.not_visible_until_unix);
+  lcdc_set_integer_field(L, "not_visible_until_unix",
+                         res.not_visible_until_unix);
   lcdc_set_integer_field(L, "visibility_timeout_seconds",
                          res.visibility_timeout_seconds);
   lcdc_set_integer_field(L, "payload_bytes", res.payload_bytes);
@@ -1552,9 +1730,7 @@ static int lcdc_lease_info(lua_State *L) {
   return 1;
 }
 
-static int lcdc_lease_close(lua_State *L) {
-  return lcdc_lease_gc(L);
-}
+static int lcdc_lease_close(lua_State *L) { return lcdc_lease_gc(L); }
 
 static int lcdc_lease_describe(lua_State *L) {
   lcdc_lease_ud *ud;
@@ -1705,8 +1881,7 @@ static int lcdc_lease_mutate_local(lua_State *L) {
   lcdc_parse_string_array(L, 2, "mutations", &mutations, &mutation_count);
   req.mutations = mutations;
   req.mutation_count = mutation_count;
-  lcdc_opt_boolean_field(L, 2, "disable_fetched_cas",
-                         &req.disable_fetched_cas);
+  lcdc_opt_boolean_field(L, 2, "disable_fetched_cas", &req.disable_fetched_cas);
   req.file_value_base_dir = lcdc_opt_string_field(L, 2, "file_value_base_dir");
   req.update.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
   if (lcdc_opt_integer_field(L, 2, "if_version", &req.update.if_version)) {
@@ -1996,9 +2171,7 @@ static int lcdc_message_info(lua_State *L) {
   return 1;
 }
 
-static int lcdc_message_close(lua_State *L) {
-  return lcdc_message_gc(L);
-}
+static int lcdc_message_close(lua_State *L) { return lcdc_message_gc(L); }
 
 static int lcdc_message_ack(lua_State *L) {
   lcdc_message_ud *ud;

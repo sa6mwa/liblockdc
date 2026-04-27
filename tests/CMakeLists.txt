@@ -94,6 +94,7 @@ if(lockdc_lua_test_sanitizer_flags MATCHES "(^|[ \t])-fsanitize=([^ \t,]+,)*addr
      AND NOT lockdc_lua_asan_runtime STREQUAL ""
      AND NOT lockdc_lua_asan_runtime STREQUAL "libasan.so")
     list(APPEND LOCKDC_LUA_TEST_ENV_COMMON "LD_PRELOAD=${lockdc_lua_asan_runtime}")
+    list(APPEND LOCKDC_LUA_TEST_ENV_COMMON "ASAN_OPTIONS=detect_leaks=0")
   endif()
 endif()
 

@@ -187,6 +187,7 @@ int main(void) {
   lc_client_config config;
   lc_client *client;
   lc_lease *lease;
+  lc_source *client_bundle;
   lc_source *input;
   lc_source *json_source;
   lc_error error;
@@ -280,6 +281,7 @@ int main(void) {
   temp_fd = -1;
   client = NULL;
   lease = NULL;
+  client_bundle = NULL;
   input = NULL;
   json_source = NULL;
   response_code = 0L;
@@ -413,7 +415,6 @@ int main(void) {
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.client_bundle_path = client_pem;
   config.default_namespace = namespace_name;
   config.logger = sdk_logger;
 
@@ -422,7 +423,24 @@ int main(void) {
   lc_update_opts_init(&update_opts);
   lc_release_req_init(&release);
 
+  rc = lc_source_from_file(client_pem, &client_bundle, &error);
+  if (rc != LC_OK) {
+    unlink(temp_path);
+    if (use_temp_fetch_material) {
+      unlink(fetch_cert_temp);
+      unlink(fetch_key_temp);
+    }
+    curl_global_cleanup();
+    rc = fail_with_error(example_logger, "lc_source_from_file", &error);
+    lc_error_cleanup(&error);
+    example_logger->destroy(example_logger);
+    sdk_logger->destroy(sdk_logger);
+    return rc;
+  }
+  config.client_bundle_source = client_bundle;
   rc = lc_client_open(&config, &client, &error);
+  lc_source_close(client_bundle);
+  client_bundle = NULL;
   if (rc != LC_OK) {
     unlink(temp_path);
     if (use_temp_fetch_material) {

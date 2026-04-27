@@ -139,8 +139,8 @@ int lc_engine_set_server_error_from_json(lc_engine_error *error,
                                          const char *correlation_id,
                                          const char *json);
 
-int lc_engine_load_bundle(lc_engine_client *client, const char *bundle_path,
-                          lc_engine_error *error);
+int lc_engine_load_bundle(lc_engine_client *client, lc_source *bundle_source,
+                          const char *bundle_path, lc_engine_error *error);
 void lc_engine_free_bundle(lc_engine_tls_bundle *bundle);
 
 const char *lc_engine_effective_namespace(lc_engine_client *client,

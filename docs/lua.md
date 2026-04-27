@@ -82,15 +82,33 @@ Primary handle types:
 
 ## Client API
 
-Open a client:
+Open a Lua client:
 
 ```lua
 local client, err = lockdc.open({
   endpoints = { "https://localhost:19441" },
-  client_bundle_path = "./client.pem",
+  client_bundle_source = { path = "./client.pem" },
   default_namespace = "default",
 })
 ```
+
+`client_bundle_source` accepts the same source-shaped values used by payload
+uploads: a PEM string, `{ bytes = pem }`, `{ path = "./client.pem" }`,
+`{ fd = fd }`, or a callback source:
+
+```lua
+local client, err = lockdc.open({
+  endpoints = { "https://localhost:19441" },
+  client_bundle_source = {
+    read = function(max_bytes)
+      return next_pem_chunk(max_bytes) -- return nil for EOF
+    end,
+  },
+})
+```
+
+`client_bundle_path` remains available for compatibility, but new Lua code
+should prefer `client_bundle_source`.
 
 Common client methods:
 

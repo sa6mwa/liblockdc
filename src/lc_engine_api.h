@@ -46,6 +46,7 @@ typedef struct lc_engine_client_config {
   const char *const *endpoints;
   size_t endpoint_count;
   const char *unix_socket_path;
+  lc_source *client_bundle_source;
   const char *client_bundle_path;
   const char *default_namespace;
   long timeout_ms;

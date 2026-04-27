@@ -299,6 +299,7 @@ int main(void) {
   char queue_name[96];
   lc_client_config client_config;
   lc_client *client;
+  lc_source *client_bundle;
   lc_source *src;
   lc_consumer_config consumer;
   lc_consumer_service_config service_config;
@@ -357,7 +358,6 @@ int main(void) {
   lc_client_config_init(&client_config);
   client_config.endpoints = endpoints;
   client_config.endpoint_count = 1U;
-  client_config.client_bundle_path = client_pem;
   client_config.default_namespace = namespace_name;
   client_config.logger = sdk_logger;
 
@@ -369,6 +369,7 @@ int main(void) {
   lc_consumer_restart_policy_init(&consumer.restart_policy);
   memset(&context, 0, sizeof(context));
   client = NULL;
+  client_bundle = NULL;
   src = NULL;
   service = NULL;
   have_thread = 0;
@@ -388,7 +389,15 @@ int main(void) {
                         "endpoint=%s client_pem=%s namespace=%s queue=%s",
                         endpoint, client_pem, namespace_name, queue_name);
 
+  rc = lc_source_from_file(client_pem, &client_bundle, &error);
+  if (rc != LC_OK) {
+    rc = fail_with_error(example_logger, "lc_source_from_file", &error);
+    goto cleanup;
+  }
+  client_config.client_bundle_source = client_bundle;
   rc = lc_client_open(&client_config, &client, &error);
+  lc_source_close(client_bundle);
+  client_bundle = NULL;
   if (rc != LC_OK) {
     rc = fail_with_error(example_logger, "lc_client_open", &error);
     goto cleanup;
@@ -479,6 +488,9 @@ cleanup:
   }
   if (src != NULL) {
     src->close(src);
+  }
+  if (client_bundle != NULL) {
+    client_bundle->close(client_bundle);
   }
   if (service != NULL) {
     service->close(service);

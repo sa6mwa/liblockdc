@@ -35,6 +35,7 @@ static void test_client_config_init_sets_expected_defaults(void **state) {
   assert_null(config.endpoints);
   assert_int_equal(config.endpoint_count, 0U);
   assert_null(config.unix_socket_path);
+  assert_null(config.client_bundle_source);
   assert_null(config.client_bundle_path);
   assert_null(config.default_namespace);
   assert_int_equal(config.timeout_ms, 30000L);

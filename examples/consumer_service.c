@@ -57,6 +57,7 @@ int main(void) {
   const char *endpoints[1];
   lc_client_config client_config;
   lc_client *client;
+  lc_source *client_bundle;
   lc_consumer_config consumer;
   lc_consumer_service_config service_config;
   lc_consumer_service *service;
@@ -109,7 +110,6 @@ int main(void) {
   lc_client_config_init(&client_config);
   client_config.endpoints = endpoints;
   client_config.endpoint_count = 1U;
-  client_config.client_bundle_path = client_pem;
   client_config.default_namespace = namespace_name;
   client_config.logger = sdk_logger;
 
@@ -119,12 +119,23 @@ int main(void) {
 
   lc_error_init(&error);
   client = NULL;
+  client_bundle = NULL;
   service = NULL;
   lc_consumer_config_init(&consumer);
   lc_consumer_service_config_init(&service_config);
   lc_consumer_restart_policy_init(&consumer.restart_policy);
 
+  rc = lc_source_from_file(client_pem, &client_bundle, &error);
+  if (rc != LC_OK) {
+    rc = fail_with_error(example_logger, "lc_source_from_file", &error);
+    lc_error_cleanup(&error);
+    example_logger->destroy(example_logger);
+    sdk_logger->destroy(sdk_logger);
+    return rc;
+  }
+  client_config.client_bundle_source = client_bundle;
   rc = lc_client_open(&client_config, &client, &error);
+  lc_source_close(client_bundle);
   if (rc != LC_OK) {
     rc = fail_with_error(example_logger, "lc_client_open", &error);
     lc_error_cleanup(&error);

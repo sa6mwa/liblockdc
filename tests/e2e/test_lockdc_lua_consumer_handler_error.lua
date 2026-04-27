@@ -8,7 +8,7 @@ local owner = os.getenv('LOCKDC_OWNER') or 'tests-lua-consumer-handler-error'
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
-  client_bundle_path = client_pem,
+  client_bundle_source = { path = client_pem },
   default_namespace = namespace_name,
 })
 

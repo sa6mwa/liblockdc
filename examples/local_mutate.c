@@ -18,17 +18,21 @@ static void print_usage(const char *argv0) {
   fputs("  -k KEY        state key to mutate (required)\n", stderr);
   fputs("  -m MUTATION   lql mutate expression (required, repeatable)\n",
         stderr);
-  fputs("  -u URL        primary lockd endpoint (default: https://localhost:19441)\n",
+  fputs("  -u URL        primary lockd endpoint (default: "
+        "https://localhost:19441)\n",
         stderr);
-  fputs("  -f URL        fallback lockd endpoint (default: https://localhost:19442)\n",
+  fputs("  -f URL        fallback lockd endpoint (default: "
+        "https://localhost:19442)\n",
         stderr);
-  fputs("  -c FILE       client PEM bundle (default: devenv/volumes/lockd-disk-a-config/client.pem)\n",
+  fputs("  -c FILE       client PEM bundle (default: "
+        "devenv/volumes/lockd-disk-a-config/client.pem)\n",
         stderr);
   fputs("  -n NAME       default namespace (default: default)\n", stderr);
   fputs("  -o OWNER      lease owner (default: example-local-mutate)\n",
         stderr);
-  fputs("  -b DIR        base dir for file:/textfile:/base64file: (default: .)\n",
-        stderr);
+  fputs(
+      "  -b DIR        base dir for file:/textfile:/base64file: (default: .)\n",
+      stderr);
   fputs("  -h            show help\n", stderr);
 }
 
@@ -36,13 +40,13 @@ static int fail_with_error(const char *step, lc_error *error) {
   fprintf(stderr,
           "%s: code=%d http_status=%ld message=%s detail=%s server_code=%s "
           "correlation=%s\n",
-          step != NULL ? step : "error",
-          error != NULL ? error->code : 0, error != NULL ? error->http_status : 0L,
+          step != NULL ? step : "error", error != NULL ? error->code : 0,
+          error != NULL ? error->http_status : 0L,
           error != NULL && error->message != NULL ? error->message : "",
           error != NULL && error->detail != NULL ? error->detail : "",
           error != NULL && error->server_code != NULL ? error->server_code : "",
           error != NULL && error->correlation_id != NULL ? error->correlation_id
-                                                        : "");
+                                                         : "");
   return 1;
 }
 
@@ -61,6 +65,7 @@ int main(int argc, char **argv) {
   const char *key;
   lc_client_config config;
   lc_client *client;
+  lc_source *client_bundle;
   lc_lease *lease;
   lc_error error;
   lc_acquire_req acquire_req;
@@ -156,11 +161,11 @@ int main(int argc, char **argv) {
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = endpoint_count;
-  config.client_bundle_path = client_pem;
   config.default_namespace = namespace_name;
 
   lc_error_init(&error);
   client = NULL;
+  client_bundle = NULL;
   lease = NULL;
   stdout_sink = NULL;
   lc_acquire_req_init(&acquire_req);
@@ -168,7 +173,16 @@ int main(int argc, char **argv) {
   lc_get_opts_init(&get_opts);
   memset(&get_res, 0, sizeof(get_res));
 
+  rc = lc_source_from_file(client_pem, &client_bundle, &error);
+  if (rc != LC_OK) {
+    rc = fail_with_error("lc_source_from_file", &error);
+    lc_error_cleanup(&error);
+    free(mutations);
+    return rc;
+  }
+  config.client_bundle_source = client_bundle;
   rc = lc_client_open(&config, &client, &error);
+  lc_source_close(client_bundle);
   if (rc != LC_OK) {
     rc = fail_with_error("lc_client_open", &error);
     lc_error_cleanup(&error);

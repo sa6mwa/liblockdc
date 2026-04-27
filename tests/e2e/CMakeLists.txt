@@ -176,3 +176,9 @@ lc_add_lua_e2e_test(
   "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_state_after_ack.lua"
   ENV_OVERRIDES "LOCKDC_QUEUE=tests-lua-e2e-state-after-ack;LOCKDC_OWNER=lua-e2e-state-after-ack"
 )
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_bundle_sources
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_bundle_sources.lua"
+  ENV_OVERRIDES "LOCKDC_KEY_PREFIX=tests/lua/e2e-bundle-sources;LOCKDC_OWNER=lua-e2e-bundle-sources"
+)

@@ -31,6 +31,7 @@ int main(void) {
   lc_client_config config;
   lc_client *client;
   lc_lease *lease;
+  lc_source *client_bundle;
   lc_source *src;
   lc_error error;
   lc_acquire_req acquire;
@@ -93,7 +94,6 @@ int main(void) {
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.client_bundle_path = client_pem;
   config.default_namespace = namespace_name;
   config.logger = sdk_logger;
 
@@ -105,6 +105,7 @@ int main(void) {
   lc_error_init(&error);
   client = NULL;
   lease = NULL;
+  client_bundle = NULL;
   src = NULL;
   memset(&updated, 0, sizeof(updated));
   memset(&describe, 0, sizeof(describe));
@@ -114,7 +115,17 @@ int main(void) {
   lc_describe_req_init(&describe_req);
   lc_release_req_init(&release);
 
+  rc = lc_source_from_file(client_pem, &client_bundle, &error);
+  if (rc != LC_OK) {
+    rc = fail_with_error(example_logger, "lc_source_from_file", &error);
+    lc_error_cleanup(&error);
+    example_logger->destroy(example_logger);
+    sdk_logger->destroy(sdk_logger);
+    return rc;
+  }
+  config.client_bundle_source = client_bundle;
   rc = lc_client_open(&config, &client, &error);
+  lc_source_close(client_bundle);
   if (rc != LC_OK) {
     rc = fail_with_error(example_logger, "lc_client_open", &error);
     lc_error_cleanup(&error);

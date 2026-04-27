@@ -34,6 +34,8 @@ struct lc_client_handle {
   char **endpoints;
   size_t endpoint_count;
   char *unix_socket_path;
+  unsigned char *client_bundle_bytes;
+  size_t client_bundle_length;
   char *client_bundle_path;
   char *default_namespace;
   long timeout_ms;

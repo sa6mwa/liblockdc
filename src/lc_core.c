@@ -45,6 +45,23 @@ typedef struct lc_fd_source {
   int fd;
 } lc_fd_source;
 
+typedef struct lc_callback_source {
+  lc_source_impl base;
+  lc_source_read_fn read;
+  lc_source_reset_fn reset;
+  lc_source_close_fn close;
+  void *context;
+} lc_callback_source;
+
+typedef struct lc_bundle_capture_source {
+  lc_source pub;
+  lc_source *inner;
+  const lc_allocator *allocator;
+  unsigned char *bytes;
+  size_t length;
+  size_t capacity;
+} lc_bundle_capture_source;
+
 typedef struct lc_fd_sink {
   lc_sink_impl base;
   int fd;
@@ -335,6 +352,56 @@ static void lc_source_pub_close(lc_source *self) {
   }
 }
 
+static size_t lc_bundle_capture_source_read(lc_source *self, void *buffer,
+                                            size_t count, lc_error *error) {
+  lc_bundle_capture_source *capture;
+  size_t nread;
+
+  capture = (lc_bundle_capture_source *)self->impl;
+  nread = capture->inner->read(capture->inner, buffer, count, error);
+  if (nread == 0U) {
+    return 0U;
+  }
+  if (nread > ((size_t)-1) - capture->length) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L, "client bundle source is too large",
+                 NULL, NULL, NULL);
+    return 0U;
+  }
+  if (capture->length + nread > capture->capacity) {
+    size_t next_capacity;
+    unsigned char *next_bytes;
+
+    next_capacity = capture->capacity == 0U ? 8192U : capture->capacity;
+    while (next_capacity < capture->length + nread) {
+      if (next_capacity > ((size_t)-1) / 2U) {
+        next_capacity = capture->length + nread;
+        break;
+      }
+      next_capacity *= 2U;
+    }
+    next_bytes = (unsigned char *)lc_realloc_with_allocator(
+        capture->allocator, capture->bytes, next_capacity);
+    if (next_bytes == NULL) {
+      lc_error_set(error, LC_ERR_NOMEM, 0L,
+                   "failed to retain client bundle source", NULL, NULL, NULL);
+      return 0U;
+    }
+    capture->bytes = next_bytes;
+    capture->capacity = next_capacity;
+  }
+  memcpy(capture->bytes + capture->length, buffer, nread);
+  capture->length += nread;
+  return nread;
+}
+
+static int lc_bundle_capture_source_reset(lc_source *self, lc_error *error) {
+  (void)self;
+  return lc_error_set(error, LC_ERR_INVALID, 0L, "source is not resettable",
+                      NULL, NULL, NULL);
+}
+
+static void lc_bundle_capture_source_close(lc_source *self) { (void)self; }
+
 static int lc_sink_pub_write(lc_sink *self, const void *bytes, size_t count,
                              lc_error *error) {
   lc_sink_impl *impl;
@@ -526,6 +593,35 @@ static void lc_fd_source_close(lc_source_impl *base) {
   lc_fd_source *source;
 
   source = (lc_fd_source *)base;
+  free(source);
+}
+
+static size_t lc_callback_source_read(lc_source_impl *base, void *buffer,
+                                      size_t count, lc_error *error) {
+  lc_callback_source *source;
+
+  source = (lc_callback_source *)base;
+  return source->read(source->context, buffer, count, error);
+}
+
+static int lc_callback_source_reset(lc_source_impl *base, lc_error *error) {
+  lc_callback_source *source;
+
+  source = (lc_callback_source *)base;
+  if (source->reset == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L, "source is not resettable",
+                        NULL, NULL, NULL);
+  }
+  return source->reset(source->context, error);
+}
+
+static void lc_callback_source_close(lc_source_impl *base) {
+  lc_callback_source *source;
+
+  source = (lc_callback_source *)base;
+  if (source->close != NULL) {
+    source->close(source->context);
+  }
   free(source);
 }
 
@@ -965,6 +1061,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                    lc_error *error) {
   lc_engine_client_config engine_config;
   lc_engine_error engine_error;
+  lc_bundle_capture_source bundle_capture;
+  unsigned char *bundle_bytes;
+  size_t bundle_length;
   lc_client_handle *client;
   size_t i;
   int rc;
@@ -974,11 +1073,27 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                         "lc_client_open requires config and out", NULL, NULL,
                         NULL);
   }
+  lc_engine_error_init(&engine_error);
+  memset(&bundle_capture, 0, sizeof(bundle_capture));
+  bundle_bytes = NULL;
+  bundle_length = 0U;
+  if (!config->disable_mtls && config->client_bundle_source != NULL) {
+    bundle_capture.inner = config->client_bundle_source;
+    bundle_capture.allocator = &config->allocator;
+    bundle_capture.pub.read = lc_bundle_capture_source_read;
+    bundle_capture.pub.reset = lc_bundle_capture_source_reset;
+    bundle_capture.pub.close = lc_bundle_capture_source_close;
+    bundle_capture.pub.impl = &bundle_capture;
+  }
+
   memset(&engine_config, 0, sizeof(engine_config));
   engine_config.endpoints = config->endpoints;
   engine_config.endpoint_count = config->endpoint_count;
   engine_config.unix_socket_path = config->unix_socket_path;
-  engine_config.client_bundle_path = config->client_bundle_path;
+  engine_config.client_bundle_source =
+      bundle_capture.inner != NULL ? &bundle_capture.pub : NULL;
+  engine_config.client_bundle_path =
+      bundle_capture.inner == NULL ? config->client_bundle_path : NULL;
   engine_config.default_namespace = config->default_namespace;
   engine_config.timeout_ms = config->timeout_ms;
   engine_config.disable_mtls = config->disable_mtls;
@@ -993,29 +1108,37 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   engine_config.allocator.free_fn = config->allocator.free_fn;
   engine_config.allocator.context = config->allocator.context;
 
-  lc_engine_error_init(&engine_error);
   client = (lc_client_handle *)lc_calloc_with_allocator(&config->allocator, 1U,
                                                         sizeof(*client));
   if (client == NULL) {
+    lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
     lc_engine_error_cleanup(&engine_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to allocate client",
                         NULL, NULL, NULL);
   }
+  client->allocator = config->allocator;
   rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);
   if (rc != LC_ENGINE_OK) {
-    lc_error_from_engine(error, &engine_error);
+    int public_rc;
+
+    public_rc = lc_error_from_engine(error, &engine_error);
     lc_engine_error_cleanup(&engine_error);
+    lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
     lc_free_with_allocator(&config->allocator, client);
-    return error->code;
+    return public_rc;
   }
+  bundle_bytes = bundle_capture.bytes;
+  bundle_length = bundle_capture.length;
+  bundle_capture.bytes = NULL;
+  client->client_bundle_bytes = bundle_bytes;
+  client->client_bundle_length = bundle_length;
   client->endpoint_count = config->endpoint_count;
   if (config->endpoint_count != 0U) {
     client->endpoints = (char **)lc_calloc_with_allocator(
         &config->allocator, config->endpoint_count, sizeof(char *));
     if (client->endpoints == NULL) {
-      lc_engine_client_close(client->engine);
+      lc_client_close_method(&client->pub);
       lc_engine_error_cleanup(&engine_error);
-      lc_free_with_allocator(&config->allocator, client);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate client endpoint copy", NULL, NULL,
                           NULL);
@@ -1066,7 +1189,6 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->logger = lc_engine_client_logger(client->engine);
   client->http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
-  client->allocator = config->allocator;
   client->pub.acquire = lc_client_acquire_method;
   client->pub.describe = lc_client_describe_method;
   client->pub.get = lc_client_get_method;
@@ -1203,6 +1325,35 @@ int lc_source_from_fd(int fd, lc_source **out, lc_error *error) {
   source->base.pub.close = lc_source_pub_close;
   source->base.read_impl = lc_fd_source_read;
   source->base.close_impl = lc_fd_source_close;
+  *out = &source->base.pub;
+  return LC_OK;
+}
+
+int lc_source_from_callbacks(lc_source_read_fn read, lc_source_reset_fn reset,
+                             lc_source_close_fn close, void *context,
+                             lc_source **out, lc_error *error) {
+  lc_callback_source *source;
+
+  if (read == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "source_from_callbacks requires read and out", NULL,
+                        NULL, NULL);
+  }
+  source = (lc_callback_source *)calloc(1U, sizeof(*source));
+  if (source == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate callback source", NULL, NULL, NULL);
+  }
+  source->base.pub.read = lc_source_pub_read;
+  source->base.pub.reset = lc_source_pub_reset;
+  source->base.pub.close = lc_source_pub_close;
+  source->base.read_impl = lc_callback_source_read;
+  source->base.reset_impl = lc_callback_source_reset;
+  source->base.close_impl = lc_callback_source_close;
+  source->read = read;
+  source->reset = reset;
+  source->close = close;
+  source->context = context;
   *out = &source->base.pub;
   return LC_OK;
 }

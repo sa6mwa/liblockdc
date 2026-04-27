@@ -1,7 +1,7 @@
+#include <errno.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -150,6 +150,8 @@ struct lc_consumer_service_handle {
   char **endpoints;
   size_t endpoint_count;
   char *unix_socket_path;
+  unsigned char *client_bundle_bytes;
+  size_t client_bundle_length;
   char *client_bundle_path;
   char *default_namespace;
   long timeout_ms;
@@ -362,9 +364,8 @@ static int fake_delivery_message_nack(lc_message *self, const lc_nack_req *req,
   return LC_OK;
 }
 
-static int fake_consumer_on_error_stop_after_first(void *context,
-                                                   const lc_consumer_error *event,
-                                                   lc_error *error) {
+static int fake_consumer_on_error_stop_after_first(
+    void *context, const lc_consumer_error *event, lc_error *error) {
   consumer_test_state *state;
 
   (void)error;
@@ -372,8 +373,7 @@ static int fake_consumer_on_error_stop_after_first(void *context,
   pthread_mutex_lock(&state->mutex);
   state->error_events += 1U;
   state->last_error_attempt = event != NULL ? event->attempt : -1;
-  state->last_error_restart_in_ms =
-      event != NULL ? event->restart_in_ms : -1L;
+  state->last_error_restart_in_ms = event != NULL ? event->restart_in_ms : -1L;
   state->last_error_code =
       event != NULL && event->cause != NULL ? event->cause->code : LC_OK;
   pthread_mutex_unlock(&state->mutex);
@@ -391,8 +391,7 @@ static int fake_consumer_on_error_record_only(void *context,
   pthread_mutex_lock(&state->mutex);
   state->error_events += 1U;
   state->last_error_attempt = event != NULL ? event->attempt : -1;
-  state->last_error_restart_in_ms =
-      event != NULL ? event->restart_in_ms : -1L;
+  state->last_error_restart_in_ms = event != NULL ? event->restart_in_ms : -1L;
   state->last_error_code =
       event != NULL && event->cause != NULL ? event->cause->code : LC_OK;
   pthread_mutex_unlock(&state->mutex);
@@ -846,8 +845,8 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
   lc_engine_client_config_init(&engine_config);
   lc_engine_error_init(&engine_error);
   dummy_endpoint = "https://127.0.0.1:1";
-  if (config->endpoint_count == 0U &&
-      (config->unix_socket_path == NULL || config->unix_socket_path[0] == '\0')) {
+  if (config->endpoint_count == 0U && (config->unix_socket_path == NULL ||
+                                       config->unix_socket_path[0] == '\0')) {
     engine_config.endpoints = &dummy_endpoint;
     engine_config.endpoint_count = 1U;
     engine_config.unix_socket_path = NULL;
@@ -860,14 +859,15 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
     engine_config.disable_mtls = config->disable_mtls;
     engine_config.insecure_skip_verify = config->insecure_skip_verify;
   }
+  engine_config.client_bundle_source = config->client_bundle_source;
   engine_config.client_bundle_path = config->client_bundle_path;
   engine_config.default_namespace = config->default_namespace;
   engine_config.timeout_ms = config->timeout_ms;
   engine_config.prefer_http_2 = config->prefer_http_2;
   engine_config.http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
-  engine_config.logger =
-      g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
+  engine_config.logger = g_test_client_logger != NULL ? g_test_client_logger
+                                                      : lc_log_noop_logger();
   engine_config.disable_logger_sys_field = config->disable_logger_sys_field;
   engine_config.allocator.malloc_fn = config->allocator.malloc_fn;
   engine_config.allocator.realloc_fn = config->allocator.realloc_fn;
@@ -883,10 +883,10 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
                         "failed to open fake worker engine", NULL, NULL, NULL);
   }
   client->allocator = config->allocator;
-  client->base_logger =
-      g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
-  client->logger =
-      g_test_client_logger != NULL ? g_test_client_logger : lc_log_noop_logger();
+  client->base_logger = g_test_client_logger != NULL ? g_test_client_logger
+                                                     : lc_log_noop_logger();
+  client->logger = g_test_client_logger != NULL ? g_test_client_logger
+                                                : lc_log_noop_logger();
   client->http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
   client->pub.close = fake_test_client_close;
@@ -894,10 +894,11 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
   return LC_OK;
 }
 
-static int wrap_consumer_engine_subscribe(
-    const lc_engine_dequeue_request *request,
-    const lc_engine_queue_stream_handler *handler, void *handler_context,
-    lc_engine_error *engine_error, int with_state) {
+static int
+wrap_consumer_engine_subscribe(const lc_engine_dequeue_request *request,
+                               const lc_engine_queue_stream_handler *handler,
+                               void *handler_context,
+                               lc_engine_error *engine_error, int with_state) {
   lc_dequeue_req public_request;
 
   if (g_consumer_test_state == NULL) {
@@ -908,11 +909,13 @@ static int wrap_consumer_engine_subscribe(
   public_request.queue = request->queue;
   public_request.owner = request->owner;
   public_request.txn_id = request->txn_id;
-  public_request.visibility_timeout_seconds = request->visibility_timeout_seconds;
+  public_request.visibility_timeout_seconds =
+      request->visibility_timeout_seconds;
   public_request.wait_seconds = request->wait_seconds;
   public_request.page_size = request->page_size;
   public_request.start_after = request->start_after;
-  if (g_consumer_test_state->subscribe_mode == CONSUMER_SUBSCRIBE_MODE_UNTIL_STOP) {
+  if (g_consumer_test_state->subscribe_mode ==
+      CONSUMER_SUBSCRIBE_MODE_UNTIL_STOP) {
     return fake_subscribe_until_stop(NULL, &public_request, with_state, NULL,
                                      handler, handler_context, engine_error);
   }
@@ -928,8 +931,8 @@ int __wrap_lc_engine_client_subscribe(
     return __real_lc_engine_client_subscribe(client, request, handler,
                                              handler_context, error);
   }
-  return wrap_consumer_engine_subscribe(request, handler, handler_context, error,
-                                        0);
+  return wrap_consumer_engine_subscribe(request, handler, handler_context,
+                                        error, 0);
 }
 
 int __wrap_lc_engine_client_subscribe_with_state(
@@ -940,8 +943,8 @@ int __wrap_lc_engine_client_subscribe_with_state(
     return __real_lc_engine_client_subscribe_with_state(
         client, request, handler, handler_context, error);
   }
-  return wrap_consumer_engine_subscribe(request, handler, handler_context, error,
-                                        1);
+  return wrap_consumer_engine_subscribe(request, handler, handler_context,
+                                        error, 1);
 }
 
 int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
@@ -1004,7 +1007,8 @@ int __wrap_pthread_mutex_init(pthread_mutex_t *mutex,
       }
     }
     assert_true(state->tracked_mutex_count <
-                sizeof(state->tracked_mutexes) / sizeof(state->tracked_mutexes[0]));
+                sizeof(state->tracked_mutexes) /
+                    sizeof(state->tracked_mutexes[0]));
     state->tracked_mutexes[state->tracked_mutex_count++] = mutex;
     pthread_mutex_unlock(&state->mutex);
   }
@@ -1624,11 +1628,10 @@ static void run_consumer_terminal_scenario_unit_test(
   assert_int_equal(runtime_state.ack_calls, expected_ack_calls);
   assert_int_equal(runtime_state.nack_calls, expected_nack_calls);
   assert_int_equal(runtime_state.extend_calls, expected_extend_calls);
-  assert_int_equal(runtime_state.close_calls,
-                   expected_ack_calls + expected_nack_calls +
-                       (handler_mode == CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK
-                            ? 1U
-                            : 0U));
+  assert_int_equal(
+      runtime_state.close_calls,
+      expected_ack_calls + expected_nack_calls +
+          (handler_mode == CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK ? 1U : 0U));
   assert_int_equal(runtime_state.handled_messages, 1U);
   assert_int_equal(runtime_state.last_nack_intent, expected_nack_intent);
 
@@ -1654,15 +1657,15 @@ test_consumer_service_preserves_explicit_failure_nack_on_success(void **state) {
       LC_NACK_INTENT_FAILURE, 0, 0L);
 }
 
-static void test_consumer_service_preserves_explicit_ack_on_success(
-    void **state) {
+static void
+test_consumer_service_preserves_explicit_ack_on_success(void **state) {
   (void)state;
-  run_consumer_terminal_scenario_unit_test(CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK,
-                                           LC_OK, 1U, 0U, 0U, -1, 0, 0L);
+  run_consumer_terminal_scenario_unit_test(
+      CONSUMER_HANDLER_MODE_EXPLICIT_ACK_OK, LC_OK, 1U, 0U, 0U, -1, 0, 0L);
 }
 
-static void test_consumer_service_preserves_explicit_close_on_success(
-    void **state) {
+static void
+test_consumer_service_preserves_explicit_close_on_success(void **state) {
   (void)state;
   run_consumer_terminal_scenario_unit_test(
       CONSUMER_HANDLER_MODE_EXPLICIT_CLOSE_OK, LC_OK, 0U, 0U, 0U, -1, 0, 0L);
@@ -1765,8 +1768,7 @@ test_consumer_service_skips_auto_ack_after_extend_failure(void **state) {
       LC_NACK_INTENT_FAILURE, 1, 1500L);
 }
 
-static void
-test_consumer_service_shutdown_stops_extender_before_message_close(
+static void test_consumer_service_shutdown_stops_extender_before_message_close(
     void **state) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
@@ -2225,8 +2227,8 @@ test_consumer_service_subscribe_failures_consume_service_failure_budget(
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
-static void test_consumer_service_handler_thread_start_failure_is_fatal(
-    void **state) {
+static void
+test_consumer_service_handler_thread_start_failure_is_fatal(void **state) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
   lc_client_handle client;
@@ -2287,8 +2289,8 @@ static void test_consumer_service_handler_thread_start_failure_is_fatal(
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
-static void test_consumer_service_worker_thread_start_failure_is_fatal(
-    void **state) {
+static void
+test_consumer_service_worker_thread_start_failure_is_fatal(void **state) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
   lc_client_handle client;
@@ -2347,8 +2349,8 @@ static void test_consumer_service_worker_thread_start_failure_is_fatal(
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
-static void test_consumer_service_extender_thread_start_failure_is_fatal(
-    void **state) {
+static void
+test_consumer_service_extender_thread_start_failure_is_fatal(void **state) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
   lc_client_handle client;
@@ -2409,8 +2411,8 @@ static void test_consumer_service_extender_thread_start_failure_is_fatal(
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
-static void test_consumer_service_message_factory_failure_is_fatal(
-    void **state) {
+static void
+test_consumer_service_message_factory_failure_is_fatal(void **state) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
   lc_client_handle client;
@@ -2596,8 +2598,7 @@ int main(void) {
       cmocka_unit_test(test_consumer_service_multi_worker_failure_cleans_up),
       cmocka_unit_test(
           test_consumer_service_auto_acks_open_delivery_on_success),
-      cmocka_unit_test(
-          test_consumer_service_preserves_explicit_ack_on_success),
+      cmocka_unit_test(test_consumer_service_preserves_explicit_ack_on_success),
       cmocka_unit_test(
           test_consumer_service_preserves_explicit_close_on_success),
       cmocka_unit_test(
@@ -2632,8 +2633,7 @@ int main(void) {
           test_consumer_service_handler_thread_start_failure_is_fatal),
       cmocka_unit_test(
           test_consumer_service_extender_thread_start_failure_is_fatal),
-      cmocka_unit_test(
-          test_consumer_service_message_factory_failure_is_fatal),
+      cmocka_unit_test(test_consumer_service_message_factory_failure_is_fatal),
       cmocka_unit_test(
           test_consumer_service_worker_clone_preserves_json_response_limit),
       cmocka_unit_test(

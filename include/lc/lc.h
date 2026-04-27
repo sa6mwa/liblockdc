@@ -38,6 +38,19 @@ typedef struct lc_error {
   char *correlation_id;
 } lc_error;
 
+/** Callback used by `lc_source_from_callbacks()` to fill `buffer`.
+ *
+ * Return the number of bytes written, `0` for end-of-stream, or `0` with
+ * `error` populated for failures.
+ */
+typedef size_t (*lc_source_read_fn)(void *context, void *buffer, size_t count,
+                                    lc_error *error);
+/** Optional callback used by `lc_source_from_callbacks()` to rewind a source.
+ */
+typedef int (*lc_source_reset_fn)(void *context, lc_error *error);
+/** Optional callback used by `lc_source_from_callbacks()` when closed. */
+typedef void (*lc_source_close_fn)(void *context);
+
 /** Custom allocation hook for malloc-style allocation. */
 typedef void *(*lc_malloc_fn)(void *context, size_t size);
 /** Custom allocation hook for realloc-style allocation. */
@@ -72,7 +85,13 @@ typedef struct lc_client_config {
   size_t endpoint_count;
   /** Unix-domain socket path used instead of `endpoints` when set. */
   const char *unix_socket_path;
-  /** Path to the combined CA/client-cert/private-key PEM bundle. */
+  /** Streamed combined CA/client-cert/private-key PEM bundle.
+   *
+   * Preferred over `client_bundle_path`. The source is borrowed and consumed
+   * during `lc_client_open()`; callers remain responsible for closing it.
+   */
+  lc_source *client_bundle_source;
+  /** Deprecated compatibility path to the combined PEM bundle. */
   const char *client_bundle_path;
   /** Namespace used when a request leaves `namespace_name` unset. */
   const char *default_namespace;
@@ -1175,8 +1194,7 @@ struct lc_lease {
    * Use this for large JSON payloads. `opts` may be `NULL` for default update
    * behavior. On success, `self->version` and `self->state_etag` are refreshed.
    */
-  int (*update)(lc_lease *self, lc_source *src,
-                const lc_update_opts *opts,
+  int (*update)(lc_lease *self, lc_source *src, const lc_update_opts *opts,
                 lc_error *error);
   /**
    * Applies one or more server-side mutations to the current state.
@@ -1742,6 +1760,10 @@ int lc_source_from_memory(const void *bytes, size_t length, lc_source **out,
 int lc_source_from_file(const char *path, lc_source **out, lc_error *error);
 /** Wraps a file descriptor as a rewindable source when possible. */
 int lc_source_from_fd(int fd, lc_source **out, lc_error *error);
+/** Wraps caller-provided callbacks as a source. */
+int lc_source_from_callbacks(lc_source_read_fn read, lc_source_reset_fn reset,
+                             lc_source_close_fn close, void *context,
+                             lc_source **out, lc_error *error);
 /** Creates a sink that writes bytes to a file path. */
 int lc_sink_to_file(const char *path, lc_sink **out, lc_error *error);
 /** Creates a sink that writes bytes to a file descriptor. */
@@ -1969,8 +1991,7 @@ int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
 int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
                   const lonejson_write_options *write_options, lc_error *error);
 /** Streams a replacement state document into a bound lease. */
-int lc_lease_update(lc_lease *lease, lc_source *src,
-                    const lc_update_opts *opts,
+int lc_lease_update(lc_lease *lease, lc_source *src, const lc_update_opts *opts,
                     lc_error *error);
 /** Applies server-side mutations to the current state of a bound lease. */
 int lc_lease_mutate(lc_lease *lease, const lc_mutate_req *req, lc_error *error);

@@ -239,23 +239,37 @@ Open a client:
 ```c
 lc_client_config config;
 lc_client *client;
+lc_source *client_bundle;
 lc_error error;
 const char *endpoints[] = { "https://localhost:19441" };
 
 lc_client_config_init(&config);
 lc_error_init(&error);
+client_bundle = NULL;
+
+if (lc_source_from_file("./client.pem", &client_bundle, &error) != LC_OK) {
+  fprintf(stderr, "failed to open client bundle: %s\n", error.message);
+  lc_error_cleanup(&error);
+  return 1;
+}
 
 config.endpoints = endpoints;
 config.endpoint_count = 1;
-config.client_bundle_path = "./client.pem";
+config.client_bundle_source = client_bundle;
 config.default_namespace = "default";
 
 if (lc_client_open(&config, &client, &error) != LC_OK) {
   fprintf(stderr, "lc_client_open failed: %s\n", error.message);
+  lc_source_close(client_bundle);
   lc_error_cleanup(&error);
   return 1;
 }
+lc_source_close(client_bundle);
 ```
+
+`client_bundle_path` remains available for existing C callers, but new code
+should prefer `client_bundle_source` so PEM bundles can come from files, memory,
+file descriptors, or callback-backed sources.
 
 Acquire a lease and update JSON state:
 

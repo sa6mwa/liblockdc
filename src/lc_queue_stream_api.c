@@ -1024,6 +1024,16 @@ static int lc_engine_subscribe_begin_payload(lc_engine_subscribe_state *state) {
     return lc_engine_set_protocol_error(
         state->error, "subscribe payload part missing Content-Length");
   }
+  if (state->callback_failed) {
+    state->phase = LC_ENGINE_SUBSCRIBE_READ_PAYLOAD;
+    if (state->payload_remaining == 0L) {
+      lc_engine_dequeue_response_cleanup(&state->current);
+      memset(&state->current, 0, sizeof(state->current));
+      state->delivery_active = 0;
+      state->phase = LC_ENGINE_SUBSCRIBE_EXPECT_BOUNDARY;
+    }
+    return LC_ENGINE_OK;
+  }
   if (state->handler.begin != NULL) {
     if (!state->handler.begin(state->handler_context, &state->current,
                               state->error)) {
@@ -1255,7 +1265,8 @@ static size_t lc_engine_subscribe_write_callback(char *ptr, size_t size,
       if ((long)chunk > state->payload_remaining) {
         chunk = (size_t)state->payload_remaining;
       }
-      if (chunk > 0U && state->handler.chunk != NULL) {
+      if (!state->callback_failed && chunk > 0U &&
+          state->handler.chunk != NULL) {
         if (!state->handler.chunk(state->handler_context, ptr + offset, chunk,
                                   state->error)) {
           state->callback_failed = 1;
@@ -1269,7 +1280,7 @@ static size_t lc_engine_subscribe_write_callback(char *ptr, size_t size,
       offset += chunk;
       state->payload_remaining -= (long)chunk;
       if (state->payload_remaining == 0L) {
-        if (state->handler.end != NULL) {
+        if (!state->callback_failed && state->handler.end != NULL) {
           if (!state->handler.end(state->handler_context, &state->current,
                                   state->error)) {
             state->callback_failed = 1;
@@ -1277,7 +1288,6 @@ static size_t lc_engine_subscribe_write_callback(char *ptr, size_t size,
               lc_engine_set_transport_error(state->error,
                                             "subscribe end callback failed");
             }
-            return 0U;
           }
         }
         lc_engine_dequeue_response_cleanup(&state->current);
@@ -1673,6 +1683,19 @@ static int lc_engine_client_subscribe_internal(
                                          error != NULL && error->message != NULL
                                              ? error->message
                                              : "stream callback failed");
+        rc = error->code;
+        lc_engine_subscribe_state_cleanup(&state);
+        curl_slist_free_all(headers);
+        return rc;
+      }
+      if (curl_rc == CURLE_OK && state.callback_failed) {
+        lc_engine_queue_stream_log_error(client, path, endpoint_index,
+                                         error != NULL && error->message != NULL
+                                             ? error->message
+                                             : "stream callback failed");
+        if (error->code == LC_ENGINE_OK) {
+          lc_engine_set_transport_error(error, "stream callback failed");
+        }
         rc = error->code;
         lc_engine_subscribe_state_cleanup(&state);
         curl_slist_free_all(headers);

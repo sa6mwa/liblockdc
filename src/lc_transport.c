@@ -1437,25 +1437,71 @@ static int lc_engine_match_private_key(X509 *certificate, EVP_PKEY *candidate) {
   return match;
 }
 
-int lc_engine_load_bundle(lc_engine_client *client, const char *bundle_path,
-                          lc_engine_error *error) {
-  BIO *bio;
+typedef struct lc_engine_source_bio_state {
+  lc_source *source;
+  lc_error error;
+  int failed;
+} lc_engine_source_bio_state;
+
+static int lc_engine_source_bio_create(BIO *bio) {
+  BIO_set_init(bio, 1);
+  BIO_set_data(bio, NULL);
+  return 1;
+}
+
+static int lc_engine_source_bio_destroy(BIO *bio) {
+  if (bio == NULL) {
+    return 0;
+  }
+  BIO_set_data(bio, NULL);
+  BIO_set_init(bio, 0);
+  return 1;
+}
+
+static int lc_engine_source_bio_read(BIO *bio, char *buffer, int count) {
+  lc_engine_source_bio_state *state;
+  size_t nread;
+
+  if (bio == NULL || buffer == NULL || count <= 0) {
+    return 0;
+  }
+  state = (lc_engine_source_bio_state *)BIO_get_data(bio);
+  if (state == NULL || state->source == NULL) {
+    return 0;
+  }
+  BIO_clear_retry_flags(bio);
+  nread =
+      state->source->read(state->source, buffer, (size_t)count, &state->error);
+  if (nread == 0U && state->error.code != LC_OK) {
+    state->failed = 1;
+    return -1;
+  }
+  return (int)nread;
+}
+
+static BIO_METHOD *lc_engine_new_source_bio_method(void) {
+  BIO_METHOD *method;
+
+  method = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "liblockdc source");
+  if (method == NULL) {
+    return NULL;
+  }
+  if (BIO_meth_set_create(method, lc_engine_source_bio_create) != 1 ||
+      BIO_meth_set_destroy(method, lc_engine_source_bio_destroy) != 1 ||
+      BIO_meth_set_read(method, lc_engine_source_bio_read) != 1) {
+    BIO_meth_free(method);
+    return NULL;
+  }
+  return method;
+}
+
+static int lc_engine_load_bundle_from_bio(lc_engine_client *client, BIO *bio,
+                                          lc_engine_error *error) {
   STACK_OF(X509_INFO) * info_stack;
   size_t index;
   int rc;
 
-  if (client == NULL || bundle_path == NULL) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "client and bundle path are required");
-  }
-
-  bio = BIO_new_file(bundle_path, "rb");
-  if (bio == NULL) {
-    return lc_engine_set_transport_error(error, "failed to open client bundle");
-  }
-
   info_stack = PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL);
-  BIO_free(bio);
   if (info_stack == NULL) {
     return lc_engine_set_protocol_error(error,
                                         "failed to parse client bundle PEM");
@@ -1523,6 +1569,78 @@ int lc_engine_load_bundle(lc_engine_client *client, const char *bundle_path,
         error, "client bundle does not contain a CA certificate");
   }
   return LC_ENGINE_OK;
+}
+
+int lc_engine_load_bundle(lc_engine_client *client, lc_source *bundle_source,
+                          const char *bundle_path, lc_engine_error *error) {
+  BIO *bio;
+  int rc;
+
+  if (client == NULL || (bundle_source == NULL && bundle_path == NULL)) {
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "client and bundle source or path are required");
+  }
+
+  if (bundle_source != NULL) {
+    BIO_METHOD *method;
+    lc_engine_source_bio_state state;
+
+    memset(&state, 0, sizeof(state));
+    state.source = bundle_source;
+    method = lc_engine_new_source_bio_method();
+    if (method == NULL) {
+      return lc_engine_set_transport_error(
+          error, "failed to allocate client bundle source BIO method");
+    }
+    bio = BIO_new(method);
+    if (bio == NULL) {
+      BIO_meth_free(method);
+      return lc_engine_set_transport_error(
+          error, "failed to allocate client bundle BIO");
+    }
+    BIO_set_data(bio, &state);
+    BIO_set_init(bio, 1);
+    {
+      BIO *buffered_bio;
+
+      buffered_bio = BIO_new(BIO_f_buffer());
+      if (buffered_bio == NULL) {
+        BIO_free(bio);
+        BIO_meth_free(method);
+        return lc_engine_set_transport_error(
+            error, "failed to allocate buffered client bundle BIO");
+      }
+      BIO_push(buffered_bio, bio);
+      rc = lc_engine_load_bundle_from_bio(client, buffered_bio, error);
+      BIO_free_all(buffered_bio);
+    }
+    BIO_meth_free(method);
+    if (state.failed) {
+      const char *message;
+
+      message = state.error.message != NULL
+                    ? state.error.message
+                    : "failed to read client bundle source";
+      lc_engine_set_transport_error(error, message);
+      lc_error_cleanup(&state.error);
+      return LC_ENGINE_ERROR_TRANSPORT;
+    }
+    lc_error_cleanup(&state.error);
+    return rc;
+  }
+
+  bio = BIO_new_file(bundle_path, "rb");
+  if (bio == NULL) {
+    return lc_engine_set_transport_error(error, "failed to open client bundle");
+  }
+  {
+    int rc;
+
+    rc = lc_engine_load_bundle_from_bio(client, bio, error);
+    BIO_free(bio);
+    return rc;
+  }
 }
 
 void lc_engine_free_bundle(lc_engine_tls_bundle *bundle) {
@@ -1693,11 +1811,13 @@ int lc_engine_client_open(const lc_engine_client_config *config,
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "at least one endpoint is required");
   }
-  if (!config->disable_mtls && (config->client_bundle_path == NULL ||
-                                config->client_bundle_path[0] == '\0')) {
+  if (!config->disable_mtls && config->client_bundle_source == NULL &&
+      (config->client_bundle_path == NULL ||
+       config->client_bundle_path[0] == '\0')) {
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-        "client_bundle_path is required unless disable_mtls is enabled");
+        "client_bundle_source or client_bundle_path is required unless "
+        "disable_mtls is enabled");
   }
 
   curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -1765,8 +1885,9 @@ int lc_engine_client_open(const lc_engine_client_config *config,
                             : 0;
 
   if (!client->disable_mtls) {
-    if (lc_engine_load_bundle(client, config->client_bundle_path, error) !=
-        LC_ENGINE_OK) {
+    if (lc_engine_load_bundle(client, config->client_bundle_source,
+                              config->client_bundle_path,
+                              error) != LC_ENGINE_OK) {
       lc_engine_client_close(client);
       return error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
     }

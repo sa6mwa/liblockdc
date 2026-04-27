@@ -180,11 +180,11 @@ static void assert_local_mutate_file_variants(lc_lease *lease,
   snprintf(text_mutation, sizeof(text_mutation), "textfile:/text_blob=%s",
            text_path);
   mutations[4] = text_mutation;
-  snprintf(base64_mutation, sizeof(base64_mutation),
-           "base64file:/bin_blob=%s", binary_path);
+  snprintf(base64_mutation, sizeof(base64_mutation), "base64file:/bin_blob=%s",
+           binary_path);
   mutations[5] = base64_mutation;
-  snprintf(auto_text_mutation, sizeof(auto_text_mutation),
-           "file:/auto_text=%s", text_path);
+  snprintf(auto_text_mutation, sizeof(auto_text_mutation), "file:/auto_text=%s",
+           text_path);
   mutations[6] = auto_text_mutation;
   snprintf(auto_bin_mutation, sizeof(auto_bin_mutation), "file:/auto_bin=%s",
            binary_path);
@@ -231,18 +231,23 @@ static void make_unique_name(const char *prefix, char *buffer,
 static void open_tcp_client(const char *endpoint, const char *bundle_path,
                             lc_client **out, lc_error *error) {
   lc_client_config config;
+  lc_source *bundle_source;
   const char *endpoints[1];
   int rc;
 
   lc_client_config_init(&config);
+  bundle_source = NULL;
+  rc = lc_source_from_file(bundle_path, &bundle_source, error);
+  assert_lc_ok(rc, error);
   endpoints[0] = endpoint;
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.client_bundle_path = bundle_path;
+  config.client_bundle_source = bundle_source;
   config.default_namespace = "default";
   config.timeout_ms = 5000L;
   config.insecure_skip_verify = 1;
   rc = lc_client_open(&config, out, error);
+  lc_source_close(bundle_source);
   assert_lc_ok(rc, error);
 }
 
@@ -250,18 +255,24 @@ static void open_tcp_client_allow_error(const char *endpoint,
                                         const char *bundle_path,
                                         lc_client **out, lc_error *error) {
   lc_client_config config;
+  lc_source *bundle_source;
   const char *endpoints[1];
+  int rc;
 
   lc_client_config_init(&config);
+  bundle_source = NULL;
+  rc = lc_source_from_file(bundle_path, &bundle_source, error);
+  assert_lc_ok(rc, error);
   endpoints[0] = endpoint;
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.client_bundle_path = bundle_path;
+  config.client_bundle_source = bundle_source;
   config.default_namespace = "default";
   config.timeout_ms = 5000L;
   config.insecure_skip_verify = 1;
   *out = NULL;
   lc_client_open(&config, out, error);
+  lc_source_close(bundle_source);
 }
 
 static void open_uds_client(const char *socket_path, lc_client **out,
@@ -912,8 +923,7 @@ static void test_disk_state_cas_failure_modes(void **state) {
   save_json_text_or_die(lease, "{\"kind\":\"cas\"}", &error);
 
   rc = lc_source_from_memory("{\"kind\":\"cas-update\"}",
-                             strlen("{\"kind\":\"cas-update\"}"), &src,
-                             &error);
+                             strlen("{\"kind\":\"cas-update\"}"), &src, &error);
   assert_lc_ok(rc, &error);
   update_opts.if_version = lease->version + 100L;
   update_opts.has_if_version = 1;
@@ -1091,8 +1101,8 @@ static void test_mem_uds_queue_failure_modes(void **state) {
   lc_dequeue_req invalid_dequeue_req;
   lc_nack_req nack_req;
   char queue_name[96];
-  static const unsigned char payload[] = {'q', 'u', 'e', 'u', 'e', '-', 'n',
-                                          'e', 'g'};
+  static const unsigned char payload[] = {'q', 'u', 'e', 'u', 'e',
+                                          '-', 'n', 'e', 'g'};
   int rc;
 
   (void)state;
@@ -1224,8 +1234,7 @@ static void test_disk_auth_permission_failure_modes(void **state) {
   rw_bundle_path =
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
                      "./devenv/volumes/lockd-disk-a-config/client.pem");
-  tc_bundle_path =
-      "./devenv/volumes/lockd-disk-a-config/tc-client.pem";
+  tc_bundle_path = "./devenv/volumes/lockd-disk-a-config/tc-client.pem";
   require_file_or_skip(rw_bundle_path);
   require_file_or_skip(tc_bundle_path);
 
@@ -1639,7 +1648,8 @@ static int e2e_consumer_handle(void *context, lc_consumer_message *delivery,
     }
     return LC_ERR_TRANSPORT;
   }
-  if (consumer_context->first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_ACK &&
+  if (consumer_context->first_delivery_mode ==
+          E2E_CONSUMER_FIRST_DELIVERY_ACK &&
       handled_count == 1) {
     return delivery->message->ack(delivery->message, error);
   }
@@ -1716,44 +1726,43 @@ static void wait_for_consumer_handled(e2e_consumer_context *consumer_context,
     }
     pthread_mutex_unlock(&consumer_context->mutex);
     if (retries++ > maximum_retries) {
-      fail_msg("consumer retry timed out: backend=%s queue=%s mode=%s "
-               "enqueue_count=%d worker_count=%lu max_failures=%d "
-               "expected_minimum_count=%d handled=%d start_events=%d "
-               "stop_events=%d error_events=%d last_error_code=%d "
-               "last_error_http_status=%ld last_error_server_code=%s "
-               "last_error_message=%s last_visibility_timeout_seconds=%ld "
-               "payload=%s state_json=%s state_key=%s "
-               "queue_available=%d waiting_consumers=%ld "
-               "pending_candidates=%ld total_consumers=%ld "
-               "has_active_watcher=%d head_message_id=%s "
-               "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
-               "head_age_seconds=%ld stats_cid=%s",
-               consumer_context->backend_label, consumer_context->queue_name,
-               e2e_consumer_delivery_mode_name(
-                   consumer_context->first_delivery_mode),
-               consumer_context->enqueue_count,
-               (unsigned long)consumer_context->worker_count,
-               consumer_context->max_failures,
-               consumer_context->expected_minimum_count,
-               consumer_context->handled, consumer_context->start_events,
-               consumer_context->stop_events, consumer_context->error_events,
-               consumer_context->last_error_code,
-               consumer_context->last_error_http_status,
-               consumer_context->last_error_server_code,
-               consumer_context->last_error_message,
-               consumer_context->last_visibility_timeout_seconds,
-               consumer_context->payload, consumer_context->state_json,
-               consumer_context->state_key,
-               consumer_context->queue_stats_available,
-               consumer_context->queue_stats_waiting_consumers,
-               consumer_context->queue_stats_pending_candidates,
-               consumer_context->queue_stats_total_consumers,
-               consumer_context->queue_stats_has_active_watcher,
-               consumer_context->queue_stats_head_message_id,
-               consumer_context->queue_stats_head_enqueued_at_unix,
-               consumer_context->queue_stats_head_not_visible_until_unix,
-               consumer_context->queue_stats_head_age_seconds,
-               consumer_context->queue_stats_correlation_id);
+      fail_msg(
+          "consumer retry timed out: backend=%s queue=%s mode=%s "
+          "enqueue_count=%d worker_count=%lu max_failures=%d "
+          "expected_minimum_count=%d handled=%d start_events=%d "
+          "stop_events=%d error_events=%d last_error_code=%d "
+          "last_error_http_status=%ld last_error_server_code=%s "
+          "last_error_message=%s last_visibility_timeout_seconds=%ld "
+          "payload=%s state_json=%s state_key=%s "
+          "queue_available=%d waiting_consumers=%ld "
+          "pending_candidates=%ld total_consumers=%ld "
+          "has_active_watcher=%d head_message_id=%s "
+          "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
+          "head_age_seconds=%ld stats_cid=%s",
+          consumer_context->backend_label, consumer_context->queue_name,
+          e2e_consumer_delivery_mode_name(
+              consumer_context->first_delivery_mode),
+          consumer_context->enqueue_count,
+          (unsigned long)consumer_context->worker_count,
+          consumer_context->max_failures,
+          consumer_context->expected_minimum_count, consumer_context->handled,
+          consumer_context->start_events, consumer_context->stop_events,
+          consumer_context->error_events, consumer_context->last_error_code,
+          consumer_context->last_error_http_status,
+          consumer_context->last_error_server_code,
+          consumer_context->last_error_message,
+          consumer_context->last_visibility_timeout_seconds,
+          consumer_context->payload, consumer_context->state_json,
+          consumer_context->state_key, consumer_context->queue_stats_available,
+          consumer_context->queue_stats_waiting_consumers,
+          consumer_context->queue_stats_pending_candidates,
+          consumer_context->queue_stats_total_consumers,
+          consumer_context->queue_stats_has_active_watcher,
+          consumer_context->queue_stats_head_message_id,
+          consumer_context->queue_stats_head_enqueued_at_unix,
+          consumer_context->queue_stats_head_not_visible_until_unix,
+          consumer_context->queue_stats_head_age_seconds,
+          consumer_context->queue_stats_correlation_id);
     }
     usleep(100000);
   }
@@ -1830,9 +1839,10 @@ static void run_consumer_service_variant_with_max_failures(
              "enqueue_count=%d worker_count=%lu max_failures=%d rc=%d "
              "error_code=%d http_status=%ld message=%s detail=%s",
              backend->label, queue_name,
-             e2e_consumer_delivery_mode_name(first_delivery_mode), enqueue_count,
-             (unsigned long)worker_count, max_failures, rc, error.code,
-             error.http_status, error.message != NULL ? error.message : "",
+             e2e_consumer_delivery_mode_name(first_delivery_mode),
+             enqueue_count, (unsigned long)worker_count, max_failures, rc,
+             error.code, error.http_status,
+             error.message != NULL ? error.message : "",
              error.detail != NULL ? error.detail : "");
   }
   assert_lc_ok(rc, &error);
@@ -1844,9 +1854,10 @@ static void run_consumer_service_variant_with_max_failures(
              "enqueue_count=%d worker_count=%lu max_failures=%d rc=%d "
              "error_code=%d http_status=%ld message=%s detail=%s",
              backend->label, queue_name,
-             e2e_consumer_delivery_mode_name(first_delivery_mode), enqueue_count,
-             (unsigned long)worker_count, max_failures, rc, error.code,
-             error.http_status, error.message != NULL ? error.message : "",
+             e2e_consumer_delivery_mode_name(first_delivery_mode),
+             enqueue_count, (unsigned long)worker_count, max_failures, rc,
+             error.code, error.http_status,
+             error.message != NULL ? error.message : "",
              error.detail != NULL ? error.detail : "");
   }
   assert_lc_ok(rc, &error);
@@ -1899,37 +1910,37 @@ static void run_consumer_service_variant_with_max_failures(
   rc = service->wait(service, &error);
   e2e_consumer_capture_queue_stats(client, queue_name, &consumer_context);
   if (rc != LC_OK) {
-    fail_msg("consumer service wait failed: backend=%s queue=%s mode=%s "
-             "enqueue_count=%d worker_count=%lu max_failures=%d handled=%d "
-             "start_events=%d stop_events=%d error_events=%d "
-             "last_error_code=%d last_error_http_status=%ld "
-             "last_error_server_code=%s last_error_message=%s "
-             "queue_available=%d waiting_consumers=%ld pending_candidates=%ld "
-             "total_consumers=%ld has_active_watcher=%d head_message_id=%s "
-             "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
-             "head_age_seconds=%ld "
-             "stats_cid=%s rc=%d error_code=%d http_status=%ld message=%s detail=%s",
-             backend->label, queue_name,
-             e2e_consumer_delivery_mode_name(first_delivery_mode), enqueue_count,
-             (unsigned long)worker_count, max_failures, consumer_context.handled,
-             consumer_context.start_events, consumer_context.stop_events,
-             consumer_context.error_events, consumer_context.last_error_code,
-             consumer_context.last_error_http_status,
-             consumer_context.last_error_server_code,
-             consumer_context.last_error_message,
-             consumer_context.queue_stats_available,
-             consumer_context.queue_stats_waiting_consumers,
-             consumer_context.queue_stats_pending_candidates,
-             consumer_context.queue_stats_total_consumers,
-             consumer_context.queue_stats_has_active_watcher,
-             consumer_context.queue_stats_head_message_id,
-             consumer_context.queue_stats_head_enqueued_at_unix,
-             consumer_context.queue_stats_head_not_visible_until_unix,
-             consumer_context.queue_stats_head_age_seconds,
-             consumer_context.queue_stats_correlation_id,
-             rc, error.code, error.http_status,
-             error.message != NULL ? error.message : "",
-             error.detail != NULL ? error.detail : "");
+    fail_msg(
+        "consumer service wait failed: backend=%s queue=%s mode=%s "
+        "enqueue_count=%d worker_count=%lu max_failures=%d handled=%d "
+        "start_events=%d stop_events=%d error_events=%d "
+        "last_error_code=%d last_error_http_status=%ld "
+        "last_error_server_code=%s last_error_message=%s "
+        "queue_available=%d waiting_consumers=%ld pending_candidates=%ld "
+        "total_consumers=%ld has_active_watcher=%d head_message_id=%s "
+        "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
+        "head_age_seconds=%ld "
+        "stats_cid=%s rc=%d error_code=%d http_status=%ld message=%s detail=%s",
+        backend->label, queue_name,
+        e2e_consumer_delivery_mode_name(first_delivery_mode), enqueue_count,
+        (unsigned long)worker_count, max_failures, consumer_context.handled,
+        consumer_context.start_events, consumer_context.stop_events,
+        consumer_context.error_events, consumer_context.last_error_code,
+        consumer_context.last_error_http_status,
+        consumer_context.last_error_server_code,
+        consumer_context.last_error_message,
+        consumer_context.queue_stats_available,
+        consumer_context.queue_stats_waiting_consumers,
+        consumer_context.queue_stats_pending_candidates,
+        consumer_context.queue_stats_total_consumers,
+        consumer_context.queue_stats_has_active_watcher,
+        consumer_context.queue_stats_head_message_id,
+        consumer_context.queue_stats_head_enqueued_at_unix,
+        consumer_context.queue_stats_head_not_visible_until_unix,
+        consumer_context.queue_stats_head_age_seconds,
+        consumer_context.queue_stats_correlation_id, rc, error.code,
+        error.http_status, error.message != NULL ? error.message : "",
+        error.detail != NULL ? error.detail : "");
   }
   assert_lc_ok(rc, &error);
 
@@ -1974,44 +1985,45 @@ static void run_consumer_service_variant_with_max_failures(
                consumer_context.last_error_server_code,
                consumer_context.last_error_message);
     }
-    assert_int_equal(consumer_context.handled,
-                     enqueue_count +
-                         (first_delivery_mode ==
-                                  E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE
-                              ? 2
-                              : 1));
+    assert_int_equal(
+        consumer_context.handled,
+        enqueue_count +
+            (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_FAIL_TWICE
+                 ? 2
+                 : 1));
     assert_true(consumer_context.error_events >= 1);
     assert_true(consumer_context.start_events >= (int)worker_count + 1);
   } else if (first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_ACK_ERROR) {
     if (consumer_context.handled != enqueue_count ||
         consumer_context.error_events < 1 ||
         consumer_context.start_events < (int)worker_count + 1) {
-      fail_msg("unexpected ack-error consumer state: backend=%s queue=%s "
-               "mode=%s handled=%d enqueue_count=%d error_events=%d "
-               "start_events=%d stop_events=%d last_error_code=%d "
-               "last_error_http_status=%ld last_error_server_code=%s "
-               "last_error_message=%s payload=%s "
-               "queue_available=%d waiting_consumers=%ld pending_candidates=%ld "
-               "total_consumers=%ld head_message_id=%s "
-               "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
-               "head_age_seconds=%ld stats_cid=%s",
-               backend->label, queue_name,
-               e2e_consumer_delivery_mode_name(first_delivery_mode),
-               consumer_context.handled, enqueue_count,
-               consumer_context.error_events, consumer_context.start_events,
-               consumer_context.stop_events, consumer_context.last_error_code,
-               consumer_context.last_error_http_status,
-               consumer_context.last_error_server_code,
-               consumer_context.last_error_message, consumer_context.payload,
-               consumer_context.queue_stats_available,
-               consumer_context.queue_stats_waiting_consumers,
-               consumer_context.queue_stats_pending_candidates,
-               consumer_context.queue_stats_total_consumers,
-               consumer_context.queue_stats_head_message_id,
-               consumer_context.queue_stats_head_enqueued_at_unix,
-               consumer_context.queue_stats_head_not_visible_until_unix,
-               consumer_context.queue_stats_head_age_seconds,
-               consumer_context.queue_stats_correlation_id);
+      fail_msg(
+          "unexpected ack-error consumer state: backend=%s queue=%s "
+          "mode=%s handled=%d enqueue_count=%d error_events=%d "
+          "start_events=%d stop_events=%d last_error_code=%d "
+          "last_error_http_status=%ld last_error_server_code=%s "
+          "last_error_message=%s payload=%s "
+          "queue_available=%d waiting_consumers=%ld pending_candidates=%ld "
+          "total_consumers=%ld head_message_id=%s "
+          "head_enqueued_at_unix=%ld head_not_visible_until_unix=%ld "
+          "head_age_seconds=%ld stats_cid=%s",
+          backend->label, queue_name,
+          e2e_consumer_delivery_mode_name(first_delivery_mode),
+          consumer_context.handled, enqueue_count,
+          consumer_context.error_events, consumer_context.start_events,
+          consumer_context.stop_events, consumer_context.last_error_code,
+          consumer_context.last_error_http_status,
+          consumer_context.last_error_server_code,
+          consumer_context.last_error_message, consumer_context.payload,
+          consumer_context.queue_stats_available,
+          consumer_context.queue_stats_waiting_consumers,
+          consumer_context.queue_stats_pending_candidates,
+          consumer_context.queue_stats_total_consumers,
+          consumer_context.queue_stats_head_message_id,
+          consumer_context.queue_stats_head_enqueued_at_unix,
+          consumer_context.queue_stats_head_not_visible_until_unix,
+          consumer_context.queue_stats_head_age_seconds,
+          consumer_context.queue_stats_correlation_id);
     }
     assert_int_equal(consumer_context.handled, enqueue_count);
     assert_true(consumer_context.error_events >= 1);
@@ -2024,16 +2036,17 @@ static void run_consumer_service_variant_with_max_failures(
              first_delivery_mode == E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE) {
     assert_int_equal(consumer_context.handled, enqueue_count + 1);
     if (consumer_context.error_events != 0) {
-      fail_msg("unexpected consumer error event: error_events=%d "
-               "last_error_code=%d last_error_http_status=%ld "
-               "last_error_server_code=%s last_error_message=%s "
-               "start_events=%d stop_events=%d last_visibility_timeout_seconds=%ld",
-               consumer_context.error_events, consumer_context.last_error_code,
-               consumer_context.last_error_http_status,
-               consumer_context.last_error_server_code,
-               consumer_context.last_error_message,
-               consumer_context.start_events, consumer_context.stop_events,
-               consumer_context.last_visibility_timeout_seconds);
+      fail_msg(
+          "unexpected consumer error event: error_events=%d "
+          "last_error_code=%d last_error_http_status=%ld "
+          "last_error_server_code=%s last_error_message=%s "
+          "start_events=%d stop_events=%d last_visibility_timeout_seconds=%ld",
+          consumer_context.error_events, consumer_context.last_error_code,
+          consumer_context.last_error_http_status,
+          consumer_context.last_error_server_code,
+          consumer_context.last_error_message, consumer_context.start_events,
+          consumer_context.stop_events,
+          consumer_context.last_visibility_timeout_seconds);
     }
     assert_int_equal(consumer_context.start_events, (int)worker_count);
   } else {
@@ -2094,8 +2107,7 @@ static void run_consumer_service_variant(const e2e_consumer_backend *backend,
       worker_count, 5, 1);
 }
 
-static void
-run_consumer_service_variant_without_payload_read(
+static void run_consumer_service_variant_without_payload_read(
     const e2e_consumer_backend *backend, const char *name_prefix,
     int enqueue_count, int first_delivery_mode, int expect_state,
     size_t worker_count) {
@@ -2135,8 +2147,7 @@ test_disk_consumer_service_restart_after_handler_failure(void **state) {
                                E2E_CONSUMER_FIRST_DELIVERY_FAIL, 0, 1U);
 }
 
-static void
-test_disk_consumer_service_delivery_failures_ignore_failure_budget(
+static void test_disk_consumer_service_delivery_failures_ignore_failure_budget(
     void **state) {
   (void)state;
   run_consumer_service_variant_with_max_failures(
@@ -2164,32 +2175,32 @@ static void test_disk_consumer_service_explicit_failure_nack_then_handler_error(
       E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR, 0, 1U);
 }
 
-static void test_disk_consumer_service_acks_without_reading_payload(
-    void **state) {
+static void
+test_disk_consumer_service_acks_without_reading_payload(void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
       &e2e_backend_disk, "disk-consumer-unread-ack", 1,
       E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
-static void test_disk_consumer_service_defers_without_reading_payload(
-    void **state) {
+static void
+test_disk_consumer_service_defers_without_reading_payload(void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
       &e2e_backend_disk, "disk-consumer-unread-defer", 1,
       E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
 }
 
-static void test_disk_consumer_service_failure_nacks_without_reading_payload(
-    void **state) {
+static void
+test_disk_consumer_service_failure_nacks_without_reading_payload(void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
       &e2e_backend_disk, "disk-consumer-unread-fail-nack", 1,
       E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0, 1U);
 }
 
-static void test_disk_consumer_service_explicit_ack_then_handler_error(
-    void **state) {
+static void
+test_disk_consumer_service_explicit_ack_then_handler_error(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_disk, "disk-consumer-ack-error", 2,
                                E2E_CONSUMER_FIRST_DELIVERY_ACK_ERROR, 0, 1U);
@@ -2254,32 +2265,32 @@ static void test_s3_consumer_service_explicit_failure_nack_then_handler_error(
       E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR, 0, 1U);
 }
 
-static void test_s3_consumer_service_acks_without_reading_payload(
-    void **state) {
+static void
+test_s3_consumer_service_acks_without_reading_payload(void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
       &e2e_backend_s3, "s3-consumer-unread-ack", 1,
       E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
-static void test_s3_consumer_service_defers_without_reading_payload(
-    void **state) {
+static void
+test_s3_consumer_service_defers_without_reading_payload(void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
       &e2e_backend_s3, "s3-consumer-unread-defer", 1,
       E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
 }
 
-static void test_s3_consumer_service_failure_nacks_without_reading_payload(
-    void **state) {
+static void
+test_s3_consumer_service_failure_nacks_without_reading_payload(void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
       &e2e_backend_s3, "s3-consumer-unread-fail-nack", 1,
       E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0, 1U);
 }
 
-static void test_s3_consumer_service_explicit_ack_then_handler_error(
-    void **state) {
+static void
+test_s3_consumer_service_explicit_ack_then_handler_error(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_s3, "s3-consumer-ack-error", 2,
                                E2E_CONSUMER_FIRST_DELIVERY_ACK_ERROR, 0, 1U);
@@ -2346,24 +2357,23 @@ test_mem_uds_consumer_service_explicit_failure_nack_then_handler_error(
       E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE_ERROR, 0, 1U);
 }
 
-static void test_mem_uds_consumer_service_acks_without_reading_payload(
-    void **state) {
+static void
+test_mem_uds_consumer_service_acks_without_reading_payload(void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
       &e2e_backend_mem, "mem-consumer-unread-ack", 1,
       E2E_CONSUMER_FIRST_DELIVERY_NONE, 0, 1U);
 }
 
-static void test_mem_uds_consumer_service_defers_without_reading_payload(
-    void **state) {
+static void
+test_mem_uds_consumer_service_defers_without_reading_payload(void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
       &e2e_backend_mem, "mem-consumer-unread-defer", 1,
       E2E_CONSUMER_FIRST_DELIVERY_DEFER, 0, 1U);
 }
 
-static void
-test_mem_uds_consumer_service_failure_nacks_without_reading_payload(
+static void test_mem_uds_consumer_service_failure_nacks_without_reading_payload(
     void **state) {
   (void)state;
   run_consumer_service_variant_without_payload_read(
@@ -2371,8 +2381,8 @@ test_mem_uds_consumer_service_failure_nacks_without_reading_payload(
       E2E_CONSUMER_FIRST_DELIVERY_NACK_FAILURE, 0, 1U);
 }
 
-static void test_mem_uds_consumer_service_explicit_ack_then_handler_error(
-    void **state) {
+static void
+test_mem_uds_consumer_service_explicit_ack_then_handler_error(void **state) {
   (void)state;
   run_consumer_service_variant(&e2e_backend_mem, "mem-consumer-ack-error", 2,
                                E2E_CONSUMER_FIRST_DELIVERY_ACK_ERROR, 0, 1U);
@@ -2637,8 +2647,7 @@ int main(void) {
       cmocka_unit_test(
           test_s3_consumer_service_explicit_failure_nack_then_handler_error),
       cmocka_unit_test(test_s3_consumer_service_acks_without_reading_payload),
-      cmocka_unit_test(
-          test_s3_consumer_service_defers_without_reading_payload),
+      cmocka_unit_test(test_s3_consumer_service_defers_without_reading_payload),
       cmocka_unit_test(
           test_s3_consumer_service_failure_nacks_without_reading_payload),
       cmocka_unit_test(

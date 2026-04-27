@@ -8,7 +8,7 @@ local flush_mode = os.getenv("LOCKDC_FLUSH_MODE") or "wait"
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
-  client_bundle_path = client_pem,
+  client_bundle_source = { path = client_pem },
   default_namespace = namespace_name,
 })
 
