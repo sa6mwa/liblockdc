@@ -192,6 +192,68 @@ function Client:acquire(req)
   return wrap_lease(lease)
 end
 
+function Client:acquire_for_update(req, handler)
+  return normalize_result(self._core:acquire_for_update(req, function(ctx)
+    local lease = wrap_lease(ctx.lease)
+    local af = {
+      lease = lease,
+      state = ctx.state,
+      state_meta = ctx.state_meta,
+    }
+
+    function af:load_json()
+      if self.state == nil then
+        return nil, self.state_meta
+      end
+      return decode_json(self.state), self.state_meta
+    end
+
+    function af:update_raw(body, opts)
+      return lease:update_raw(body, opts)
+    end
+
+    function af:update_json(value, opts)
+      return lease:update_json(value, opts)
+    end
+
+    function af:mutate(update_req)
+      return lease:mutate(update_req)
+    end
+
+    function af:mutate_local(update_req)
+      return lease:mutate_local(update_req)
+    end
+
+    function af:metadata(update_req)
+      return lease:metadata(update_req)
+    end
+
+    function af:remove(update_req)
+      return lease:remove(update_req)
+    end
+
+    function af:keepalive(update_req)
+      return lease:keepalive(update_req)
+    end
+
+    local ok, result, handler_err = pcall(handler, af)
+    lease:close()
+    if not ok then
+      error(result)
+    end
+    if handler_err ~= nil then
+      return nil, handler_err
+    end
+    if result == false then
+      return nil, "acquire_for_update handler returned false"
+    end
+    if type(result) == "string" then
+      return nil, result
+    end
+    return nil
+  end))
+end
+
 function Client:describe(req)
   return self._core:describe(req)
 end

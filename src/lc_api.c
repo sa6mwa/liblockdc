@@ -5,6 +5,13 @@ int lc_acquire(lc_client *client, const lc_acquire_req *req, lc_lease **out,
   return client->acquire(client, req, out, error);
 }
 
+int lc_acquire_for_update(lc_client *client, const lc_acquire_req *req,
+                          lc_acquire_for_update_handler_fn handler,
+                          void *handler_context, lc_error *error) {
+  return client->acquire_for_update(client, req, handler, handler_context,
+                                    error);
+}
+
 int lc_describe(lc_client *client, const lc_describe_req *req,
                 lc_describe_res *out, lc_error *error) {
   return client->describe(client, req, out, error);

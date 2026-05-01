@@ -220,9 +220,9 @@ The intended ownership model is:
 
 - `liblockdc` owns the Lua-facing `lockd` client
 - `liblockdc` owns the Lua-facing `lonejson` dependency boundary for what it
-  exposes
+  exposes by declaring the supported `lonejson` Lua rock version
 - downstream components such as `vectis` should consume that shipped Lua
-  distribution instead of maintaining a second `lockd` Lua client or a second
+  client distribution instead of maintaining a second `lockd` Lua client or an
   incompatible JSON binding layout
 
 This keeps one coherent SDK import path for downstream Lua workflow runtimes.
@@ -316,6 +316,38 @@ if (lease->release(lease, &release, &error) != LC_OK) {
 }
 
 client->close(client);
+```
+
+For callback-style update flows, `lc_acquire_for_update()` acquires the lease,
+fetches a private state snapshot, invokes the handler, closes the snapshot, and
+always attempts to release the lease before returning. The lease and snapshot
+reader are borrowed and valid only during the callback; the helper owns the
+final release. Handler success commits staged changes; handler failure releases
+with rollback so partial callback updates are not published:
+
+```c
+static int update_order(void *ctx, lc_acquire_for_update_context *af,
+                        lc_error *error) {
+  lc_source *src;
+  int rc;
+
+  (void)ctx;
+  rc = lc_source_from_memory("{\"status\":\"processing\"}",
+                             strlen("{\"status\":\"processing\"}"),
+                             &src, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = af->lease->update(af->lease, src, NULL, error);
+  lc_source_close(src);
+  return rc;
+}
+
+if (lc_acquire_for_update(client, &acquire, update_order, NULL, &error) !=
+    LC_OK) {
+  fprintf(stderr, "acquire_for_update failed: %s\n", error.message);
+  lc_error_cleanup(&error);
+}
 ```
 
 Queue APIs follow the same handle-oriented pattern: dequeue or subscribe, operate on the returned `lc_message`, and then finish with `ack()`, `nack()`, or `close()`.

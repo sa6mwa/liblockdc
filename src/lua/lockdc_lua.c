@@ -39,6 +39,11 @@ typedef struct lcdc_lua_source {
   int close_ref;
 } lcdc_lua_source;
 
+typedef struct lcdc_acquire_for_update_handler {
+  lua_State *L;
+  int handler_ref;
+} lcdc_acquire_for_update_handler;
+
 static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
                                    lc_error *error);
 static int lcdc_lua_source_reset(void *context, lc_error *error);
@@ -824,6 +829,188 @@ static int lcdc_client_acquire(lua_State *L) {
   }
   lc_error_cleanup(&error);
   return lcdc_push_lease(L, lease, 0);
+}
+
+static const char *lcdc_lua_error_message(lua_State *L, int index) {
+  const char *message;
+
+  if (index < 0) {
+    index = lua_gettop(L) + index + 1;
+  }
+  if (lua_istable(L, index)) {
+    lua_getfield(L, index, "message");
+    message = lua_tostring(L, -1);
+    lua_pop(L, 1);
+    if (message != NULL) {
+      return message;
+    }
+  }
+  message = lua_tostring(L, index);
+  return message != NULL ? message : "Lua acquire_for_update handler failed";
+}
+
+static int lcdc_lua_error_to_lc_error(lua_State *L, int index,
+                                      lc_error *error) {
+  const char *message;
+  const char *detail;
+  const char *server_code;
+  const char *correlation_id;
+  long http_status;
+  int code;
+  int rc;
+
+  if (index < 0) {
+    index = lua_gettop(L) + index + 1;
+  }
+  if (!lua_istable(L, index)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        lcdc_lua_error_message(L, index), NULL, NULL, NULL);
+  }
+
+  code = LC_ERR_INVALID;
+  http_status = 0L;
+
+  lua_getfield(L, index, "code");
+  if (lua_isnumber(L, -1)) {
+    code = (int)lua_tointeger(L, -1);
+  }
+  lua_pop(L, 1);
+  if (code == LC_OK) {
+    code = LC_ERR_INVALID;
+  }
+
+  lua_getfield(L, index, "http_status");
+  if (lua_isnumber(L, -1)) {
+    http_status = (long)lua_tointeger(L, -1);
+  }
+  lua_pop(L, 1);
+
+  lua_getfield(L, index, "message");
+  message = lua_tostring(L, -1);
+  lua_getfield(L, index, "detail");
+  detail = lua_tostring(L, -1);
+  lua_getfield(L, index, "server_code");
+  server_code = lua_tostring(L, -1);
+  lua_getfield(L, index, "correlation_id");
+  correlation_id = lua_tostring(L, -1);
+
+  rc = lc_error_set(error, code, http_status,
+                    message != NULL ? message
+                                    : "Lua acquire_for_update handler failed",
+                    detail, server_code, correlation_id);
+  lua_pop(L, 4);
+  return rc;
+}
+
+static int lcdc_acquire_for_update_handler_call(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  lcdc_acquire_for_update_handler *handler;
+  lua_State *L;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  size_t written;
+  int rc;
+
+  handler = (lcdc_acquire_for_update_handler *)context;
+  L = handler->L;
+  sink = NULL;
+  lua_rawgeti(L, LUA_REGISTRYINDEX, handler->handler_ref);
+  lua_newtable(L);
+  if (lcdc_push_cloned_lease(L, update->lease) != 1) {
+    lua_pop(L, 2);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to create Lua acquire_for_update lease", NULL,
+                        NULL, NULL);
+  }
+  lua_setfield(L, -2, "lease");
+  if (update->state.reader != NULL) {
+    rc = lc_sink_to_memory(&sink, error);
+    if (rc != LC_OK) {
+      lua_pop(L, 2);
+      return rc;
+    }
+    rc = lc_copy(update->state.reader, sink, &written, error);
+    (void)written;
+    if (rc != LC_OK) {
+      lc_sink_close(sink);
+      lua_pop(L, 2);
+      return rc;
+    }
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+    if (rc != LC_OK) {
+      lc_sink_close(sink);
+      lua_pop(L, 2);
+      return rc;
+    }
+    lua_pushlstring(L, (const char *)bytes, length);
+    lc_sink_close(sink);
+    sink = NULL;
+  } else {
+    lua_pushnil(L);
+  }
+  lua_setfield(L, -2, "state");
+  lua_newtable(L);
+  lcdc_set_bool_field(L, "has_state", update->state.has_state);
+  lcdc_set_bool_field(L, "no_content", !update->state.has_state);
+  lcdc_set_string_field(L, "content_type", update->state.content_type);
+  lcdc_set_string_field(L, "etag", update->state.etag);
+  lcdc_set_integer_field(L, "version", update->state.version);
+  lcdc_set_integer_field(L, "fencing_token", update->state.fencing_token);
+  lcdc_set_string_field(L, "correlation_id", update->state.correlation_id);
+  lua_setfield(L, -2, "state_meta");
+
+  if (lua_pcall(L, 1, 2, 0) != 0) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      lcdc_lua_error_message(L, -1), NULL, NULL, NULL);
+    lua_pop(L, 1);
+    return rc;
+  }
+  if ((!lua_isnil(L, -1)) ||
+      (lua_isboolean(L, -2) && !lua_toboolean(L, -2)) ||
+      lua_isstring(L, -2)) {
+    rc = lcdc_lua_error_to_lc_error(L, !lua_isnil(L, -1) ? -1 : -2, error);
+    lua_pop(L, 2);
+    return rc;
+  }
+  lua_pop(L, 2);
+  return LC_OK;
+}
+
+static int lcdc_client_acquire_for_update(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_acquire_req req;
+  lc_error error;
+  lcdc_acquire_for_update_handler handler;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_acquire_req_init(&req);
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  luaL_checktype(L, 3, LUA_TFUNCTION);
+  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  lcdc_require_string_field(L, 2, "key", &req.key);
+  lcdc_require_string_field(L, 2, "owner", &req.owner);
+  lcdc_opt_integer_field(L, 2, "ttl_seconds", &req.ttl_seconds);
+  lcdc_opt_integer_field(L, 2, "block_seconds", &req.block_seconds);
+  lcdc_opt_boolean_field(L, 2, "if_not_exists", &req.if_not_exists);
+  req.txn_id = lcdc_opt_string_field(L, 2, "txn_id");
+  handler.L = L;
+  lua_pushvalue(L, 3);
+  handler.handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  rc = lc_acquire_for_update(ud->client, &req,
+                             lcdc_acquire_for_update_handler_call, &handler,
+                             &error);
+  luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
 }
 
 static int lcdc_client_describe(lua_State *L) {
@@ -2302,6 +2489,7 @@ static const luaL_Reg lcdc_client_methods[] = {
     {"info", lcdc_client_info},
     {"close", lcdc_client_close},
     {"acquire", lcdc_client_acquire},
+    {"acquire_for_update", lcdc_client_acquire_for_update},
     {"describe", lcdc_client_describe},
     {"get", lcdc_client_get},
     {"update", lcdc_client_update},

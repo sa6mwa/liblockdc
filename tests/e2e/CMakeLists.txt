@@ -77,6 +77,18 @@ if(TARGET lc_example_acquire_lease_lifecycle)
   )
 endif()
 
+if(TARGET lc_example_acquire_for_update)
+  add_test(NAME lc_example_smoke_acquire_for_update
+    COMMAND $<TARGET_FILE:lc_example_acquire_for_update>
+  )
+  set_tests_properties(lc_example_smoke_acquire_for_update PROPERTIES
+    LABELS "e2e;examples"
+    PASS_REGULAR_EXPRESSION "acquire_for_update updated key"
+    RUN_SERIAL TRUE
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+endif()
+
 if(TARGET lc_example_client_and_lease_methods)
   add_test(NAME lc_example_smoke_client_and_lease_methods
     COMMAND $<TARGET_FILE:lc_example_client_and_lease_methods>
@@ -146,6 +158,18 @@ lc_add_lua_e2e_test(
   lc_e2e_lua_example_acquire_update_json
   "${CMAKE_SOURCE_DIR}/examples/lua/acquire_update_json.lua"
   ENV_OVERRIDES "LOCKDC_KEY=tests/lua/e2e-acquire-update-json;LOCKDC_OWNER=lua-e2e-acquire-update-json"
+)
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_example_acquire_for_update
+  "${CMAKE_SOURCE_DIR}/examples/lua/acquire_for_update.lua"
+  ENV_OVERRIDES "LOCKDC_KEY=tests/lua/e2e-example-acquire-for-update;LOCKDC_OWNER=lua-e2e-example-acquire-for-update"
+)
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_acquire_for_update
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_acquire_for_update.lua"
+  ENV_OVERRIDES "LOCKDC_KEY=tests/lua/e2e-acquire-for-update;LOCKDC_OWNER=lua-e2e-acquire-for-update"
 )
 
 lc_add_lua_e2e_test(

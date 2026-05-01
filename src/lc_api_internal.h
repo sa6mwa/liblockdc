@@ -180,6 +180,10 @@ lc_message *lc_message_new(lc_client_handle *client,
 
 int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                              lc_lease **out, lc_error *error);
+int lc_client_acquire_for_update_method(
+    lc_client *self, const lc_acquire_req *req,
+    lc_acquire_for_update_handler_fn handler, void *handler_context,
+    lc_error *error);
 int lc_client_describe_method(lc_client *self, const lc_describe_req *req,
                               lc_describe_res *out, lc_error *error);
 int lc_client_get_method(lc_client *self, const char *key,

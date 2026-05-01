@@ -2,6 +2,8 @@
 #include "lc_internal.h"
 #include "lc_log.h"
 
+#include <errno.h>
+
 static void *lc_subscribe_handler_main(void *context);
 
 static void lc_client_log_operation_error(lc_client_handle *client,
@@ -171,6 +173,172 @@ int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   lc_engine_acquire_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;
+}
+
+typedef struct lc_acquire_for_update_file_sink {
+  FILE *fp;
+} lc_acquire_for_update_file_sink;
+
+static int lc_acquire_for_update_sink_write(lc_sink *self, const void *bytes,
+                                            size_t count, lc_error *error) {
+  lc_acquire_for_update_file_sink *sink;
+
+  sink = (lc_acquire_for_update_file_sink *)self->impl;
+  if (sink == NULL || sink->fp == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "acquire_for_update sink is closed", NULL, NULL, NULL);
+  }
+  if (count == 0U) {
+    return 1;
+  }
+  if (fwrite(bytes, 1U, count, sink->fp) != count) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to write acquire_for_update snapshot",
+                        strerror(errno), NULL, NULL);
+  }
+  return 1;
+}
+
+static void lc_acquire_for_update_sink_close(lc_sink *self) {
+  (void)self;
+}
+
+int lc_client_acquire_for_update_method(
+    lc_client *self, const lc_acquire_req *req,
+    lc_acquire_for_update_handler_fn handler, void *handler_context,
+    lc_error *error) {
+  lc_client_handle *client;
+  lc_lease *lease;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_error handler_error;
+  lc_error release_error;
+  lc_acquire_for_update_file_sink file_sink;
+  lc_sink sink;
+  lc_acquire_for_update_context update;
+  FILE *fp;
+  FILE *snapshot_fp;
+  int rc;
+  int release_rc;
+
+  if (self == NULL || req == NULL || handler == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "acquire_for_update requires self, req, and handler",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  lease = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  lc_get_opts_init(&get_opts);
+  lc_release_req_init(&release_req);
+  lc_error_init(&handler_error);
+  lc_error_init(&release_error);
+  fp = NULL;
+  snapshot_fp = NULL;
+  memset(&update, 0, sizeof(update));
+
+  {
+    pslog_field fields[2];
+
+    fields[0] = lc_log_str_field("key", req->key);
+    fields[1] = lc_log_str_field("owner", req->owner);
+    lc_log_trace(client->logger, "client.acquire_for_update.start", fields,
+                 2U);
+  }
+
+  rc = lc_acquire(self, req, &lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  fp = tmpfile();
+  if (fp == NULL) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to create acquire_for_update snapshot file",
+                      strerror(errno), NULL, NULL);
+    goto release_and_return;
+  }
+  file_sink.fp = fp;
+  sink.write = lc_acquire_for_update_sink_write;
+  sink.close = lc_acquire_for_update_sink_close;
+  sink.impl = &file_sink;
+
+  rc = lc_lease_get(lease, &sink, &get_opts, &get_res, error);
+  if (rc != LC_OK) {
+    goto release_and_return;
+  }
+  if (fflush(fp) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to flush acquire_for_update snapshot",
+                      strerror(errno), NULL, NULL);
+    goto release_and_return;
+  }
+  rewind(fp);
+
+  update.lease = lease;
+  update.state.has_state = !get_res.no_content;
+  update.state.content_type = get_res.content_type;
+  update.state.etag = get_res.etag;
+  update.state.version = get_res.version;
+  update.state.fencing_token = get_res.fencing_token;
+  update.state.correlation_id = get_res.correlation_id;
+  if (!get_res.no_content) {
+    snapshot_fp = fp;
+    fp = NULL;
+    update.state.reader = lc_source_from_open_file(snapshot_fp, 1);
+    snapshot_fp = NULL;
+    if (update.state.reader == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to wrap acquire_for_update snapshot source",
+                        NULL, NULL, NULL);
+      goto release_and_return;
+    }
+  }
+
+  rc = handler(handler_context, &update, &handler_error);
+  if (update.state.reader != NULL) {
+    lc_source_close(update.state.reader);
+    update.state.reader = NULL;
+  }
+  if (rc != LC_OK) {
+    release_req.rollback = 1;
+    if (error != NULL) {
+      *error = handler_error;
+      lc_error_init(&handler_error);
+    }
+    goto release_and_return;
+  }
+
+release_and_return:
+  if (fp != NULL) {
+    fclose(fp);
+    fp = NULL;
+  }
+  release_rc = lc_lease_release(lease, &release_req, &release_error);
+  if (release_rc != LC_OK && rc == LC_OK) {
+    rc = release_rc;
+    if (error != NULL) {
+      *error = release_error;
+      lc_error_init(&release_error);
+    }
+  }
+  if (release_rc == LC_OK) {
+    lease = NULL;
+  } else {
+    lc_lease_close(lease);
+  }
+  lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&handler_error);
+  lc_error_cleanup(&release_error);
+  if (rc == LC_OK) {
+    pslog_field fields[1];
+
+    fields[0] = lc_log_str_field("key", req->key);
+    lc_log_info(client->logger, "client.acquire_for_update.success", fields,
+                1U);
+  }
+  return rc;
 }
 
 int lc_client_describe_method(lc_client *self, const lc_describe_req *req,

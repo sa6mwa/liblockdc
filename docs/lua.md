@@ -35,8 +35,8 @@ SDK root or make `lockdc.pc` visible to `pkg-config`.
 
 The generated rockspec expects:
 
-- `lockdc`
-- `lonejson == 0.4.1-1`
+- package `lockdc`
+- `lonejson == 0.5.0-1`
 - Lua `>= 5.5, < 5.6`
 
 ## Dependency ownership
@@ -46,16 +46,21 @@ The generated rockspec expects:
 That means:
 
 - `liblockdc` ships the `lockdc` Lua module
-- `liblockdc` ships the Lua-facing packaging needed to consume `lonejson`
-- downstream consumers such as `vectis` should use the `lonejson` Lua binding
-  shipped with the `liblockdc` SDK distribution instead of bundling a second,
-  competing copy
+- the `lockdc` rock declares the supported `lonejson` Lua rock version
+- downstream consumers such as `vectis` should use the same `lonejson` Lua
+  dependency declared by `lockdc` instead of bundling a competing copy
 
 This keeps the Lua dependency graph coherent:
 
 - one SDK owner for the public lock client and JSON contract
 - one Lua JSON binding version aligned with the public `liblockdc` API surface
 - one installation/import path for downstream workflow runtimes
+
+The Lua binding does not expose `pslog` configuration. Native logging is a
+`liblockdc` SDK concern; normal Lua rock users get the SDK no-op logger
+default. Embedded hosts that need a shared framework logger should create the
+`lc_client` in C with their own `pslog_logger *` and wrap that client for Lua
+through a host-side integration layer.
 
 ## Public entrypoints
 
@@ -115,6 +120,7 @@ Common client methods:
 - `client:info()`
 - `client:close()`
 - `client:acquire(req)`
+- `client:acquire_for_update(req, handler)`
 - `client:describe(req)`
 - `client:get_raw(req, dest)`
 - `client:get_json(req)`
@@ -149,6 +155,42 @@ Common client methods:
 - `client:start_consumer(...)`
 
 The Lua binding intentionally excludes the TC/XA administrative APIs.
+
+`client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
+update, release workflow. The handler receives a context table with:
+
+- `lease`
+- `state`
+- `state_meta`
+- `load_json()`
+- `update_raw(body, req)`
+- `update_json(value, req)`
+- `mutate(req)`
+- `mutate_local(req)`
+- `metadata(req)`
+- `remove(req)`
+- `keepalive(req)`
+
+The helper always attempts to release the lease after the handler returns.
+Handler success commits staged changes; handler failure releases with rollback
+so partial callback updates are not published. Return `nil` from the handler
+for success, or return an error value to report failure and roll back:
+
+```lua
+local ok, err = client:acquire_for_update({
+  key = "orders/42",
+  owner = "worker-1",
+  ttl_seconds = 60,
+}, function(af)
+  local state, meta = af:load_json()
+  if state == nil and (meta == nil or not meta.no_content) then
+    return "failed to load state"
+  end
+  state = state or {}
+  state.status = "processing"
+  return af:update_json(state)
+end)
+```
 
 ## Lease API
 
@@ -240,6 +282,7 @@ separate blocking consumers if you need to consume separate queues from Lua.
 Pedagogic examples live in:
 
 - `examples/lua/acquire_update_json.lua`
+- `examples/lua/acquire_for_update.lua`
 - `examples/lua/queue_roundtrip.lua`
 - `examples/lua/namespace_config.lua`
 - `examples/lua/consumer_handler.lua`

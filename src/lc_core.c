@@ -1190,6 +1190,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
   client->pub.acquire = lc_client_acquire_method;
+  client->pub.acquire_for_update = lc_client_acquire_for_update_method;
   client->pub.describe = lc_client_describe_method;
   client->pub.get = lc_client_get_method;
   client->pub.load = lc_client_load_method;

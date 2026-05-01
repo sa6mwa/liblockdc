@@ -18,8 +18,9 @@ Static-only SDK bundles are for `vectis` or other embedded-Lua build graphs,
 not for a normal `luarocks install` flow.
 
 `liblockdc` owns this Lua dependency layout. Downstream consumers such as
-`vectis` should use the `lockdc` and `lonejson` Lua modules shipped with the
-`liblockdc` SDK bundle rather than repackaging a separate `lockd` Lua client.
+`vectis` should use the `lockdc` Lua module and the `lonejson` Lua rock version
+declared by `lockdc` rather than repackaging a separate `lockd` Lua client or a
+competing JSON binding.
 
 When running from this repository after building and staging the SDK locally,
 one workable path is:
@@ -52,6 +53,9 @@ make dev-up
 
 - `acquire_update_json.lua`
   acquire a lease, read JSON state, update JSON state, and release
+- `acquire_for_update.lua`
+  wraps the same acquire, snapshot, update, and release lifecycle for callback
+  code; successful handlers commit and failed handlers roll back
 - `queue_roundtrip.lua`
   enqueue a JSON payload, dequeue it, inspect it, and acknowledge it
 - `namespace_config.lua`

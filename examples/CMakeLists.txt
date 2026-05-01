@@ -34,6 +34,9 @@ endfunction()
 add_executable(lc_example_acquire_lease_lifecycle acquire_lease_lifecycle.c)
 lc_configure_example_target(lc_example_acquire_lease_lifecycle)
 
+add_executable(lc_example_acquire_for_update acquire_for_update.c)
+lc_configure_example_target(lc_example_acquire_for_update)
+
 add_executable(lc_example_client_and_lease_methods client_and_lease_methods.c)
 lc_configure_example_target(lc_example_client_and_lease_methods)
 

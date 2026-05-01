@@ -32,7 +32,7 @@ endforeach()
 file(READ "${generated_rockspec_path}" rockspec_text)
 foreach(required_snippet
     "package = \"lockdc\""
-    "\"lonejson == 0.4.1-1\""
+    "\"lonejson == 0.5.0-1\""
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v"
     "scripts/build_lockdc_lua_rock.sh"

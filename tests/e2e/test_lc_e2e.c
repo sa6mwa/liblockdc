@@ -25,6 +25,8 @@ LONEJSON_MAP_DEFINE(e2e_status_map, e2e_status_doc, e2e_status_fields);
 
 static void assert_lc_ok(int rc, lc_error *error);
 static void assert_lc_server_error(int rc, lc_error *error, long http_status);
+static int buffer_contains(const void *bytes, size_t length,
+                           const char *needle);
 
 static void save_json_text_or_die(lc_lease *lease, const char *json_text,
                                   lc_error *error) {
@@ -37,6 +39,74 @@ static void save_json_text_or_die(lc_lease *lease, const char *json_text,
   rc = lease->update(lease, src, NULL, error);
   lc_source_close(src);
   assert_lc_ok(rc, error);
+}
+
+typedef struct acquire_for_update_e2e_state {
+  const char *expected;
+  int saw_snapshot;
+} acquire_for_update_e2e_state;
+
+static int acquire_for_update_e2e_handler(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  acquire_for_update_e2e_state *state;
+  lc_sink *sink;
+  lc_source *src;
+  const void *bytes;
+  size_t length;
+  size_t written;
+  int rc;
+
+  state = (acquire_for_update_e2e_state *)context;
+  sink = NULL;
+  src = NULL;
+  assert_non_null(update);
+  assert_non_null(update->lease);
+  assert_true(update->state.has_state);
+  assert_non_null(update->state.reader);
+  assert_true(update->state.version >= 1L);
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  rc = lc_copy(update->state.reader, sink, &written, error);
+  assert_lc_ok(rc, error);
+  assert_true(written > 0U);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  assert_lc_ok(rc, error);
+  assert_true(buffer_contains(bytes, length, state->expected));
+  state->saw_snapshot = 1;
+  lc_sink_close(sink);
+
+  rc = lc_source_from_memory(
+      "{\"value\":2,\"via\":\"acquire-for-update\"}",
+      strlen("{\"value\":2,\"via\":\"acquire-for-update\"}"), &src, error);
+  assert_lc_ok(rc, error);
+  rc = update->lease->update(update->lease, src, NULL, error);
+  lc_source_close(src);
+  return rc;
+}
+
+static int acquire_for_update_failing_handler(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  lc_source *src;
+  int rc;
+
+  (void)context;
+  src = NULL;
+  assert_non_null(update);
+  assert_non_null(update->lease);
+  rc = lc_source_from_memory(
+      "{\"value\":3,\"via\":\"failed-acquire-for-update\"}",
+      strlen("{\"value\":3,\"via\":\"failed-acquire-for-update\"}"), &src,
+      error);
+  assert_lc_ok(rc, error);
+  rc = update->lease->update(update->lease, src, NULL, error);
+  lc_source_close(src);
+  assert_lc_ok(rc, error);
+  if (error != NULL) {
+    error->code = LC_ERR_INVALID;
+    error->message = strdup("intentional acquire_for_update handler failure");
+    assert_non_null(error->message);
+  }
+  return LC_ERR_INVALID;
 }
 
 static void write_temp_file_or_die(char *template_path,
@@ -365,6 +435,149 @@ static void test_disk_lease_state_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_true(buffer_contains(bytes, length, "\"kind\":\"e2e\""));
   assert_true(buffer_contains(bytes, length, "\"tags\":[\"disk\"]"));
+
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_acquire_for_update_roundtrip(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  char key[96];
+  acquire_for_update_e2e_state handler_state;
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_get_opts_init(&get_opts);
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&handler_state, 0, sizeof(handler_state));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("disk-acquire-for-update", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e-seed";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  save_json_text_or_die(lease, "{\"value\":1}", &error);
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire_req.owner = "lc-e2e-acquire-for-update";
+  handler_state.expected = "\"value\":1";
+  rc = lc_acquire_for_update(client, &acquire_req,
+                             acquire_for_update_e2e_handler, &handler_state,
+                             &error);
+  assert_lc_ok(rc, &error);
+  assert_true(handler_state.saw_snapshot);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  get_opts.public_read = 1;
+  rc = client->get(client, key, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(get_res.no_content, 0);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(buffer_contains(bytes, length, "\"value\":2"));
+  assert_true(buffer_contains(bytes, length, "\"via\":\"acquire-for-update\""));
+
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_acquire_for_update_handler_error_rolls_back(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  char key[96];
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_get_opts_init(&get_opts);
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("disk-acquire-for-update-error", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e-seed";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  save_json_text_or_die(lease, "{\"value\":1}", &error);
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire_req.owner = "lc-e2e-acquire-for-update-error";
+  rc = lc_acquire_for_update(client, &acquire_req,
+                             acquire_for_update_failing_handler, NULL, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_non_null(error.message);
+  assert_string_equal(error.message,
+                      "intentional acquire_for_update handler failure");
+  lc_error_cleanup(&error);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  get_opts.public_read = 1;
+  rc = client->get(client, key, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(get_res.no_content, 0);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(buffer_contains(bytes, length, "\"value\":1"));
+  assert_false(
+      buffer_contains(bytes, length, "\"via\":\"failed-acquire-for-update\""));
 
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
@@ -2581,6 +2794,8 @@ static void test_s3_dequeue_with_state_roundtrip(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
+      cmocka_unit_test(test_disk_acquire_for_update_roundtrip),
+      cmocka_unit_test(test_disk_acquire_for_update_handler_error_rolls_back),
       cmocka_unit_test(test_disk_acquire_if_not_exists_conflict),
       cmocka_unit_test(test_disk_state_cas_failure_modes),
       cmocka_unit_test(test_disk_query_rejects_invalid_inputs),

@@ -1129,6 +1129,8 @@ int lc_engine_http_json_request_stream(
     int should_retry;
     lc_engine_json_http_state state;
     lonejson_curl_upload body_upload;
+    size_t measured_body_length;
+    int has_measured_body_length;
 
     lc_engine_http_result_cleanup(result);
     lc_engine_buffer_init(&url);
@@ -1139,6 +1141,8 @@ int lc_engine_http_json_request_stream(
     memset(&body_upload, 0, sizeof(body_upload));
     memset(error_buffer, 0, sizeof(error_buffer));
     memset(&state, 0, sizeof(state));
+    measured_body_length = 0U;
+    has_measured_body_length = 0;
     state.result = result;
     state.error = error;
     state.response_map = response_map;
@@ -1218,6 +1222,16 @@ int lc_engine_http_json_request_stream(
 
     if (body_map != NULL) {
       lonejson_status upload_status;
+      lonejson_error measure_error;
+
+      lonejson_error_init(&measure_error);
+      upload_status = lonejson_generator_measure(
+          body_map, body_src, &measured_body_length, body_options,
+          &measure_error);
+      if (upload_status == LONEJSON_STATUS_OK &&
+          (size_t)(curl_off_t)measured_body_length == measured_body_length) {
+        has_measured_body_length = 1;
+      }
 
       upload_status = lonejson_curl_upload_init(&body_upload, body_map,
                                                 body_src, body_options);
@@ -1230,8 +1244,16 @@ int lc_engine_http_json_request_stream(
       }
       if (strcmp(method, "POST") == 0) {
         curl_easy_setopt(easy, CURLOPT_POST, 1L);
+        if (has_measured_body_length) {
+          curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE,
+                           (curl_off_t)measured_body_length);
+        }
       } else {
         curl_easy_setopt(easy, CURLOPT_UPLOAD, 1L);
+        if (has_measured_body_length) {
+          curl_easy_setopt(easy, CURLOPT_INFILESIZE_LARGE,
+                           (curl_off_t)measured_body_length);
+        }
       }
       curl_easy_setopt(easy, CURLOPT_READFUNCTION, lonejson_curl_read_callback);
       curl_easy_setopt(easy, CURLOPT_READDATA, &body_upload);

@@ -241,6 +241,55 @@ local function test_subscribe_ack_and_error_paths()
   assert_eq(failure_message.last_nack_req.intent, 'failure', 'failed handler should nack with failure intent')
 end
 
+local function test_acquire_for_update_propagates_sdk_failure_shape()
+  local expected_err = { message = 'update failed' }
+  local lease_core = {
+    closed = false,
+    update = function()
+      return nil, expected_err
+    end,
+    close = function(self)
+      self.closed = true
+    end,
+  }
+  local client_core = {}
+
+  client_core.acquire_for_update = function(_, _req, handler)
+    local result, handler_err = handler({
+      lease = lease_core,
+      state = '{"value":1}',
+      state_meta = {
+        has_state = true,
+        no_content = false,
+      },
+    })
+    if handler_err ~= nil then
+      return nil, handler_err
+    end
+    if result == false or type(result) == 'string' then
+      return nil, result
+    end
+    return true
+  end
+
+  client_core.close = function() end
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  local ok, err = client:acquire_for_update({
+    key = 'state-key',
+    owner = 'worker-1',
+  }, function(af)
+    return af:update_json({ value = 2 })
+  end)
+
+  assert_eq(ok, nil, 'acquire_for_update should fail when handler returns nil, err')
+  assert_eq(err, expected_err, 'acquire_for_update should preserve the SDK error table')
+  assert_truthy(lease_core.closed, 'acquire_for_update should close the facade lease after handler return')
+end
+
 local function test_subscribe_with_state_and_service_lifecycle()
   local state_lease = {
     closed = false,
@@ -468,6 +517,7 @@ end
 test_json_helpers()
 test_request_flattening_and_default_content_type()
 test_subscribe_ack_and_error_paths()
+test_acquire_for_update_propagates_sdk_failure_shape()
 test_subscribe_with_state_and_service_lifecycle()
 test_watch_queue_change_detection()
 test_json_null_roundtrip_helpers()

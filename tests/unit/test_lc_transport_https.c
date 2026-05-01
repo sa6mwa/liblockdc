@@ -3896,7 +3896,8 @@ static void test_public_lease_save_uses_mapped_lonejson_upload(void **state) {
       "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
   static const char *update_headers[] = {
       "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
+      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4",
+      "Content-Length: 11"};
   static const char *update_response_headers[] = {
       "X-Correlation-Id: corr-update", "Content-Type: application/json"};
   static const char *update_body[] = {"{\"value\":2}"};

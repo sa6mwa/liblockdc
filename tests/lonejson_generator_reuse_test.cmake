@@ -18,7 +18,7 @@ set(download_root "${test_root}/downloads")
 set(configure_script "${dependency_build_root}/lonejson/src/configure.cmake")
 set(lonejson_build_dir "${dependency_build_root}/lonejson/build")
 set(lonejson_cache "${lonejson_build_dir}/CMakeCache.txt")
-set(lonejson_asset "${download_root}/lonejson-0.4.1.h.gz")
+set(lonejson_asset "${download_root}/lonejson-0.5.0.h.gz")
 set(lonejson_header "${test_root}/lonejson.h")
 
 file(REMOVE_RECURSE "${test_root}")

@@ -23,6 +23,35 @@ typedef struct lc_source lc_source;
 /** Opaque byte sink used for downloads and streamed response bodies. */
 typedef struct lc_sink lc_sink;
 
+/** Snapshot fetched by `acquire_for_update()` before invoking the handler. */
+typedef struct lc_state_snapshot {
+  /** Streamed private state payload. `NULL` when `has_state` is zero. */
+  lc_source *reader;
+  /** Non-zero when the key currently has a committed state document. */
+  int has_state;
+  /** State content type returned by lockd. */
+  const char *content_type;
+  /** State entity tag returned by lockd. */
+  const char *etag;
+  /** State version returned by lockd. */
+  long version;
+  /** Current fencing token returned by lockd. */
+  long fencing_token;
+  /** Correlation id for the snapshot read. */
+  const char *correlation_id;
+} lc_state_snapshot;
+
+/** Context passed to `lc_acquire_for_update_handler_fn`. */
+typedef struct lc_acquire_for_update_context {
+  /**
+   * Active lease handle. Borrowed for the duration of the callback; do not
+   * close or release it from the handler because the helper releases it.
+   */
+  lc_lease *lease;
+  /** Private state snapshot fetched before the callback. */
+  lc_state_snapshot state;
+} lc_acquire_for_update_context;
+
 /**
  * Structured error returned by all public operations.
  *
@@ -37,6 +66,10 @@ typedef struct lc_error {
   char *server_code;
   char *correlation_id;
 } lc_error;
+
+/** Callback invoked while an acquire-for-update lease is held. */
+typedef int (*lc_acquire_for_update_handler_fn)(
+    void *context, lc_acquire_for_update_context *update, lc_error *error);
 
 /** Callback used by `lc_source_from_callbacks()` to fill `buffer`.
  *
@@ -1624,6 +1657,22 @@ struct lc_client {
    * unset. */
   const char *default_namespace;
   void *impl;
+  /**
+   * Acquires a lease, fetches the private state snapshot, invokes `handler`,
+   * closes the snapshot, and releases the lease before returning.
+   *
+   * The `lc_acquire_for_update_context`, its `lease`, and its `state.reader`
+   * are borrowed and valid only for the duration of the handler call. The
+   * helper owns the final release, so handlers must not close or release the
+   * borrowed lease. Handler success commits staged changes; handler failure
+   * releases with rollback.
+   *
+   * This slot is appended after the original public fields to preserve method
+   * offsets for binaries compiled against older headers.
+   */
+  int (*acquire_for_update)(lc_client *self, const lc_acquire_req *req,
+                            lc_acquire_for_update_handler_fn handler,
+                            void *handler_context, lc_error *error);
 };
 
 /** Returns the semantic version string compiled into this build. */
@@ -1825,6 +1874,15 @@ void lc_attachment_get_res_cleanup(lc_attachment_get_res *response);
  */
 int lc_acquire(lc_client *client, const lc_acquire_req *req, lc_lease **out,
                lc_error *error);
+/**
+ * Acquires a lease, fetches the private state snapshot, runs `handler`, and
+ * always attempts to release the lease before returning. The handler receives a
+ * borrowed lease and must not close or release it. Handler success commits
+ * staged changes; handler failure releases with rollback.
+ */
+int lc_acquire_for_update(lc_client *client, const lc_acquire_req *req,
+                          lc_acquire_for_update_handler_fn handler,
+                          void *handler_context, lc_error *error);
 /** Describes the current lease and state metadata for a key. */
 int lc_describe(lc_client *client, const lc_describe_req *req,
                 lc_describe_res *out, lc_error *error);
