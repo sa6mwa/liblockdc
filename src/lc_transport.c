@@ -1934,6 +1934,16 @@ pslog_logger *lc_engine_client_logger(lc_engine_client *client) {
   return client->logger;
 }
 
+void lc_engine_client_set_cancel_check(lc_engine_client *client,
+                                       int (*cancel_check)(void *context),
+                                       void *cancel_context) {
+  if (client == NULL) {
+    return;
+  }
+  client->cancel_check = cancel_check;
+  client->cancel_context = cancel_context;
+}
+
 void lc_engine_client_close(lc_engine_client *client) {
   size_t index;
 

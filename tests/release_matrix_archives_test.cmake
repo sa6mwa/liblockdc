@@ -56,11 +56,6 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
     list(APPEND lockdc_expected_checksum_artifacts
         "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz"
     )
-    if(LOCKDC_TARGET_ID MATCHES "apple-darwin$")
-        list(APPEND lockdc_expected_artifacts
-            "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}-smoke.zip"
-        )
-    endif()
 endforeach()
 
 if(lockdc_release_version STREQUAL "")
@@ -119,6 +114,17 @@ set(lockdc_checksums_path "${lockdc_dist_dir}/${lockdc_checksums_name}")
 if(NOT EXISTS "${lockdc_checksums_path}")
     message(FATAL_ERROR "missing checksum manifest: ${lockdc_checksums_path}")
 endif()
+
+foreach(lockdc_release_artifact IN LISTS lockdc_actual_artifacts)
+    lockdc_assert_release_artifact_has_no_private_traces(
+        "${lockdc_dist_dir}/${lockdc_release_artifact}"
+        "dist release artifact"
+    )
+endforeach()
+lockdc_assert_file_has_no_private_traces(
+    "${lockdc_checksums_path}"
+    "dist release artifact"
+)
 
 execute_process(
     COMMAND sha256sum --check "${lockdc_checksums_name}"

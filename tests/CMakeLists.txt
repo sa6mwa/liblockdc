@@ -115,6 +115,11 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NO
     "LOCKDC_LUA_CORE_DIR=${CMAKE_BINARY_DIR}/lua"
     ${LOCKDC_LUA_TEST_ENV_COMMON}
   )
+  if(UNIX AND NOT APPLE)
+    list(APPEND lockdc_lua_core_smoke_env
+      "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
+    )
+  endif()
   set_tests_properties(lua_binding_core_smoke_test PROPERTIES
     ENVIRONMENT "${lockdc_lua_core_smoke_env}"
   )

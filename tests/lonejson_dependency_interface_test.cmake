@@ -89,7 +89,19 @@ foreach(symbol IN ITEMS
     lonejson_curl_upload_cleanup
     lonejson_generator_init
     lonejson_generator_read
-    lonejson_generator_cleanup)
+    lonejson_generator_cleanup
+    lonejson_default_sse_options
+    lonejson_sse_open
+    lonejson_sse_push
+    lonejson_sse_finish
+    lonejson_sse_push_json
+    lonejson_sse_finish_json
+    lonejson_sse_close
+    lonejson_default_multipart_options
+    lonejson_multipart_open
+    lonejson_multipart_push
+    lonejson_multipart_finish
+    lonejson_multipart_close)
     assert_contains("${static_symbols}" "${symbol}" "${symbol} in liblonejson.a")
     assert_contains("${shared_symbols}" "${symbol}" "${symbol} in liblonejson.so.0")
 endforeach()
@@ -105,7 +117,19 @@ foreach(alias_symbol IN ITEMS
     lj_curl_upload_cleanup
     lj_generator_init
     lj_generator_read
-    lj_generator_cleanup)
+    lj_generator_cleanup
+    lj_default_sse_options
+    lj_sse_open
+    lj_sse_push
+    lj_sse_finish
+    lj_sse_push_json
+    lj_sse_finish_json
+    lj_sse_close
+    lj_default_multipart_options
+    lj_multipart_open
+    lj_multipart_push
+    lj_multipart_finish
+    lj_multipart_close)
     assert_not_contains("${static_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.a")
     assert_not_contains("${shared_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.so.0")
 endforeach()

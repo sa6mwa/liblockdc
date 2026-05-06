@@ -28,6 +28,7 @@ endfunction()
 
 lockdc_import_cache_path(LOCKDC_EXTERNAL_ROOT)
 lockdc_import_cache_path(LOCKDC_DEPENDENCY_BUILD_ROOT)
+lockdc_import_cache_path(CMAKE_STRIP)
 lockdc_import_cache_path(CMAKE_INSTALL_NAME_TOOL)
 lockdc_import_cache_path(LOCKDC_OTOOL)
 
@@ -156,6 +157,37 @@ function(lockdc_fix_darwin_install_names package_root)
 endfunction()
 
 lockdc_fix_darwin_install_names("${package_root}")
+
+function(lockdc_strip_packaged_artifact artifact_path)
+    if(NOT CMAKE_STRIP OR NOT EXISTS "${CMAKE_STRIP}")
+        return()
+    endif()
+    if(NOT EXISTS "${artifact_path}" OR IS_SYMLINK "${artifact_path}")
+        return()
+    endif()
+    if(LOCKDC_TARGET_ID MATCHES "apple-darwin$" AND artifact_path MATCHES "\\.a$")
+        return()
+    endif()
+
+    execute_process(
+        COMMAND "${CMAKE_STRIP}" -S "${artifact_path}"
+        RESULT_VARIABLE _lockdc_strip_result
+        ERROR_VARIABLE _lockdc_strip_error
+    )
+    if(NOT _lockdc_strip_result EQUAL 0)
+        message(FATAL_ERROR "failed to strip ${artifact_path}\n${_lockdc_strip_error}")
+    endif()
+endfunction()
+
+file(GLOB _lockdc_owned_library_artifacts
+    LIST_DIRECTORIES false
+    "${package_root}/lib/liblockdc.a"
+    "${package_root}/lib/liblockdc.so*"
+    "${package_root}/lib/liblockdc.*.dylib"
+)
+foreach(_lockdc_owned_library_artifact IN LISTS _lockdc_owned_library_artifacts)
+    lockdc_strip_packaged_artifact("${_lockdc_owned_library_artifact}")
+endforeach()
 
 lockdc_copy_required_license_named(
     "libpslog"

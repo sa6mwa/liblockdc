@@ -67,6 +67,7 @@ typedef struct https_expectation {
   size_t response_header_count;
   const char *response_body;
   const char *expected_client_cn;
+  size_t response_body_chunk_size;
 } https_expectation;
 
 typedef struct https_tls_material {
@@ -98,6 +99,21 @@ typedef struct subscribe_capture {
   char payload[256];
   size_t payload_length;
 } subscribe_capture;
+
+typedef struct canceling_subscribe_capture {
+  subscribe_capture capture;
+  int cancel_requested;
+} canceling_subscribe_capture;
+
+typedef struct watch_capture {
+  int event_count;
+  char namespace_name[64];
+  char queue[64];
+  char head_message_id[64];
+  char correlation_id[64];
+  long long changed_at_unix;
+  int available;
+} watch_capture;
 
 typedef struct test_enqueue_source {
   lc_source pub;
@@ -197,6 +213,34 @@ static int watch_event_sink(void *context,
   (void)context;
   (void)event;
   (void)error;
+  return 1;
+}
+
+static int watch_capture_sink(void *context,
+                              const lc_engine_queue_watch_event *event,
+                              lc_engine_error *error) {
+  watch_capture *capture;
+
+  (void)error;
+  capture = (watch_capture *)context;
+  capture->event_count += 1;
+  if (event->namespace_name != NULL) {
+    snprintf(capture->namespace_name, sizeof(capture->namespace_name), "%s",
+             event->namespace_name);
+  }
+  if (event->queue != NULL) {
+    snprintf(capture->queue, sizeof(capture->queue), "%s", event->queue);
+  }
+  if (event->head_message_id != NULL) {
+    snprintf(capture->head_message_id, sizeof(capture->head_message_id), "%s",
+             event->head_message_id);
+  }
+  if (event->correlation_id != NULL) {
+    snprintf(capture->correlation_id, sizeof(capture->correlation_id), "%s",
+             event->correlation_id);
+  }
+  capture->changed_at_unix = event->changed_at_unix;
+  capture->available = event->available;
   return 1;
 }
 
@@ -550,8 +594,25 @@ static int write_http_response(SSL *ssl, const https_expectation *expectation) {
     return 0;
   }
   if (body_length > 0U) {
-    return SSL_write(ssl, expectation->response_body, (int)body_length) ==
-           (int)body_length;
+    size_t body_offset;
+    size_t chunk_size;
+
+    if (expectation->response_body_chunk_size == 0U) {
+      return SSL_write(ssl, expectation->response_body, (int)body_length) ==
+             (int)body_length;
+    }
+    body_offset = 0U;
+    while (body_offset < body_length) {
+      chunk_size = body_length - body_offset;
+      if (chunk_size > expectation->response_body_chunk_size) {
+        chunk_size = expectation->response_body_chunk_size;
+      }
+      if (SSL_write(ssl, expectation->response_body + body_offset,
+                    (int)chunk_size) != (int)chunk_size) {
+        return 0;
+      }
+      body_offset += chunk_size;
+    }
   }
   return 1;
 }
@@ -1284,6 +1345,46 @@ static int capture_delivery_chunk(void *context, const void *bytes,
   return 1;
 }
 
+static int fail_delivery_chunk(void *context, const void *bytes, size_t count,
+                               lc_engine_error *error) {
+  (void)context;
+  (void)bytes;
+  (void)count;
+  error->code = LC_ENGINE_ERROR_TRANSPORT;
+  error->message = strdup("test payload chunk failure");
+  return 0;
+}
+
+static int test_cancel_check(void *context) {
+  canceling_subscribe_capture *capture;
+
+  capture = (canceling_subscribe_capture *)context;
+  return capture != NULL && capture->cancel_requested;
+}
+
+static int cancel_after_delivery_chunk(void *context, const void *bytes,
+                                       size_t count, lc_engine_error *error) {
+  canceling_subscribe_capture *capture;
+
+  capture = (canceling_subscribe_capture *)context;
+  assert_non_null(capture);
+  assert_true(capture_delivery_chunk(&capture->capture, bytes, count, error));
+  if (capture->capture.payload_length >= 11U) {
+    capture->cancel_requested = 1;
+  }
+  return 1;
+}
+
+static int fail_and_cancel_delivery_chunk(void *context, const void *bytes,
+                                          size_t count, lc_engine_error *error) {
+  canceling_subscribe_capture *capture;
+
+  capture = (canceling_subscribe_capture *)context;
+  assert_non_null(capture);
+  capture->cancel_requested = 1;
+  return fail_delivery_chunk(&capture->capture, bytes, count, error);
+}
+
 static int capture_delivery_end(void *context,
                                 const lc_engine_dequeue_response *delivery,
                                 lc_engine_error *error) {
@@ -1875,6 +1976,127 @@ test_queue_transport_rejects_overflowing_numeric_fields(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+static void test_watch_stream_filters_events_and_finishes_trailing_event(
+    void **state) {
+  static const char response_body[] =
+      "event: queue_noise\r\n"
+      "data: {not-json-but-skipped}\r\n"
+      "\r\n"
+      "event: queue_watch\r\n"
+      "data: {\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+      "\"available\":true,\"head_message_id\":\"msg-1\","
+      "\"changed_at_unix\":12345}";
+  static const char *watch_headers[] = {
+      "X-Correlation-Id: corr-watch-header",
+      "Content-Type: text/event-stream"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/queue/watch",
+       (const char *const[]){"Accept: text/event-stream",
+                             "Content-Type: application/json"},
+       2U, (const char *const[]){"\"namespace\":\"transport-ns\"",
+                                 "\"queue\":\"jobs\""},
+       2U, 0, 200, watch_headers,
+       sizeof(watch_headers) / sizeof(watch_headers[0]), response_body,
+       "liblockdc test client", 7U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_watch_queue_request watch_req;
+  watch_capture capture;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&watch_req, 0, sizeof(watch_req));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  client = NULL;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  watch_req.namespace_name = "transport-ns";
+  watch_req.queue = "jobs";
+  rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
+                                    &capture, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+  assert_int_equal(capture.event_count, 1);
+  assert_string_equal(capture.namespace_name, "transport-ns");
+  assert_string_equal(capture.queue, "jobs");
+  assert_string_equal(capture.head_message_id, "msg-1");
+  assert_string_equal(capture.correlation_id, "corr-watch-header");
+  assert_int_equal(capture.available, 1);
+  assert_int_equal(capture.changed_at_unix, 12345);
+
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_watch_stream_rejects_malformed_selected_event(void **state) {
+  static const char response_body[] =
+      "event: queue_watch\r\n"
+      "data: {\"namespace\":\"transport-ns\",\"queue\":\"jobs\",";
+  static const char *watch_headers[] = {
+      "X-Correlation-Id: corr-watch-bad",
+      "Content-Type: text/event-stream"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/queue/watch",
+       (const char *const[]){"Accept: text/event-stream",
+                             "Content-Type: application/json"},
+       2U, (const char *const[]){"\"namespace\":\"transport-ns\"",
+                                 "\"queue\":\"jobs\""},
+       2U, 0, 200, watch_headers,
+       sizeof(watch_headers) / sizeof(watch_headers[0]), response_body,
+       "liblockdc test client", 5U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_watch_queue_request watch_req;
+  watch_capture capture;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&watch_req, 0, sizeof(watch_req));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  client = NULL;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  watch_req.namespace_name = "transport-ns";
+  watch_req.queue = "jobs";
+  rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
+                                    &capture, &error);
+  assert_int_equal(rc, LC_ENGINE_ERROR_PROTOCOL);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_PROTOCOL);
+  assert_int_equal(capture.event_count, 0);
+
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
 static void
 test_queue_transport_preserves_typed_json_parse_errors(void **state) {
   static const char *queue_headers[] = {"Content-Type: application/json"};
@@ -2214,7 +2436,7 @@ test_subscribe_accepts_content_length_with_trailing_ows(void **state) {
                              "\"queue\":\"jobs\""},
        2U, 0, 200, response_headers,
        sizeof(response_headers) / sizeof(response_headers[0]), response_body,
-       "liblockdc test client"}};
+       "liblockdc test client", 3U}};
   https_tls_material material;
   https_testserver server;
   lc_engine_client_config config;
@@ -2252,6 +2474,371 @@ test_subscribe_accepts_content_length_with_trailing_ows(void **state) {
   assert_int_equal(capture.end_calls, 1);
   assert_string_equal(capture.message_id, "msg-1");
   assert_string_equal(capture.payload, "{\"ok\":true}");
+
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_subscribe_rejects_payload_without_content_length(void **state) {
+  static const char response_body[] =
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"meta\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 192\r\n"
+      "\r\n"
+      "{\"message\":{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+      "\"message_id\":\"msg-1\",\"payload_content_type\":\"application/json\","
+      "\"correlation_id\":\"corr-sub\",\"lease_id\":\"lease-1\"},"
+      "\"next_cursor\":\"cursor-1\"}\r\n"
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"payload\"\r\n"
+      "Content-Type: application/json\r\n"
+      "\r\n"
+      "{\"ok\":true}\r\n"
+      "--queue-boundary--\r\n";
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-subscribe",
+      "Content-Type: multipart/mixed; boundary=queue-boundary"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/queue/subscribe",
+       (const char *const[]){"Content-Type: application/json"}, 1U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
+       2U, 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 2U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_dequeue_request req;
+  lc_engine_queue_stream_handler handler;
+  subscribe_capture capture;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  client = NULL;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  req.queue = "jobs";
+  req.owner = "worker-1";
+  handler.begin = capture_delivery_begin;
+  handler.chunk = capture_delivery_chunk;
+  handler.end = capture_delivery_end;
+  rc = lc_engine_client_subscribe(client, &req, &handler, &capture, &error);
+  assert_int_equal(rc, LC_ENGINE_ERROR_PROTOCOL);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_PROTOCOL);
+  assert_int_equal(capture.begin_calls, 0);
+  assert_int_equal(capture.end_calls, 0);
+
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_subscribe_rejects_missing_closing_boundary(void **state) {
+  static const char response_body[] =
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"meta\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 192\r\n"
+      "\r\n"
+      "{\"message\":{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+      "\"message_id\":\"msg-1\",\"payload_content_type\":\"application/json\","
+      "\"correlation_id\":\"corr-sub\",\"lease_id\":\"lease-1\"},"
+      "\"next_cursor\":\"cursor-1\"}\r\n"
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"payload\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 11\r\n"
+      "\r\n"
+      "{\"ok\":true}\r\n";
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-subscribe",
+      "Content-Type: multipart/mixed; boundary=queue-boundary"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/queue/subscribe",
+       (const char *const[]){"Content-Type: application/json"}, 1U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
+       2U, 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 4U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_dequeue_request req;
+  lc_engine_queue_stream_handler handler;
+  subscribe_capture capture;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  client = NULL;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  req.queue = "jobs";
+  req.owner = "worker-1";
+  handler.begin = capture_delivery_begin;
+  handler.chunk = capture_delivery_chunk;
+  handler.end = capture_delivery_end;
+  rc = lc_engine_client_subscribe(client, &req, &handler, &capture, &error);
+  assert_int_equal(rc, LC_ENGINE_ERROR_PROTOCOL);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_PROTOCOL);
+
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_subscribe_propagates_payload_callback_failure(void **state) {
+  static const char response_body[] =
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"meta\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 192\r\n"
+      "\r\n"
+      "{\"message\":{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+      "\"message_id\":\"msg-1\",\"payload_content_type\":\"application/json\","
+      "\"correlation_id\":\"corr-sub\",\"lease_id\":\"lease-1\"},"
+      "\"next_cursor\":\"cursor-1\"}\r\n"
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"payload\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 11\r\n"
+      "\r\n"
+      "{\"ok\":true}\r\n"
+      "--queue-boundary--\r\n";
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-subscribe",
+      "Content-Type: multipart/mixed; boundary=queue-boundary"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/queue/subscribe",
+       (const char *const[]){"Content-Type: application/json"}, 1U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
+       2U, 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 3U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_dequeue_request req;
+  lc_engine_queue_stream_handler handler;
+  subscribe_capture capture;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  client = NULL;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  req.queue = "jobs";
+  req.owner = "worker-1";
+  handler.begin = capture_delivery_begin;
+  handler.chunk = fail_delivery_chunk;
+  handler.end = capture_delivery_end;
+  rc = lc_engine_client_subscribe(client, &req, &handler, &capture, &error);
+  assert_int_equal(rc, LC_ENGINE_ERROR_TRANSPORT);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_TRANSPORT);
+  assert_string_equal(error.message, "test payload chunk failure");
+  assert_int_equal(capture.begin_calls, 1);
+  assert_int_equal(capture.end_calls, 0);
+
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_subscribe_treats_cancelled_callback_failure_as_ok(void **state) {
+  static const char response_body[] =
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"meta\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 192\r\n"
+      "\r\n"
+      "{\"message\":{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+      "\"message_id\":\"msg-1\",\"payload_content_type\":\"application/json\","
+      "\"correlation_id\":\"corr-sub\",\"lease_id\":\"lease-1\"},"
+      "\"next_cursor\":\"cursor-1\"}\r\n"
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"payload\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 11\r\n"
+      "\r\n"
+      "{\"ok\":true}\r\n"
+      "--queue-boundary--\r\n";
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-subscribe",
+      "Content-Type: multipart/mixed; boundary=queue-boundary"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/queue/subscribe",
+       (const char *const[]){"Content-Type: application/json"}, 1U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
+       2U, 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 3U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_dequeue_request req;
+  lc_engine_queue_stream_handler handler;
+  canceling_subscribe_capture capture;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  client = NULL;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+  lc_engine_client_set_cancel_check(client, test_cancel_check, &capture);
+
+  req.queue = "jobs";
+  req.owner = "worker-1";
+  handler.begin = capture_delivery_begin;
+  handler.chunk = fail_and_cancel_delivery_chunk;
+  handler.end = capture_delivery_end;
+  rc = lc_engine_client_subscribe(client, &req, &handler, &capture, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+  assert_int_equal(error.code, LC_ENGINE_OK);
+  assert_int_equal(capture.capture.begin_calls, 1);
+  assert_int_equal(capture.capture.end_calls, 0);
+  assert_int_equal(capture.cancel_requested, 1);
+
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_subscribe_treats_cancelled_finish_failure_as_ok(void **state) {
+  static const char response_body[] =
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"meta\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 192\r\n"
+      "\r\n"
+      "{\"message\":{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+      "\"message_id\":\"msg-1\",\"payload_content_type\":\"application/json\","
+      "\"correlation_id\":\"corr-sub\",\"lease_id\":\"lease-1\"},"
+      "\"next_cursor\":\"cursor-1\"}\r\n"
+      "--queue-boundary\r\n"
+      "Content-Disposition: form-data; name=\"payload\"\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 11\r\n"
+      "\r\n"
+      "{\"ok\":true}\r\n";
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-subscribe",
+      "Content-Type: multipart/mixed; boundary=queue-boundary"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/queue/subscribe",
+       (const char *const[]){"Content-Type: application/json"}, 1U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
+       2U, 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 4U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_dequeue_request req;
+  lc_engine_queue_stream_handler handler;
+  canceling_subscribe_capture capture;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  client = NULL;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+  lc_engine_client_set_cancel_check(client, test_cancel_check, &capture);
+
+  req.queue = "jobs";
+  req.owner = "worker-1";
+  handler.begin = capture_delivery_begin;
+  handler.chunk = cancel_after_delivery_chunk;
+  handler.end = capture_delivery_end;
+  rc = lc_engine_client_subscribe(client, &req, &handler, &capture, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+  assert_int_equal(error.code, LC_ENGINE_OK);
+  assert_int_equal(capture.capture.begin_calls, 1);
+  assert_string_equal(capture.capture.payload, "{\"ok\":true}");
+  assert_int_equal(capture.cancel_requested, 1);
 
   lc_engine_client_close(client);
   https_testserver_stop(&server);
@@ -3703,7 +4290,7 @@ static void test_public_dequeue_emits_stream_transport_logs(void **state) {
       "--queue-boundary\r\n"
       "Content-Disposition: form-data; name=\"meta\"\r\n"
       "Content-Type: application/json\r\n"
-      "Content-Length: 192\r\n"
+      "Content-Length: 213\r\n"
       "\r\n"
       "{\"message\":{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
       "\"message_id\":\"msg-1\",\"payload_content_type\":\"application/json\","
@@ -4885,6 +5472,13 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_WATCH_REJECTS_OVERSIZED_ERROR_BODY)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_watch_transport_rejects_oversized_error_body)
+#elif defined(LC_HTTPS_CASE_WATCH_FILTERS_AND_FINISHES_TRAILING_EVENT)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(                                                            \
+      test_watch_stream_filters_events_and_finishes_trailing_event)
+#elif defined(LC_HTTPS_CASE_WATCH_REJECTS_MALFORMED_SELECTED_EVENT)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_watch_stream_rejects_malformed_selected_event)
 #elif defined(LC_HTTPS_CASE_QUEUE_REJECTS_OVERFLOWING_NUMERIC_FIELDS)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_queue_transport_rejects_overflowing_numeric_fields)
@@ -4900,6 +5494,21 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_SUBSCRIBE_REJECTS_DEFAULT_META_OVERFLOW)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_subscribe_rejects_default_meta_overflow)
+#elif defined(LC_HTTPS_CASE_SUBSCRIBE_REJECTS_PAYLOAD_WITHOUT_CONTENT_LENGTH)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_subscribe_rejects_payload_without_content_length)
+#elif defined(LC_HTTPS_CASE_SUBSCRIBE_REJECTS_MISSING_CLOSING_BOUNDARY)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_subscribe_rejects_missing_closing_boundary)
+#elif defined(LC_HTTPS_CASE_SUBSCRIBE_PROPAGATES_PAYLOAD_CALLBACK_FAILURE)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_subscribe_propagates_payload_callback_failure)
+#elif defined(LC_HTTPS_CASE_SUBSCRIBE_TREATS_CANCELLED_CALLBACK_FAILURE_AS_OK)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_subscribe_treats_cancelled_callback_failure_as_ok)
+#elif defined(LC_HTTPS_CASE_SUBSCRIBE_TREATS_CANCELLED_FINISH_FAILURE_AS_OK)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_subscribe_treats_cancelled_finish_failure_as_ok)
 #elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_EMITS_PSLOG_MESSAGES)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_client_emits_pslog_messages)
@@ -5029,6 +5638,9 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
       cmocka_unit_test(test_queue_transport_rejects_oversized_error_body),        \
       cmocka_unit_test(test_watch_transport_rejects_oversized_error_body),        \
       cmocka_unit_test(                                                           \
+          test_watch_stream_filters_events_and_finishes_trailing_event),          \
+      cmocka_unit_test(test_watch_stream_rejects_malformed_selected_event),       \
+      cmocka_unit_test(                                                           \
           test_queue_transport_rejects_overflowing_numeric_fields),               \
       cmocka_unit_test(                                                           \
           test_queue_transport_preserves_typed_json_parse_errors),                \
@@ -5036,6 +5648,12 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_subscribe_accepts_content_length_with_trailing_ows),               \
       cmocka_unit_test(test_subscribe_respects_client_meta_limit),                \
       cmocka_unit_test(test_subscribe_rejects_default_meta_overflow),             \
+      cmocka_unit_test(test_subscribe_rejects_payload_without_content_length),    \
+      cmocka_unit_test(test_subscribe_rejects_missing_closing_boundary),          \
+      cmocka_unit_test(test_subscribe_propagates_payload_callback_failure),       \
+      cmocka_unit_test(                                                           \
+          test_subscribe_treats_cancelled_callback_failure_as_ok),                \
+      cmocka_unit_test(test_subscribe_treats_cancelled_finish_failure_as_ok),     \
       cmocka_unit_test(test_public_client_emits_pslog_messages),                  \
       cmocka_unit_test(test_public_client_can_disable_sdk_sys_field),             \
       cmocka_unit_test(test_public_bound_lease_methods_emit_logs),                \

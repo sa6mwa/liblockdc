@@ -47,7 +47,7 @@ set(stage_name "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}-smoke")
 set(stage_root "${bundle_root}/${stage_name}")
 set(release_archive "${bundle_dist}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
 set(release_prefix "${extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
-set(smoke_archive "${lockdc_dist_dir}/${stage_name}.zip")
+set(smoke_archive "${bundle_root}/${stage_name}.zip")
 
 file(REMOVE_RECURSE "${bundle_root}")
 file(MAKE_DIRECTORY "${bundle_dist}" "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}")
@@ -208,7 +208,6 @@ if(LOCKDC_OTOOL AND EXISTS "${LOCKDC_OTOOL}")
     endforeach()
 endif()
 
-file(MAKE_DIRECTORY "${lockdc_dist_dir}")
 file(REMOVE "${smoke_archive}")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E tar cf "${smoke_archive}" --format=zip "${stage_name}"

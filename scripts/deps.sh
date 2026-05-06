@@ -243,6 +243,14 @@ prune_dependency_install_trees() {
   cmake -DLOCKDC_EXTERNAL_ROOT="$deps_root" -P "$repo_root/cmake/prune_dependency_install_tree.cmake"
 }
 
+assert_dependency_install_tree_privacy() {
+  cmake \
+    -DLOCKDC_ROOT="$repo_root" \
+    -DLOCKDC_SCAN_LABEL="dependency install tree $deps_root" \
+    -DLOCKDC_SCAN_PATHS="$deps_root" \
+    -P "$repo_root/tests/release_privacy_scan.cmake"
+}
+
 reset_dependency_build_root() {
   local attempt=1
 
@@ -333,6 +341,7 @@ if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ]; then
   existing_manifest=$(cat "$manifest_path")
   if [ "$existing_manifest" = "$manifest" ]; then
     prune_dependency_install_trees
+    assert_dependency_install_tree_privacy
     exit 0
   fi
 
@@ -343,6 +352,7 @@ if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ]; then
       && [ "$(manifest_value preset "$manifest_path")" = "$preset" ] \
       && [ "$(manifest_value zlib_version "$manifest_path")" = "$zlib_version" ]; then
       prune_dependency_install_trees
+      assert_dependency_install_tree_privacy
       printf '%s\n' "$manifest" > "$manifest_path"
       exit 0
     fi
@@ -361,4 +371,5 @@ stage_dependency_license "pslog" "libpslog" "$deps_root/pslog/install/share/doc/
 stage_dependency_license "nghttp2" "nghttp2" "$deps_build_root/nghttp2/src/COPYING"
 stage_dependency_license "lonejson" "lonejson" "$deps_root/lonejson/install/share/doc/liblonejson/LICENSE"
 prune_dependency_install_trees
+assert_dependency_install_tree_privacy
 printf '%s\n' "$manifest" > "$manifest_path"

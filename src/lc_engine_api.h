@@ -719,6 +719,9 @@ int lc_engine_client_open(const lc_engine_client_config *config,
                           lc_engine_client **out_client,
                           lc_engine_error *error);
 pslog_logger *lc_engine_client_logger(lc_engine_client *client);
+void lc_engine_client_set_cancel_check(lc_engine_client *client,
+                                       int (*cancel_check)(void *context),
+                                       void *cancel_context);
 void lc_engine_client_close(lc_engine_client *client);
 int lc_engine_client_set_allocator(lc_engine_client *client,
                                    const lc_engine_allocator *allocator,

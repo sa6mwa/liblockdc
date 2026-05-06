@@ -65,12 +65,12 @@ option(LOCKDC_BUILD_FUZZERS "Build clang/libFuzzer targets for parser and stream
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
-set(LOCKDC_OPENSSL_VERSION "3.6.1" CACHE STRING "Pinned OpenSSL release used for CMake-managed dependency builds.")
+set(LOCKDC_OPENSSL_VERSION "3.6.2" CACHE STRING "Pinned OpenSSL release used for CMake-managed dependency builds.")
 set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release used for compression support in vendored dependencies.")
-set(LOCKDC_CURL_VERSION "8.18.0" CACHE STRING "Pinned curl release used for CMake-managed dependency builds.")
-set(LOCKDC_NGHTTP2_VERSION "1.68.0" CACHE STRING "Pinned nghttp2 release used to enable libcurl HTTP/2 support.")
+set(LOCKDC_CURL_VERSION "8.20.0" CACHE STRING "Pinned curl release used for CMake-managed dependency builds.")
+set(LOCKDC_NGHTTP2_VERSION "1.69.0" CACHE STRING "Pinned nghttp2 release used to enable libcurl HTTP/2 support.")
 set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release used for SSH and SFTP support.")
-set(LOCKDC_LONEJSON_VERSION "0.5.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
+set(LOCKDC_LONEJSON_VERSION "0.7.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.3.1" CACHE STRING "Pinned libpslog release used for SDK logging.")
 set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
@@ -371,6 +371,31 @@ function(lc_configure_library_target target)
     lc_enable_fuzz_instrumentation_if_requested(${target})
 endfunction()
 
+function(lc_add_release_privacy_scan target)
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+        return()
+    endif()
+    if(LOCKDC_SANITIZER_INSTRUMENTED)
+        return()
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_STRIP_BIN=${CMAKE_STRIP}
+            -DLOCKDC_STRIP_TARGET=$<TARGET_FILE:${target}>
+            -DLOCKDC_TARGET_ID=${LOCKDC_TARGET_ID}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/strip_release_target.cmake
+        VERBATIM
+    )
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_SCAN_LABEL=$<TARGET_FILE_NAME:${target}>
+            -DLOCKDC_SCAN_PATHS=$<TARGET_FILE:${target}>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/release_privacy_scan.cmake
+        VERBATIM
+    )
+endfunction()
+
 if(LOCKDC_BUILD_STATIC)
     add_library(lc_static STATIC)
     add_library(lockdc::static ALIAS lc_static)
@@ -386,6 +411,7 @@ if(LOCKDC_BUILD_STATIC)
     set_target_properties(lc_static PROPERTIES
         OUTPUT_NAME lockdc
     )
+    lc_add_release_privacy_scan(lc_static)
 endif()
 
 if(LOCKDC_BUILD_SHARED)
@@ -412,9 +438,13 @@ if(LOCKDC_BUILD_SHARED)
         OUTPUT_NAME lockdc
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
+        BUILD_RPATH "${lockdc_shared_install_rpath}"
+        BUILD_RPATH_USE_ORIGIN ON
+        BUILD_WITH_INSTALL_RPATH ON
         INSTALL_RPATH "${lockdc_shared_install_rpath}"
         INSTALL_RPATH_USE_LINK_PATH OFF
     )
+    lc_add_release_privacy_scan(lc_shared)
 endif()
 
 if(LOCKDC_BUILD_TESTS)
@@ -631,6 +661,7 @@ if(LOCKDC_BUILD_TESTS)
                 -DLOCKDC_SHARED_LIB_NAME=$<TARGET_FILE_NAME:lc_shared>
                 -DLOCKDC_SHARED_SONAME=$<TARGET_SONAME_FILE_NAME:lc_shared>
                 -DLOCKDC_SHARED_LINK_NAME=$<TARGET_LINKER_FILE_NAME:lc_shared>
+                -DLOCKDC_SANITIZER_INSTRUMENTED=${LOCKDC_SANITIZER_INSTRUMENTED}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/package_archives_test.cmake
         )
         set_tests_properties(package_archives_test PROPERTIES RUN_SERIAL TRUE)

@@ -1,7 +1,8 @@
 local lockdc = require("lockdc")
 
-local endpoint = assert(os.getenv("LOCKDC_URL"), "LOCKDC_URL is required")
-local client_pem = assert(os.getenv("LOCKDC_CLIENT_PEM"), "LOCKDC_CLIENT_PEM is required")
+local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
+local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
+  or "./devenv/volumes/lockd-disk-a-config/client.pem"
 local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
 local queue = os.getenv("LOCKDC_QUEUE") or "tests-lua-consumer"
 local owner = os.getenv("LOCKDC_OWNER") or "tests-lua-consumer"

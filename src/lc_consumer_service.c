@@ -1053,8 +1053,8 @@ static int lc_consumer_clone_client(lc_consumer_service_handle *service,
     return rc;
   }
   client = (lc_client_handle *)(*out);
-  client->engine->cancel_check = lc_consumer_cancel_check;
-  client->engine->cancel_context = service;
+  lc_engine_client_set_cancel_check(client->engine, lc_consumer_cancel_check,
+                                    service);
   return LC_OK;
 }
 
@@ -1439,6 +1439,9 @@ lc_consumer_delivery_begin(void *context,
     return 0;
   }
   bridge->extend_thread_started = 1;
+  /* Handler failures are managed by the consumer bridge; the stream parser
+   * must still see a clean part boundary so they are not reclassified as
+   * malformed subscribe streams. */
   return 1;
 }
 
@@ -1498,6 +1501,13 @@ static int lc_consumer_delivery_end(void *context,
   bridge->handler_thread_started = 0;
   lc_consumer_delivery_stop_extender(bridge);
   rc = bridge->handler_rc;
+  if (rc != LC_OK && engine_error != NULL && engine_error->code == LC_ENGINE_OK) {
+    lc_engine_set_transport_error(
+        engine_error,
+        bridge->error != NULL && bridge->error->message != NULL
+            ? bridge->error->message
+            : "consumer handler failed");
+  }
   lc_engine_dequeue_response_cleanup(&bridge->meta);
   pthread_mutex_destroy(&bridge->op_mutex);
   bridge->op_mutex_initialized = 0;

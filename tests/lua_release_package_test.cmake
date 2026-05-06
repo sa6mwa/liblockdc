@@ -51,6 +51,7 @@ set(lockdc_extract_root "${LOCKDC_BINARY_DIR}/lua-release-package-test")
 set(lockdc_release_prefix "${lockdc_extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
 set(lockdc_lua_rock_extract_root "${LOCKDC_BINARY_DIR}/lua-release-package-src-rock")
 set(lockdc_lua_inner_archive_path "${lockdc_lua_rock_extract_root}/lockdc-${LOCKDC_VERSION}-1.tar.gz")
+set(lockdc_lua_inner_rockspec_path "${lockdc_lua_rock_extract_root}/lockdc-${LOCKDC_VERSION}-1.rockspec")
 
 file(REMOVE_RECURSE "${lockdc_test_root}")
 file(MAKE_DIRECTORY "${lockdc_dist_dir}")
@@ -126,8 +127,30 @@ endif()
 if(NOT EXISTS "${lockdc_lua_inner_archive_path}")
     message(FATAL_ERROR "Lua source rock is missing embedded source archive: ${lockdc_lua_inner_archive_path}")
 endif()
+if(NOT EXISTS "${lockdc_lua_inner_rockspec_path}")
+    message(FATAL_ERROR "Lua source rock is missing embedded rockspec: ${lockdc_lua_inner_rockspec_path}")
+endif()
 
 assert_tar_numeric_owner_group("${lockdc_lua_inner_archive_path}")
+
+file(READ "${lockdc_lua_inner_rockspec_path}" lockdc_lua_inner_rockspec_text)
+foreach(disallowed_path "${LOCKDC_ROOT}" "$ENV{HOME}")
+    if(disallowed_path STREQUAL "")
+        continue()
+    endif()
+    string(FIND "${lockdc_lua_inner_rockspec_text}" "${disallowed_path}" disallowed_index)
+    if(NOT disallowed_index EQUAL -1)
+        message(FATAL_ERROR
+            "Lua source rock embedded rockspec contains local path '${disallowed_path}'\n"
+            "rockspec:\n${lockdc_lua_inner_rockspec_text}")
+    endif()
+endforeach()
+string(FIND "${lockdc_lua_inner_rockspec_text}" "url = \"lockdc-${LOCKDC_VERSION}-1.tar.gz\"" inner_source_index)
+if(inner_source_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua source rock embedded rockspec should reference the embedded source archive by relative name\n"
+        "rockspec:\n${lockdc_lua_inner_rockspec_text}")
+endif()
 
 file(READ "${lockdc_lua_rockspec_path}" lockdc_lua_rockspec_text)
 foreach(required_snippet

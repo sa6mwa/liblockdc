@@ -46,6 +46,29 @@ typedef struct acquire_for_update_e2e_state {
   int saw_snapshot;
 } acquire_for_update_e2e_state;
 
+typedef struct queue_watch_e2e_context {
+  const char *endpoint;
+  const char *bundle_path;
+  const char *queue_name;
+  char queue_name_storage[128];
+  int event_count;
+  int unavailable_count;
+  int available_count;
+  int saw_available;
+  int saw_unavailable;
+  int stop_after_initial_unavailable;
+  int stop_after_available;
+  int stop_after_unavailable_after_available;
+  char event_queue[128];
+  char head_message_id[128];
+  char unavailable_head_message_id[128];
+  char correlation_id[128];
+  int enqueue_rc;
+  int dequeue_rc;
+  lc_error enqueue_error;
+  lc_error dequeue_error;
+} queue_watch_e2e_context;
+
 static int acquire_for_update_e2e_handler(
     void *context, lc_acquire_for_update_context *update, lc_error *error) {
   acquire_for_update_e2e_state *state;
@@ -932,6 +955,323 @@ static void test_mem_uds_dequeue_batch_roundtrip(void **state) {
 
   lc_dequeue_batch_cleanup(&batch);
   lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static int queue_watch_e2e_handler(void *context, const lc_watch_event *event,
+                                   lc_error *error) {
+  queue_watch_e2e_context *watch;
+
+  watch = (queue_watch_e2e_context *)context;
+  watch->event_count += 1;
+  if (event->queue != NULL) {
+    snprintf(watch->event_queue, sizeof(watch->event_queue), "%s",
+             event->queue);
+  }
+  if (event->correlation_id != NULL) {
+    snprintf(watch->correlation_id, sizeof(watch->correlation_id), "%s",
+             event->correlation_id);
+  }
+  if (event->available) {
+    watch->available_count += 1;
+    watch->saw_available = 1;
+    if (event->head_message_id != NULL) {
+      snprintf(watch->head_message_id, sizeof(watch->head_message_id), "%s",
+               event->head_message_id);
+    }
+    if (!watch->stop_after_available) {
+      return 1;
+    }
+    error->code = LC_ERR_TRANSPORT;
+    error->message = strdup("queue watch e2e observed available event");
+    assert_non_null(error->message);
+    return 0;
+  } else {
+    watch->unavailable_count += 1;
+    watch->saw_unavailable = 1;
+    if (event->head_message_id != NULL) {
+      snprintf(watch->unavailable_head_message_id,
+               sizeof(watch->unavailable_head_message_id), "%s",
+               event->head_message_id);
+    }
+    if (!watch->stop_after_initial_unavailable &&
+        (!watch->stop_after_unavailable_after_available ||
+         !watch->saw_available)) {
+      return 1;
+    }
+    error->code = LC_ERR_TRANSPORT;
+    error->message = strdup("queue watch e2e observed unavailable event");
+    assert_non_null(error->message);
+    return 0;
+  }
+}
+
+static void *queue_watch_e2e_enqueue_thread(void *arg) {
+  queue_watch_e2e_context *watch;
+  lc_client *client;
+  lc_source *src;
+  lc_enqueue_req req;
+  lc_enqueue_res res;
+  static const unsigned char payload[] = {'w', 'a', 't', 'c', 'h'};
+
+  watch = (queue_watch_e2e_context *)arg;
+  client = NULL;
+  src = NULL;
+  lc_error_init(&watch->enqueue_error);
+  lc_enqueue_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  usleep(200000U);
+
+  open_tcp_client(watch->endpoint, watch->bundle_path, &client,
+                  &watch->enqueue_error);
+  watch->enqueue_rc =
+      lc_source_from_memory(payload, sizeof(payload), &src,
+                            &watch->enqueue_error);
+  if (watch->enqueue_rc == LC_OK) {
+    req.queue = watch->queue_name;
+    req.content_type = "text/plain";
+    req.visibility_timeout_seconds = 30L;
+    req.ttl_seconds = 300L;
+    watch->enqueue_rc = client->enqueue(client, &req, src, &res,
+                                        &watch->enqueue_error);
+  }
+  if (src != NULL) {
+    lc_source_close(src);
+  }
+  lc_enqueue_res_cleanup(&res);
+  lc_client_close(client);
+  return NULL;
+}
+
+static void *queue_watch_e2e_enqueue_dequeue_thread(void *arg) {
+  queue_watch_e2e_context *watch;
+  lc_client *client;
+  lc_source *src;
+  lc_message *message;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  static const unsigned char payload[] = {'w', 'a', 't', 'c', 'h',
+                                          '-', 'a', 'c', 'k'};
+
+  watch = (queue_watch_e2e_context *)arg;
+  client = NULL;
+  src = NULL;
+  message = NULL;
+  lc_error_init(&watch->enqueue_error);
+  lc_error_init(&watch->dequeue_error);
+  lc_enqueue_req_init(&enqueue_req);
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  usleep(200000U);
+
+  open_tcp_client(watch->endpoint, watch->bundle_path, &client,
+                  &watch->enqueue_error);
+  watch->enqueue_rc =
+      lc_source_from_memory(payload, sizeof(payload), &src,
+                            &watch->enqueue_error);
+  if (watch->enqueue_rc == LC_OK) {
+    enqueue_req.queue = watch->queue_name;
+    enqueue_req.content_type = "text/plain";
+    enqueue_req.visibility_timeout_seconds = 30L;
+    enqueue_req.ttl_seconds = 300L;
+    watch->enqueue_rc = client->enqueue(client, &enqueue_req, src,
+                                        &enqueue_res, &watch->enqueue_error);
+  }
+  if (src != NULL) {
+    lc_source_close(src);
+  }
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  if (watch->enqueue_rc == LC_OK) {
+    usleep(200000U);
+    dequeue_req.queue = watch->queue_name;
+    dequeue_req.owner = "lc-e2e-watch-worker";
+    dequeue_req.visibility_timeout_seconds = 30L;
+    dequeue_req.wait_seconds = 2L;
+    watch->dequeue_rc =
+        client->dequeue(client, &dequeue_req, &message, &watch->dequeue_error);
+    if (watch->dequeue_rc == LC_OK) {
+      watch->dequeue_rc = message->ack(message, &watch->dequeue_error);
+      message = NULL;
+    }
+  } else {
+    watch->dequeue_rc = watch->enqueue_rc;
+  }
+
+  if (message != NULL) {
+    lc_message_close(message);
+  }
+  lc_client_close(client);
+  return NULL;
+}
+
+static void test_disk_queue_watch_stream_observes_initial_unavailable(
+    void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_watch_queue_req req;
+  lc_watch_handler handler;
+  queue_watch_e2e_context watch;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lc_error_init(&error);
+  lc_watch_queue_req_init(&req);
+  lc_watch_handler_init(&handler);
+  memset(&watch, 0, sizeof(watch));
+  make_unique_name("disk-watch-empty", watch.queue_name_storage,
+                   sizeof(watch.queue_name_storage));
+  watch.queue_name = watch.queue_name_storage;
+  watch.stop_after_initial_unavailable = 1;
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  req.queue = watch.queue_name;
+  handler.handle = queue_watch_e2e_handler;
+  handler.context = &watch;
+  rc = client->watch_queue(client, &req, &handler, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message,
+                      "queue watch e2e observed unavailable event");
+  assert_true(watch.event_count >= 1);
+  assert_true(watch.unavailable_count >= 1);
+  assert_int_equal(watch.available_count, 0);
+  assert_int_equal(watch.saw_unavailable, 1);
+  assert_int_equal(watch.saw_available, 0);
+  assert_string_equal(watch.event_queue, watch.queue_name);
+  assert_true(watch.head_message_id[0] == '\0');
+  assert_true(watch.correlation_id[0] != '\0');
+
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_queue_watch_stream_observes_enqueue(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_watch_queue_req req;
+  lc_watch_handler handler;
+  queue_watch_e2e_context watch;
+  pthread_t enqueue_thread;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lc_error_init(&error);
+  lc_watch_queue_req_init(&req);
+  lc_watch_handler_init(&handler);
+  memset(&watch, 0, sizeof(watch));
+  watch.endpoint = endpoint;
+  watch.bundle_path = bundle_path;
+  make_unique_name("disk-watch-queue", watch.queue_name_storage,
+                   sizeof(watch.queue_name_storage));
+  watch.queue_name = watch.queue_name_storage;
+  watch.stop_after_available = 1;
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  assert_int_equal(pthread_create(&enqueue_thread, NULL,
+                                  queue_watch_e2e_enqueue_thread, &watch),
+                   0);
+  req.queue = watch.queue_name;
+  handler.handle = queue_watch_e2e_handler;
+  handler.context = &watch;
+  rc = client->watch_queue(client, &req, &handler, &error);
+  assert_int_equal(pthread_join(enqueue_thread, NULL), 0);
+  assert_lc_ok(watch.enqueue_rc, &watch.enqueue_error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "queue watch e2e observed available event");
+  assert_true(watch.event_count >= 1);
+  assert_true(watch.unavailable_count >= 1);
+  assert_true(watch.available_count >= 1);
+  assert_int_equal(watch.saw_available, 1);
+  assert_int_equal(watch.saw_unavailable, 1);
+  assert_string_equal(watch.event_queue, watch.queue_name);
+  assert_true(watch.head_message_id[0] != '\0');
+  assert_true(watch.correlation_id[0] != '\0');
+
+  lc_client_close(client);
+  lc_error_cleanup(&watch.enqueue_error);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_queue_watch_stream_observes_available_then_unavailable(
+    void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_watch_queue_req req;
+  lc_watch_handler handler;
+  queue_watch_e2e_context watch;
+  pthread_t worker_thread;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lc_error_init(&error);
+  lc_watch_queue_req_init(&req);
+  lc_watch_handler_init(&handler);
+  memset(&watch, 0, sizeof(watch));
+  watch.endpoint = endpoint;
+  watch.bundle_path = bundle_path;
+  make_unique_name("disk-watch-transition", watch.queue_name_storage,
+                   sizeof(watch.queue_name_storage));
+  watch.queue_name = watch.queue_name_storage;
+  watch.stop_after_unavailable_after_available = 1;
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  assert_int_equal(pthread_create(&worker_thread, NULL,
+                                  queue_watch_e2e_enqueue_dequeue_thread,
+                                  &watch),
+                   0);
+  req.queue = watch.queue_name;
+  handler.handle = queue_watch_e2e_handler;
+  handler.context = &watch;
+  rc = client->watch_queue(client, &req, &handler, &error);
+  assert_int_equal(pthread_join(worker_thread, NULL), 0);
+  assert_lc_ok(watch.enqueue_rc, &watch.enqueue_error);
+  assert_lc_ok(watch.dequeue_rc, &watch.dequeue_error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message,
+                      "queue watch e2e observed unavailable event");
+  assert_true(watch.event_count >= 3);
+  assert_true(watch.unavailable_count >= 2);
+  assert_true(watch.available_count >= 1);
+  assert_int_equal(watch.saw_available, 1);
+  assert_int_equal(watch.saw_unavailable, 1);
+  assert_string_equal(watch.event_queue, watch.queue_name);
+  assert_true(watch.head_message_id[0] != '\0');
+  assert_true(watch.correlation_id[0] != '\0');
+
+  lc_client_close(client);
+  lc_error_cleanup(&watch.enqueue_error);
+  lc_error_cleanup(&watch.dequeue_error);
   lc_error_cleanup(&error);
 }
 
@@ -2801,6 +3141,11 @@ int main(void) {
       cmocka_unit_test(test_disk_query_rejects_invalid_inputs),
       cmocka_unit_test(test_disk_management_failure_modes),
       cmocka_unit_test(test_disk_auth_permission_failure_modes),
+      cmocka_unit_test(
+          test_disk_queue_watch_stream_observes_initial_unavailable),
+      cmocka_unit_test(test_disk_queue_watch_stream_observes_enqueue),
+      cmocka_unit_test(
+          test_disk_queue_watch_stream_observes_available_then_unavailable),
       cmocka_unit_test(test_disk_local_mutate_stream_roundtrip)};
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

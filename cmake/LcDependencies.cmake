@@ -74,6 +74,54 @@ function(lc_get_openssl_config_target out_var)
   set(${out_var} "${_target}" PARENT_SCOPE)
 endfunction()
 
+function(lc_get_external_c_flags out_var)
+  set(_flags "-O2 -DNDEBUG -g0")
+  if(CMAKE_C_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
+    string(APPEND _flags
+      " -fmacro-prefix-map=${LOCKDC_DEPENDENCY_BUILD_ROOT}=deps-build"
+      " -fmacro-prefix-map=${LOCKDC_EXTERNAL_ROOT}=deps"
+    )
+  endif()
+  if(NOT "${CMAKE_C_FLAGS}" STREQUAL "")
+    set(_flags "${CMAKE_C_FLAGS} ${_flags}")
+  endif()
+  string(STRIP "${_flags}" _flags)
+  set(${out_var} "${_flags}" PARENT_SCOPE)
+endfunction()
+
+function(lc_get_strip_dependency_install_command out_var install_dir)
+  if(NOT CMAKE_STRIP)
+    message(FATAL_ERROR "CMAKE_STRIP is required when building release dependencies")
+  endif()
+
+  set(_strip_static_archives ON)
+  set(_darwin_fixup_args "")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(_strip_static_archives OFF)
+    if(NOT CMAKE_INSTALL_NAME_TOOL)
+      message(FATAL_ERROR "CMAKE_INSTALL_NAME_TOOL is required when building Darwin dependencies")
+    endif()
+    if(NOT LOCKDC_OTOOL)
+      message(FATAL_ERROR "LOCKDC_OTOOL is required when building Darwin dependencies")
+    endif()
+    set(_darwin_fixup_args
+      -DLOCKDC_DARWIN_DEPENDENCY_ROOT=${LOCKDC_EXTERNAL_ROOT}
+      -DLOCKDC_INSTALL_NAME_TOOL=${CMAKE_INSTALL_NAME_TOOL}
+      -DLOCKDC_OTOOL=${LOCKDC_OTOOL}
+    )
+  endif()
+
+  set(_command
+    ${CMAKE_COMMAND}
+      -DLOCKDC_STRIP_BIN=${CMAKE_STRIP}
+      -DLOCKDC_STRIP_ROOT=${install_dir}
+      -DLOCKDC_STRIP_STATIC_ARCHIVES=${_strip_static_archives}
+      ${_darwin_fixup_args}
+      -P ${CMAKE_SOURCE_DIR}/cmake/strip_dependency_install_tree.cmake
+  )
+  set(${out_var} "${_command}" PARENT_SCOPE)
+endfunction()
+
 function(lc_append_common_external_cmake_args out_var)
   set(_args
     -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
@@ -85,6 +133,9 @@ function(lc_append_common_external_cmake_args out_var)
   if(CMAKE_TOOLCHAIN_FILE)
     list(APPEND _args -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE})
   endif()
+
+  lc_get_external_c_flags(_lockdc_external_c_flags)
+  list(APPEND _args -DCMAKE_C_FLAGS=${_lockdc_external_c_flags})
 
   set(${out_var} "${_args}" PARENT_SCOPE)
 endfunction()
@@ -98,6 +149,7 @@ function(lc_add_openssl)
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   lc_get_openssl_config_target(openssl_config_target)
+  set(openssl_dir "/etc/ssl")
   set(config_args ${openssl_config_target} no-tests no-docs no-module no-apps no-makedepend)
   if(LOCKDC_TARGET_LIBC STREQUAL "musl")
     list(APPEND config_args no-secure-memory no-afalgeng)
@@ -113,12 +165,15 @@ function(lc_add_openssl)
   lc_normalize_prefix(env_prefix "${install_dir}")
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
   set(build_command make -j${LOCKDC_DEPENDENCY_BUILD_JOBS})
-  set(install_command make -j${LOCKDC_DEPENDENCY_BUILD_JOBS} install_sw)
+  set(install_command make -j${LOCKDC_DEPENDENCY_BUILD_JOBS} install_sw DESTDIR=${env_prefix})
+  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
   set(openssl_env_args
     CC=${CMAKE_C_COMPILER}
     AR=${CMAKE_AR}
     RANLIB=${CMAKE_RANLIB}
   )
+  lc_get_external_c_flags(openssl_cflags)
+  list(APPEND openssl_env_args CFLAGS=${openssl_cflags})
   if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_LINKER)
     list(APPEND openssl_env_args LDFLAGS=-fuse-ld=${CMAKE_LINKER})
   endif()
@@ -126,7 +181,7 @@ function(lc_add_openssl)
   if(LOCKDC_BUILD_DEPENDENCIES)
     ExternalProject_Add(${project_name}
       URL "https://github.com/openssl/openssl/releases/download/openssl-${LOCKDC_OPENSSL_VERSION}/openssl-${LOCKDC_OPENSSL_VERSION}.tar.gz"
-      URL_HASH "SHA256=b1bfedcd5b289ff22aee87c9d600f515767ebf45f77168cb6d64f231f518a82e"
+      URL_HASH "SHA256=aaf51a1fe064384f811daeaeb4ec4dce7340ec8bd893027eee676af31e83a04f"
       DOWNLOAD_NAME "openssl-${LOCKDC_OPENSSL_VERSION}.tar.gz"
       PREFIX "${prefix_dir}"
       DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
@@ -135,16 +190,21 @@ function(lc_add_openssl)
       TMP_DIR "${tmp_dir}"
       TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
       INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
+      PATCH_COMMAND
+        ${CMAKE_COMMAND}
+          -DOPENSSL_SOURCE_DIR=${source_dir}
+          -P ${CMAKE_SOURCE_DIR}/cmake/patch_openssl_buildinfo.cmake
       CONFIGURE_COMMAND
         ${CMAKE_COMMAND} -E env
           ${openssl_env_args}
           "${source_dir}/Configure"
           ${config_args}
-          --prefix=${env_prefix}
-          --openssldir=${env_prefix}/ssl
+          --prefix=/
+          --openssldir=${openssl_dir}
           --libdir=lib
       BUILD_COMMAND ${build_command}
       INSTALL_COMMAND ${install_command}
+        COMMAND ${strip_install_command}
       BUILD_IN_SOURCE 1
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
@@ -216,12 +276,15 @@ function(lc_add_nghttp2)
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   lc_get_target_triple(autotools_host)
+  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
   set(nghttp2_env_args
     CC=${CMAKE_C_COMPILER}
     AR=${CMAKE_AR}
     RANLIB=${CMAKE_RANLIB}
   )
+  lc_get_external_c_flags(nghttp2_cflags)
+  list(APPEND nghttp2_env_args CFLAGS=${nghttp2_cflags})
   if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_LINKER)
     list(APPEND nghttp2_env_args
       PATH=${LOCKDC_OSXCROSS_BIN_DIR}:$ENV{PATH}
@@ -232,7 +295,7 @@ function(lc_add_nghttp2)
   if(LOCKDC_BUILD_DEPENDENCIES)
     ExternalProject_Add(${project_name}
       URL "https://github.com/nghttp2/nghttp2/releases/download/v${LOCKDC_NGHTTP2_VERSION}/nghttp2-${LOCKDC_NGHTTP2_VERSION}.tar.gz"
-      URL_HASH "SHA256=2c16ffc588ad3f9e2613c3fad72db48ecb5ce15bc362fcc85b342e48daf51013"
+      URL_HASH "SHA256=c866b7477cbb7512ab6863a685027adbb1bb8da8fc3bab7429ed43d3281d5aa9"
       DOWNLOAD_NAME "nghttp2-${LOCKDC_NGHTTP2_VERSION}.tar.gz"
       PREFIX "${prefix_dir}"
       DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
@@ -253,6 +316,7 @@ function(lc_add_nghttp2)
         --enable-lib-only
       BUILD_COMMAND make -C lib -j${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND make -C lib install
+        COMMAND ${strip_install_command}
       BUILD_IN_SOURCE 0
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
@@ -296,6 +360,7 @@ function(lc_add_zlib)
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   lc_append_common_external_cmake_args(common_cmake_args)
+  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
   if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -339,6 +404,7 @@ function(lc_add_zlib)
         ${common_cmake_args}
       BUILD_COMMAND ${CMAKE_COMMAND} --build . --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
+        COMMAND ${strip_install_command}
       BUILD_IN_SOURCE 0
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
@@ -385,6 +451,7 @@ function(lc_add_libssh2)
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   lc_append_common_external_cmake_args(common_cmake_args)
+  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
   set(libssh2_shared_library "${install_dir}/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}")
@@ -455,6 +522,7 @@ function(lc_add_libssh2)
         lc_zlib_project
       BUILD_COMMAND ${CMAKE_COMMAND} --build . --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
+        COMMAND ${strip_install_command}
       BUILD_IN_SOURCE 0
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
@@ -513,6 +581,7 @@ function(lc_add_curl)
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   lc_append_common_external_cmake_args(common_cmake_args)
+  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
   if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(curl_install_rpath "@loader_path")
@@ -528,7 +597,7 @@ function(lc_add_curl)
   if(LOCKDC_BUILD_DEPENDENCIES)
     ExternalProject_Add(${project_name}
       URL "https://curl.se/download/curl-${LOCKDC_CURL_VERSION}.tar.xz"
-      URL_HASH "SHA256=40df79166e74aa20149365e11ee4c798a46ad57c34e4f68fd13100e2c9a91946"
+      URL_HASH "SHA256=63fe2dc148ba0ceae89922ef838f7e5c946272c2e78b7c59fab4b79d3ce2b896"
       DOWNLOAD_NAME "${curl_download_name}"
       PREFIX "${prefix_dir}"
       DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
@@ -590,6 +659,7 @@ function(lc_add_curl)
         ${common_cmake_args}
       BUILD_COMMAND ${CMAKE_COMMAND} --build . --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
+        COMMAND ${strip_install_command}
       BUILD_IN_SOURCE 0
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
@@ -626,8 +696,8 @@ endfunction()
 function(lc_get_lonejson_header_info out_name out_hash)
   set(asset_name "lonejson-${LOCKDC_LONEJSON_VERSION}.h.gz")
 
-  if(asset_name STREQUAL "lonejson-0.5.0.h.gz")
-    set(asset_hash "b91427a66b72cf0c8a4f4d3bddef5f7fbebfdaf332f50be30b4fb282442ccceb")
+  if(asset_name STREQUAL "lonejson-0.7.0.h.gz")
+    set(asset_hash "a11ae5cd87b102967438ce65c675efdcf6723801f5a5b5dc5710125a20b4b91f")
   else()
     message(FATAL_ERROR "Unsupported lonejson header asset: ${asset_name}")
   endif()
@@ -664,6 +734,7 @@ endfunction()
 
 function(lc_prepare_lonejson_source source_dir install_dir
          curl_include_dir download_dir asset_name gzip_bin)
+  lc_get_external_c_flags(lonejson_cflags)
   file(MAKE_DIRECTORY
     "${source_dir}"
     "${install_dir}/include"
@@ -763,6 +834,7 @@ function(lc_prepare_lonejson_source source_dir install_dir
       "          \"-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}\"\n")
   endif()
   file(APPEND "${source_dir}/configure.cmake"
+    "          \"-DCMAKE_C_FLAGS=${lonejson_cflags}\"\n"
     "          \"-DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}\"\n")
   file(APPEND "${source_dir}/configure.cmake"
     "          \"-DCMAKE_INSTALL_PREFIX=${install_dir}\"\n"
@@ -784,6 +856,7 @@ function(lc_add_lonejson)
   set(tmp_dir "${prefix_dir}/tmp")
   set(download_dir "${LOCKDC_DOWNLOAD_ROOT}")
   lc_get_lonejson_header_info(asset_name asset_hash)
+  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
   if(LOCKDC_BUILD_DEPENDENCIES)
     find_program(LOCKDC_GZIP_BIN NAMES gzip REQUIRED)
   endif()
@@ -814,6 +887,7 @@ function(lc_add_lonejson)
           -P "${source_dir}/configure.cmake"
       BUILD_COMMAND ${CMAKE_COMMAND} --build "${build_dir}" --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install "${build_dir}"
+        COMMAND ${strip_install_command}
       BUILD_IN_SOURCE 0
     )
   endif()
@@ -860,6 +934,7 @@ function(lc_add_cmocka)
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   lc_append_common_external_cmake_args(common_cmake_args)
+  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
   if(LOCKDC_BUILD_DEPENDENCIES)
@@ -885,6 +960,7 @@ function(lc_add_cmocka)
         ${common_cmake_args}
       BUILD_COMMAND ${CMAKE_COMMAND} --build . --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install .
+        COMMAND ${strip_install_command}
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
   endif()
@@ -967,6 +1043,7 @@ endfunction()
 
 function(lc_prepare_pslog_single_header_source source_dir install_dir
          download_dir asset_name gzip_bin)
+  lc_get_external_c_flags(pslog_cflags)
   file(MAKE_DIRECTORY
     "${source_dir}"
     "${install_dir}/include"
@@ -1052,6 +1129,7 @@ function(lc_prepare_pslog_single_header_source source_dir install_dir
       "          \"-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}\"\n")
   endif()
   file(APPEND "${source_dir}/configure.cmake"
+    "          \"-DCMAKE_C_FLAGS=${pslog_cflags}\"\n"
     "          \"-DCMAKE_BUILD_TYPE=${LOCKDC_DEPENDENCY_BUILD_TYPE}\"\n"
     "          \"-DCMAKE_INSTALL_PREFIX=${install_dir}\"\n"
     "          -Wno-dev\n"
@@ -1071,6 +1149,7 @@ function(lc_add_pslog)
   set(stamp_dir "${prefix_dir}/stamp")
   set(tmp_dir "${prefix_dir}/tmp")
   set(download_dir "${LOCKDC_DOWNLOAD_ROOT}")
+  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
   string(TOLOWER "${LOCKDC_TARGET_OS}" _lockdc_target_os_lower)
   if(_lockdc_target_os_lower STREQUAL "darwin")
     lc_get_pslog_header_info(asset_name asset_hash)
@@ -1106,6 +1185,7 @@ function(lc_add_pslog)
           -P "${source_dir}/configure.cmake"
       BUILD_COMMAND ${CMAKE_COMMAND} --build "${build_dir}" --parallel ${LOCKDC_DEPENDENCY_BUILD_JOBS}
       INSTALL_COMMAND ${CMAKE_COMMAND} --install "${build_dir}"
+        COMMAND ${strip_install_command}
       BUILD_IN_SOURCE 0
     )
   elseif(LOCKDC_BUILD_DEPENDENCIES)
@@ -1125,6 +1205,7 @@ function(lc_add_pslog)
       INSTALL_COMMAND
         ${CMAKE_COMMAND} -E rm -rf "${install_dir}"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${source_dir}" "${install_dir}"
+        COMMAND ${strip_install_command}
       BUILD_IN_SOURCE 1
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )

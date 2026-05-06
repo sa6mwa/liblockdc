@@ -39,6 +39,7 @@ set(lockdc_lua_rockspec_name "lockdc-${LOCKDC_VERSION}-1.rockspec")
 set(lockdc_lua_src_rock_name "lockdc-${LOCKDC_VERSION}-1.src.rock")
 set(lockdc_lua_source_archive_base "${lockdc_lua_stage_root}/${lockdc_lua_source_root_name}.tar")
 set(lockdc_lua_source_archive_path "${lockdc_lua_source_archive_base}.gz")
+get_filename_component(lockdc_lua_source_archive_name "${lockdc_lua_source_archive_path}" NAME)
 
 file(REMOVE_RECURSE "${lockdc_lua_stage_root}")
 file(MAKE_DIRECTORY "${lockdc_lua_stage_workdir}")
@@ -87,6 +88,8 @@ if(NOT lockdc_lua_gzip_result EQUAL 0)
         "stderr:\n${lockdc_lua_gzip_stderr}")
 endif()
 
+file(COPY "${lockdc_lua_source_archive_path}" DESTINATION "${lockdc_lua_stage_workdir}")
+
 file(READ "${lockdc_lua_stage_workdir}/${lockdc_lua_rockspec_name}" lockdc_lua_pack_rockspec_text)
 string(REGEX REPLACE "source = \\{[^\\}]*\\}" "source = {\n  url = \"${lockdc_lua_source_archive_path}\",\n}" lockdc_lua_pack_rockspec_text "${lockdc_lua_pack_rockspec_text}")
 file(WRITE "${lockdc_lua_stage_workdir}/${lockdc_lua_rockspec_name}" "${lockdc_lua_pack_rockspec_text}")
@@ -107,6 +110,48 @@ endif()
 
 if(NOT EXISTS "${lockdc_lua_stage_workdir}/${lockdc_lua_src_rock_name}")
     message(FATAL_ERROR "luarocks pack did not produce ${lockdc_lua_src_rock_name}")
+endif()
+
+set(lockdc_lua_src_rock_rewrite_root "${lockdc_lua_stage_root}/src-rock-rewrite")
+file(REMOVE_RECURSE "${lockdc_lua_src_rock_rewrite_root}")
+file(MAKE_DIRECTORY "${lockdc_lua_src_rock_rewrite_root}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar xf "${lockdc_lua_stage_workdir}/${lockdc_lua_src_rock_name}"
+    WORKING_DIRECTORY "${lockdc_lua_src_rock_rewrite_root}"
+    RESULT_VARIABLE lockdc_lua_unpack_result
+    OUTPUT_VARIABLE lockdc_lua_unpack_stdout
+    ERROR_VARIABLE lockdc_lua_unpack_stderr
+)
+if(NOT lockdc_lua_unpack_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to unpack Lua source rock for local-path rewrite\n"
+        "stdout:\n${lockdc_lua_unpack_stdout}\n"
+        "stderr:\n${lockdc_lua_unpack_stderr}")
+endif()
+
+set(lockdc_lua_embedded_rockspec "${lockdc_lua_src_rock_rewrite_root}/${lockdc_lua_rockspec_name}")
+if(NOT EXISTS "${lockdc_lua_embedded_rockspec}")
+    message(FATAL_ERROR "Lua source rock is missing embedded rockspec: ${lockdc_lua_embedded_rockspec}")
+endif()
+file(READ "${lockdc_lua_embedded_rockspec}" lockdc_lua_embedded_rockspec_text)
+string(REGEX REPLACE "source = \\{[^\\}]*\\}" "source = {\n  url = \"${lockdc_lua_source_archive_name}\",\n}" lockdc_lua_embedded_rockspec_text "${lockdc_lua_embedded_rockspec_text}")
+file(WRITE "${lockdc_lua_embedded_rockspec}" "${lockdc_lua_embedded_rockspec_text}")
+
+file(REMOVE "${lockdc_lua_stage_workdir}/${lockdc_lua_src_rock_name}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar cf "${lockdc_lua_stage_workdir}/${lockdc_lua_src_rock_name}" --format=zip
+        "${lockdc_lua_rockspec_name}"
+        "${lockdc_lua_source_archive_name}"
+    WORKING_DIRECTORY "${lockdc_lua_src_rock_rewrite_root}"
+    RESULT_VARIABLE lockdc_lua_repack_result
+    OUTPUT_VARIABLE lockdc_lua_repack_stdout
+    ERROR_VARIABLE lockdc_lua_repack_stderr
+)
+if(NOT lockdc_lua_repack_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to repack Lua source rock after local-path rewrite\n"
+        "stdout:\n${lockdc_lua_repack_stdout}\n"
+        "stderr:\n${lockdc_lua_repack_stderr}")
 endif()
 
 file(COPY "${lockdc_generated_rockspec_path}" DESTINATION "${LOCKDC_DIST_DIR}")
