@@ -128,6 +128,16 @@ LONEJSON_MAP_DEFINE(lc_engine_subscribe_meta_map, lc_engine_subscribe_meta_json,
 static const char *const lc_engine_watch_sse_event_names[] = {"",
                                                               "queue_watch"};
 
+#define LC_ENGINE_WATCH_SSE_MAX_LINE_BYTES (64U * 1024U)
+#define LC_ENGINE_WATCH_SSE_MAX_EVENT_DATA_BYTES LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
+#define LC_ENGINE_WATCH_SSE_MAX_BUFFERED_BYTES LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
+
+#define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_BOUNDARY_BYTES 200U
+#define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_HEADER_LINE_BYTES (64U * 1024U)
+#define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_HEADER_COUNT 64U
+#define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_PART_BUFFERED_BYTES \
+  LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
+
 static const lonejson_field lc_engine_watch_queue_request_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_queue_request, namespace_name,
                                 "namespace"),
@@ -191,6 +201,25 @@ static int lc_engine_i64_to_size_checked(lonejson_int64 value,
   }
   *out_value = narrowed;
   return LC_ENGINE_OK;
+}
+
+static void lc_engine_watch_sse_options(lonejson_sse_options *options) {
+  memset(options, 0, sizeof(*options));
+  options->max_line_bytes = LC_ENGINE_WATCH_SSE_MAX_LINE_BYTES;
+  options->max_event_data_bytes = LC_ENGINE_WATCH_SSE_MAX_EVENT_DATA_BYTES;
+  options->max_buffered_bytes = LC_ENGINE_WATCH_SSE_MAX_BUFFERED_BYTES;
+}
+
+static void lc_engine_subscribe_multipart_options(
+    lonejson_multipart_options *options) {
+  memset(options, 0, sizeof(*options));
+  options->max_boundary_bytes =
+      LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_BOUNDARY_BYTES;
+  options->max_header_line_bytes =
+      LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_HEADER_LINE_BYTES;
+  options->max_header_count = LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_HEADER_COUNT;
+  options->max_part_buffered_bytes =
+      LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_PART_BUFFERED_BYTES;
 }
 
 typedef struct lc_engine_watch_state {
@@ -511,6 +540,7 @@ static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
                                              size_t nmemb, void *userdata) {
   lc_engine_watch_state *state;
   lonejson_sse_json_options json_options;
+  lonejson_sse_options sse_options;
   lonejson_error lj_error;
   lonejson_status status;
   size_t total;
@@ -528,8 +558,9 @@ static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
     return total;
   }
   if (state->sse == NULL) {
+    lc_engine_watch_sse_options(&sse_options);
     memset(&lj_error, 0, sizeof(lj_error));
-    state->sse = lonejson_sse_open(NULL, &lj_error);
+    state->sse = lonejson_sse_open(&sse_options, &lj_error);
     if (state->sse == NULL) {
       state->callback_failed = 1;
       lc_engine_lonejson_error_from_status(
@@ -1015,6 +1046,7 @@ static lonejson_status lc_engine_subscribe_end_part(
 
 static int lc_engine_subscribe_open_multipart(lc_engine_subscribe_state *state,
                                               lonejson_error *lj_error) {
+  lonejson_multipart_options multipart_options;
   lonejson_status status;
 
   if (state->multipart != NULL) {
@@ -1024,8 +1056,10 @@ static int lc_engine_subscribe_open_multipart(lc_engine_subscribe_state *state,
     return lc_engine_set_protocol_error(
         state->error, "subscribe response missing Content-Type");
   }
+  lc_engine_subscribe_multipart_options(&multipart_options);
   state->multipart =
-      lonejson_multipart_open(state->content_type, NULL, lj_error);
+      lonejson_multipart_open(state->content_type, &multipart_options,
+                              lj_error);
   if (state->multipart != NULL) {
     return LC_ENGINE_OK;
   }
