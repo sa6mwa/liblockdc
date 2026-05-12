@@ -109,6 +109,7 @@ typedef struct lc_public_mock_client {
   lc_public_mock_call queue_nack_call;
   lc_public_mock_call queue_extend_call;
   lc_public_mock_call query_call;
+  lc_public_mock_call query_keys_call;
   lc_public_mock_call get_namespace_config_call;
   lc_public_mock_call update_namespace_config_call;
   lc_public_mock_call flush_index_call;

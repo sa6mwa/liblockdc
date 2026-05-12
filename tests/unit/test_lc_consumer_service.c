@@ -29,6 +29,7 @@ typedef struct consumer_test_state {
   size_t expected_messages;
   size_t handled_messages;
   size_t subscribe_calls;
+  size_t deliveries_per_subscribe;
   size_t end_callback_rejections;
   size_t end_callback_rejections_without_engine_error;
   size_t ack_calls;
@@ -745,17 +746,22 @@ static int fake_subscribe(lc_consumer_service_handle *service,
   consumer_test_state *state;
   lc_engine_dequeue_response delivery;
   char message_id[64];
+  size_t deliveries;
+  size_t delivery_index;
+  size_t subscribe_call;
   int accepted;
-  int completed;
 
   (void)service;
   (void)client;
   state = g_consumer_test_state;
   pthread_mutex_lock(&state->mutex);
   state->subscribe_calls += 1U;
-  snprintf(message_id, sizeof(message_id), "msg-%lu",
-           (unsigned long)state->subscribe_calls);
+  subscribe_call = state->subscribe_calls;
+  deliveries = state->deliveries_per_subscribe;
   pthread_mutex_unlock(&state->mutex);
+  if (deliveries == 0U) {
+    deliveries = 1U;
+  }
 
   if (state->fail_subscribe) {
     lc_engine_error_init(engine_error);
@@ -764,40 +770,45 @@ static int fake_subscribe(lc_consumer_service_handle *service,
     return LC_ENGINE_ERROR_TRANSPORT;
   }
 
-  memset(&delivery, 0, sizeof(delivery));
-  delivery.namespace_name = (char *)request->namespace_name;
-  delivery.queue = (char *)request->queue;
-  delivery.message_id = message_id;
-  delivery.payload_content_type = "application/json";
-  delivery.lease_id = "lease-1";
-  delivery.meta_etag = "meta-1";
-  delivery.fencing_token = 11L;
-  delivery.visibility_timeout_seconds = request->visibility_timeout_seconds;
-  if (with_state) {
-    delivery.state_lease_id = "state-lease-1";
-    delivery.state_etag = "state-etag-1";
-    delivery.state_fencing_token = 17L;
-  }
-
-  accepted = handler->begin(handler_context, &delivery, engine_error);
-  if (!accepted) {
-    return LC_ENGINE_ERROR_TRANSPORT;
-  }
-  /* These consumer-service unit tests exercise delivery lifecycle and
-   * terminal-action semantics, not payload streaming. Keep the harness
-   * payload-less so an immediate ack/defer/nack cannot race a synthetic
-   * producer write and turn the test into a stream timing flake. */
-  if (state->stop_before_end && state->service != NULL) {
-    stop_test_service(state);
-  }
-  if (!handler->end(handler_context, &delivery, engine_error)) {
-    pthread_mutex_lock(&state->mutex);
-    state->end_callback_rejections += 1U;
-    if (engine_error == NULL || engine_error->code == LC_ENGINE_OK) {
-      state->end_callback_rejections_without_engine_error += 1U;
+  for (delivery_index = 0U; delivery_index < deliveries; ++delivery_index) {
+    snprintf(message_id, sizeof(message_id), "msg-%lu-%lu",
+             (unsigned long)subscribe_call,
+             (unsigned long)(delivery_index + 1U));
+    memset(&delivery, 0, sizeof(delivery));
+    delivery.namespace_name = (char *)request->namespace_name;
+    delivery.queue = (char *)request->queue;
+    delivery.message_id = message_id;
+    delivery.payload_content_type = "application/json";
+    delivery.lease_id = "lease-1";
+    delivery.meta_etag = "meta-1";
+    delivery.fencing_token = 11L;
+    delivery.visibility_timeout_seconds = request->visibility_timeout_seconds;
+    if (with_state) {
+      delivery.state_lease_id = "state-lease-1";
+      delivery.state_etag = "state-etag-1";
+      delivery.state_fencing_token = 17L;
     }
-    pthread_mutex_unlock(&state->mutex);
-    return LC_ENGINE_ERROR_TRANSPORT;
+
+    accepted = handler->begin(handler_context, &delivery, engine_error);
+    if (!accepted) {
+      return LC_ENGINE_ERROR_TRANSPORT;
+    }
+    /* These consumer-service unit tests exercise delivery lifecycle and
+     * terminal-action semantics, not payload streaming. Keep the harness
+     * payload-less so an immediate ack/defer/nack cannot race a synthetic
+     * producer write and turn the test into a stream timing flake. */
+    if (state->stop_before_end && state->service != NULL) {
+      stop_test_service(state);
+    }
+    if (!handler->end(handler_context, &delivery, engine_error)) {
+      pthread_mutex_lock(&state->mutex);
+      state->end_callback_rejections += 1U;
+      if (engine_error == NULL || engine_error->code == LC_ENGINE_OK) {
+        state->end_callback_rejections_without_engine_error += 1U;
+      }
+      pthread_mutex_unlock(&state->mutex);
+      return LC_ENGINE_ERROR_TRANSPORT;
+    }
   }
   return LC_ENGINE_OK;
 }
@@ -1289,6 +1300,65 @@ test_consumer_service_multi_worker_runs_without_transport(void **state) {
              error.message != NULL ? error.message : "(null)");
   }
   assert_true(runtime_state.subscribe_calls >= 3U);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  assert_true(alloc_state.total_allocations > 0U);
+  assert_int_equal(alloc_state.live_allocations, 0U);
+
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
+test_consumer_service_releases_each_delivery_in_single_subscribe_stream(
+    void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.expected_messages = 2U;
+  runtime_state.deliveries_per_subscribe = 2U;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(error.code, LC_OK);
+  assert_int_equal(runtime_state.subscribe_calls, 1U);
+  assert_int_equal(runtime_state.handled_messages, 2U);
+  assert_int_equal(runtime_state.ack_calls, 2U);
+  assert_int_equal(runtime_state.close_calls, 2U);
 
   service->close(service);
   g_consumer_test_state = NULL;
@@ -2607,6 +2677,8 @@ int main(void) {
           test_consumer_service_multi_worker_releases_tracked_allocations),
       cmocka_unit_test(
           test_consumer_service_multi_worker_runs_without_transport),
+      cmocka_unit_test(
+          test_consumer_service_releases_each_delivery_in_single_subscribe_stream),
       cmocka_unit_test(test_consumer_service_multi_worker_failure_cleans_up),
       cmocka_unit_test(
           test_consumer_service_auto_acks_open_delivery_on_success),

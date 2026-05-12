@@ -161,6 +161,56 @@ function(assert_lockdc_owned_binaries_have_no_local_paths extract_root archive_p
     endforeach()
 endfunction()
 
+function(assert_packaged_binaries_have_no_sanitizer_runtime extract_root archive_path)
+    find_program(LOCKDC_STRINGS_BIN NAMES strings)
+    if(NOT LOCKDC_STRINGS_BIN)
+        message(FATAL_ERROR "strings is required for archive sanitizer validation")
+    endif()
+
+    file(GLOB packaged_binaries
+        LIST_DIRECTORIES false
+        "${extract_root}/lib/*.a"
+        "${extract_root}/lib/*.so"
+        "${extract_root}/lib/*.so.*"
+        "${extract_root}/lib/*.dylib"
+        "${extract_root}/lib/*.dll"
+    )
+    foreach(packaged_binary IN LISTS packaged_binaries)
+        if(IS_SYMLINK "${packaged_binary}")
+            continue()
+        endif()
+        execute_process(
+            COMMAND "${LOCKDC_STRINGS_BIN}" "${packaged_binary}"
+            RESULT_VARIABLE strings_result
+            OUTPUT_VARIABLE strings_output
+            ERROR_VARIABLE strings_error
+        )
+        if(NOT strings_result EQUAL 0)
+            message(FATAL_ERROR
+                "failed to inspect sanitizer references in ${packaged_binary}: ${archive_path}\n${strings_error}")
+        endif()
+        foreach(disallowed_sanitizer_reference
+            "libasan"
+            "libubsan"
+            "__asan_"
+            "__ubsan_"
+            "AddressSanitizer"
+            "UndefinedBehaviorSanitizer"
+            "ASAN_OPTIONS"
+            "UBSAN_OPTIONS"
+            "-fsanitize=address"
+            "-fsanitize=undefined"
+        )
+            string(FIND "${strings_output}" "${disallowed_sanitizer_reference}" sanitizer_reference_index)
+            if(NOT sanitizer_reference_index EQUAL -1)
+                message(FATAL_ERROR
+                    "release archive binary contains sanitizer reference '${disallowed_sanitizer_reference}': "
+                    "${packaged_binary} in ${archive_path}")
+            endif()
+        endforeach()
+    endforeach()
+endfunction()
+
 function(assert_archive_layout archive_path version target_id shared_lib_name shared_soname shared_link_name)
     if(NOT EXISTS "${archive_path}")
         message(FATAL_ERROR "missing archive: ${archive_path}")
@@ -293,6 +343,7 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     if(NOT DEFINED LOCKDC_SANITIZER_INSTRUMENTED OR LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "" OR
        LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "0")
         lockdc_assert_tree_has_no_private_traces("${extract_root}/${archive_prefix}" "${archive_path}")
+        assert_packaged_binaries_have_no_sanitizer_runtime("${extract_root}/${archive_prefix}" "${archive_path}")
     endif()
     if(target_id MATCHES "apple-darwin$")
         assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libpslog.dylib")

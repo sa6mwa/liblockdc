@@ -577,6 +577,10 @@ local function run_subscribe(client, req, with_state, handler, should_stop)
     end
     state = with_state and message:state() or nil
     ok, handler_err = pcall(handler, message, state)
+    if state ~= nil then
+      state:close()
+      state = nil
+    end
     if ok and handler_err == nil and message:is_open() then
       local ack_ok, ack_err = message:ack()
 

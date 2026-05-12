@@ -159,8 +159,7 @@ case "$kind" in
     ctest --preset x86_64-linux-gnu-release --progress --stop-on-failure --timeout "$ctest_timeout"
     ;;
   asan)
-    "$script_dir/build.sh" asan
-    ctest --preset asan --progress --stop-on-failure --timeout "$ctest_timeout"
+    "$script_dir/test.sh" debug
     ;;
   coverage)
     "$script_dir/build.sh" coverage

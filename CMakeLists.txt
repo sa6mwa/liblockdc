@@ -70,9 +70,10 @@ set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release used for compr
 set(LOCKDC_CURL_VERSION "8.20.0" CACHE STRING "Pinned curl release used for CMake-managed dependency builds.")
 set(LOCKDC_NGHTTP2_VERSION "1.69.0" CACHE STRING "Pinned nghttp2 release used to enable libcurl HTTP/2 support.")
 set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release used for SSH and SFTP support.")
-set(LOCKDC_LONEJSON_VERSION "0.8.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
+set(LOCKDC_LONEJSON_VERSION "0.12.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.3.1" CACHE STRING "Pinned libpslog release used for SDK logging.")
+set(LOCKDC_ABI_VERSION "1" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
 set(LOCKDC_VERSION_OVERRIDE "" CACHE STRING "Override the detected liblockdc package version with an explicit semantic version.")
@@ -90,6 +91,9 @@ set(LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT "60" CACHE STRING "Maximum idl
 
 if(NOT LOCKDC_BUILD_STATIC AND NOT LOCKDC_BUILD_SHARED)
     message(FATAL_ERROR "Enable at least one of LOCKDC_BUILD_STATIC or LOCKDC_BUILD_SHARED.")
+endif()
+if(NOT LOCKDC_ABI_VERSION MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "LOCKDC_ABI_VERSION must be a non-negative integer.")
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)
@@ -437,7 +441,7 @@ if(LOCKDC_BUILD_SHARED)
     set_target_properties(lc_shared PROPERTIES
         OUTPUT_NAME lockdc
         VERSION ${PROJECT_VERSION}
-        SOVERSION ${PROJECT_VERSION_MAJOR}
+        SOVERSION ${LOCKDC_ABI_VERSION}
         BUILD_RPATH "${lockdc_shared_install_rpath}"
         BUILD_RPATH_USE_ORIGIN ON
         BUILD_WITH_INSTALL_RPATH ON

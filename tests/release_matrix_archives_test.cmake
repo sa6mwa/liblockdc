@@ -36,7 +36,16 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
     unset(LOCKDC_SHARED_LIB_NAME)
     unset(LOCKDC_SHARED_SONAME)
     unset(LOCKDC_SHARED_LINK_NAME)
+    unset(LOCKDC_SANITIZER_INSTRUMENTED)
     include("${lockdc_metadata}")
+
+    if(DEFINED LOCKDC_SANITIZER_INSTRUMENTED
+       AND NOT LOCKDC_SANITIZER_INSTRUMENTED STREQUAL ""
+       AND NOT LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "0")
+        message(FATAL_ERROR
+            "release preset ${lockdc_preset} is sanitizer-instrumented; "
+            "release artifacts must not be built with ASan/UBSan")
+    endif()
 
     if(lockdc_release_version STREQUAL "")
         set(lockdc_release_version "${LOCKDC_VERSION}")

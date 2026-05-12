@@ -110,6 +110,12 @@ int lc_query(lc_client *client, const lc_query_req *req, lc_sink *dst,
   return client->query(client, req, dst, out, error);
 }
 
+int lc_query_keys(lc_client *client, const lc_query_req *req,
+                  const lc_query_key_handler *handler, void *context,
+                  lc_query_res *out, lc_error *error) {
+  return client->query_keys(client, req, handler, context, out, error);
+}
+
 int lc_get_namespace_config(lc_client *client,
                             const lc_namespace_config_req *req,
                             lc_namespace_config_res *out, lc_error *error) {

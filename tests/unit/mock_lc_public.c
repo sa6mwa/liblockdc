@@ -579,6 +579,18 @@ static int mock_client_query(lc_client *self, const lc_query_req *req,
   return mock->rc;
 }
 
+static int mock_client_query_keys(lc_client *self, const lc_query_req *req,
+                                  const lc_query_key_handler *handler,
+                                  void *context, lc_query_res *out,
+                                  lc_error *error) {
+  lc_public_mock_client *mock;
+
+  mock = (lc_public_mock_client *)self;
+  lc_public_mock_record(&mock->query_keys_call, self, req, handler, context,
+                        out, error);
+  return mock->rc;
+}
+
 static int mock_client_get_namespace_config(lc_client *self,
                                             const lc_namespace_config_req *req,
                                             lc_namespace_config_res *out,
@@ -907,6 +919,7 @@ void lc_public_mock_client_init(lc_public_mock_client *mock) {
   mock->pub.queue_nack = mock_client_queue_nack;
   mock->pub.queue_extend = mock_client_queue_extend;
   mock->pub.query = mock_client_query;
+  mock->pub.query_keys = mock_client_query_keys;
   mock->pub.get_namespace_config = mock_client_get_namespace_config;
   mock->pub.update_namespace_config = mock_client_update_namespace_config;
   mock->pub.flush_index = mock_client_flush_index;

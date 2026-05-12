@@ -134,5 +134,6 @@ void lc_engine_query_stream_response_cleanup(
   lc_engine_client_free_alloc(client, response->return_mode);
   response->return_mode = NULL;
   response->index_seq = 0UL;
+  response->index_seq_present = 0;
   response->http_status = 0L;
 }

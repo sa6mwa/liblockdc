@@ -21,6 +21,7 @@ endif()
 
 file(READ "${LOCKDC_ROOT}/CMakeLists.txt" lockdc_root_cmake_text)
 foreach(forbidden_snippet
+    "SOVERSION \${PROJECT_VERSION_MAJOR}"
     "CMAKE_SHARED_LIBRARY_SUFFIX}.${PROJECT_VERSION}"
     "CMAKE_SHARED_LIBRARY_SUFFIX}.${PROJECT_VERSION_MAJOR}"
 )
@@ -30,6 +31,10 @@ foreach(forbidden_snippet
             "CMakeLists.txt still synthesizes an ELF-only shared-library filename fragment '${forbidden_snippet}'\n")
     endif()
 endforeach()
+if(NOT lockdc_root_cmake_text MATCHES "SOVERSION [$][{]LOCKDC_ABI_VERSION[}]")
+    message(FATAL_ERROR
+        "CMakeLists.txt must use LOCKDC_ABI_VERSION for the shared-library SOVERSION\n")
+endif()
 
 file(READ "${LOCKDC_ROOT}/cmake/install_vendored_sdk_runtime_artifacts.cmake.in"
      lockdc_runtime_helper_template_text)

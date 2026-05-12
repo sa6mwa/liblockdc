@@ -258,6 +258,8 @@ typedef struct lc_engine_query_request {
   const char *cursor;
   const char *fields_json;
   const char *return_mode;
+  const char *engine;
+  const char *refresh;
 } lc_engine_query_request;
 
 typedef struct lc_engine_query_response {
@@ -272,8 +274,16 @@ typedef struct lc_engine_query_stream_response {
   char *metadata_json;
   char *return_mode;
   unsigned long index_seq;
+  int index_seq_present;
   long http_status;
 } lc_engine_query_stream_response;
+
+typedef struct lc_engine_query_key_handler {
+  int (*begin)(void *context, lc_engine_error *error);
+  int (*chunk)(void *context, const char *bytes, size_t len,
+               lc_engine_error *error);
+  int (*end)(void *context, lc_engine_error *error);
+} lc_engine_query_key_handler;
 
 typedef struct lc_engine_enqueue_request {
   const char *namespace_name;
@@ -848,6 +858,12 @@ int lc_engine_client_query_into(lc_engine_client *client,
                                 const lc_engine_query_request *request,
                                 lc_engine_write_callback writer,
                                 void *writer_context,
+                                lc_engine_query_stream_response *response,
+                                lc_engine_error *error);
+int lc_engine_client_query_keys(lc_engine_client *client,
+                                const lc_engine_query_request *request,
+                                const lc_engine_query_key_handler *handler,
+                                void *handler_context,
                                 lc_engine_query_stream_response *response,
                                 lc_engine_error *error);
 int lc_engine_client_enqueue_from(lc_engine_client *client,

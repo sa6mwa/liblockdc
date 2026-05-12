@@ -69,6 +69,72 @@ typedef struct queue_watch_e2e_context {
   lc_error dequeue_error;
 } queue_watch_e2e_context;
 
+typedef struct query_keys_e2e_capture {
+  const char *key_prefix;
+  size_t key_prefix_len;
+  size_t expected_count;
+  size_t begin_calls;
+  size_t chunk_calls;
+  size_t end_calls;
+  size_t total_bytes;
+  char current[160];
+  size_t current_length;
+  unsigned char seen[512];
+} query_keys_e2e_capture;
+
+static int query_keys_e2e_begin(void *context, lc_error *error) {
+  query_keys_e2e_capture *capture;
+
+  (void)error;
+  capture = (query_keys_e2e_capture *)context;
+  capture->begin_calls += 1U;
+  capture->current_length = 0U;
+  capture->current[0] = '\0';
+  return 1;
+}
+
+static int query_keys_e2e_chunk(void *context, const char *bytes, size_t len,
+                                lc_error *error) {
+  query_keys_e2e_capture *capture;
+  size_t available;
+
+  (void)error;
+  capture = (query_keys_e2e_capture *)context;
+  capture->chunk_calls += 1U;
+  capture->total_bytes += len;
+  available = sizeof(capture->current) - capture->current_length - 1U;
+  assert_true(len <= available);
+  memcpy(capture->current + capture->current_length, bytes, len);
+  capture->current_length += len;
+  capture->current[capture->current_length] = '\0';
+  return 1;
+}
+
+static int query_keys_e2e_end(void *context, lc_error *error) {
+  query_keys_e2e_capture *capture;
+  const char *suffix;
+  char *end;
+  unsigned long index;
+
+  (void)error;
+  capture = (query_keys_e2e_capture *)context;
+  assert_true(capture->current_length > capture->key_prefix_len);
+  assert_int_equal(strncmp(capture->current, capture->key_prefix,
+                           capture->key_prefix_len),
+                   0);
+  suffix = capture->current + capture->key_prefix_len;
+  index = strtoul(suffix, &end, 10);
+  assert_non_null(end);
+  assert_int_equal(*end, '\0');
+  assert_true(index < capture->expected_count);
+  assert_int_equal(capture->seen[index], 0U);
+  capture->seen[index] = 1U;
+  capture->end_calls += 1U;
+  capture->current_length = 0U;
+  capture->current[0] = '\0';
+  return 1;
+}
+
 static int acquire_for_update_e2e_handler(
     void *context, lc_acquire_for_update_context *update, lc_error *error) {
   acquire_for_update_e2e_state *state;
@@ -1563,6 +1629,210 @@ static void test_disk_query_rejects_invalid_inputs(void **state) {
 
   lc_sink_close(sink);
   lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_query_documents_captures_lockd_trailers(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  char key_a[96];
+  char key_b[96];
+  char kind[96];
+  char json_text[256];
+  char selector_json[192];
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("disk-query-trailer-kind", kind, sizeof(kind));
+  make_unique_name("disk-query-trailer-a", key_a, sizeof(key_a));
+  make_unique_name("disk-query-trailer-b", key_b, sizeof(key_b));
+
+  acquire_req.owner = "lc-e2e-query-trailers";
+  acquire_req.ttl_seconds = 30L;
+
+  acquire_req.key = key_a;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  snprintf(json_text, sizeof(json_text),
+           "{\"kind\":\"%s\",\"ordinal\":1,\"status\":\"ready\"}", kind);
+  save_json_text_or_die(lease, json_text, &error);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire_req.key = key_b;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  snprintf(json_text, sizeof(json_text),
+           "{\"kind\":\"%s\",\"ordinal\":2,\"status\":\"ready\"}", kind);
+  save_json_text_or_die(lease, json_text, &error);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+
+  snprintf(selector_json, sizeof(selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
+  query_req.selector_json = selector_json;
+  query_req.limit = 1L;
+  query_req.return_mode = "documents";
+  query_req.engine = "index";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(length > 0U);
+  assert_true(buffer_contains(bytes, length, kind));
+  assert_true(buffer_contains(bytes, length, "\"status\":\"ready\""));
+  assert_non_null(query_res.metadata_json);
+  assert_true(buffer_contains(query_res.metadata_json,
+                              strlen(query_res.metadata_json),
+                              "query_candidates"));
+  assert_string_equal(query_res.return_mode, "documents");
+
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&query_res);
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void test_disk_query_keys_streams_many_indexed_keys(void **state) {
+  enum { key_count = 512 };
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_keys_e2e_capture capture;
+  char kind[96];
+  char key_prefix[128];
+  char key[160];
+  char json_text[256];
+  char selector_json[192];
+  size_t index;
+  size_t seen_count;
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("disk-query-keys-kind", kind, sizeof(kind));
+  snprintf(key_prefix, sizeof(key_prefix), "e2e/query-keys/%s/", kind);
+  acquire_req.owner = "lc-e2e-query-keys";
+  acquire_req.ttl_seconds = 120L;
+
+  for (index = 0U; index < (size_t)key_count; ++index) {
+    snprintf(key, sizeof(key), "%s%04zu", key_prefix, index);
+    acquire_req.key = key;
+    rc = client->acquire(client, &acquire_req, &lease, &error);
+    assert_lc_ok(rc, &error);
+    snprintf(json_text, sizeof(json_text),
+             "{\"kind\":\"%s\",\"ordinal\":%zu,\"status\":\"ready\"}", kind,
+             index);
+    save_json_text_or_die(lease, json_text, &error);
+    rc = lease->release(lease, &release_req, &error);
+    assert_lc_ok(rc, &error);
+    lease = NULL;
+  }
+
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+
+  snprintf(selector_json, sizeof(selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
+  query_req.selector_json = selector_json;
+  query_req.limit = key_count;
+  query_req.engine = "index";
+  handler.begin = query_keys_e2e_begin;
+  handler.chunk = query_keys_e2e_chunk;
+  handler.end = query_keys_e2e_end;
+  capture.key_prefix = key_prefix;
+  capture.key_prefix_len = strlen(key_prefix);
+  capture.expected_count = key_count;
+  rc = lc_query_keys(client, &query_req, &handler, &capture, &query_res,
+                     &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.begin_calls, (size_t)key_count);
+  assert_int_equal(capture.end_calls, (size_t)key_count);
+  assert_true(capture.chunk_calls >= (size_t)key_count);
+  assert_true(capture.total_bytes >= (strlen(key_prefix) + 4U) *
+                                         (size_t)key_count);
+  seen_count = 0U;
+  for (index = 0U; index < (size_t)key_count; ++index) {
+    seen_count += capture.seen[index] != 0U ? 1U : 0U;
+  }
+  assert_int_equal(seen_count, (size_t)key_count);
+
+  lc_query_res_cleanup(&query_res);
+  lc_index_flush_res_cleanup(&flush_res);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
@@ -3139,6 +3409,8 @@ int main(void) {
       cmocka_unit_test(test_disk_acquire_if_not_exists_conflict),
       cmocka_unit_test(test_disk_state_cas_failure_modes),
       cmocka_unit_test(test_disk_query_rejects_invalid_inputs),
+      cmocka_unit_test(test_disk_query_documents_captures_lockd_trailers),
+      cmocka_unit_test(test_disk_query_keys_streams_many_indexed_keys),
       cmocka_unit_test(test_disk_management_failure_modes),
       cmocka_unit_test(test_disk_auth_permission_failure_modes),
       cmocka_unit_test(

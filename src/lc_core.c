@@ -1210,6 +1210,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.queue_nack = lc_client_queue_nack_method;
   client->pub.queue_extend = lc_client_queue_extend_method;
   client->pub.query = lc_client_query_method;
+  client->pub.query_keys = lc_client_query_keys_method;
   client->pub.get_namespace_config = lc_client_get_namespace_config_method;
   client->pub.update_namespace_config =
       lc_client_update_namespace_config_method;
@@ -1550,6 +1551,7 @@ void lc_query_res_cleanup(lc_query_res *response) {
   }
   free(response->cursor);
   free(response->return_mode);
+  free(response->metadata_json);
   free(response->correlation_id);
   memset(response, 0, sizeof(*response));
 }

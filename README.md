@@ -66,6 +66,10 @@ Build the normal host development preset:
 make build
 ```
 
+`make build` and `make test-debug` use the sanitizer-instrumented debug
+preset. Third-party dependencies are still reused from the release-built host
+dependency cache.
+
 Run the host release suites for the shipped x86_64 GNU and musl builds:
 
 ```bash
@@ -83,6 +87,9 @@ Run the full release verification path across host and cross targets:
 ```bash
 make test-all
 ```
+
+`make test-all` starts with the sanitizer-instrumented debug suite before the
+host and cross release suites.
 
 Run focused verification layers:
 

@@ -1810,10 +1810,6 @@ int lc_engine_set_server_error_from_json(lc_engine_error *error,
   synthetic.current_etag = parsed.current_etag;
   synthetic.current_version = (long)parsed.current_version;
   synthetic.retry_after_seconds = (long)parsed.retry_after_seconds;
-  parsed.server_error_code = NULL;
-  parsed.detail = NULL;
-  parsed.leader_endpoint = NULL;
-  parsed.current_etag = NULL;
   rc = lc_engine_set_server_error_from_result(error, &synthetic);
   lonejson_cleanup(&lc_engine_http_error_map, &parsed);
   return rc;

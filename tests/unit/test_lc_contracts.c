@@ -49,6 +49,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lc_extend_res extend_res;
   lc_query_req query_req;
   lc_query_res query_res;
+  lc_query_key_handler query_key_handler;
   lc_namespace_config_req namespace_req;
   lc_namespace_config_res namespace_res;
   lc_index_flush_req index_flush_req;
@@ -129,6 +130,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   memset(&extend_res, 0, sizeof(extend_res));
   memset(&query_req, 0, sizeof(query_req));
   memset(&query_res, 0, sizeof(query_res));
+  memset(&query_key_handler, 0, sizeof(query_key_handler));
   memset(&namespace_req, 0, sizeof(namespace_req));
   memset(&namespace_res, 0, sizeof(namespace_res));
   memset(&index_flush_req, 0, sizeof(index_flush_req));
@@ -226,6 +228,9 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_query(&client.pub, &query_req, &sink.pub, &query_res, &error);
   assert_int_equal(rc, LC_OK);
+  rc = lc_query_keys(&client.pub, &query_req, &query_key_handler, NULL,
+                     &query_res, &error);
+  assert_int_equal(rc, LC_OK);
   rc = lc_get_namespace_config(&client.pub, &namespace_req, &namespace_res,
                                &error);
   assert_int_equal(rc, LC_OK);
@@ -310,6 +315,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(client.queue_nack_call.count, 1);
   assert_int_equal(client.queue_extend_call.count, 1);
   assert_int_equal(client.query_call.count, 1);
+  assert_int_equal(client.query_keys_call.count, 1);
   assert_int_equal(client.get_namespace_config_call.count, 1);
   assert_int_equal(client.update_namespace_config_call.count, 1);
   assert_int_equal(client.flush_index_call.count, 1);
@@ -339,6 +345,25 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lc_client_close(&client.pub);
   assert_int_equal(client.close_calls, 1);
   lc_error_cleanup(&error);
+}
+
+static void test_public_struct_layout_preserves_stable_prefixes(void **state) {
+  (void)state;
+
+  assert_true(offsetof(lc_query_res, cursor) <
+              offsetof(lc_query_res, return_mode));
+  assert_true(offsetof(lc_query_res, return_mode) <
+              offsetof(lc_query_res, index_seq));
+  assert_true(offsetof(lc_query_res, index_seq) <
+              offsetof(lc_query_res, correlation_id));
+  assert_true(offsetof(lc_query_res, correlation_id) <
+              offsetof(lc_query_res, metadata_json));
+
+  assert_int_equal(offsetof(lc_client, get_namespace_config),
+                   offsetof(lc_client, query) +
+                       sizeof(((lc_client *)0)->query));
+  assert_true(offsetof(lc_client, query_keys) >
+              offsetof(lc_client, acquire_for_update));
 }
 
 static void test_lease_wrappers_delegate_full_public_surface(void **state) {
@@ -543,6 +568,7 @@ static void test_stream_close_wrappers_delegate(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_client_wrappers_delegate_full_public_surface),
+      cmocka_unit_test(test_public_struct_layout_preserves_stable_prefixes),
       cmocka_unit_test(test_lease_wrappers_delegate_full_public_surface),
       cmocka_unit_test(
           test_message_and_service_wrappers_delegate_full_public_surface),

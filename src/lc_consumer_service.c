@@ -1271,6 +1271,10 @@ lc_consumer_delivery_begin(void *context,
 
   (void)engine_error;
   bridge = (lc_consumer_delivery_bridge *)context;
+  /* A subscribe stream can deliver multiple messages before the worker returns
+   * to its outer cleanup path. Reusing the bridge must first release the
+   * previous per-delivery wrapper, metadata, and synchronization primitives. */
+  lc_consumer_delivery_cleanup(bridge);
   lc_consumer_delivery_meta_copy(&bridge->meta, delivery);
   {
     pslog_field fields[8];

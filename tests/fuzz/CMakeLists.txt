@@ -25,6 +25,7 @@ lc_add_fuzz_target(lc_fuzz_streams fuzz_lc_streams.c)
 lc_add_fuzz_target(lc_fuzz_bundle_open fuzz_lc_bundle_open.c)
 lc_add_fuzz_target(lc_fuzz_attachment_decode fuzz_lc_attachment_decode.c)
 lc_add_fuzz_target(lc_fuzz_queue_meta fuzz_lc_queue_meta.c)
+lc_add_fuzz_target(lc_fuzz_query_keys_stream fuzz_lc_query_keys_stream.c)
 lc_add_fuzz_target(lc_fuzz_mutate_parse fuzz_lc_mutate_parse.c)
 lc_add_fuzz_target(lc_fuzz_mutate_apply fuzz_lc_mutate_apply.c)
 
@@ -35,6 +36,7 @@ file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/streams" DESTINATION "${LC_FUZZ_BI
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/bundle_open" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/attachment_decode" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/queue_meta" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/query_keys_stream" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/mutate_parse" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/mutate_apply" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
 
@@ -51,6 +53,9 @@ set_tests_properties(lc_fuzz_attachment_decode_smoke PROPERTIES ENVIRONMENT "ASA
 add_test(NAME lc_fuzz_queue_meta_smoke COMMAND lc_fuzz_queue_meta -runs=128 ${LC_FUZZ_BINARY_CORPUS_DIR}/queue_meta)
 set_tests_properties(lc_fuzz_queue_meta_smoke PROPERTIES LABELS fuzz)
 set_tests_properties(lc_fuzz_queue_meta_smoke PROPERTIES ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+
+add_test(NAME lc_fuzz_query_keys_stream_smoke COMMAND lc_fuzz_query_keys_stream -runs=128 ${LC_FUZZ_BINARY_CORPUS_DIR}/query_keys_stream)
+set_tests_properties(lc_fuzz_query_keys_stream_smoke PROPERTIES LABELS fuzz)
 
 add_test(NAME lc_fuzz_mutate_parse_smoke COMMAND lc_fuzz_mutate_parse -runs=128 ${LC_FUZZ_BINARY_CORPUS_DIR}/mutate_parse)
 set_tests_properties(lc_fuzz_mutate_parse_smoke PROPERTIES LABELS fuzz)

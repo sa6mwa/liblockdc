@@ -1771,6 +1771,8 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
   engine_req.cursor = req->cursor;
   engine_req.fields_json = req->fields_json;
   engine_req.return_mode = req->return_mode;
+  engine_req.engine = req->engine;
+  engine_req.refresh = req->refresh;
   rc = lc_engine_client_query_into(client->engine, &engine_req,
                                    lc_engine_write_bridge, &bridge, &engine_res,
                                    &engine_error);
@@ -1799,6 +1801,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
   out->cursor = lc_strdup_local(engine_res.cursor);
   out->return_mode = lc_strdup_local(engine_res.return_mode);
   out->index_seq = engine_res.index_seq;
+  out->metadata_json = lc_strdup_local(engine_res.metadata_json);
   out->correlation_id = lc_strdup_local(engine_res.correlation_id);
   {
     pslog_field fields[5];
@@ -1809,6 +1812,175 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
     fields[3] = pslog_i64("index_seq", (pslog_int64)out->index_seq);
     fields[4] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "client.query.success", fields, 5U);
+  }
+  lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
+  lc_engine_error_cleanup(&engine_error);
+  return LC_OK;
+}
+
+typedef struct lc_query_key_public_bridge {
+  const lc_query_key_handler *handler;
+  void *context;
+} lc_query_key_public_bridge;
+
+static int lc_query_key_bridge_set_engine_error(lc_engine_error *dst,
+                                                const lc_error *src,
+                                                const char *fallback) {
+  if (dst == NULL) {
+    return 0;
+  }
+  if (src != NULL && src->code != LC_OK) {
+    dst->code = LC_ENGINE_ERROR_TRANSPORT;
+    dst->message = lc_strdup_local(src->message != NULL ? src->message
+                                                        : fallback);
+  } else {
+    lc_engine_set_transport_error(dst, fallback);
+  }
+  return 0;
+}
+
+static int lc_query_key_bridge_begin(void *context, lc_engine_error *error) {
+  lc_query_key_public_bridge *bridge;
+  lc_error public_error;
+  int ok;
+
+  bridge = (lc_query_key_public_bridge *)context;
+  if (bridge == NULL || bridge->handler == NULL ||
+      bridge->handler->begin == NULL) {
+    return 1;
+  }
+  lc_error_init(&public_error);
+  ok = bridge->handler->begin(bridge->context, &public_error);
+  if (!ok) {
+    lc_query_key_bridge_set_engine_error(error, &public_error,
+                                         "query key begin callback failed");
+  }
+  lc_error_cleanup(&public_error);
+  return ok;
+}
+
+static int lc_query_key_bridge_chunk(void *context, const char *bytes,
+                                     size_t len, lc_engine_error *error) {
+  lc_query_key_public_bridge *bridge;
+  lc_error public_error;
+  int ok;
+
+  bridge = (lc_query_key_public_bridge *)context;
+  if (bridge == NULL || bridge->handler == NULL ||
+      bridge->handler->chunk == NULL) {
+    return 1;
+  }
+  lc_error_init(&public_error);
+  ok = bridge->handler->chunk(bridge->context, bytes, len, &public_error);
+  if (!ok) {
+    lc_query_key_bridge_set_engine_error(error, &public_error,
+                                         "query key chunk callback failed");
+  }
+  lc_error_cleanup(&public_error);
+  return ok;
+}
+
+static int lc_query_key_bridge_end(void *context, lc_engine_error *error) {
+  lc_query_key_public_bridge *bridge;
+  lc_error public_error;
+  int ok;
+
+  bridge = (lc_query_key_public_bridge *)context;
+  if (bridge == NULL || bridge->handler == NULL ||
+      bridge->handler->end == NULL) {
+    return 1;
+  }
+  lc_error_init(&public_error);
+  ok = bridge->handler->end(bridge->context, &public_error);
+  if (!ok) {
+    lc_query_key_bridge_set_engine_error(error, &public_error,
+                                         "query key end callback failed");
+  }
+  lc_error_cleanup(&public_error);
+  return ok;
+}
+
+int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
+                                const lc_query_key_handler *handler,
+                                void *context, lc_query_res *out,
+                                lc_error *error) {
+  static const lc_engine_query_key_handler engine_handler = {
+      lc_query_key_bridge_begin, lc_query_key_bridge_chunk,
+      lc_query_key_bridge_end};
+  lc_client_handle *client;
+  lc_engine_query_request engine_req;
+  lc_engine_query_stream_response engine_res;
+  lc_engine_error engine_error;
+  lc_query_key_public_bridge bridge;
+  int rc;
+
+  if (self == NULL || req == NULL || handler == NULL || out == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "query_keys requires self, req, handler, and out", NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  {
+    pslog_field fields[4];
+
+    fields[0] = lc_log_str_field("namespace", req->namespace_name);
+    fields[1] = lc_log_str_field("return_mode", "keys");
+    fields[2] = lc_log_i64_field("limit", req->limit);
+    fields[3] = lc_log_str_field("cursor", req->cursor);
+    lc_log_trace(client->logger, "client.query_keys.start", fields, 4U);
+  }
+  memset(&engine_req, 0, sizeof(engine_req));
+  memset(&engine_res, 0, sizeof(engine_res));
+  memset(&bridge, 0, sizeof(bridge));
+  lc_engine_error_init(&engine_error);
+  bridge.handler = handler;
+  bridge.context = context;
+  engine_req.namespace_name = req->namespace_name;
+  engine_req.selector_json = req->selector_json;
+  engine_req.limit = req->limit;
+  engine_req.cursor = req->cursor;
+  engine_req.fields_json = req->fields_json;
+  engine_req.return_mode = "keys";
+  engine_req.engine = req->engine;
+  engine_req.refresh = req->refresh;
+  rc = lc_engine_client_query_keys(client->engine, &engine_req, &engine_handler,
+                                   &bridge, &engine_res, &engine_error);
+  if (rc != LC_ENGINE_OK) {
+    rc = lc_error_from_engine(error, &engine_error);
+    {
+      pslog_field fields[4];
+
+      fields[0] = lc_log_str_field("namespace", req->namespace_name);
+      fields[1] = lc_log_str_field("return_mode", "keys");
+      fields[2] = lc_log_i64_field("limit", req->limit);
+      fields[3] = lc_log_str_field("cursor", req->cursor);
+      lc_client_log_operation_error(
+          client,
+          error != NULL && error->code == LC_ERR_TRANSPORT ? PSLOG_LEVEL_ERROR
+                                                           : PSLOG_LEVEL_WARN,
+          error != NULL && error->code == LC_ERR_TRANSPORT
+              ? "client.query_keys.transport_error"
+              : "client.query_keys.error",
+          fields, 4U, error);
+    }
+    lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
+    lc_engine_error_cleanup(&engine_error);
+    return rc;
+  }
+  out->cursor = lc_strdup_local(engine_res.cursor);
+  out->return_mode = lc_strdup_local(engine_res.return_mode);
+  out->index_seq = engine_res.index_seq;
+  out->metadata_json = lc_strdup_local(engine_res.metadata_json);
+  out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  {
+    pslog_field fields[5];
+
+    fields[0] = lc_log_str_field("namespace", req->namespace_name);
+    fields[1] = lc_log_str_field("return_mode", out->return_mode);
+    fields[2] = lc_log_str_field("cursor", out->cursor);
+    fields[3] = pslog_i64("index_seq", (pslog_int64)out->index_seq);
+    fields[4] = lc_log_str_field("cid", out->correlation_id);
+    lc_log_trace(client->logger, "client.query_keys.success", fields, 5U);
   }
   lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
   lc_engine_error_cleanup(&engine_error);

@@ -470,6 +470,10 @@ typedef struct lc_query_req {
   const char *fields_json;
   /** Server-specific query return mode. */
   const char *return_mode;
+  /** Optional query engine hint, for example `index` or `scan`. */
+  const char *engine;
+  /** Optional query refresh mode, for example `wait_for`. */
+  const char *refresh;
 } lc_query_req;
 
 /** Query metadata returned alongside streamed query results. */
@@ -478,7 +482,19 @@ typedef struct lc_query_res {
   char *return_mode;
   unsigned long index_seq;
   char *correlation_id;
+  /** Raw JSON metadata emitted by document query trailers, when present. */
+  char *metadata_json;
 } lc_query_res;
+
+/** Chunked callback handler for `lc_query_keys()`. */
+typedef struct lc_query_key_handler {
+  /** Called when a decoded key string begins. */
+  int (*begin)(void *context, lc_error *error);
+  /** Called with decoded UTF-8 key bytes. Bytes are valid only for the call. */
+  int (*chunk)(void *context, const char *bytes, size_t len, lc_error *error);
+  /** Called after the key string and following array delimiter are validated. */
+  int (*end)(void *context, lc_error *error);
+} lc_query_key_handler;
 
 /** Generic owned string list used by several management responses. */
 typedef struct lc_string_list {
@@ -1667,12 +1683,21 @@ struct lc_client {
    * borrowed lease. Handler success commits staged changes; handler failure
    * releases with rollback.
    *
-   * This slot is appended after the original public fields to preserve method
-   * offsets for binaries compiled against older headers.
+   * Extension slots are appended to keep method offsets stable within the
+   * current shared-library ABI line.
    */
   int (*acquire_for_update)(lc_client *self, const lc_acquire_req *req,
                             lc_acquire_for_update_handler_fn handler,
                             void *handler_context, lc_error *error);
+  /**
+   * Streams key query result strings through chunked callbacks.
+   *
+   * Extension slots are appended to keep method offsets stable within the
+   * current shared-library ABI line.
+   */
+  int (*query_keys)(lc_client *self, const lc_query_req *req,
+                    const lc_query_key_handler *handler, void *context,
+                    lc_query_res *out, lc_error *error);
 };
 
 /** Returns the semantic version string compiled into this build. */
@@ -1949,6 +1974,10 @@ int lc_queue_extend(lc_client *client, const lc_extend_op *req,
 /** Streams query results into `dst`. */
 int lc_query(lc_client *client, const lc_query_req *req, lc_sink *dst,
              lc_query_res *out, lc_error *error);
+/** Streams key query result strings through chunked callbacks. */
+int lc_query_keys(lc_client *client, const lc_query_req *req,
+                  const lc_query_key_handler *handler, void *context,
+                  lc_query_res *out, lc_error *error);
 /** Reads namespace-level engine configuration. */
 int lc_get_namespace_config(lc_client *client,
                             const lc_namespace_config_req *req,

@@ -68,6 +68,8 @@ typedef struct https_expectation {
   const char *response_body;
   const char *expected_client_cn;
   size_t response_body_chunk_size;
+  const char *const *response_trailers;
+  size_t response_trailer_count;
 } https_expectation;
 
 typedef struct https_tls_material {
@@ -114,6 +116,35 @@ typedef struct watch_capture {
   long long changed_at_unix;
   int available;
 } watch_capture;
+
+typedef struct query_key_capture {
+  int begin_calls;
+  int chunk_calls;
+  int end_calls;
+  int fail_on_chunk;
+  int fail_on_end;
+  char bytes[256];
+  size_t length;
+} query_key_capture;
+
+typedef struct query_key_large_capture {
+  size_t begin_calls;
+  size_t chunk_calls;
+  size_t end_calls;
+  size_t total_bytes;
+  size_t current_length;
+  size_t current_index;
+  char current[128];
+  char first[128];
+  char last[128];
+} query_key_large_capture;
+
+typedef struct tracking_allocator_state {
+  size_t malloc_calls;
+  size_t realloc_calls;
+  size_t free_calls;
+  size_t bytes_requested;
+} tracking_allocator_state;
 
 typedef struct test_enqueue_source {
   lc_source pub;
@@ -249,6 +280,109 @@ static long next_test_serial(void) {
   return serial++;
 }
 
+static int capture_query_key_begin(void *context, lc_error *error) {
+  query_key_capture *capture;
+
+  (void)error;
+  capture = (query_key_capture *)context;
+  capture->begin_calls += 1;
+  if (capture->length + 1U < sizeof(capture->bytes)) {
+    capture->bytes[capture->length++] = '[';
+    capture->bytes[capture->length] = '\0';
+  }
+  return 1;
+}
+
+static int capture_query_key_chunk(void *context, const char *bytes,
+                                   size_t len, lc_error *error) {
+  query_key_capture *capture;
+  size_t available;
+
+  capture = (query_key_capture *)context;
+  capture->chunk_calls += 1;
+  if (capture->fail_on_chunk) {
+    lc_error_set(error, LC_ERR_TRANSPORT, 0L, "capture rejected query key",
+                 NULL, NULL, NULL);
+    return 0;
+  }
+  available = sizeof(capture->bytes) - capture->length - 1U;
+  if (len > available) {
+    len = available;
+  }
+  if (len > 0U) {
+    memcpy(capture->bytes + capture->length, bytes, len);
+    capture->length += len;
+    capture->bytes[capture->length] = '\0';
+  }
+  return 1;
+}
+
+static int capture_query_key_end(void *context, lc_error *error) {
+  query_key_capture *capture;
+
+  (void)error;
+  capture = (query_key_capture *)context;
+  capture->end_calls += 1;
+  if (capture->fail_on_end) {
+    lc_error_set(error, LC_ERR_TRANSPORT, 0L, "capture rejected query key end",
+                 NULL, NULL, NULL);
+    return 0;
+  }
+  if (capture->length + 1U < sizeof(capture->bytes)) {
+    capture->bytes[capture->length++] = ']';
+    capture->bytes[capture->length] = '\0';
+  }
+  return 1;
+}
+
+static int capture_large_query_key_begin(void *context, lc_error *error) {
+  query_key_large_capture *capture;
+
+  (void)error;
+  capture = (query_key_large_capture *)context;
+  capture->begin_calls += 1U;
+  capture->current_length = 0U;
+  capture->current[0] = '\0';
+  return 1;
+}
+
+static int capture_large_query_key_chunk(void *context, const char *bytes,
+                                         size_t len, lc_error *error) {
+  query_key_large_capture *capture;
+  size_t available;
+
+  (void)error;
+  capture = (query_key_large_capture *)context;
+  capture->chunk_calls += 1U;
+  capture->total_bytes += len;
+  available = sizeof(capture->current) - capture->current_length - 1U;
+  if (len > available) {
+    len = available;
+  }
+  if (len > 0U) {
+    memcpy(capture->current + capture->current_length, bytes, len);
+    capture->current_length += len;
+    capture->current[capture->current_length] = '\0';
+  }
+  return 1;
+}
+
+static int capture_large_query_key_end(void *context, lc_error *error) {
+  query_key_large_capture *capture;
+
+  (void)error;
+  capture = (query_key_large_capture *)context;
+  if (capture->end_calls == 0U) {
+    snprintf(capture->first, sizeof(capture->first), "%s", capture->current);
+  }
+  snprintf(capture->last, sizeof(capture->last), "%s", capture->current);
+  capture->end_calls += 1U;
+  capture->current_index += 1U;
+  capture->current_length = 0U;
+  capture->current[0] = '\0';
+  return 1;
+}
+
 static void set_failure(https_testserver *server, const char *format, ...) {
   va_list args;
 
@@ -301,6 +435,47 @@ static void reset_strdup_failure_state(void) {
   g_fail_lc_client_strdup_on_call = 0;
   g_lc_strdup_local_call_count = 0;
   g_lc_client_strdup_call_count = 0;
+}
+
+static void *tracking_malloc(void *context, size_t size) {
+  tracking_allocator_state *state;
+
+  state = (tracking_allocator_state *)context;
+  if (state != NULL) {
+    state->malloc_calls += 1U;
+    state->bytes_requested += size;
+  }
+  return malloc(size);
+}
+
+static void *tracking_realloc(void *context, void *ptr, size_t size) {
+  tracking_allocator_state *state;
+
+  state = (tracking_allocator_state *)context;
+  if (state != NULL) {
+    state->realloc_calls += 1U;
+    state->bytes_requested += size;
+  }
+  return realloc(ptr, size);
+}
+
+static void tracking_free(void *context, void *ptr) {
+  tracking_allocator_state *state;
+
+  state = (tracking_allocator_state *)context;
+  if (state != NULL && ptr != NULL) {
+    state->free_calls += 1U;
+  }
+  free(ptr);
+}
+
+static void tracking_allocator_configure(lc_allocator *allocator,
+                                         tracking_allocator_state *state) {
+  lc_allocator_init(allocator);
+  allocator->malloc_fn = tracking_malloc;
+  allocator->realloc_fn = tracking_realloc;
+  allocator->free_fn = tracking_free;
+  allocator->context = state;
 }
 
 char *__real_lc_strdup_local(const char *value);
@@ -356,6 +531,47 @@ static char *make_repeat_json_body(const char *prefix, const char *suffix,
   memcpy(body + prefix_len + payload_len, suffix, suffix_len);
   body[prefix_len + payload_len + suffix_len] = '\0';
   return body;
+}
+
+static void format_large_query_key(size_t index, char *buffer,
+                                   size_t capacity) {
+  snprintf(buffer, capacity, "resource/large-key-%04zu", index);
+}
+
+static char *make_large_query_keys_body(size_t key_count,
+                                        size_t *out_total_key_bytes) {
+  test_request_capture body;
+  char key[64];
+  size_t index;
+
+  memset(&body, 0, sizeof(body));
+  if (!buffer_append(&body, "{\"keys\":[", strlen("{\"keys\":["))) {
+    return NULL;
+  }
+  if (out_total_key_bytes != NULL) {
+    *out_total_key_bytes = 0U;
+  }
+  for (index = 0U; index < key_count; ++index) {
+    format_large_query_key(index, key, sizeof(key));
+    if (index > 0U && !buffer_append(&body, ",", 1U)) {
+      buffer_cleanup(&body);
+      return NULL;
+    }
+    if (!buffer_append(&body, "\"", 1U) ||
+        !buffer_append(&body, key, strlen(key)) ||
+        !buffer_append(&body, "\"", 1U)) {
+      buffer_cleanup(&body);
+      return NULL;
+    }
+    if (out_total_key_bytes != NULL) {
+      *out_total_key_bytes += strlen(key);
+    }
+  }
+  if (!buffer_append(&body, "]}", strlen("]}"))) {
+    buffer_cleanup(&body);
+    return NULL;
+  }
+  return body.data;
 }
 
 static char *make_watch_body_with_oversized_event_data_after_valid_event(void) {
@@ -693,24 +909,37 @@ static const char *status_reason(int status) {
 
 static int write_http_response(SSL *ssl, const https_expectation *expectation) {
   char response[16384];
+  char chunk_header[64];
   int written;
   size_t body_length;
   size_t offset;
   size_t index;
+  int chunked;
 
   body_length = expectation->response_body != NULL
                     ? strlen(expectation->response_body)
                     : 0U;
+  chunked = expectation->response_trailer_count > 0U;
   written = snprintf(response, sizeof(response),
                      "HTTP/1.1 %d %s\r\n"
-                     "Connection: close\r\n"
-                     "Content-Length: %zu\r\n",
+                     "Connection: close\r\n",
                      expectation->response_status,
-                     status_reason(expectation->response_status), body_length);
+                     status_reason(expectation->response_status));
   if (written < 0 || (size_t)written >= sizeof(response)) {
     return 0;
   }
   offset = (size_t)written;
+  if (chunked) {
+    written = snprintf(response + offset, sizeof(response) - offset,
+                       "Transfer-Encoding: chunked\r\n");
+  } else {
+    written = snprintf(response + offset, sizeof(response) - offset,
+                       "Content-Length: %zu\r\n", body_length);
+  }
+  if (written < 0 || (size_t)written >= sizeof(response) - offset) {
+    return 0;
+  }
+  offset += (size_t)written;
   for (index = 0U; index < expectation->response_header_count; ++index) {
     written = snprintf(response + offset, sizeof(response) - offset, "%s\r\n",
                        expectation->response_headers[index]);
@@ -726,6 +955,45 @@ static int write_http_response(SSL *ssl, const https_expectation *expectation) {
   offset += 2U;
   if (SSL_write(ssl, response, (int)offset) != (int)offset) {
     return 0;
+  }
+  if (chunked) {
+    size_t body_offset;
+    size_t chunk_size;
+
+    body_offset = 0U;
+    while (body_offset < body_length) {
+      chunk_size = body_length - body_offset;
+      if (expectation->response_body_chunk_size > 0U &&
+          chunk_size > expectation->response_body_chunk_size) {
+        chunk_size = expectation->response_body_chunk_size;
+      }
+      written = snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n",
+                         chunk_size);
+      if (written < 0 || (size_t)written >= sizeof(chunk_header)) {
+        return 0;
+      }
+      if (SSL_write(ssl, chunk_header, written) != written ||
+          SSL_write(ssl, expectation->response_body + body_offset,
+                    (int)chunk_size) != (int)chunk_size ||
+          SSL_write(ssl, "\r\n", 2) != 2) {
+        return 0;
+      }
+      body_offset += chunk_size;
+    }
+    if (SSL_write(ssl, "0\r\n", 3) != 3) {
+      return 0;
+    }
+    for (index = 0U; index < expectation->response_trailer_count; ++index) {
+      written = snprintf(response, sizeof(response), "%s\r\n",
+                         expectation->response_trailers[index]);
+      if (written < 0 || (size_t)written >= sizeof(response)) {
+        return 0;
+      }
+      if (SSL_write(ssl, response, written) != written) {
+        return 0;
+      }
+    }
+    return SSL_write(ssl, "\r\n", 2) == 2;
   }
   if (body_length > 0U) {
     size_t body_offset;
@@ -4937,7 +5205,9 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
       "X-Lockd-Query-Return: compact",
       "Content-Type: application/x-ndjson"};
   static const https_expectation expectations[] = {
-      {"POST", "/v1/query", query_headers,
+      {"POST",
+       "/v1/query?engine=scan%20engine%2F1&refresh=wait%26refresh%2Bnow",
+       query_headers,
        sizeof(query_headers) / sizeof(query_headers[0]), query_body,
        sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
        sizeof(response_headers) / sizeof(response_headers[0]),
@@ -4982,6 +5252,8 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   req.cursor = "cursor-0";
   req.fields_json = "[\"key\"]";
   req.return_mode = "compact";
+  req.engine = "scan engine/1";
+  req.refresh = "wait&refresh+now";
   rc = lc_query(client, &req, sink, &res, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
@@ -4992,6 +5264,776 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   assert_string_equal(res.return_mode, "compact");
   assert_int_equal(res.index_seq, 12UL);
   assert_string_equal(res.correlation_id, "corr-query-stream");
+
+  lc_query_res_cleanup(&res);
+  lc_sink_close(sink);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_query_keys_streams_chunks_and_headers(void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"namespace\":\"transport-ns\"",
+                                     "\"return\":\"keys\""};
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-query-keys",
+      "X-Lockd-Query-Cursor: cursor-keys-1",
+      "X-Lockd-Query-Index-Seq: 45",
+      "X-Lockd-Query-Metadata: {\"source\":\"header\"}",
+      "X-Lockd-Query-Return: keys", "Content-Type: application/json"};
+  static const char response_body[] =
+      "{\"namespace\":\"transport-ns\",\"keys\":[\"resource/one\","
+      "\"resource/two\"],\"cursor\":\"body-cursor\",\"index_seq\":1,"
+      "\"metadata\":{\"source\":\"body\"}}";
+  https_expectation expectations[] = {
+      {"POST",
+       "/v1/query?engine=index%26scan%2Ffast%2Bsafe&refresh=wait%20for%2Fseq%2B1",
+       query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 3U, NULL, 0U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  handler.begin = capture_query_key_begin;
+  handler.chunk = capture_query_key_chunk;
+  handler.end = capture_query_key_end;
+  req.namespace_name = "transport-ns";
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  req.limit = 2L;
+  req.engine = "index&scan/fast+safe";
+  req.refresh = "wait for/seq+1";
+  rc = lc_query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.begin_calls, 2);
+  assert_true(capture.chunk_calls >= 2);
+  assert_int_equal(capture.end_calls, 2);
+  assert_string_equal(capture.bytes, "[resource/one][resource/two]");
+  assert_string_equal(res.cursor, "cursor-keys-1");
+  assert_string_equal(res.return_mode, "keys");
+  assert_int_equal(res.index_seq, 45UL);
+  assert_string_equal(res.metadata_json, "{\"source\":\"header\"}");
+  assert_string_equal(res.correlation_id, "corr-query-keys");
+
+  lc_query_res_cleanup(&res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_query_keys_captures_body_metadata(void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"return\":\"keys\""};
+  static const char *response_headers[] = {"Content-Type: application/json"};
+  static const char response_body[] =
+      "{\"keys\":[\"resource/body-one\",\"resource/body-two\"],"
+      "\"cursor\":\"body-cursor\",\"index_seq\":77,"
+      "\"metadata\":{\"source\":\"body\"}}";
+  https_expectation expectations[] = {
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 5U, NULL, 0U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  handler.begin = capture_query_key_begin;
+  handler.chunk = capture_query_key_chunk;
+  handler.end = capture_query_key_end;
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  rc = lc_query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.begin_calls, 2);
+  assert_true(capture.chunk_calls >= 2);
+  assert_int_equal(capture.end_calls, 2);
+  assert_string_equal(capture.bytes,
+                      "[resource/body-one][resource/body-two]");
+  assert_string_equal(res.cursor, "body-cursor");
+  assert_int_equal(res.index_seq, 77UL);
+  assert_string_equal(res.metadata_json, "{\"source\":\"body\"}");
+  assert_null(res.correlation_id);
+
+  lc_query_res_cleanup(&res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_query_keys_streams_large_response_without_client_alloc(
+    void **state) {
+  enum { key_count = 4096 };
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"return\":\"keys\""};
+  static const char *response_headers[] = {"Content-Type: application/json"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), NULL,
+       "liblockdc test client", 11U, NULL, 0U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_large_capture capture;
+  tracking_allocator_state alloc_state;
+  char expected_first[64];
+  char expected_last[64];
+  char *response_body;
+  size_t total_key_bytes;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  response_body = make_large_query_keys_body(key_count, &total_key_bytes);
+  assert_non_null(response_body);
+  expectations[0].response_body = response_body;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&alloc_state, 0, sizeof(alloc_state));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  tracking_allocator_configure(&config.allocator, &alloc_state);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  memset(&alloc_state, 0, sizeof(alloc_state));
+
+  handler.begin = capture_large_query_key_begin;
+  handler.chunk = capture_large_query_key_chunk;
+  handler.end = capture_large_query_key_end;
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  rc = lc_query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.begin_calls, (size_t)key_count);
+  assert_int_equal(capture.end_calls, (size_t)key_count);
+  assert_true(capture.chunk_calls >= (size_t)key_count);
+  assert_int_equal(capture.total_bytes, total_key_bytes);
+  format_large_query_key(0U, expected_first, sizeof(expected_first));
+  format_large_query_key((size_t)key_count - 1U, expected_last,
+                         sizeof(expected_last));
+  assert_string_equal(capture.first, expected_first);
+  assert_string_equal(capture.last, expected_last);
+  assert_null(res.cursor);
+  assert_int_equal(res.index_seq, 0UL);
+  assert_null(res.metadata_json);
+  assert_int_equal(alloc_state.malloc_calls, 0U);
+  assert_int_equal(alloc_state.realloc_calls, 0U);
+  assert_int_equal(alloc_state.bytes_requested, 0U);
+
+  lc_query_res_cleanup(&res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+  free(response_body);
+}
+
+static void test_public_query_keys_propagates_chunk_callback_failure(
+    void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"return\":\"keys\""};
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-query-keys-fail",
+      "X-Lockd-Query-Return: keys", "Content-Type: application/json"};
+  static const char response_body[] = "{\"keys\":[\"resource/fail\"]}";
+  https_expectation expectations[] = {
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 0U, NULL, 0U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  capture.fail_on_chunk = 1;
+  handler.begin = capture_query_key_begin;
+  handler.chunk = capture_query_key_chunk;
+  handler.end = capture_query_key_end;
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  rc = lc_query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "capture rejected query key");
+  assert_int_equal(capture.begin_calls, 1);
+  assert_int_equal(capture.end_calls, 0);
+
+  lc_query_res_cleanup(&res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_query_keys_propagates_end_callback_failure(
+    void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"return\":\"keys\""};
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-query-keys-end-fail",
+      "X-Lockd-Query-Return: keys", "Content-Type: application/json"};
+  static const char response_body[] = "{\"keys\":[\"resource/end-fail\"]}";
+  https_expectation expectations[] = {
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 0U, NULL, 0U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  capture.fail_on_end = 1;
+  handler.begin = capture_query_key_begin;
+  handler.chunk = capture_query_key_chunk;
+  handler.end = capture_query_key_end;
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  rc = lc_query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "capture rejected query key end");
+  assert_int_equal(capture.begin_calls, 1);
+  assert_true(capture.chunk_calls >= 1);
+  assert_int_equal(capture.end_calls, 1);
+
+  lc_query_res_cleanup(&res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_query_keys_rejects_malformed_keys_json(void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"return\":\"keys\""};
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-query-keys-bad-json",
+      "X-Lockd-Query-Return: keys", "Content-Type: application/json"};
+  static const char response_body[] = "{\"keys\":[\"unterminated\"";
+  https_expectation expectations[] = {
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
+       "liblockdc test client", 3U, NULL, 0U}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  handler.begin = capture_query_key_begin;
+  handler.chunk = capture_query_key_chunk;
+  handler.end = capture_query_key_end;
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  rc = lc_query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_non_null(error.message);
+
+  lc_query_res_cleanup(&res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_query_stream_captures_trailers_after_body(void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"selector\":{\"eq\":{\"field\":\"/kind\"",
+                                     "\"value\":\"trailer-unit\"}}",
+                                     "\"return\":\"documents\""};
+  static const char *response_headers[] = {
+      "x-correlation-id: corr-query-stream-trailer",
+      "x-lockd-query-return: documents",
+      "Trailer: x-lockd-query-cursor, x-lockd-query-index-seq, "
+      "x-lockd-query-metadata",
+      "Content-Type: application/x-ndjson"};
+  static const char *response_trailers[] = {
+      "x-lockd-query-cursor: cursor-from-trailer",
+      "x-lockd-query-index-seq: 34",
+      "x-lockd-query-metadata: {\"source\":\"trailer\"}"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/query?engine=index", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]),
+       "{\"key\":\"resource/trailer\"}\n", "liblockdc test client", 5U,
+       response_trailers,
+       sizeof(response_trailers) / sizeof(response_trailers[0])}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_error error;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  req.selector_json = "{\"eq\":{\"field\":\"/kind\",\"value\":\"trailer-unit\"}}";
+  req.return_mode = "documents";
+  req.engine = "index";
+  rc = lc_query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"key\":\"resource/trailer\"}\n"));
+  assert_memory_equal(bytes, "{\"key\":\"resource/trailer\"}\n", length);
+  assert_string_equal(res.cursor, "cursor-from-trailer");
+  assert_string_equal(res.return_mode, "documents");
+  assert_int_equal(res.index_seq, 34UL);
+  assert_string_equal(res.metadata_json, "{\"source\":\"trailer\"}");
+  assert_string_equal(res.correlation_id, "corr-query-stream-trailer");
+
+  lc_query_res_cleanup(&res);
+  lc_sink_close(sink);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_query_stream_trailers_override_headers(void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"selector\":{\"eq\":{\"field\":\"/kind\"",
+                                     "\"value\":\"trailer-override\"}}",
+                                     "\"return\":\"documents\""};
+  static const char *response_headers[] = {
+      "x-correlation-id: corr-query-stream-override",
+      "x-lockd-query-return: headers-return",
+      "x-lockd-query-cursor: stale-header-cursor",
+      "x-lockd-query-index-seq: 1",
+      "x-lockd-query-metadata: {\"source\":\"header\"}",
+      "Trailer: x-lockd-query-cursor, x-lockd-query-index-seq, "
+      "x-lockd-query-metadata, x-lockd-query-return",
+      "Content-Type: application/x-ndjson"};
+  static const char *response_trailers[] = {
+      "x-lockd-query-cursor: final-trailer-cursor",
+      "x-lockd-query-index-seq: 99",
+      "x-lockd-query-metadata: {\"source\":\"trailer\"}",
+      "x-lockd-query-return: documents"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]),
+       "{\"key\":\"resource/override\"}\n", "liblockdc test client", 7U,
+       response_trailers,
+       sizeof(response_trailers) / sizeof(response_trailers[0])}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_error error;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  req.selector_json =
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"trailer-override\"}}";
+  req.return_mode = "documents";
+  rc = lc_query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"key\":\"resource/override\"}\n"));
+  assert_memory_equal(bytes, "{\"key\":\"resource/override\"}\n", length);
+  assert_string_equal(res.cursor, "final-trailer-cursor");
+  assert_string_equal(res.return_mode, "documents");
+  assert_int_equal(res.index_seq, 99UL);
+  assert_string_equal(res.metadata_json, "{\"source\":\"trailer\"}");
+  assert_string_equal(res.correlation_id, "corr-query-stream-override");
+
+  lc_query_res_cleanup(&res);
+  lc_sink_close(sink);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
+test_public_query_stream_retries_node_passive_and_cleans_trailers(
+    void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"selector\":{\"owner\":\"owner-a\"}",
+                                     "\"return\":\"documents\""};
+  static const char *first_response_headers[] = {
+      "X-Correlation-Id: corr-query-passive",
+      "X-Lockd-Query-Return: documents",
+      "Trailer: x-lockd-query-cursor, x-lockd-query-index-seq, "
+      "x-lockd-query-metadata",
+      "Content-Type: application/json"};
+  static const char *first_response_trailers[] = {
+      "x-lockd-query-cursor: stale-passive-cursor",
+      "x-lockd-query-index-seq: 88",
+      "x-lockd-query-metadata: {\"source\":\"passive\"}"};
+  static const char *second_response_headers[] = {
+      "X-Correlation-Id: corr-query-active",
+      "X-Lockd-Query-Return: documents",
+      "Content-Type: application/x-ndjson"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 503,
+       first_response_headers,
+       sizeof(first_response_headers) / sizeof(first_response_headers[0]),
+       "{\"error\":\"node_passive\"}", "liblockdc test client", 6U,
+       first_response_trailers,
+       sizeof(first_response_trailers) / sizeof(first_response_trailers[0])},
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200,
+       second_response_headers,
+       sizeof(second_response_headers) / sizeof(second_response_headers[0]),
+       "{\"key\":\"resource/active\"}\n", "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_error error;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  static char endpoint_a[128];
+  static char endpoint_b[128];
+  static const char *endpoints[2];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  snprintf(endpoint_a, sizeof(endpoint_a), "https://127.0.0.1:%u",
+           (unsigned)server.port);
+  snprintf(endpoint_b, sizeof(endpoint_b), "https://127.0.0.1:%u",
+           (unsigned)server.port);
+  endpoints[0] = endpoint_a;
+  endpoints[1] = endpoint_b;
+  config.endpoints = endpoints;
+  config.endpoint_count = 2U;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  req.return_mode = "documents";
+  rc = lc_query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"key\":\"resource/active\"}\n"));
+  assert_memory_equal(bytes, "{\"key\":\"resource/active\"}\n", length);
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "documents");
+  assert_int_equal(res.index_seq, 0UL);
+  assert_null(res.metadata_json);
+  assert_string_equal(res.correlation_id, "corr-query-active");
+
+  lc_query_res_cleanup(&res);
+  lc_sink_close(sink);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_query_stream_rejects_invalid_trailer_index_seq(
+    void **state) {
+  static const char *query_headers[] = {
+      "Content-Type: application/json",
+      "Accept: application/x-ndjson, application/json"};
+  static const char *query_body[] = {"\"selector\":{\"eq\":{\"field\":\"/kind\"",
+                                     "\"value\":\"bad-trailer-unit\"}}",
+                                     "\"return\":\"documents\""};
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-query-stream-trailer",
+      "X-Lockd-Query-Return: documents",
+      "Trailer: x-lockd-query-index-seq",
+      "Content-Type: application/x-ndjson"};
+  static const char *response_trailers[] = {
+      "x-lockd-query-index-seq: not-a-number"};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/query", query_headers,
+       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
+       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]),
+       "{\"key\":\"resource/bad-trailer\"}\n", "liblockdc test client", 0U,
+       response_trailers,
+       sizeof(response_trailers) / sizeof(response_trailers[0])}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_error error;
+  lc_sink *sink;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  req.selector_json =
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"bad-trailer-unit\"}}";
+  req.return_mode = "documents";
+  rc = lc_query(client, &req, sink, &res, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(error.code, LC_ERR_PROTOCOL);
+  assert_non_null(error.message);
+  assert_string_equal(error.message, "failed to parse query index sequence");
 
   lc_query_res_cleanup(&res);
   lc_sink_close(sink);
@@ -6160,9 +7202,47 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_HEADERS_AND_BODY)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_query_stream_captures_headers_and_body)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_STREAMS_CHUNKS_AND_HEADERS)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_query_keys_streams_chunks_and_headers)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_CAPTURES_BODY_METADATA)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_query_keys_captures_body_metadata)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_STREAMS_LARGE_RESPONSE_WITHOUT_CLIENT_ALLOC)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(                                                            \
+      test_public_query_keys_streams_large_response_without_client_alloc)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_PROPAGATES_CHUNK_CALLBACK_FAILURE)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(                                                            \
+      test_public_query_keys_propagates_chunk_callback_failure)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_PROPAGATES_END_CALLBACK_FAILURE)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_query_keys_propagates_end_callback_failure)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_REJECTS_MALFORMED_KEYS_JSON)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_query_keys_rejects_malformed_keys_json)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_TRAILERS_AFTER_BODY)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_query_stream_captures_trailers_after_body)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_TRAILERS_OVERRIDE_HEADERS)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_query_stream_trailers_override_headers)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_RETRIES_NODE_PASSIVE_AND_CLEANS_TRAILERS)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(                                                            \
+      test_public_query_stream_retries_node_passive_and_cleans_trailers)
 #elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_REJECTS_INVALID_INDEX_SEQ)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_REJECTS_INVALID_TRAILER_INDEX_SEQ)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_query_stream_rejects_invalid_trailer_index_seq)
 #elif defined(LC_HTTPS_CASE_PUBLIC_QUEUE_NACK_MAPS_ENUM_INTENTS)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_queue_nack_maps_enum_intents)
@@ -6253,7 +7333,22 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
       cmocka_unit_test(test_public_enqueue_streams_payload_from_source),          \
       cmocka_unit_test(test_public_dequeue_emits_stream_transport_logs),          \
       cmocka_unit_test(test_public_query_stream_captures_headers_and_body),       \
+      cmocka_unit_test(test_public_query_keys_streams_chunks_and_headers),        \
+      cmocka_unit_test(test_public_query_keys_captures_body_metadata),            \
+      cmocka_unit_test(                                                           \
+          test_public_query_keys_streams_large_response_without_client_alloc),     \
+      cmocka_unit_test(                                                           \
+          test_public_query_keys_propagates_chunk_callback_failure),              \
+      cmocka_unit_test(                                                           \
+          test_public_query_keys_propagates_end_callback_failure),                \
+      cmocka_unit_test(test_public_query_keys_rejects_malformed_keys_json),       \
+      cmocka_unit_test(test_public_query_stream_captures_trailers_after_body),    \
+      cmocka_unit_test(test_public_query_stream_trailers_override_headers),       \
+      cmocka_unit_test(                                                           \
+          test_public_query_stream_retries_node_passive_and_cleans_trailers),     \
       cmocka_unit_test(test_public_query_stream_rejects_invalid_index_seq),       \
+      cmocka_unit_test(                                                           \
+          test_public_query_stream_rejects_invalid_trailer_index_seq),            \
       cmocka_unit_test(test_public_queue_nack_maps_enum_intents),                 \
       cmocka_unit_test(test_public_queue_nack_rejects_invalid_intent)
 #endif

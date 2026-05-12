@@ -233,6 +233,10 @@ int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
                                   lc_extend_res *out, lc_error *error);
 int lc_client_query_method(lc_client *self, const lc_query_req *req,
                            lc_sink *dst, lc_query_res *out, lc_error *error);
+int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
+                                const lc_query_key_handler *handler,
+                                void *context, lc_query_res *out,
+                                lc_error *error);
 int lc_client_get_namespace_config_method(lc_client *self,
                                           const lc_namespace_config_req *req,
                                           lc_namespace_config_res *out,

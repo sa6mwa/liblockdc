@@ -248,6 +248,7 @@ int main(void) {
 
 file(WRITE "${consumer_src_dir}/api_surface.c" [=[
 #include <lc/lc.h>
+#include <string.h>
 
 int lockdc_release_tarball_touch_client_api(lc_client *client, lc_lease **lease,
                                             lc_source *src, lc_sink *dst,
@@ -270,6 +271,7 @@ int lockdc_release_tarball_touch_client_api(lc_client *client, lc_lease **lease,
     lc_release_res release_res;
     lc_query_req query;
     lc_query_res query_res;
+    lc_query_key_handler query_key_handler;
     lc_enqueue_req enqueue;
     lc_enqueue_res enqueue_res;
     lc_dequeue_req dequeue;
@@ -292,6 +294,7 @@ int lockdc_release_tarball_touch_client_api(lc_client *client, lc_lease **lease,
     lc_keepalive_op_init(&keepalive);
     lc_release_op_init(&release);
     lc_query_req_init(&query);
+    memset(&query_key_handler, 0, sizeof(query_key_handler));
     lc_enqueue_req_init(&enqueue);
     lc_dequeue_req_init(&dequeue);
     lc_queue_stats_req_init(&stats);
@@ -314,6 +317,8 @@ int lockdc_release_tarball_touch_client_api(lc_client *client, lc_lease **lease,
            lc_keepalive(client, &keepalive, &keepalive_res, &error) +
            lc_release(client, &release, &release_res, &error) +
            lc_query(client, &query, dst, &query_res, &error) +
+           lc_query_keys(client, &query, &query_key_handler, (void *)0,
+                         &query_res, &error) +
            lc_enqueue(client, &enqueue, src, &enqueue_res, &error) +
            lc_dequeue(client, &dequeue, &message, &error) +
            lc_queue_stats(client, &stats, &stats_res, &error) +

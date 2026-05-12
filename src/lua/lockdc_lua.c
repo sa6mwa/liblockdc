@@ -1646,6 +1646,8 @@ static int lcdc_client_query(lua_State *L) {
   req.cursor = lcdc_opt_string_field(L, 2, "cursor");
   req.fields_json = lcdc_opt_string_field(L, 2, "fields_json");
   req.return_mode = lcdc_opt_string_field(L, 2, "return_mode");
+  req.engine = lcdc_opt_string_field(L, 2, "engine");
+  req.refresh = lcdc_opt_string_field(L, 2, "refresh");
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
@@ -1666,6 +1668,7 @@ static int lcdc_client_query(lua_State *L) {
   lcdc_set_string_field(L, "cursor", res.cursor);
   lcdc_set_string_field(L, "return_mode", res.return_mode);
   lcdc_set_uinteger_field(L, "index_seq", res.index_seq);
+  lcdc_set_string_field(L, "metadata_json", res.metadata_json);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_query_res_cleanup(&res);
   lc_error_cleanup(&error);

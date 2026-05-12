@@ -43,29 +43,29 @@ FUZZ_TIME ?= 30
 
 help:
 	@printf '%s\n' \
-		'make build              Configure and build the debug preset.' \
-		'make build-debug        Configure and build the debug preset.' \
+		'make build              Configure and build the ASan/UBSan debug preset.' \
+		'make build-debug        Configure and build the ASan/UBSan debug preset.' \
 		'make build-release      Configure and build the full shipped Linux release matrix.' \
 		'make build-e2e          Configure and build the e2e preset.' \
-		'make build-asan         Configure and build the ASan/UBSan preset.' \
+		'make build-asan         Compatibility alias for the ASan/UBSan debug build.' \
 		'make build-coverage     Configure and build the coverage preset.' \
 		'make build-fuzz         Configure and build the fuzz preset.' \
 		'make deps-debug         Provision the host-native release dependency tree used by debug/e2e/asan/coverage/fuzz.' \
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
-		'make test-debug         Run the debug preset test suite.' \
+		'make test-debug         Run the ASan/UBSan debug preset test suite.' \
 		'make test               Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
 		'make test-host          Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
-		'make test-all           Run host release suites plus non-host cross release suites.' \
-		'make test-asan          Run the ASan/UBSan preset test suite.' \
+		'make test-all           Run ASan/UBSan debug first, then host release and non-host cross release suites.' \
+		'make test-asan          Compatibility alias for test-debug.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
 		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
 		'make format             Run clang-format over repo .c and .h files.' \
-		'make asan               Run the ASan/UBSan preset test suite.' \
+		'make asan               Compatibility alias for test-debug.' \
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
@@ -179,7 +179,7 @@ __test-e2e:
 test-all:
 	$(TIMED) test-all $(MAKE) __test-all
 
-__test-all: __test-host __test-cross
+__test-all: __test-debug __test-host __test-cross
 
 dev-up:
 	$(TIMED) dev-up $(MAKE) __dev-up
@@ -205,13 +205,12 @@ format:
 test-asan:
 	$(TIMED) test-asan $(MAKE) __test-asan
 
-__test-asan: __build-asan
-	$(CTEST) --preset $(ASAN_PRESET)
+__test-asan: __test-debug
 
 asan:
 	$(TIMED) asan $(MAKE) __asan
 
-__asan: __test-asan
+__asan: __test-debug
 
 test-coverage:
 	$(TIMED) test-coverage $(MAKE) __test-coverage

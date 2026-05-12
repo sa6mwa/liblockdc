@@ -35,8 +35,8 @@ function(lc_add_lua_e2e_test test_name script_path)
   endif()
 
   set(options)
-  set(one_value_args ENV_OVERRIDES)
-  cmake_parse_arguments(LUA_E2E "${options}" "${one_value_args}" "" ${ARGN})
+  set(multi_value_args ENV_OVERRIDES)
+  cmake_parse_arguments(LUA_E2E "${options}" "" "${multi_value_args}" ${ARGN})
 
   set(lua_e2e_command
     "${CMAKE_COMMAND}"
@@ -44,11 +44,16 @@ function(lc_add_lua_e2e_test test_name script_path)
       -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
       -DLOCKDC_TEST_NAME=${test_name}
       -DLOCKDC_LUA_TEST_SCRIPT=${script_path}
-      -P "${CMAKE_SOURCE_DIR}/tests/lua_rock_install_and_run_test.cmake"
   )
   if(LUA_E2E_ENV_OVERRIDES)
-    list(APPEND lua_e2e_command "-DLOCKDC_LUA_TEST_ENV=${LUA_E2E_ENV_OVERRIDES}")
+    string(REPLACE ";" "|" lua_e2e_env_overrides "${LUA_E2E_ENV_OVERRIDES}")
+    list(APPEND lua_e2e_command
+      "-DLOCKDC_LUA_TEST_ENV=${lua_e2e_env_overrides}"
+    )
   endif()
+  list(APPEND lua_e2e_command
+    -P "${CMAKE_SOURCE_DIR}/tests/lua_rock_install_and_run_test.cmake"
+  )
 
   add_test(NAME ${test_name} COMMAND ${lua_e2e_command})
   set_tests_properties(${test_name} PROPERTIES

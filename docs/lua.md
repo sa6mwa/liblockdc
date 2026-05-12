@@ -36,7 +36,7 @@ SDK root or make `lockdc.pc` visible to `pkg-config`.
 The generated rockspec expects:
 
 - package `lockdc`
-- `lonejson == 0.8.0-1`
+- `lonejson == 0.12.0-1`
 - Lua `>= 5.5, < 5.6`
 
 ## Dependency ownership
@@ -144,7 +144,9 @@ Common client methods:
 - `client:queue_ack(message_or_req)`
 - `client:queue_nack(req)`
 - `client:queue_extend(req)`
-- `client:query_raw(req, dest)`
+- `client:query_raw(req, dest)` (`req.engine` and `req.refresh` may select the
+  query engine/refresh mode; document-query trailer metadata is returned as
+  `metadata_json`)
 - `client:get_namespace_config(req)`
 - `client:update_namespace_config(req)`
 - `client:flush_index(req)`
