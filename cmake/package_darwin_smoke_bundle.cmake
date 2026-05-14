@@ -89,10 +89,32 @@ project(lockdc_darwin_smoke C)
 
 find_package(lockdc CONFIG REQUIRED)
 
+set(LOCKDC_EXTERNAL_ROOT "${LOCKDC_EXTERNAL_ROOT}")
+set(LOCKDC_EXTERNAL_INCLUDE_DIRS
+    "${LOCKDC_EXTERNAL_ROOT}/curl/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
+set(LOCKDC_EXTERNAL_LIBRARY_DIRS
+    "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+
 add_executable(lockdc_static_smoke smoke.c)
+target_include_directories(lockdc_static_smoke PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
+target_link_directories(lockdc_static_smoke PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(lockdc_static_smoke PRIVATE lockdc::static)
 
 add_executable(lockdc_shared_smoke smoke.c)
+target_include_directories(lockdc_shared_smoke PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
+target_link_directories(lockdc_shared_smoke PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(lockdc_shared_smoke PRIVATE lockdc::shared)
 set_target_properties(lockdc_shared_smoke PROPERTIES
   BUILD_RPATH "@executable_path/../lib"
@@ -133,6 +155,7 @@ set(configure_args
     "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
     "-DCMAKE_PREFIX_PATH=${release_prefix}"
     "-Dlockdc_DIR=${release_prefix}/lib/cmake/lockdc"
+    "-DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}"
     "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF"
     "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"
     "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON"

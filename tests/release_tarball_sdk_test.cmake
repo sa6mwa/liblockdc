@@ -99,7 +99,6 @@ endif()
 foreach(required_path
     "${release_prefix}/include/lc/lc.h"
     "${release_prefix}/include/lc/version.h"
-    "${release_prefix}/include/lonejson.h"
     "${release_prefix}/lib/liblockdc.a"
     "${release_prefix}/lib/${LOCKDC_SHARED_LINK_NAME}"
     "${release_prefix}/lib/pkgconfig/lockdc.pc"
@@ -111,6 +110,21 @@ foreach(required_path
 endforeach()
 
 foreach(forbidden_path
+    "${release_prefix}/include/lonejson.h"
+    "${release_prefix}/include/pslog.h"
+    "${release_prefix}/include/curl"
+    "${release_prefix}/include/openssl"
+    "${release_prefix}/include/nghttp2"
+    "${release_prefix}/include/libssh2.h"
+    "${release_prefix}/include/zlib.h"
+    "${release_prefix}/lib/liblonejson.a"
+    "${release_prefix}/lib/libpslog.a"
+    "${release_prefix}/lib/libcurl.a"
+    "${release_prefix}/lib/libssl.a"
+    "${release_prefix}/lib/libcrypto.a"
+    "${release_prefix}/lib/libnghttp2.a"
+    "${release_prefix}/lib/libssh2.a"
+    "${release_prefix}/lib/libz.a"
     "${release_prefix}/share/lua/5.5/lockdc/init.lua"
     "${release_prefix}/share/lockdc/luarocks"
     "${release_prefix}/lib/lua/5.5/lockdc"
@@ -153,20 +167,47 @@ project(lockdc_release_tarball_consumer C)
 
 find_package(lockdc CONFIG REQUIRED)
 
+set(LOCKDC_EXTERNAL_ROOT "${LOCKDC_EXTERNAL_ROOT}")
+set(LOCKDC_EXTERNAL_INCLUDE_DIRS
+    "${LOCKDC_EXTERNAL_ROOT}/curl/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
+set(LOCKDC_EXTERNAL_LIBRARY_DIRS
+    "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+
 add_library(api_surface OBJECT api_surface.c)
+target_include_directories(api_surface PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
 target_link_libraries(api_surface PRIVATE lockdc::static)
 
 add_executable(example_static example.c $<TARGET_OBJECTS:api_surface>)
+target_include_directories(example_static PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
+target_link_directories(example_static PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(example_static PRIVATE lockdc::static)
 
 add_executable(test_static test.c $<TARGET_OBJECTS:api_surface>)
+target_include_directories(test_static PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
+target_link_directories(test_static PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(test_static PRIVATE lockdc::static)
 
 add_executable(example_shared example.c $<TARGET_OBJECTS:api_surface>)
+target_include_directories(example_shared PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
+target_link_directories(example_shared PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(example_shared PRIVATE lockdc::shared)
 set_target_properties(example_shared PROPERTIES BUILD_RPATH "${LOCKDC_RELEASE_PREFIX}/lib")
 
 add_executable(test_shared test.c $<TARGET_OBJECTS:api_surface>)
+target_include_directories(test_shared PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
+target_link_directories(test_shared PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(test_shared PRIVATE lockdc::shared)
 set_target_properties(test_shared PROPERTIES BUILD_RPATH "${LOCKDC_RELEASE_PREFIX}/lib")
 ]=])
@@ -396,7 +437,8 @@ set(lockdc_consumer_configure_args
         "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"
         "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON"
         "-Dlockdc_DIR=${release_prefix}/lib/cmake/lockdc"
-        "-DLOCKDC_RELEASE_PREFIX=${release_prefix}")
+        "-DLOCKDC_RELEASE_PREFIX=${release_prefix}"
+        "-DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}")
 if(LOCKDC_TARGET_ID MATCHES "apple-darwin$"
         AND DEFINED CMAKE_TOOLCHAIN_FILE
         AND NOT "${CMAKE_TOOLCHAIN_FILE}" STREQUAL "")
@@ -431,9 +473,16 @@ if(NOT build_result EQUAL 0)
 endif()
 
 if(LOCKDC_RUN_DOWNSTREAM_BINARIES)
+    set(lockdc_release_runtime_env)
+    if(UNIX AND NOT APPLE)
+        set(lockdc_release_runtime_env
+            "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+    endif()
     foreach(binary_name example_static test_static example_shared test_shared)
         execute_process(
-            COMMAND "${consumer_bin_dir}/${binary_name}"
+            COMMAND "${CMAKE_COMMAND}" -E env
+                ${lockdc_release_runtime_env}
+                "${consumer_bin_dir}/${binary_name}"
             RESULT_VARIABLE run_result
             OUTPUT_VARIABLE run_stdout
             ERROR_VARIABLE run_stderr
@@ -487,6 +536,22 @@ endif()
 
 separate_arguments(lockdc_pkgconfig_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_cflags}")
 separate_arguments(lockdc_pkgconfig_libs_list UNIX_COMMAND "${lockdc_pkgconfig_libs}")
+list(APPEND lockdc_pkgconfig_cflags_list
+    "-I${LOCKDC_EXTERNAL_ROOT}/curl/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/openssl/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
+list(APPEND lockdc_pkgconfig_libs_list
+    "-L${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 set(lockdc_direct_link_flags)
 if(DEFINED CMAKE_EXE_LINKER_FLAGS AND NOT "${CMAKE_EXE_LINKER_FLAGS}" STREQUAL "")
     separate_arguments(lockdc_direct_link_flags UNIX_COMMAND "${CMAKE_EXE_LINKER_FLAGS}")
@@ -557,6 +622,22 @@ endif()
 
 separate_arguments(lockdc_pkgconfig_shared_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_shared_cflags}")
 separate_arguments(lockdc_pkgconfig_shared_libs_list UNIX_COMMAND "${lockdc_pkgconfig_shared_libs}")
+list(APPEND lockdc_pkgconfig_shared_cflags_list
+    "-I${LOCKDC_EXTERNAL_ROOT}/curl/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/openssl/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
+list(APPEND lockdc_pkgconfig_shared_libs_list
+    "-L${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 
 set(lockdc_pkgconfig_shared_consumer "${consumer_bin_dir}/release_tarball_pkgconfig_shared")
 set(lockdc_pkgconfig_shared_rpath_flag "-Wl,-rpath,${release_prefix}/lib")

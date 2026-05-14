@@ -6,6 +6,7 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 requested_abi=${1:-all}
 cmake_bin=${CMAKE:-cmake}
 build_script=${LOCKDC_BUILD_SCRIPT:-$script_dir/build.sh}
+deps_script=${LOCKDC_DEPS_SCRIPT:-$script_dir/deps.sh}
 lockdc_version=${LOCKDC_VERSION:-}
 
 unset LD_LIBRARY_PATH
@@ -32,7 +33,10 @@ run_cmake_script() {
 run_target() {
   local preset="$1"
   local build_dir="$repo_root/build/$preset"
+  local deps_preset
 
+  deps_preset="deps-${preset%-release}"
+  "$deps_script" "$deps_preset"
   "$build_script" "$preset"
   "$cmake_bin" \
     -DLOCKDC_BINARY_DIR="$build_dir" \

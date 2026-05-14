@@ -36,7 +36,7 @@ SDK root or make `lockdc.pc` visible to `pkg-config`.
 The generated rockspec expects:
 
 - package `lockdc`
-- `lonejson == 0.12.0-1`
+- `lonejson == 0.14.0-1`
 - Lua `>= 5.5, < 5.6`
 
 ## Dependency ownership

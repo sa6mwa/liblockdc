@@ -9,7 +9,7 @@ endif()
 set(lonejson_root "${LOCKDC_EXTERNAL_ROOT}/lonejson/install")
 set(lonejson_build_root "${LOCKDC_DEPENDENCY_BUILD_ROOT}/lonejson/build")
 set(lonejson_static_archive "${lonejson_root}/lib/liblonejson.a")
-set(lonejson_shared_library "${lonejson_root}/lib/liblonejson.so.0")
+set(lonejson_shared_library "${lonejson_root}/lib/liblonejson.so.4")
 set(lonejson_header "${lonejson_root}/include/lonejson.h")
 
 foreach(path IN ITEMS
@@ -22,22 +22,24 @@ foreach(path IN ITEMS
 endforeach()
 
 foreach(path IN ITEMS
-    "${lonejson_root}/lib/pkgconfig"
-    "${lonejson_root}/lib/cmake"
     "${lonejson_root}/bin")
     if(EXISTS "${path}")
         message(FATAL_ERROR "lonejson install tree still exposes non-public artifact: ${path}")
     endif()
 endforeach()
 
-set(lonejson_ninja "${lonejson_build_root}/build.ninja")
-if(NOT EXISTS "${lonejson_ninja}")
-    message(FATAL_ERROR "missing lonejson build graph: ${lonejson_ninja}")
-endif()
+foreach(path IN ITEMS
+    "${lonejson_root}/lib/pkgconfig/lonejson.pc"
+    "${lonejson_root}/lib/cmake/lonejson/lonejsonConfig.cmake"
+    "${lonejson_root}/lib/cmake/lonejson/lonejsonConfigVersion.cmake")
+    if(NOT EXISTS "${path}")
+        message(FATAL_ERROR "missing lonejson consumer metadata: ${path}")
+    endif()
+endforeach()
 
-file(READ "${lonejson_ninja}" lonejson_ninja_text)
-if(NOT lonejson_ninja_text MATCHES "CMakeFiles/lonejson_object\\.dir/")
-    message(FATAL_ERROR "lonejson dependency build is not using a shared object library")
+if(EXISTS "${lonejson_build_root}")
+    message(FATAL_ERROR
+        "lonejson dependency unexpectedly has a local build tree: ${lonejson_build_root}")
 endif()
 
 find_program(NM_BIN NAMES nm REQUIRED)
@@ -103,7 +105,7 @@ foreach(symbol IN ITEMS
     lonejson_multipart_finish
     lonejson_multipart_close)
     assert_contains("${static_symbols}" "${symbol}" "${symbol} in liblonejson.a")
-    assert_contains("${shared_symbols}" "${symbol}" "${symbol} in liblonejson.so.0")
+    assert_contains("${shared_symbols}" "${symbol}" "${symbol} in liblonejson.so.4")
 endforeach()
 
 foreach(alias_symbol IN ITEMS
@@ -131,5 +133,5 @@ foreach(alias_symbol IN ITEMS
     lj_multipart_finish
     lj_multipart_close)
     assert_not_contains("${static_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.a")
-    assert_not_contains("${shared_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.so.0")
+    assert_not_contains("${shared_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.so.4")
 endforeach()

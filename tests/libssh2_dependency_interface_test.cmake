@@ -2,16 +2,12 @@ if(NOT DEFINED LOCKDC_EXTERNAL_ROOT OR LOCKDC_EXTERNAL_ROOT STREQUAL "")
     message(FATAL_ERROR "LOCKDC_EXTERNAL_ROOT is required")
 endif()
 
-if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT OR LOCKDC_DEPENDENCY_BUILD_ROOT STREQUAL "")
-    message(FATAL_ERROR "LOCKDC_DEPENDENCY_BUILD_ROOT is required")
-endif()
-
 set(libssh2_root "${LOCKDC_EXTERNAL_ROOT}/libssh2/install")
-set(libssh2_build_ninja "${LOCKDC_DEPENDENCY_BUILD_ROOT}/libssh2/build/build.ninja")
-set(libssh2_pc "${LOCKDC_DEPENDENCY_BUILD_ROOT}/libssh2/build/src/libssh2.pc")
+set(cpkt_manifest "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/share/c.pkt.systems/manifest.txt")
 
-function(assert_contains text pattern description)
-    if(NOT text MATCHES "${pattern}")
+function(assert_literal_contains text needle description)
+    string(FIND "${text}" "${needle}" found_at)
+    if(found_at EQUAL -1)
         message(FATAL_ERROR "libssh2 dependency metadata is missing ${description}")
     endif()
 endfunction()
@@ -19,9 +15,7 @@ endfunction()
 foreach(path IN ITEMS
     "${libssh2_root}/lib/libssh2.a"
     "${libssh2_root}/lib/libssh2.so"
-    "${libssh2_root}/include/libssh2.h"
-    "${libssh2_pc}"
-    "${libssh2_build_ninja}")
+    "${libssh2_root}/include/libssh2.h")
     if(NOT EXISTS "${path}")
         message(FATAL_ERROR "missing libssh2 dependency artifact: ${path}")
     endif()
@@ -36,8 +30,11 @@ foreach(path IN ITEMS
     endif()
 endforeach()
 
-file(READ "${libssh2_pc}" libssh2_pc_text)
-file(READ "${libssh2_build_ninja}" libssh2_build_ninja_text)
+if(NOT EXISTS "${cpkt_manifest}")
+    message(FATAL_ERROR "missing c.pkt.systems manifest: ${cpkt_manifest}")
+endif()
 
-assert_contains("${libssh2_pc_text}" "zlib" "zlib dependency in libssh2.pc")
-assert_contains("${libssh2_build_ninja_text}" "src/CMakeFiles/libssh2_object.dir/" "libssh2 object-library build outputs")
+file(READ "${cpkt_manifest}" cpkt_manifest_text)
+assert_literal_contains("${cpkt_manifest_text}" "bundle_version=0.1.0" "c.pkt.systems bundle version")
+assert_literal_contains("${cpkt_manifest_text}" "libssh2_version=1.11.1" "libssh2 bundle version")
+assert_literal_contains("${cpkt_manifest_text}" "zlib_version=1.3.2" "zlib bundle version")

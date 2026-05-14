@@ -10,10 +10,13 @@ if(NOT DEFINED LOCKDC_C_COMPILER OR LOCKDC_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "LOCKDC_C_COMPILER is required")
 endif()
 
+if(NOT DEFINED LOCKDC_EXTERNAL_ROOT OR LOCKDC_EXTERNAL_ROOT STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_EXTERNAL_ROOT is required")
+endif()
+
 function(assert_arch_alias alias canonical)
     set(test_root "${LOCKDC_BINARY_DIR}/arch-alias-configure-test/${alias}")
     set(build_dir "${test_root}/build")
-    set(external_root "${test_root}/external")
     set(dependency_build_root "${test_root}/deps-build")
     set(fake_cxx "${test_root}/definitely-no-cxx")
 
@@ -30,7 +33,7 @@ function(assert_arch_alias alias canonical)
             -DLOCKDC_BUILD_EXAMPLES=OFF
             -DLOCKDC_BUILD_BENCHMARKS=OFF
             -DLOCKDC_BUILD_FUZZERS=OFF
-            -DLOCKDC_EXTERNAL_ROOT=${external_root}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
             -DLOCKDC_DEPENDENCY_BUILD_ROOT=${dependency_build_root}
             -DLOCKDC_TARGET_ARCH=${alias}
             -DCMAKE_C_COMPILER=${LOCKDC_C_COMPILER}

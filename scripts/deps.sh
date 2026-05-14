@@ -7,6 +7,7 @@ preset=${1:-deps-x86_64-linux-gnu}
 
 unset LD_LIBRARY_PATH
 dry_run=${LOCKDC_DEPS_DRY_RUN:-0}
+download_timeout=${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT:-300}
 
 resolve_host_debug_preset() {
   local compiler triple
@@ -169,6 +170,7 @@ resolve_cmake_cache_string() {
   printf '%s\n' "$resolved_value"
 }
 
+cpkt_version=$(resolve_cmake_cache_string LOCKDC_CPKT_VERSION "${LOCKDC_CPKT_VERSION:-}")
 openssl_version=$(resolve_cmake_cache_string LOCKDC_OPENSSL_VERSION "${LOCKDC_OPENSSL_VERSION:-}")
 zlib_version=$(resolve_cmake_cache_string LOCKDC_ZLIB_VERSION "${LOCKDC_ZLIB_VERSION:-}")
 curl_version=$(resolve_cmake_cache_string LOCKDC_CURL_VERSION "${LOCKDC_CURL_VERSION:-}")
@@ -177,6 +179,36 @@ libssh2_version=$(resolve_cmake_cache_string LOCKDC_LIBSSH2_VERSION "${LOCKDC_LI
 lonejson_version=$(resolve_cmake_cache_string LOCKDC_LONEJSON_VERSION "${LOCKDC_LONEJSON_VERSION:-}")
 cmocka_version=$(resolve_cmake_cache_string LOCKDC_CMOCKA_VERSION "${LOCKDC_CMOCKA_VERSION:-}")
 pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_VERSION:-}")
+
+cpkt_asset_name="c.pkt.systems-$cpkt_version-${preset#deps-}.tar.gz"
+cpkt_download_url="https://github.com/sa6mwa/c.pkt.systems/releases/download/v$cpkt_version/$cpkt_asset_name"
+case "$cpkt_asset_name" in
+  c.pkt.systems-0.1.0-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=4e6c4ca07c0647a05923b4a56ef12d440a1d1b53465224e30d990fc18777aa4e
+    ;;
+  c.pkt.systems-0.1.0-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=d44f70558b961125c96d356d27ce83fc7d50c9cc650a335c2016c8d3778d98aa
+    ;;
+  c.pkt.systems-0.1.0-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=c20969872de3087f984e8bca3e01fa98e495a3581940e426d07ebed014cf8190
+    ;;
+  c.pkt.systems-0.1.0-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=8ff3cc3c457dc66918470beaea01744bc38c342a87c20c6b072761c56c858e19
+    ;;
+  c.pkt.systems-0.1.0-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=26787953d690b0f01a11538e8692f68f9c746b8e97a9baf47ac15241d9a947fc
+    ;;
+  c.pkt.systems-0.1.0-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=f0172a6ff928111cfaeb503b01b48b3cdd2c05a04d54047630180ee79f65af31
+    ;;
+  c.pkt.systems-0.1.0-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=dba4424de9566c2418162f62e5e90c45b40266c6e750b5096d4a251bf96d8e9a
+    ;;
+  *)
+    printf 'unsupported c.pkt.systems release asset: %s\n' "$cpkt_asset_name" >&2
+    exit 1
+    ;;
+esac
 
 compiler=${CC:-cc}
 compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
@@ -188,12 +220,6 @@ fingerprint=$(
     cat "$repo_root/cmake/LcDependencies.cmake"
     if [ -f "$repo_root/cmake/prune_dependency_install_tree.cmake" ]; then
       cat "$repo_root/cmake/prune_dependency_install_tree.cmake"
-    fi
-    if [ -f "$repo_root/cmake/patch_libssh2_single_pass.cmake" ]; then
-      cat "$repo_root/cmake/patch_libssh2_single_pass.cmake"
-    fi
-    if [ -f "$repo_root/cmake/patch_zlib_single_pass.cmake" ]; then
-      cat "$repo_root/cmake/patch_zlib_single_pass.cmake"
     fi
     cat "$repo_root/scripts/deps.sh"
     if [ -d "$repo_root/cmake/toolchains" ]; then
@@ -209,6 +235,9 @@ machine=$compiler_machine
 version=$compiler_version
 fingerprint=$fingerprint
 preset=$preset
+cpkt_version=$cpkt_version
+cpkt_asset_name=$cpkt_asset_name
+cpkt_asset_hash=$cpkt_asset_hash
 openssl_version=$openssl_version
 zlib_version=$zlib_version
 curl_version=$curl_version
@@ -237,6 +266,100 @@ stage_dependency_license() {
 
   mkdir -p "$(dirname "$destination_path")"
   cp "$source_path" "$destination_path"
+}
+
+copy_matching_files() {
+  local destination=$1
+  shift
+  local copied=0
+  local candidate
+
+  mkdir -p "$destination"
+  for candidate in "$@"; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      cp -a "$candidate" "$destination/"
+      copied=1
+    fi
+  done
+  if [ "$copied" -eq 0 ]; then
+    printf 'no c.pkt.systems files matched for destination: %s\n' "$destination" >&2
+    exit 1
+  fi
+}
+
+stage_cpkt_license() {
+  local package_name=$1
+  local source_path="$deps_root/c.pkt.systems/install/share/doc/c.pkt.systems/third_party/$package_name/LICENSE"
+  local destination_dir="$deps_root/$package_name/install/share/doc/liblockdc-third-party/$package_name"
+
+  if [ ! -f "$source_path" ]; then
+    printf 'missing c.pkt.systems license for %s: %s\n' "$package_name" "$source_path" >&2
+    exit 1
+  fi
+
+  mkdir -p "$destination_dir"
+  cp "$source_path" "$destination_dir/LICENSE.txt"
+}
+
+download_cpkt_bundle() {
+  local archive_path="$repo_root/.cache/downloads/$cpkt_asset_name"
+  local extract_root="$deps_root/c.pkt.systems/install"
+  local actual_hash
+
+  mkdir -p "$repo_root/.cache/downloads" "$extract_root"
+  if [ ! -f "$archive_path" ]; then
+    curl -fL --connect-timeout "$download_timeout" \
+      --max-time "$download_timeout" \
+      -o "$archive_path" "$cpkt_download_url"
+  fi
+
+  actual_hash=$(sha256sum "$archive_path" | awk '{print $1}')
+  if [ "$actual_hash" != "$cpkt_asset_hash" ]; then
+    printf 'c.pkt.systems checksum mismatch for %s\nexpected %s\nactual   %s\n' \
+      "$cpkt_asset_name" "$cpkt_asset_hash" "$actual_hash" >&2
+    exit 1
+  fi
+
+  rm -rf "$extract_root"
+  mkdir -p "$extract_root"
+  tar -xzf "$archive_path" -C "$extract_root" --strip-components=1
+}
+
+stage_cpkt_component_layout() {
+  local cpkt_root="$deps_root/c.pkt.systems/install"
+
+  download_cpkt_bundle
+  rm -rf \
+    "$deps_root/openssl/install" \
+    "$deps_root/curl/install" \
+    "$deps_root/nghttp2/install" \
+    "$deps_root/libssh2/install" \
+    "$deps_root/zlib/install"
+
+  copy_matching_files "$deps_root/openssl/install/include" "$cpkt_root/include/openssl"
+  copy_matching_files "$deps_root/openssl/install/lib" "$cpkt_root"/lib/libssl* "$cpkt_root"/lib/libcrypto*
+  stage_cpkt_license openssl
+
+  copy_matching_files "$deps_root/curl/install/include" "$cpkt_root/include/curl"
+  copy_matching_files "$deps_root/curl/install/lib" "$cpkt_root"/lib/libcurl*
+  stage_cpkt_license curl
+
+  copy_matching_files "$deps_root/nghttp2/install/include" "$cpkt_root/include/nghttp2"
+  copy_matching_files "$deps_root/nghttp2/install/lib" "$cpkt_root"/lib/libnghttp2*
+  stage_cpkt_license nghttp2
+
+  copy_matching_files "$deps_root/libssh2/install/include" \
+    "$cpkt_root/include/libssh2.h" \
+    "$cpkt_root/include/libssh2_publickey.h" \
+    "$cpkt_root/include/libssh2_sftp.h"
+  copy_matching_files "$deps_root/libssh2/install/lib" "$cpkt_root"/lib/libssh2*
+  stage_cpkt_license libssh2
+
+  copy_matching_files "$deps_root/zlib/install/include" \
+    "$cpkt_root/include/zlib.h" \
+    "$cpkt_root/include/zconf.h"
+  copy_matching_files "$deps_root/zlib/install/lib" "$cpkt_root"/lib/libz*
+  stage_cpkt_license zlib
 }
 
 prune_dependency_install_trees() {
@@ -277,7 +400,7 @@ case "$preset" in
     zlib_shared_soname_path="$deps_root/zlib/install/lib/libz.1.${shared_ext}"
     zlib_shared_versioned_path="$deps_root/zlib/install/lib/libz.$zlib_version.${shared_ext}"
     pslog_shared_path="$deps_root/pslog/install/lib/libpslog.0.${shared_ext}"
-    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.0.${shared_ext}"
+    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.4.${shared_ext}"
     ;;
   *)
     shared_ext=so
@@ -288,7 +411,7 @@ case "$preset" in
     zlib_shared_soname_path="$deps_root/zlib/install/lib/libz.so.1"
     zlib_shared_versioned_path="$deps_root/zlib/install/lib/libz.so.$zlib_version"
     pslog_shared_path="$deps_root/pslog/install/lib/libpslog.so.0"
-    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.so.0"
+    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.so.4"
     ;;
 esac
 curl_shared_path="$deps_root/curl/install/lib/libcurl.${shared_ext}"
@@ -360,15 +483,12 @@ if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ]; then
 fi
 
 reset_dependency_build_root
+stage_cpkt_component_layout
 cmake_extra_args+=("-DLOCKDC_ZLIB_VERSION=$zlib_version")
+cmake_extra_args+=("-DLOCKDC_CPKT_VERSION=$cpkt_version")
 cmake --preset "$cmake_preset" --fresh "${cmake_extra_args[@]}"
 cmake --build --preset "$cmake_preset" --target lc_deps
-stage_dependency_license "openssl" "openssl" "$deps_build_root/openssl/src/LICENSE.txt"
-stage_dependency_license "curl" "curl" "$deps_build_root/curl/src/COPYING"
-stage_dependency_license "libssh2" "libssh2" "$deps_build_root/libssh2/src/COPYING"
-stage_dependency_license "zlib" "zlib" "$deps_build_root/zlib/src/LICENSE"
 stage_dependency_license "pslog" "libpslog" "$deps_root/pslog/install/share/doc/libpslog/LICENSE"
-stage_dependency_license "nghttp2" "nghttp2" "$deps_build_root/nghttp2/src/COPYING"
 stage_dependency_license "lonejson" "lonejson" "$deps_root/lonejson/install/share/doc/liblonejson/LICENSE"
 prune_dependency_install_trees
 assert_dependency_install_tree_privacy

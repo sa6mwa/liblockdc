@@ -15,7 +15,7 @@ namespace configuration, and consumer helper APIs backed by the liblockdc C SDK.
 }
 dependencies = {
   "lua >= 5.5, < 5.6",
-  "lonejson == 0.12.0-1",
+  "lonejson == 0.14.1-1",
 }
 build = {
   type = "command",

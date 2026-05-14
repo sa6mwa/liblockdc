@@ -249,17 +249,13 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/README.md(\n|$)" "share/doc/liblockdc/README.md")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lc/lc\\.h(\n|$)" "include/lc/lc.h")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lc/version\\.h(\n|$)" "include/lc/version.h")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/pslog\\.h(\n|$)" "include/pslog.h")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/pslog_version\\.h(\n|$)" "include/pslog_version.h")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/curl/curl\\.h(\n|$)" "curl headers")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/openssl/ssl\\.h(\n|$)" "OpenSSL headers")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/nghttp2/nghttp2\\.h(\n|$)" "nghttp2 headers")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/libssh2\\.h(\n|$)" "libssh2 header")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/libssh2_publickey\\.h(\n|$)" "libssh2 publickey header")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/libssh2_sftp\\.h(\n|$)" "libssh2 sftp header")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/zlib\\.h(\n|$)" "zlib header")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/zconf\\.h(\n|$)" "zlib configuration header")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lonejson\\.h(\n|$)" "lonejson header")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/pslog(_version)?\\.h(\n|$)" "libpslog headers")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/curl(/|\n|$)" "curl headers")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/openssl(/|\n|$)" "OpenSSL headers")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/nghttp2(/|\n|$)" "nghttp2 headers")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/libssh2(_publickey|_sftp)?\\.h(\n|$)" "libssh2 headers")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/z(conf|lib)\\.h(\n|$)" "zlib headers")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lonejson\\.h(\n|$)" "lonejson header")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/liblockdc(/|\n|$)" "engine share/liblockdc path")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lockdc/luarocks(/|\n|$)" "embedded LuaRocks payload")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lua/5\\.5/lockdc(/|\n|$)" "embedded Lua runtime wrapper")
@@ -278,44 +274,45 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     endif()
 
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/liblockdc\\.a(\n|$)" "static library")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libpslog\\.a(\n|$)" "libpslog static archive")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libcurl\\.a(\n|$)" "libcurl static archive")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libssl\\.a(\n|$)" "OpenSSL ssl static archive")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libcrypto\\.a(\n|$)" "OpenSSL crypto static archive")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libnghttp2\\.a(\n|$)" "nghttp2 static archive")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libssh2\\.a(\n|$)" "libssh2 static archive")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libz\\.a(\n|$)" "zlib static archive")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/liblonejson\\.a(\n|$)" "lonejson static archive")
+    foreach(forbidden_dependency_archive
+        libpslog
+        libcurl
+        libssl
+        libcrypto
+        libnghttp2
+        libssh2
+        libz
+        liblonejson)
+        assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_archive}\\.a(\n|$)" "${forbidden_dependency_archive} static archive")
+    endforeach()
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/pkgconfig/lockdc\\.pc(\n|$)" "pkg-config metadata")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/cmake/lockdc/lockdcConfig\\.cmake(\n|$)" "CMake package config")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/cmake/lockdc/lockdcConfigVersion\\.cmake(\n|$)" "CMake package version file")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/libpslog/LICENSE(\n|$)" "libpslog license")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/openssl/LICENSE\\.txt(\n|$)" "OpenSSL license")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/curl/LICENSE\\.txt(\n|$)" "curl license")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/nghttp2/LICENSE\\.txt(\n|$)" "nghttp2 license")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/libssh2/LICENSE\\.txt(\n|$)" "libssh2 license")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/zlib/LICENSE\\.txt(\n|$)" "zlib license")
-    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/lonejson/LICENSE(\n|$)" "lonejson license")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party(/|\n|$)" "third-party license directory")
     if(target_id MATCHES "apple-darwin$")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libcurl\\.dylib" "bundled curl dylib")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libpslog\\.dylib" "bundled libpslog dylib")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libpslog\\.0\\.dylib" "libpslog versioned dylib")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libssh2\\.dylib" "bundled libssh2 dylib")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libssh2\\.1\\.dylib" "libssh2 versioned dylib")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libz\\.dylib" "bundled zlib dylib")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libz\\.1\\.dylib" "zlib dylib SONAME symlink")
-        string(REPLACE "." "\\." zlib_version_regex "${LOCKDC_ZLIB_VERSION}")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libz\\.${zlib_version_regex}\\.dylib" "zlib versioned dylib")
+        foreach(forbidden_dependency_library
+            libcurl
+            libpslog
+            libssl
+            libcrypto
+            libnghttp2
+            libssh2
+            libz
+            liblonejson)
+            assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_library}[^/\n]*\\.dylib" "${forbidden_dependency_library} dylib")
+        endforeach()
     else()
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libcurl\\.so" "bundled curl shared library")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libpslog\\.so" "bundled libpslog shared library")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libssh2\\.so" "bundled libssh2 shared library")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libssh2\\.so\\.1" "libssh2 shared-library SONAME symlink")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libssh2\\.so\\.1\\.0\\.1" "libssh2 versioned shared library")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libz\\.so" "bundled zlib shared library")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libz\\.so\\.1" "zlib shared-library SONAME symlink")
-        string(REPLACE "." "\\." zlib_version_regex "${LOCKDC_ZLIB_VERSION}")
-        assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/libz\\.so\\.${zlib_version_regex}" "zlib versioned shared library")
+        foreach(forbidden_dependency_library
+            libcurl
+            libpslog
+            libssl
+            libcrypto
+            libnghttp2
+            libssh2
+            libz
+            liblonejson)
+            assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_library}\\.so" "${forbidden_dependency_library} shared library")
+        endforeach()
     endif()
 
     string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef extract_suffix)
@@ -344,17 +341,6 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
        LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "0")
         lockdc_assert_tree_has_no_private_traces("${extract_root}/${archive_prefix}" "${archive_path}")
         assert_packaged_binaries_have_no_sanitizer_runtime("${extract_root}/${archive_prefix}" "${archive_path}")
-    endif()
-    if(target_id MATCHES "apple-darwin$")
-        assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libpslog.dylib")
-        assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libssh2.dylib")
-        assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libz.dylib")
-        assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libz.1.dylib")
-    else()
-        assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libssh2.so")
-        assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libssh2.so.1")
-        assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libz.so")
-        assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/libz.so.1")
     endif()
     file(REMOVE_RECURSE "${extract_root}")
 

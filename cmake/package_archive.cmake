@@ -32,26 +32,6 @@ lockdc_import_cache_path(CMAKE_STRIP)
 lockdc_import_cache_path(CMAKE_INSTALL_NAME_TOOL)
 lockdc_import_cache_path(LOCKDC_OTOOL)
 
-function(lockdc_copy_required_license_named package_name destination_dir output_name)
-    set(candidates ${ARGN})
-
-    foreach(candidate IN LISTS candidates)
-        if(EXISTS "${candidate}")
-            file(MAKE_DIRECTORY "${destination_dir}")
-            file(COPY "${candidate}" DESTINATION "${destination_dir}")
-            get_filename_component(source_name "${candidate}" NAME)
-            if(NOT source_name STREQUAL output_name)
-                file(RENAME "${destination_dir}/${source_name}" "${destination_dir}/${output_name}")
-            endif()
-            return()
-        endif()
-    endforeach()
-
-    list(JOIN candidates "\n  " candidate_list)
-    message(FATAL_ERROR
-        "missing required ${package_name} package license; looked in:\n  ${candidate_list}")
-endfunction()
-
 file(REMOVE_RECURSE "${package_root}")
 file(MAKE_DIRECTORY "${package_root}/include/lc")
 file(MAKE_DIRECTORY "${package_root}/include")
@@ -188,57 +168,6 @@ file(GLOB _lockdc_owned_library_artifacts
 foreach(_lockdc_owned_library_artifact IN LISTS _lockdc_owned_library_artifacts)
     lockdc_strip_packaged_artifact("${_lockdc_owned_library_artifact}")
 endforeach()
-
-lockdc_copy_required_license_named(
-    "libpslog"
-    "${package_root}/share/doc/liblockdc/third_party/libpslog"
-    "LICENSE"
-    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/share/doc/libpslog/LICENSE"
-    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/share/doc/liblockdc-third-party/libpslog/LICENSE.txt"
-)
-lockdc_copy_required_license_named(
-    "openssl"
-    "${package_root}/share/doc/liblockdc/third_party/openssl"
-    "LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/share/doc/liblockdc-third-party/openssl/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/openssl/src/LICENSE.txt"
-)
-lockdc_copy_required_license_named(
-    "curl"
-    "${package_root}/share/doc/liblockdc/third_party/curl"
-    "LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/curl/install/share/doc/liblockdc-third-party/curl/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/curl/src/COPYING"
-)
-lockdc_copy_required_license_named(
-    "nghttp2"
-    "${package_root}/share/doc/liblockdc/third_party/nghttp2"
-    "LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/share/doc/liblockdc-third-party/nghttp2/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/nghttp2/src/COPYING"
-)
-lockdc_copy_required_license_named(
-    "libssh2"
-    "${package_root}/share/doc/liblockdc/third_party/libssh2"
-    "LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/share/doc/liblockdc-third-party/libssh2/LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/share/doc/libssh2/COPYING"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/libssh2/src/COPYING"
-)
-lockdc_copy_required_license_named(
-    "zlib"
-    "${package_root}/share/doc/liblockdc/third_party/zlib"
-    "LICENSE.txt"
-    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/share/doc/liblockdc-third-party/zlib/LICENSE.txt"
-    "${LOCKDC_DEPENDENCY_BUILD_ROOT}/zlib/src/LICENSE"
-)
-lockdc_copy_required_license_named(
-    "lonejson"
-    "${package_root}/share/doc/liblockdc/third_party/lonejson"
-    "LICENSE"
-    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/share/doc/liblonejson/LICENSE"
-    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/share/doc/liblockdc-third-party/lonejson/LICENSE.txt"
-)
 
 file(MAKE_DIRECTORY "${LOCKDC_DIST_DIR}")
 set(archive_base "${LOCKDC_DIST_DIR}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar")

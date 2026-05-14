@@ -14,6 +14,10 @@ if(NOT DEFINED LOCKDC_C_COMPILER OR LOCKDC_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "LOCKDC_C_COMPILER is required")
 endif()
 
+if(NOT DEFINED LOCKDC_EXTERNAL_ROOT OR LOCKDC_EXTERNAL_ROOT STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_EXTERNAL_ROOT is required")
+endif()
+
 set(test_root "${LOCKDC_BINARY_DIR}/install-tree-sdk-test")
 set(install_prefix "${test_root}/prefix")
 set(consumer_src_dir "${test_root}/consumer")
@@ -38,9 +42,7 @@ endif()
 foreach(required_path
     "${install_prefix}/include/lc/lc.h"
     "${install_prefix}/include/lc/version.h"
-    "${install_prefix}/include/lonejson.h"
     "${install_prefix}/lib/liblockdc.a"
-    "${install_prefix}/lib/liblonejson.a"
     "${install_prefix}/lib/cmake/lockdc/lockdcConfig.cmake"
 )
     if(NOT EXISTS "${required_path}")
@@ -49,6 +51,21 @@ foreach(required_path
 endforeach()
 
 foreach(forbidden_path
+    "${install_prefix}/include/lonejson.h"
+    "${install_prefix}/include/pslog.h"
+    "${install_prefix}/include/curl"
+    "${install_prefix}/include/openssl"
+    "${install_prefix}/include/nghttp2"
+    "${install_prefix}/include/libssh2.h"
+    "${install_prefix}/include/zlib.h"
+    "${install_prefix}/lib/liblonejson.a"
+    "${install_prefix}/lib/libpslog.a"
+    "${install_prefix}/lib/libcurl.a"
+    "${install_prefix}/lib/libssl.a"
+    "${install_prefix}/lib/libcrypto.a"
+    "${install_prefix}/lib/libnghttp2.a"
+    "${install_prefix}/lib/libssh2.a"
+    "${install_prefix}/lib/libz.a"
     "${install_prefix}/share/lua/5.5/lockdc/init.lua"
     "${install_prefix}/share/lockdc/luarocks"
     "${install_prefix}/lib/lua/5.5/lockdc"
@@ -60,25 +77,14 @@ endforeach()
 
 file(READ "${install_prefix}/lib/cmake/lockdc/lockdcConfig.cmake" lockdc_config_text)
 file(READ "${install_prefix}/lib/pkgconfig/lockdc.pc" lockdc_pkgconfig_text)
-string(FIND "${lockdc_config_text}" "libssh2.a" lockdc_ssh2_index)
-string(FIND "${lockdc_config_text}" "libssl.a" lockdc_ssl_index)
-string(FIND "${lockdc_config_text}" "libcrypto.a" lockdc_crypto_index)
-string(FIND "${lockdc_config_text}" "libz.a" lockdc_z_index)
-
-if(lockdc_ssh2_index EQUAL -1 OR lockdc_ssl_index EQUAL -1 OR
-   lockdc_crypto_index EQUAL -1 OR lockdc_z_index EQUAL -1)
-    message(FATAL_ERROR
-        "installed static package config is missing expected static dependency archives\n"
-        "config:\n${lockdc_config_text}")
-endif()
-
-if(lockdc_ssh2_index GREATER lockdc_ssl_index OR
-   lockdc_ssh2_index GREATER lockdc_crypto_index OR
-   lockdc_ssh2_index GREATER lockdc_z_index)
-    message(FATAL_ERROR
-        "installed static package config exports libssh2 after one of its dependencies\n"
-        "config:\n${lockdc_config_text}")
-endif()
+foreach(forbidden_archive_name libssh2.a libssl.a libcrypto.a libz.a libcurl.a libnghttp2.a libpslog.a liblonejson.a)
+    string(FIND "${lockdc_config_text}" "${forbidden_archive_name}" forbidden_archive_index)
+    if(NOT forbidden_archive_index EQUAL -1)
+        message(FATAL_ERROR
+            "installed static package config still references bundled dependency archive ${forbidden_archive_name}\n"
+            "config:\n${lockdc_config_text}")
+    endif()
+endforeach()
 
 if(lockdc_config_text MATCHES "atomic")
     string(FIND "${lockdc_pkgconfig_text}" "-latomic" lockdc_pkgconfig_atomic_index)
@@ -96,10 +102,32 @@ project(lockdc_install_tree_consumer C)
 
 find_package(lockdc CONFIG REQUIRED)
 
+set(LOCKDC_EXTERNAL_ROOT "${LOCKDC_EXTERNAL_ROOT}")
+set(LOCKDC_EXTERNAL_INCLUDE_DIRS
+    "${LOCKDC_EXTERNAL_ROOT}/curl/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
+set(LOCKDC_EXTERNAL_LIBRARY_DIRS
+    "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+
 add_executable(lockdc_install_tree_consumer_static main.c)
+target_include_directories(lockdc_install_tree_consumer_static PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
+target_link_directories(lockdc_install_tree_consumer_static PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(lockdc_install_tree_consumer_static PRIVATE lockdc::static)
 
 add_executable(lockdc_install_tree_consumer_shared main.c)
+target_include_directories(lockdc_install_tree_consumer_shared PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
+target_link_directories(lockdc_install_tree_consumer_shared PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(lockdc_install_tree_consumer_shared PRIVATE lockdc::shared)
 ]=])
 
@@ -147,6 +175,7 @@ set(lockdc_consumer_configure_command
     "-DCMAKE_C_COMPILER=${LOCKDC_C_COMPILER}"
     "-DCMAKE_C_FLAGS_DEBUG=${LOCKDC_C_FLAGS_DEBUG}"
     "-DCMAKE_PREFIX_PATH=${install_prefix}"
+    "-DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}"
 )
 if(DEFINED LOCKDC_BUILD_TYPE AND NOT LOCKDC_BUILD_TYPE STREQUAL "")
     list(APPEND lockdc_consumer_configure_command
@@ -221,6 +250,35 @@ endif()
 
 separate_arguments(lockdc_pkgconfig_shared_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_shared_cflags}")
 separate_arguments(lockdc_pkgconfig_shared_libs_list UNIX_COMMAND "${lockdc_pkgconfig_shared_libs}")
+list(APPEND lockdc_pkgconfig_shared_cflags_list
+    "-I${LOCKDC_EXTERNAL_ROOT}/curl/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/openssl/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
+list(APPEND lockdc_pkgconfig_shared_libs_list
+    "-L${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    foreach(lockdc_external_library_dir
+        "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+        list(APPEND lockdc_pkgconfig_shared_libs_list
+            "-Wl,-rpath-link,${lockdc_external_library_dir}")
+    endforeach()
+endif()
 
 execute_process(
     COMMAND "${LOCKDC_C_COMPILER}"
@@ -276,6 +334,22 @@ endif()
 
 separate_arguments(lockdc_pkgconfig_cflags_list UNIX_COMMAND "${lockdc_pkgconfig_cflags}")
 separate_arguments(lockdc_pkgconfig_libs_list UNIX_COMMAND "${lockdc_pkgconfig_libs}")
+list(APPEND lockdc_pkgconfig_cflags_list
+    "-I${LOCKDC_EXTERNAL_ROOT}/curl/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/openssl/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
+list(APPEND lockdc_pkgconfig_libs_list
+    "-L${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 
 if(NOT DEFINED LOCKDC_SANITIZER_INSTRUMENTED OR LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "" OR
    LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "0")

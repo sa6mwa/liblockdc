@@ -50,7 +50,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(LOCKDC_BUILD_STATIC "Build the static lockdc library." ON)
 option(LOCKDC_BUILD_SHARED "Build the shared lockdc library." ON)
-option(LOCKDC_BUILD_DEPENDENCIES "Download and build OpenSSL, zlib, nghttp2, libcurl, libssh2, and lonejson." OFF)
+option(LOCKDC_BUILD_DEPENDENCIES "Provision vendored dependency artifacts needed by this preset." OFF)
 option(LOCKDC_BUILD_EXAMPLES "Build example programs." ON)
 option(LOCKDC_BUILD_TESTS "Build unit tests." ON)
 option(LOCKDC_BUILD_LUA_BINDINGS "Build the optional Lua extension when Lua headers are available." ON)
@@ -65,14 +65,15 @@ option(LOCKDC_BUILD_FUZZERS "Build clang/libFuzzer targets for parser and stream
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
-set(LOCKDC_OPENSSL_VERSION "3.6.2" CACHE STRING "Pinned OpenSSL release used for CMake-managed dependency builds.")
-set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release used for compression support in vendored dependencies.")
-set(LOCKDC_CURL_VERSION "8.20.0" CACHE STRING "Pinned curl release used for CMake-managed dependency builds.")
-set(LOCKDC_NGHTTP2_VERSION "1.69.0" CACHE STRING "Pinned nghttp2 release used to enable libcurl HTTP/2 support.")
-set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release used for SSH and SFTP support.")
-set(LOCKDC_LONEJSON_VERSION "0.12.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
+set(LOCKDC_OPENSSL_VERSION "3.6.2" CACHE STRING "Pinned OpenSSL release supplied by c.pkt.systems.")
+set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release supplied by c.pkt.systems.")
+set(LOCKDC_CURL_VERSION "8.20.0" CACHE STRING "Pinned curl release supplied by c.pkt.systems.")
+set(LOCKDC_NGHTTP2_VERSION "1.69.0" CACHE STRING "Pinned nghttp2 release supplied by c.pkt.systems.")
+set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release supplied by c.pkt.systems.")
+set(LOCKDC_LONEJSON_VERSION "0.14.1" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
-set(LOCKDC_PSLOG_VERSION "0.3.1" CACHE STRING "Pinned libpslog release used for SDK logging.")
+set(LOCKDC_PSLOG_VERSION "0.4.1" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
+set(LOCKDC_CPKT_VERSION "0.1.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version.")
 set(LOCKDC_ABI_VERSION "1" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
@@ -570,37 +571,12 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     endif()
 endif()
 
-set(LOCKDC_INSTALL_VENDORED_SDK_DEV_ARTIFACTS_SCRIPT
-    "${CMAKE_CURRENT_BINARY_DIR}/install_vendored_sdk_dev_artifacts.cmake")
-set(LOCKDC_INSTALL_VENDORED_SDK_RUNTIME_ARTIFACTS_SCRIPT
-    "${CMAKE_CURRENT_BINARY_DIR}/install_vendored_sdk_runtime_artifacts.cmake")
-if(TARGET lc_static)
-    set(LOCKDC_INSTALL_STATIC_VENDORED_SDK_ARTIFACTS 1)
-else()
-    set(LOCKDC_INSTALL_STATIC_VENDORED_SDK_ARTIFACTS 0)
-endif()
-
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_vendored_sdk_dev_artifacts.cmake.in"
-    "${LOCKDC_INSTALL_VENDORED_SDK_DEV_ARTIFACTS_SCRIPT}"
-    @ONLY
-)
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_vendored_sdk_runtime_artifacts.cmake.in"
-    "${LOCKDC_INSTALL_VENDORED_SDK_RUNTIME_ARTIFACTS_SCRIPT}"
-    @ONLY
-)
-
 if(LOCKDC_INSTALL)
 
     install(FILES ${LOCKDC_PUBLIC_HEADER} ${LOCKDC_PUBLIC_VERSION_HEADER}
         DESTINATION include/lc
         COMPONENT dev
     )
-    install(SCRIPT "${LOCKDC_INSTALL_VENDORED_SDK_DEV_ARTIFACTS_SCRIPT}" COMPONENT dev)
-    if(TARGET lc_shared)
-        install(SCRIPT "${LOCKDC_INSTALL_VENDORED_SDK_RUNTIME_ARTIFACTS_SCRIPT}" COMPONENT runtime)
-    endif()
     if(TARGET lc_shared)
         install(TARGETS lc_shared
 
@@ -737,6 +713,7 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/arch_alias_configure_test.cmake
     )
     set_tests_properties(arch_alias_configure_test PROPERTIES RUN_SERIAL TRUE)
@@ -773,6 +750,7 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
             -DLOCKDC_C_FLAGS_DEBUG=${CMAKE_C_FLAGS_DEBUG}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
             $<$<BOOL:${CMAKE_BUILD_TYPE}>:-DLOCKDC_BUILD_TYPE=${CMAKE_BUILD_TYPE}>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_tree_sdk_test.cmake
     )
@@ -838,14 +816,6 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(dependency_download_timeout_test PROPERTIES RUN_SERIAL TRUE)
 
-    add_test(NAME lonejson_generator_reuse_test
-        COMMAND ${CMAKE_COMMAND}
-            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
-            -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lonejson_generator_reuse_test.cmake
-    )
-    set_tests_properties(lonejson_generator_reuse_test PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)

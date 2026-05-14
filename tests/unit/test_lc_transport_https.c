@@ -17,13 +17,11 @@
 #include <unistd.h>
 
 #include <cmocka.h>
-#include <openssl/bn.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#include <openssl/x509v3.h>
 
 #include "lc/lc.h"
 #include "lc_api_internal.h"
@@ -199,6 +197,61 @@ static int test_enqueue_source_reset(lc_source *self, lc_error *error) {
 
 static void test_enqueue_source_close(lc_source *self) { free(self); }
 
+static const char test_ca_cert_pem[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIBnTCCAUOgAwIBAgIUOWr99fMFJ1QzGFbUpwdb+top+jAwCgYIKoZIzj0EAwIw\n"
+    "HDEaMBgGA1UEAwwRbGlibG9ja2RjLXRlc3QtY2EwHhcNMjYwNTEzMDkyNDUyWhcN\n"
+    "MzYwNTEwMDkyNDUyWjAcMRowGAYDVQQDDBFsaWJsb2NrZGMtdGVzdC1jYTBZMBMG\n"
+    "ByqGSM49AgEGCCqGSM49AwEHA0IABJVbOSJmV0Mpdf+efxL7TkvWqhdFXpVPAOZa\n"
+    "UU/HUGXV3E0uZ4TmdNh3mB1ZL/LGFwabH986Xz373Eu1EONhJDOjYzBhMB0GA1Ud\n"
+    "DgQWBBRhJsVVpWFQwPbEZbzHchpB6gADUzAfBgNVHSMEGDAWgBRhJsVVpWFQwPbE\n"
+    "ZbzHchpB6gADUzAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggq\n"
+    "hkjOPQQDAgNIADBFAiBqJim3EWrI6T7djPWbigkHAioxzQsNSxn235I/zTjGCAIh\n"
+    "AKxXEPuExIVGeRAj3u+ufdNeoCQ1BJ0gs1q9kx7hATCh\n"
+    "-----END CERTIFICATE-----\n";
+
+static const char test_server_cert_pem[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIBujCCAV+gAwIBAgITcXftkPHe43ReOThojIto8afVuzAKBggqhkjOPQQDAjAc\n"
+    "MRowGAYDVQQDDBFsaWJsb2NrZGMtdGVzdC1jYTAeFw0yNjA1MTMwOTI1MjBaFw0z\n"
+    "NjA1MTAwOTI1MjBaMBQxEjAQBgNVBAMMCTEyNy4wLjAuMTBZMBMGByqGSM49AgEG\n"
+    "CCqGSM49AwEHA0IABFwVMIW0hbixJw8kVMl4Q/91CQou6jOgYHbzGCbZjS8cj2zD\n"
+    "fp2W2/9FLJLgXCheiQtgs5FVM3UTafmhr6u1blGjgYcwgYQwDAYDVR0TAQH/BAIw\n"
+    "ADAOBgNVHQ8BAf8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDwYDVR0RBAgw\n"
+    "BocEfwAAATAdBgNVHQ4EFgQUHLf7oMF8LK0B4M7Fs1L1KimczI8wHwYDVR0jBBgw\n"
+    "FoAUYSbFVaVhUMD2xGW8x3IaQeoAA1MwCgYIKoZIzj0EAwIDSQAwRgIhAL6EQPan\n"
+    "NsEcJS32fVUAqOvOIwLat1kNvigoLWDfMgmAAiEAmKZ9gN1EQkCiUihfRt8p15oi\n"
+    "yXb+97r7yY5Edwcqaj8=\n"
+    "-----END CERTIFICATE-----\n";
+
+static const char test_server_key_pem[] =
+    "-----BEGIN EC PRIVATE KEY-----\n"
+    "MHcCAQEEIB82xUKiuFyk14MPXt1Wn6oh/0GZPrGQTK3EllZNvQEgoAoGCCqGSM49\n"
+    "AwEHoUQDQgAEXBUwhbSFuLEnDyRUyXhD/3UJCi7qM6BgdvMYJtmNLxyPbMN+nZbb\n"
+    "/0UskuBcKF6JC2CzkVUzdRNp+aGvq7VuUQ==\n"
+    "-----END EC PRIVATE KEY-----\n";
+
+static const char test_client_cert_pem[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIBsjCCAVigAwIBAgITcXftkPHe43ReOThojIto8afVvTAKBggqhkjOPQQDAjAc\n"
+    "MRowGAYDVQQDDBFsaWJsb2NrZGMtdGVzdC1jYTAeFw0yNjA1MTMwOTMwMjFaFw0z\n"
+    "NjA1MTAwOTMwMjFaMCAxHjAcBgNVBAMMFWxpYmxvY2tkYyB0ZXN0IGNsaWVudDBZ\n"
+    "MBMGByqGSM49AgEGCCqGSM49AwEHA0IABDsuNvQzPLbcyLgHlP/LMUhN4QlwVq0+\n"
+    "4mTM3oX0clJhPI4PVTEocaW5KN2UkOPEpT0udpGF4NpqSktW3RuMO3ajdTBzMAwG\n"
+    "A1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMC\n"
+    "MB0GA1UdDgQWBBQR8wr4fCTmUD2wgOgErzgCP0p5lzAfBgNVHSMEGDAWgBRhJsVV\n"
+    "pWFQwPbEZbzHchpB6gADUzAKBggqhkjOPQQDAgNIADBFAiEAkuu6OJ7zfr662Zag\n"
+    "mgAZsa5G826L2lj8vpg5NTwtcrICIHH7U/bQzd/duxhMhvMC5hiPVP20mNzHkIAS\n"
+    "v/vIcWo/\n"
+    "-----END CERTIFICATE-----\n";
+
+static const char test_client_key_pem[] =
+    "-----BEGIN EC PRIVATE KEY-----\n"
+    "MHcCAQEEIG0AZ89DCmoEjxTzzkBlFVWQDSpL87NfazNArOz1zcGXoAoGCCqGSM49\n"
+    "AwEHoUQDQgAEOy429DM8ttzIuAeU/8sxSE3hCXBWrT7iZMzehfRyUmE8jg9VMShx\n"
+    "pbko3ZSQ48SlPS52kYXg2mpKS1bdG4w7dg==\n"
+    "-----END EC PRIVATE KEY-----\n";
+
 static int test_enqueue_source_new(const void *bytes, size_t length,
                                    size_t max_chunk, lc_source **out,
                                    test_enqueue_source **out_state,
@@ -273,11 +326,6 @@ static int watch_capture_sink(void *context,
   capture->changed_at_unix = event->changed_at_unix;
   capture->available = event->available;
   return 1;
-}
-
-static long next_test_serial(void) {
-  static long serial = 1L;
-  return serial++;
 }
 
 static int capture_query_key_begin(void *context, lc_error *error) {
@@ -1219,145 +1267,52 @@ static void *https_testserver_main(void *context) {
   return NULL;
 }
 
-static int add_extension(X509 *cert, X509 *issuer, int nid, const char *value) {
-  X509_EXTENSION *extension;
-  X509V3_CTX ctx;
-
-  X509V3_set_ctx(&ctx, issuer, cert, NULL, NULL, 0);
-  extension = X509V3_EXT_conf_nid(NULL, &ctx, nid, (char *)value);
-  if (extension == NULL) {
-    return 0;
-  }
-  if (X509_add_ext(cert, extension, -1) != 1) {
-    X509_EXTENSION_free(extension);
-    return 0;
-  }
-  X509_EXTENSION_free(extension);
-  return 1;
-}
-
-static EVP_PKEY *generate_key(void) {
-  EVP_PKEY_CTX *ctx;
-  EVP_PKEY *key;
-
-  ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
-  key = NULL;
-  if (ctx == NULL) {
-    return NULL;
-  }
-  if (EVP_PKEY_keygen_init(ctx) <= 0 ||
-      EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) <= 0 ||
-      EVP_PKEY_keygen(ctx, &key) <= 0) {
-    EVP_PKEY_CTX_free(ctx);
-    return NULL;
-  }
-  EVP_PKEY_CTX_free(ctx);
-  return key;
-}
-
-static X509 *generate_certificate(EVP_PKEY *subject_key,
-                                  const char *common_name, X509 *issuer_cert,
-                                  EVP_PKEY *issuer_key, int is_ca,
-                                  const char *extended_usage,
-                                  const char *subject_alt_name) {
+static X509 *read_cert_pem(const char *pem) {
+  BIO *bio;
   X509 *cert;
-  X509_NAME *subject;
 
-  cert = X509_new();
-  if (cert == NULL) {
+  bio = BIO_new_mem_buf(pem, -1);
+  if (bio == NULL) {
     return NULL;
   }
-  if (X509_set_version(cert, 2) != 1 ||
-      ASN1_INTEGER_set(X509_get_serialNumber(cert), next_test_serial()) != 1 ||
-      X509_gmtime_adj(X509_getm_notBefore(cert), -3600L) == NULL ||
-      X509_gmtime_adj(X509_getm_notAfter(cert), 86400L) == NULL ||
-      X509_set_pubkey(cert, subject_key) != 1) {
-    X509_free(cert);
-    return NULL;
-  }
-
-  subject = X509_get_subject_name(cert);
-  if (subject == NULL ||
-      X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
-                                 (const unsigned char *)common_name, -1, -1,
-                                 0) != 1) {
-    X509_free(cert);
-    return NULL;
-  }
-  if (issuer_cert != NULL) {
-    if (X509_set_issuer_name(cert, X509_get_subject_name(issuer_cert)) != 1) {
-      X509_free(cert);
-      return NULL;
-    }
-  } else if (X509_set_issuer_name(cert, subject) != 1) {
-    X509_free(cert);
-    return NULL;
-  }
-
-  if (!add_extension(cert, issuer_cert != NULL ? issuer_cert : cert,
-                     NID_basic_constraints,
-                     is_ca ? "critical,CA:TRUE" : "critical,CA:FALSE")) {
-    X509_free(cert);
-    return NULL;
-  }
-  if (!add_extension(cert, issuer_cert != NULL ? issuer_cert : cert,
-                     NID_key_usage,
-                     is_ca ? "critical,keyCertSign,cRLSign"
-                           : "critical,digitalSignature,keyEncipherment")) {
-    X509_free(cert);
-    return NULL;
-  }
-  if (!is_ca && extended_usage != NULL &&
-      !add_extension(cert, issuer_cert != NULL ? issuer_cert : cert,
-                     NID_ext_key_usage, extended_usage)) {
-    X509_free(cert);
-    return NULL;
-  }
-  if (subject_alt_name != NULL &&
-      !add_extension(cert, issuer_cert != NULL ? issuer_cert : cert,
-                     NID_subject_alt_name, subject_alt_name)) {
-    X509_free(cert);
-    return NULL;
-  }
-  if (!add_extension(cert, issuer_cert != NULL ? issuer_cert : cert,
-                     NID_subject_key_identifier, "hash")) {
-    X509_free(cert);
-    return NULL;
-  }
-  if (issuer_cert != NULL &&
-      !add_extension(cert, issuer_cert, NID_authority_key_identifier,
-                     "keyid:always")) {
-    X509_free(cert);
-    return NULL;
-  }
-  if (X509_sign(cert, issuer_key != NULL ? issuer_key : subject_key,
-                EVP_sha256()) <= 0) {
-    X509_free(cert);
-    return NULL;
-  }
+  cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+  BIO_free(bio);
   return cert;
 }
 
-static int write_bundle_file(const char *path, X509 *ca_cert, X509 *client_cert,
-                             EVP_PKEY *client_key) {
+static EVP_PKEY *read_key_pem(const char *pem) {
+  BIO *bio;
+  EVP_PKEY *key;
+
+  bio = BIO_new_mem_buf(pem, -1);
+  if (bio == NULL) {
+    return NULL;
+  }
+  key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+  BIO_free(bio);
+  return key;
+}
+
+static int write_client_bundle_file(const char *path, int include_ca) {
   FILE *file;
+  const char *parts[3];
+  size_t i;
 
   file = fopen(path, "wb");
   if (file == NULL) {
     return 0;
   }
-  if (ca_cert != NULL && PEM_write_X509(file, ca_cert) != 1) {
-    fclose(file);
-    return 0;
-  }
-  if (client_cert != NULL && PEM_write_X509(file, client_cert) != 1) {
-    fclose(file);
-    return 0;
-  }
-  if (client_key != NULL &&
-      PEM_write_PrivateKey(file, client_key, NULL, NULL, 0, NULL, NULL) != 1) {
-    fclose(file);
-    return 0;
+  parts[0] = include_ca ? test_ca_cert_pem : "";
+  parts[1] = test_client_cert_pem;
+  parts[2] = test_client_key_pem;
+  for (i = 0U; i < sizeof(parts) / sizeof(parts[0]); ++i) {
+    size_t length;
+
+    length = strlen(parts[i]);
+    if (length > 0U && fwrite(parts[i], 1U, length, file) != length) {
+      fclose(file);
+      return 0;
+    }
   }
   fclose(file);
   return 1;
@@ -1400,8 +1355,6 @@ static int read_file_bytes(const char *path, unsigned char **out,
 
 static int https_tls_material_init_shared(void) {
   char template_path[] = "/tmp/liblockdc-transport-XXXXXX";
-  EVP_PKEY *client_key;
-  X509 *client_cert;
   https_tls_material *material;
 
   if (shared_tls_material_initialized) {
@@ -1424,41 +1377,19 @@ static int https_tls_material_init_shared(void) {
     return 0;
   }
 
-  material->ca_key = generate_key();
-  material->server_key = generate_key();
-  client_key = generate_key();
-  if (material->ca_key == NULL || material->server_key == NULL ||
-      client_key == NULL) {
-    EVP_PKEY_free(client_key);
-    return 0;
-  }
-
-  material->ca_cert = generate_certificate(
-      material->ca_key, "liblockdc test ca", NULL, NULL, 1, NULL, NULL);
-  material->server_cert =
-      generate_certificate(material->server_key, "127.0.0.1", material->ca_cert,
-                           material->ca_key, 0, "serverAuth", "IP:127.0.0.1");
-  client_cert = generate_certificate(client_key, "liblockdc test client",
-                                     material->ca_cert, material->ca_key, 0,
-                                     "clientAuth", NULL);
+  material->ca_cert = read_cert_pem(test_ca_cert_pem);
+  material->server_cert = read_cert_pem(test_server_cert_pem);
+  material->server_key = read_key_pem(test_server_key_pem);
   if (material->ca_cert == NULL || material->server_cert == NULL ||
-      client_cert == NULL) {
-    X509_free(client_cert);
-    EVP_PKEY_free(client_key);
+      material->server_key == NULL) {
     return 0;
   }
 
-  if (!write_bundle_file(material->client_bundle_path, material->ca_cert,
-                         client_cert, client_key) ||
-      !write_bundle_file(material->client_bundle_without_ca_path, NULL,
-                         client_cert, client_key)) {
-    X509_free(client_cert);
-    EVP_PKEY_free(client_key);
+  if (!write_client_bundle_file(material->client_bundle_path, 1) ||
+      !write_client_bundle_file(material->client_bundle_without_ca_path, 0)) {
     return 0;
   }
 
-  X509_free(client_cert);
-  EVP_PKEY_free(client_key);
   shared_tls_material_initialized = 1;
   return 1;
 }

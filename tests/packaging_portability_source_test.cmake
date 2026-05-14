@@ -36,16 +36,10 @@ if(NOT lockdc_root_cmake_text MATCHES "SOVERSION [$][{]LOCKDC_ABI_VERSION[}]")
         "CMakeLists.txt must use LOCKDC_ABI_VERSION for the shared-library SOVERSION\n")
 endif()
 
-file(READ "${LOCKDC_ROOT}/cmake/install_vendored_sdk_runtime_artifacts.cmake.in"
-     lockdc_runtime_helper_template_text)
-foreach(required_snippet
-    "@CMAKE_SHARED_LIBRARY_SUFFIX@*"
-    "*@CMAKE_SHARED_LIBRARY_SUFFIX@"
-)
-    string(FIND "${lockdc_runtime_helper_template_text}" "${required_snippet}" snippet_index)
-    if(snippet_index EQUAL -1)
-        message(FATAL_ERROR
-            "runtime vendored install helper template is missing portable shared-library glob fragment '${required_snippet}'\n"
-            "template:\n${lockdc_runtime_helper_template_text}")
+foreach(forbidden_helper
+    "${LOCKDC_ROOT}/cmake/install_vendored_sdk_dev_artifacts.cmake.in"
+    "${LOCKDC_ROOT}/cmake/install_vendored_sdk_runtime_artifacts.cmake.in")
+    if(EXISTS "${forbidden_helper}")
+        message(FATAL_ERROR "obsolete vendored install helper still exists: ${forbidden_helper}")
     endif()
 endforeach()

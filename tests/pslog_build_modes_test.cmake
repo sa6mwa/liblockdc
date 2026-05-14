@@ -121,8 +121,8 @@ run_checked("shared-only example build"
 run_checked("shared-only install"
     "${CMAKE_COMMAND}" --install "${shared_build}"
 )
-if(NOT EXISTS "${shared_prefix}/include/pslog.h")
-    message(FATAL_ERROR "shared-only install did not stage pslog.h")
+if(EXISTS "${shared_prefix}/include/pslog.h")
+    message(FATAL_ERROR "shared-only install staged dependency header pslog.h")
 endif()
 
 append_toolchain_arg(static_configure_args
@@ -149,9 +149,9 @@ run_checked("static-only example build"
 run_checked("static-only install"
     "${CMAKE_COMMAND}" --install "${static_build}"
 )
-if(NOT EXISTS "${static_prefix}/include/pslog.h")
-    message(FATAL_ERROR "static-only install did not stage pslog.h")
+if(EXISTS "${static_prefix}/include/pslog.h")
+    message(FATAL_ERROR "static-only install staged dependency header pslog.h")
 endif()
-if(NOT EXISTS "${static_prefix}/lib/libpslog.a")
-    message(FATAL_ERROR "static-only install did not stage libpslog.a")
+if(EXISTS "${static_prefix}/lib/libpslog.a")
+    message(FATAL_ERROR "static-only install staged dependency archive libpslog.a")
 endif()

@@ -168,6 +168,9 @@ if [ "${lockdc_resolved_version}" != "${expected_lockdc_version}" ]; then
   lockdc_dependency_error "found liblockdc ${lockdc_resolved_version}, but this Lua rock requires liblockdc ${expected_lockdc_version}"
 fi
 
+lockdc_cflags="${lockdc_cflags}${LOCKDC_CFLAGS_EXTRA:+ ${LOCKDC_CFLAGS_EXTRA}}"
+lockdc_libs="${lockdc_libs}${LOCKDC_LIBS_EXTRA:+ ${LOCKDC_LIBS_EXTRA}}"
+
 run_cc ${common_cflags} ${lockdc_cflags} -c "${repo_root}/src/lua/lockdc_lua.c" -o "${object_path}"
 run_cc ${libflag} -o "${module_path}" "${object_path}" ${linkflags} ${lockdc_libs}
 if [ "${module_path}" != "${rock_install_module_path}" ]; then

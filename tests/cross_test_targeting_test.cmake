@@ -108,3 +108,42 @@ assert_log_contains("ctest\\|--preset\\|aarch64-linux-musl-release\\|--output-on
 assert_log_contains("ctest\\|--preset\\|armhf-linux-gnu-release\\|--output-on-failure\\|" "armhf gnu ctest invocation")
 assert_log_contains("ctest\\|--preset\\|armhf-linux-musl-release\\|--output-on-failure\\|" "armhf musl ctest invocation")
 assert_log_not_contains("build\\|" "release preset build invocation")
+
+file(WRITE "${fake_build}" [=[
+#!/usr/bin/env bash
+set -eu
+{
+  printf 'build|'
+  for arg in "$@"; do
+    printf '%s|' "$arg"
+  done
+  printf '\n'
+} >> "${LOCKDC_TEST_LOG}"
+exit 0
+]=])
+file(WRITE "${log_path}" "")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        PATH=${bin_dir}:$ENV{PATH}
+        LOCKDC_TEST_LOG=${log_path}
+        "${script_dir}/cross_test.sh" preset
+    WORKING_DIRECTORY "${LOCKDC_BINARY_DIR}"
+    RESULT_VARIABLE cross_test_preset_result
+    OUTPUT_VARIABLE cross_test_preset_stdout
+    ERROR_VARIABLE cross_test_preset_stderr
+)
+if(NOT cross_test_preset_result EQUAL 0)
+    message(FATAL_ERROR
+        "expected cross_test.sh preset to succeed\n"
+        "stdout:\n${cross_test_preset_stdout}\n"
+        "stderr:\n${cross_test_preset_stderr}")
+endif()
+
+file(READ "${log_path}" log_contents)
+
+assert_log_contains("build\\|debug\\|" "debug preset build invocation")
+assert_log_contains("ctest\\|--preset\\|debug\\|--output-on-failure\\|" "debug preset ctest invocation")
+assert_log_not_contains("build\\|asan\\|" "asan compatibility alias build invocation")
+assert_log_not_contains("ctest\\|--preset\\|asan\\|" "asan compatibility alias ctest invocation")
+assert_log_not_contains("ctest\\|--preset\\|armhf-linux-musl-release\\|" "release ctest invocation during preset-only mode")

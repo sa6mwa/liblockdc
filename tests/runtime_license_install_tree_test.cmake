@@ -66,14 +66,16 @@ function(assert_archive_contains pattern description)
     endif()
 endfunction()
 
+function(assert_archive_not_contains pattern description)
+    if(archive_listing MATCHES "${pattern}")
+        message(FATAL_ERROR
+            "archive unexpectedly contains ${description}\n"
+            "archive contents:\n${archive_listing}")
+    endif()
+endfunction()
+
 assert_archive_contains("(^|\n)${archive_prefix_regex}/(\n|$)" "archive root directory")
-assert_archive_contains("(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/openssl/LICENSE\\.txt(\n|$)" "OpenSSL staged license")
-assert_archive_contains("(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/curl/LICENSE\\.txt(\n|$)" "curl staged license")
-assert_archive_contains("(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/libssh2/LICENSE\\.txt(\n|$)" "libssh2 staged license")
-assert_archive_contains("(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/zlib/LICENSE\\.txt(\n|$)" "zlib staged license")
-assert_archive_contains("(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/libpslog/LICENSE(\n|$)" "libpslog staged license")
-assert_archive_contains("(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/nghttp2/LICENSE\\.txt(\n|$)" "nghttp2 staged license")
-assert_archive_contains("(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party/lonejson/LICENSE(\n|$)" "lonejson staged license")
+assert_archive_not_contains("(^|\n)${archive_prefix_regex}/share/doc/liblockdc/third_party(/|\n|$)" "third-party license directory")
 
 if(archive_listing MATCHES "(^|\n)\\./")
     message(FATAL_ERROR
