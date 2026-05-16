@@ -351,8 +351,8 @@ static void test_mutation_plan_rejects_missing_array_path(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_mutation_plan_rejects_truncated_object_key_without_crashing(
-    void **state) {
+static void
+test_mutation_plan_rejects_truncated_object_key_without_crashing(void **state) {
   const char *exprs[1];
   lc_mutation_parse_options options;
   lc_mutation_plan *plan;

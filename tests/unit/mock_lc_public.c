@@ -161,8 +161,7 @@ static int mock_lease_update(lc_lease *self, lc_source *src,
   lc_public_mock_lease *mock;
 
   mock = (lc_public_mock_lease *)self;
-  lc_public_mock_record(&mock->update_call, self, src, opts, error, NULL,
-                        NULL);
+  lc_public_mock_record(&mock->update_call, self, src, opts, error, NULL, NULL);
   return mock->rc;
 }
 

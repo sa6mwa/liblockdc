@@ -492,7 +492,8 @@ typedef struct lc_query_key_handler {
   int (*begin)(void *context, lc_error *error);
   /** Called with decoded UTF-8 key bytes. Bytes are valid only for the call. */
   int (*chunk)(void *context, const char *bytes, size_t len, lc_error *error);
-  /** Called after the key string and following array delimiter are validated. */
+  /** Called after the key string and following array delimiter are validated.
+   */
   int (*end)(void *context, lc_error *error);
 } lc_query_key_handler;
 

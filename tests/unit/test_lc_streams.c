@@ -195,8 +195,8 @@ static void test_source_from_memory_can_reset_and_reread(void **state) {
   second_n = 0U;
   lc_error_init(&error);
 
-  rc = lc_source_from_memory(json_text, sizeof(json_text) - 1U, &source,
-                             &error);
+  rc =
+      lc_source_from_memory(json_text, sizeof(json_text) - 1U, &source, &error);
   assert_int_equal(rc, LC_OK);
 
   do {

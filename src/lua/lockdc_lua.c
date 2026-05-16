@@ -961,13 +961,12 @@ static int lcdc_acquire_for_update_handler_call(
   lua_setfield(L, -2, "state_meta");
 
   if (lua_pcall(L, 1, 2, 0) != 0) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      lcdc_lua_error_message(L, -1), NULL, NULL, NULL);
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L, lcdc_lua_error_message(L, -1),
+                      NULL, NULL, NULL);
     lua_pop(L, 1);
     return rc;
   }
-  if ((!lua_isnil(L, -1)) ||
-      (lua_isboolean(L, -2) && !lua_toboolean(L, -2)) ||
+  if ((!lua_isnil(L, -1)) || (lua_isboolean(L, -2) && !lua_toboolean(L, -2)) ||
       lua_isstring(L, -2)) {
     rc = lcdc_lua_error_to_lc_error(L, !lua_isnil(L, -1) ? -1 : -2, error);
     lua_pop(L, 2);
@@ -999,9 +998,8 @@ static int lcdc_client_acquire_for_update(lua_State *L) {
   handler.L = L;
   lua_pushvalue(L, 3);
   handler.handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-  rc = lc_acquire_for_update(ud->client, &req,
-                             lcdc_acquire_for_update_handler_call, &handler,
-                             &error);
+  rc = lc_acquire_for_update(
+      ud->client, &req, lcdc_acquire_for_update_handler_call, &handler, &error);
   luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);

@@ -1225,9 +1225,9 @@ int lc_engine_http_json_request_stream(
       lonejson_error measure_error;
 
       lonejson_error_init(&measure_error);
-      upload_status = lonejson_generator_measure(
-          body_map, body_src, &measured_body_length, body_options,
-          &measure_error);
+      upload_status =
+          lonejson_generator_measure(body_map, body_src, &measured_body_length,
+                                     body_options, &measure_error);
       if (upload_status == LONEJSON_STATUS_OK &&
           (size_t)(curl_off_t)measured_body_length == measured_body_length) {
         has_measured_body_length = 1;

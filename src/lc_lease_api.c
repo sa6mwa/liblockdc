@@ -70,13 +70,11 @@ static int lc_lease_lonejson_load_write_callback(void *context,
   return 1;
 }
 
-static int lc_lease_duplicate_get_metadata(const char *content_type,
-                                           const char *etag,
-                                           const char *correlation_id,
-                                           char **out_content_type,
-                                           char **out_etag,
-                                           char **out_correlation_id,
-                                           lc_error *error) {
+static int
+lc_lease_duplicate_get_metadata(const char *content_type, const char *etag,
+                                const char *correlation_id,
+                                char **out_content_type, char **out_etag,
+                                char **out_correlation_id, lc_error *error) {
   char *content_type_copy;
   char *etag_copy;
   char *correlation_id_copy;
@@ -133,8 +131,8 @@ static int lc_lease_refresh_state_view(lc_lease_handle *lease,
 }
 
 static int lc_lease_refresh_new_state_etag(lc_lease_handle *lease,
-                                           const char *state_etag,
-                                           long version, lc_error *error) {
+                                           const char *state_etag, long version,
+                                           lc_error *error) {
   char *state_etag_copy;
 
   state_etag_copy = lc_client_strdup(lease->client, state_etag);
@@ -289,10 +287,9 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
   out->content_type = NULL;
   out->etag = NULL;
   out->correlation_id = NULL;
-  rc = lc_lease_duplicate_get_metadata(engine_res.content_type, engine_res.etag,
-                                       engine_res.correlation_id,
-                                       &out->content_type, &out->etag,
-                                       &out->correlation_id, error);
+  rc = lc_lease_duplicate_get_metadata(
+      engine_res.content_type, engine_res.etag, engine_res.correlation_id,
+      &out->content_type, &out->etag, &out->correlation_id, error);
   if (rc != LC_OK) {
     lc_engine_get_stream_response_cleanup(&engine_res);
     lc_engine_error_cleanup(&engine_error);
@@ -444,9 +441,9 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
           "failed to parse mapped lease state");
     }
   }
-  rc = lc_lease_duplicate_get_metadata(
-      engine_res.content_type, engine_res.etag, engine_res.correlation_id,
-      &content_type, &etag, &correlation_id, error);
+  rc = lc_lease_duplicate_get_metadata(engine_res.content_type, engine_res.etag,
+                                       engine_res.correlation_id, &content_type,
+                                       &etag, &correlation_id, error);
   if (rc != LC_OK) {
     lc_engine_get_stream_response_cleanup(&engine_res);
     lc_engine_error_cleanup(&engine_error);
@@ -581,8 +578,7 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
 
   if (self == NULL || src == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "lease update requires self and src", NULL, NULL,
-                        NULL);
+                        "lease update requires self and src", NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
   {

@@ -119,9 +119,9 @@ static int query_keys_e2e_end(void *context, lc_error *error) {
   (void)error;
   capture = (query_keys_e2e_capture *)context;
   assert_true(capture->current_length > capture->key_prefix_len);
-  assert_int_equal(strncmp(capture->current, capture->key_prefix,
-                           capture->key_prefix_len),
-                   0);
+  assert_int_equal(
+      strncmp(capture->current, capture->key_prefix, capture->key_prefix_len),
+      0);
   suffix = capture->current + capture->key_prefix_len;
   index = strtoul(suffix, &end, 10);
   assert_non_null(end);
@@ -135,8 +135,9 @@ static int query_keys_e2e_end(void *context, lc_error *error) {
   return 1;
 }
 
-static int acquire_for_update_e2e_handler(
-    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+static int acquire_for_update_e2e_handler(void *context,
+                                          lc_acquire_for_update_context *update,
+                                          lc_error *error) {
   acquire_for_update_e2e_state *state;
   lc_sink *sink;
   lc_source *src;
@@ -550,8 +551,9 @@ static void test_disk_acquire_for_update_roundtrip(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -602,7 +604,8 @@ static void test_disk_acquire_for_update_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_disk_acquire_for_update_handler_error_rolls_back(void **state) {
+static void
+test_disk_acquire_for_update_handler_error_rolls_back(void **state) {
   const char *endpoint;
   const char *bundle_path;
   lc_client *client;
@@ -620,8 +623,9 @@ static void test_disk_acquire_for_update_handler_error_rolls_back(void **state) 
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1090,16 +1094,15 @@ static void *queue_watch_e2e_enqueue_thread(void *arg) {
 
   open_tcp_client(watch->endpoint, watch->bundle_path, &client,
                   &watch->enqueue_error);
-  watch->enqueue_rc =
-      lc_source_from_memory(payload, sizeof(payload), &src,
-                            &watch->enqueue_error);
+  watch->enqueue_rc = lc_source_from_memory(payload, sizeof(payload), &src,
+                                            &watch->enqueue_error);
   if (watch->enqueue_rc == LC_OK) {
     req.queue = watch->queue_name;
     req.content_type = "text/plain";
     req.visibility_timeout_seconds = 30L;
     req.ttl_seconds = 300L;
-    watch->enqueue_rc = client->enqueue(client, &req, src, &res,
-                                        &watch->enqueue_error);
+    watch->enqueue_rc =
+        client->enqueue(client, &req, src, &res, &watch->enqueue_error);
   }
   if (src != NULL) {
     lc_source_close(src);
@@ -1133,16 +1136,15 @@ static void *queue_watch_e2e_enqueue_dequeue_thread(void *arg) {
 
   open_tcp_client(watch->endpoint, watch->bundle_path, &client,
                   &watch->enqueue_error);
-  watch->enqueue_rc =
-      lc_source_from_memory(payload, sizeof(payload), &src,
-                            &watch->enqueue_error);
+  watch->enqueue_rc = lc_source_from_memory(payload, sizeof(payload), &src,
+                                            &watch->enqueue_error);
   if (watch->enqueue_rc == LC_OK) {
     enqueue_req.queue = watch->queue_name;
     enqueue_req.content_type = "text/plain";
     enqueue_req.visibility_timeout_seconds = 30L;
     enqueue_req.ttl_seconds = 300L;
-    watch->enqueue_rc = client->enqueue(client, &enqueue_req, src,
-                                        &enqueue_res, &watch->enqueue_error);
+    watch->enqueue_rc = client->enqueue(client, &enqueue_req, src, &enqueue_res,
+                                        &watch->enqueue_error);
   }
   if (src != NULL) {
     lc_source_close(src);
@@ -1172,8 +1174,8 @@ static void *queue_watch_e2e_enqueue_dequeue_thread(void *arg) {
   return NULL;
 }
 
-static void test_disk_queue_watch_stream_observes_initial_unavailable(
-    void **state) {
+static void
+test_disk_queue_watch_stream_observes_initial_unavailable(void **state) {
   const char *endpoint;
   const char *bundle_path;
   lc_client *client;
@@ -1264,7 +1266,8 @@ static void test_disk_queue_watch_stream_observes_enqueue(void **state) {
   assert_int_equal(pthread_join(enqueue_thread, NULL), 0);
   assert_lc_ok(watch.enqueue_rc, &watch.enqueue_error);
   assert_int_equal(rc, LC_ERR_TRANSPORT);
-  assert_string_equal(error.message, "queue watch e2e observed available event");
+  assert_string_equal(error.message,
+                      "queue watch e2e observed available event");
   assert_true(watch.event_count >= 1);
   assert_true(watch.unavailable_count >= 1);
   assert_true(watch.available_count >= 1);
@@ -1279,8 +1282,8 @@ static void test_disk_queue_watch_stream_observes_enqueue(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_disk_queue_watch_stream_observes_available_then_unavailable(
-    void **state) {
+static void
+test_disk_queue_watch_stream_observes_available_then_unavailable(void **state) {
   const char *endpoint;
   const char *bundle_path;
   lc_client *client;
@@ -1817,14 +1820,14 @@ static void test_disk_query_keys_streams_many_indexed_keys(void **state) {
   capture.key_prefix = key_prefix;
   capture.key_prefix_len = strlen(key_prefix);
   capture.expected_count = key_count;
-  rc = lc_query_keys(client, &query_req, &handler, &capture, &query_res,
-                     &error);
+  rc =
+      lc_query_keys(client, &query_req, &handler, &capture, &query_res, &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(capture.begin_calls, (size_t)key_count);
   assert_int_equal(capture.end_calls, (size_t)key_count);
   assert_true(capture.chunk_calls >= (size_t)key_count);
-  assert_true(capture.total_bytes >= (strlen(key_prefix) + 4U) *
-                                         (size_t)key_count);
+  assert_true(capture.total_bytes >=
+              (strlen(key_prefix) + 4U) * (size_t)key_count);
   seen_count = 0U;
   for (index = 0U; index < (size_t)key_count; ++index) {
     seen_count += capture.seen[index] != 0U ? 1U : 0U;

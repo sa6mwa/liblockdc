@@ -315,8 +315,8 @@ static int lc_engine_query_keys_apply_body_metadata(
   return LC_ENGINE_OK;
 }
 
-static lonejson_status
-lc_engine_query_key_stream_begin(void *user, lonejson_error *error) {
+static lonejson_status lc_engine_query_key_stream_begin(void *user,
+                                                        lonejson_error *error) {
   lc_engine_query_key_stream_bridge *bridge;
 
   (void)error;
@@ -335,8 +335,10 @@ lc_engine_query_key_stream_begin(void *user, lonejson_error *error) {
   return LONEJSON_STATUS_OK;
 }
 
-static lonejson_status lc_engine_query_key_stream_chunk(
-    void *user, const char *data, size_t len, lonejson_error *error) {
+static lonejson_status lc_engine_query_key_stream_chunk(void *user,
+                                                        const char *data,
+                                                        size_t len,
+                                                        lonejson_error *error) {
   lc_engine_query_key_stream_bridge *bridge;
 
   (void)error;
@@ -356,8 +358,8 @@ static lonejson_status lc_engine_query_key_stream_chunk(
   return LONEJSON_STATUS_OK;
 }
 
-static lonejson_status
-lc_engine_query_key_stream_end(void *user, lonejson_error *error) {
+static lonejson_status lc_engine_query_key_stream_end(void *user,
+                                                      lonejson_error *error) {
   lc_engine_query_key_stream_bridge *bridge;
 
   (void)error;
@@ -894,9 +896,9 @@ int lc_engine_client_query_keys(lc_engine_client *client,
       return lc_engine_lonejson_error_from_status(
           error, rc, &lj_error, "failed to configure query keys parser");
     }
-    rc = lonejson_curl_parse_init(&key_parse,
-                                  &lc_engine_query_keys_response_map,
-                                  &key_response, &key_parse_options);
+    rc =
+        lonejson_curl_parse_init(&key_parse, &lc_engine_query_keys_response_map,
+                                 &key_response, &key_parse_options);
     if (rc != LONEJSON_STATUS_OK) {
       lonejson_curl_upload_cleanup(&body_upload);
       free(url);

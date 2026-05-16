@@ -70,9 +70,8 @@ static lonejson_status fuzz_key_end(void *user, lonejson_error *error) {
                                     : LONEJSON_STATUS_OK;
 }
 
-static lonejson_read_result fuzz_query_keys_read(void *user,
-                                                 unsigned char *buffer,
-                                                 size_t capacity) {
+static lonejson_read_result
+fuzz_query_keys_read(void *user, unsigned char *buffer, size_t capacity) {
   fuzz_query_keys_reader *reader;
   lonejson_read_result result;
   size_t current;
@@ -138,9 +137,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   reader.len = json_size;
   reader.chunk_size = chunk_size;
   lonejson_init(&fuzz_query_keys_response_map, &response);
-  if (lonejson_string_array_stream_set_handler(&response.keys, &handler,
-                                               &capture, &error) !=
-      LONEJSON_STATUS_OK) {
+  if (lonejson_string_array_stream_set_handler(
+          &response.keys, &handler, &capture, &error) != LONEJSON_STATUS_OK) {
     lonejson_cleanup(&fuzz_query_keys_response_map, &response);
     return 0;
   }

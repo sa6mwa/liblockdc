@@ -129,13 +129,15 @@ static const char *const lc_engine_watch_sse_event_names[] = {"",
                                                               "queue_watch"};
 
 #define LC_ENGINE_WATCH_SSE_MAX_LINE_BYTES (64U * 1024U)
-#define LC_ENGINE_WATCH_SSE_MAX_EVENT_DATA_BYTES LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
-#define LC_ENGINE_WATCH_SSE_MAX_BUFFERED_BYTES LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
+#define LC_ENGINE_WATCH_SSE_MAX_EVENT_DATA_BYTES                               \
+  LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
+#define LC_ENGINE_WATCH_SSE_MAX_BUFFERED_BYTES                                 \
+  LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
 
 #define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_BOUNDARY_BYTES 200U
 #define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_HEADER_LINE_BYTES (64U * 1024U)
 #define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_HEADER_COUNT 64U
-#define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_PART_BUFFERED_BYTES \
+#define LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_PART_BUFFERED_BYTES                  \
   LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
 
 static const lonejson_field lc_engine_watch_queue_request_fields[] = {
@@ -210,8 +212,8 @@ static void lc_engine_watch_sse_options(lonejson_sse_options *options) {
   options->max_buffered_bytes = LC_ENGINE_WATCH_SSE_MAX_BUFFERED_BYTES;
 }
 
-static void lc_engine_subscribe_multipart_options(
-    lonejson_multipart_options *options) {
+static void
+lc_engine_subscribe_multipart_options(lonejson_multipart_options *options) {
   memset(options, 0, sizeof(*options));
   options->max_boundary_bytes =
       LC_ENGINE_SUBSCRIBE_MULTIPART_MAX_BOUNDARY_BYTES;
@@ -507,8 +509,9 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
     if (event.correlation_id == NULL) {
       lc_engine_queue_watch_event_cleanup(&event);
       lonejson_reset(&lc_engine_watch_event_map, parsed);
-      lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
-                                 "failed to allocate queue watch correlation_id");
+      lc_engine_set_client_error(
+          state->error, LC_ENGINE_ERROR_NO_MEMORY,
+          "failed to allocate queue watch correlation_id");
       return LONEJSON_STATUS_CALLBACK_FAILED;
     }
   } else if (state->correlation_id != NULL) {
@@ -516,8 +519,9 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
     if (event.correlation_id == NULL) {
       lc_engine_queue_watch_event_cleanup(&event);
       lonejson_reset(&lc_engine_watch_event_map, parsed);
-      lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
-                                 "failed to allocate queue watch correlation_id");
+      lc_engine_set_client_error(
+          state->error, LC_ENGINE_ERROR_NO_MEMORY,
+          "failed to allocate queue watch correlation_id");
       return LONEJSON_STATUS_CALLBACK_FAILED;
     }
   }
@@ -571,18 +575,16 @@ static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
   memset(&json_options, 0, sizeof(json_options));
   memset(&lj_error, 0, sizeof(lj_error));
   json_options.event_names = lc_engine_watch_sse_event_names;
-  json_options.event_name_count =
-      sizeof(lc_engine_watch_sse_event_names) /
-      sizeof(lc_engine_watch_sse_event_names[0]);
-  status = lonejson_sse_push_json(state->sse, &lc_engine_watch_event_map,
-                                  &state->parsed, ptr, total, &json_options,
-                                  lc_engine_watch_sse_json_event, state,
-                                  &lj_error);
+  json_options.event_name_count = sizeof(lc_engine_watch_sse_event_names) /
+                                  sizeof(lc_engine_watch_sse_event_names[0]);
+  status = lonejson_sse_push_json(
+      state->sse, &lc_engine_watch_event_map, &state->parsed, ptr, total,
+      &json_options, lc_engine_watch_sse_json_event, state, &lj_error);
   if (status != LONEJSON_STATUS_OK) {
     state->callback_failed = 1;
     if (state->error->code == LC_ENGINE_OK) {
-      lc_engine_lonejson_error_from_status(
-          state->error, status, &lj_error, "failed to parse queue watch event");
+      lc_engine_lonejson_error_from_status(state->error, status, &lj_error,
+                                           "failed to parse queue watch event");
     }
     return 0U;
   }
@@ -600,18 +602,17 @@ static int lc_engine_watch_finish(lc_engine_watch_state *state) {
   memset(&json_options, 0, sizeof(json_options));
   memset(&lj_error, 0, sizeof(lj_error));
   json_options.event_names = lc_engine_watch_sse_event_names;
-  json_options.event_name_count =
-      sizeof(lc_engine_watch_sse_event_names) /
-      sizeof(lc_engine_watch_sse_event_names[0]);
-  status = lonejson_sse_finish_json(state->sse, &lc_engine_watch_event_map,
-                                    &state->parsed, &json_options,
-                                    lc_engine_watch_sse_json_event, state,
-                                    &lj_error);
+  json_options.event_name_count = sizeof(lc_engine_watch_sse_event_names) /
+                                  sizeof(lc_engine_watch_sse_event_names[0]);
+  status = lonejson_sse_finish_json(
+      state->sse, &lc_engine_watch_event_map, &state->parsed, &json_options,
+      lc_engine_watch_sse_json_event, state, &lj_error);
   if (status != LONEJSON_STATUS_OK) {
     state->callback_failed = 1;
     if (state->error->code == LC_ENGINE_OK) {
       return lc_engine_lonejson_error_from_status(
-          state->error, status, &lj_error, "failed to finish queue watch event");
+          state->error, status, &lj_error,
+          "failed to finish queue watch event");
     }
     return state->error->code;
   }
@@ -907,8 +908,9 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
   return LC_ENGINE_OK;
 }
 
-static int lc_engine_subscribe_begin_payload(
-    lc_engine_subscribe_state *state, const lonejson_multipart_part *part) {
+static int
+lc_engine_subscribe_begin_payload(lc_engine_subscribe_state *state,
+                                  const lonejson_multipart_part *part) {
   if (!state->delivery_active) {
     return lc_engine_set_protocol_error(
         state->error, "subscribe payload part arrived before meta");
@@ -942,8 +944,7 @@ static int lc_engine_subscribe_begin_payload(
 }
 
 static lonejson_status
-lc_engine_subscribe_begin_part(void *user,
-                               const lonejson_multipart_part *part,
+lc_engine_subscribe_begin_part(void *user, const lonejson_multipart_part *part,
                                lonejson_error *lj_error) {
   lc_engine_subscribe_state *state;
   int rc;
@@ -1009,8 +1010,9 @@ static lonejson_status lc_engine_subscribe_part_data(void *user,
   return LONEJSON_STATUS_OK;
 }
 
-static lonejson_status lc_engine_subscribe_end_part(
-    void *user, const lonejson_multipart_part *part, lonejson_error *lj_error) {
+static lonejson_status
+lc_engine_subscribe_end_part(void *user, const lonejson_multipart_part *part,
+                             lonejson_error *lj_error) {
   lc_engine_subscribe_state *state;
   int rc;
 
@@ -1057,9 +1059,8 @@ static int lc_engine_subscribe_open_multipart(lc_engine_subscribe_state *state,
         state->error, "subscribe response missing Content-Type");
   }
   lc_engine_subscribe_multipart_options(&multipart_options);
-  state->multipart =
-      lonejson_multipart_open(state->content_type, &multipart_options,
-                              lj_error);
+  state->multipart = lonejson_multipart_open(state->content_type,
+                                             &multipart_options, lj_error);
   if (state->multipart != NULL) {
     return LC_ENGINE_OK;
   }
@@ -1068,8 +1069,8 @@ static int lc_engine_subscribe_open_multipart(lc_engine_subscribe_state *state,
       state->error, status, lj_error, "failed to open multipart parser");
 }
 
-static void lc_engine_subscribe_multipart_handler(
-    lonejson_multipart_handler *handler) {
+static void
+lc_engine_subscribe_multipart_handler(lonejson_multipart_handler *handler) {
   memset(handler, 0, sizeof(*handler));
   handler->begin_part = lc_engine_subscribe_begin_part;
   handler->part_data = lc_engine_subscribe_part_data;
@@ -1093,8 +1094,8 @@ static int lc_engine_subscribe_finish(lc_engine_subscribe_state *state) {
   }
   lc_engine_subscribe_multipart_handler(&handler);
   memset(&lj_error, 0, sizeof(lj_error));
-  status = lonejson_multipart_finish(state->multipart, &handler, state,
-                                     &lj_error);
+  status =
+      lonejson_multipart_finish(state->multipart, &handler, state, &lj_error);
   if (status != LONEJSON_STATUS_OK) {
     state->callback_failed = 1;
     if (state->error->code == LC_ENGINE_OK) {
@@ -1137,8 +1138,8 @@ static size_t lc_engine_subscribe_write_callback(char *ptr, size_t size,
   if (status != LONEJSON_STATUS_OK) {
     state->callback_failed = 1;
     if (state->error->code == LC_ENGINE_OK) {
-      lc_engine_lonejson_error_from_status(
-          state->error, status, &lj_error, "failed to parse subscribe stream");
+      lc_engine_lonejson_error_from_status(state->error, status, &lj_error,
+                                           "failed to parse subscribe stream");
     }
     return 0U;
   }

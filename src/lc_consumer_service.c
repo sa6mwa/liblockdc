@@ -1505,12 +1505,12 @@ static int lc_consumer_delivery_end(void *context,
   bridge->handler_thread_started = 0;
   lc_consumer_delivery_stop_extender(bridge);
   rc = bridge->handler_rc;
-  if (rc != LC_OK && engine_error != NULL && engine_error->code == LC_ENGINE_OK) {
+  if (rc != LC_OK && engine_error != NULL &&
+      engine_error->code == LC_ENGINE_OK) {
     lc_engine_set_transport_error(
-        engine_error,
-        bridge->error != NULL && bridge->error->message != NULL
-            ? bridge->error->message
-            : "consumer handler failed");
+        engine_error, bridge->error != NULL && bridge->error->message != NULL
+                          ? bridge->error->message
+                          : "consumer handler failed");
   }
   lc_engine_dequeue_response_cleanup(&bridge->meta);
   pthread_mutex_destroy(&bridge->op_mutex);

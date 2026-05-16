@@ -264,8 +264,7 @@ int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
   return lease->save(lease, map, src, write_options, error);
 }
 
-int lc_lease_update(lc_lease *lease, lc_source *src,
-                    const lc_update_opts *opts,
+int lc_lease_update(lc_lease *lease, lc_source *src, const lc_update_opts *opts,
                     lc_error *error) {
   return lease->update(lease, src, opts, error);
 }

@@ -69,9 +69,8 @@ static int update_order(void *context, lc_acquire_for_update_context *af,
       return rc;
     }
     ctx->logger->infof(ctx->logger, "example.acquire_for_update.snapshot",
-                       "version=%ld bytes=%lu content=%.*s",
-                       af->state.version, (unsigned long)length, (int)length,
-                       (const char *)bytes);
+                       "version=%ld bytes=%lu content=%.*s", af->state.version,
+                       (unsigned long)length, (int)length, (const char *)bytes);
     lc_sink_close(snapshot);
   } else {
     ctx->logger->infof(ctx->logger, "example.acquire_for_update.snapshot",

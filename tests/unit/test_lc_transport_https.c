@@ -341,8 +341,8 @@ static int capture_query_key_begin(void *context, lc_error *error) {
   return 1;
 }
 
-static int capture_query_key_chunk(void *context, const char *bytes,
-                                   size_t len, lc_error *error) {
+static int capture_query_key_chunk(void *context, const char *bytes, size_t len,
+                                   lc_error *error) {
   query_key_capture *capture;
   size_t available;
 
@@ -728,13 +728,12 @@ static char *make_subscribe_body_with_oversized_header_after_delivery(void) {
   static const char bad_header_prefix[] =
       "--queue-boundary\r\n"
       "Content-Disposition: form-data; name=\"meta\"; x=\"";
-  static const char suffix[] =
-      "\"\r\n"
-      "Content-Type: application/json\r\n"
-      "Content-Length: 2\r\n"
-      "\r\n"
-      "{}\r\n"
-      "--queue-boundary--\r\n";
+  static const char suffix[] = "\"\r\n"
+                               "Content-Type: application/json\r\n"
+                               "Content-Length: 2\r\n"
+                               "\r\n"
+                               "{}\r\n"
+                               "--queue-boundary--\r\n";
   test_request_capture body;
   char *header_value;
 
@@ -1015,8 +1014,8 @@ static int write_http_response(SSL *ssl, const https_expectation *expectation) {
           chunk_size > expectation->response_body_chunk_size) {
         chunk_size = expectation->response_body_chunk_size;
       }
-      written = snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n",
-                         chunk_size);
+      written =
+          snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n", chunk_size);
       if (written < 0 || (size_t)written >= sizeof(chunk_header)) {
         return 0;
       }
@@ -1709,7 +1708,8 @@ static int cancel_after_delivery_chunk(void *context, const void *bytes,
 }
 
 static int fail_and_cancel_delivery_chunk(void *context, const void *bytes,
-                                          size_t count, lc_engine_error *error) {
+                                          size_t count,
+                                          lc_engine_error *error) {
   canceling_subscribe_capture *capture;
 
   capture = (canceling_subscribe_capture *)context;
@@ -2309,8 +2309,8 @@ test_queue_transport_rejects_overflowing_numeric_fields(void **state) {
   https_tls_material_cleanup(&material);
 }
 
-static void test_watch_stream_filters_events_and_finishes_trailing_event(
-    void **state) {
+static void
+test_watch_stream_filters_events_and_finishes_trailing_event(void **state) {
   static const char response_body[] =
       "event: queue_noise\r\n"
       "data: {not-json-but-skipped}\r\n"
@@ -2319,15 +2319,15 @@ static void test_watch_stream_filters_events_and_finishes_trailing_event(
       "data: {\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
       "\"available\":true,\"head_message_id\":\"msg-1\","
       "\"changed_at_unix\":12345}";
-  static const char *watch_headers[] = {
-      "X-Correlation-Id: corr-watch-header",
-      "Content-Type: text/event-stream"};
+  static const char *watch_headers[] = {"X-Correlation-Id: corr-watch-header",
+                                        "Content-Type: text/event-stream"};
   https_expectation expectations[] = {
       {"POST", "/v1/queue/watch",
        (const char *const[]){"Accept: text/event-stream",
                              "Content-Type: application/json"},
-       2U, (const char *const[]){"\"namespace\":\"transport-ns\"",
-                                 "\"queue\":\"jobs\""},
+       2U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
        2U, 0, 200, watch_headers,
        sizeof(watch_headers) / sizeof(watch_headers[0]), response_body,
        "liblockdc test client", 7U}};
@@ -2379,15 +2379,15 @@ static void test_watch_stream_rejects_malformed_selected_event(void **state) {
   static const char response_body[] =
       "event: queue_watch\r\n"
       "data: {\"namespace\":\"transport-ns\",\"queue\":\"jobs\",";
-  static const char *watch_headers[] = {
-      "X-Correlation-Id: corr-watch-bad",
-      "Content-Type: text/event-stream"};
+  static const char *watch_headers[] = {"X-Correlation-Id: corr-watch-bad",
+                                        "Content-Type: text/event-stream"};
   https_expectation expectations[] = {
       {"POST", "/v1/queue/watch",
        (const char *const[]){"Accept: text/event-stream",
                              "Content-Type: application/json"},
-       2U, (const char *const[]){"\"namespace\":\"transport-ns\"",
-                                 "\"queue\":\"jobs\""},
+       2U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
        2U, 0, 200, watch_headers,
        sizeof(watch_headers) / sizeof(watch_headers[0]), response_body,
        "liblockdc test client", 5U}};
@@ -2439,8 +2439,9 @@ static void test_watch_stream_rejects_oversized_line(void **state) {
       {"POST", "/v1/queue/watch",
        (const char *const[]){"Accept: text/event-stream",
                              "Content-Type: application/json"},
-       2U, (const char *const[]){"\"namespace\":\"transport-ns\"",
-                                 "\"queue\":\"jobs\""},
+       2U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
        2U, 0, 200, watch_headers,
        sizeof(watch_headers) / sizeof(watch_headers[0]), NULL,
        "liblockdc test client", 4096U}};
@@ -2488,7 +2489,8 @@ static void test_watch_stream_rejects_oversized_line(void **state) {
   https_testserver_stop(&server);
   assert_int_equal(server.handled_count, 1U);
   if (server.failure_message[0] != '\0') {
-    assert_string_equal(server.failure_message, "failed to write HTTP response");
+    assert_string_equal(server.failure_message,
+                        "failed to write HTTP response");
   }
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
@@ -2505,8 +2507,9 @@ test_watch_stream_rejects_oversized_event_data_after_prior_event(void **state) {
       {"POST", "/v1/queue/watch",
        (const char *const[]){"Accept: text/event-stream",
                              "Content-Type: application/json"},
-       2U, (const char *const[]){"\"namespace\":\"transport-ns\"",
-                                 "\"queue\":\"jobs\""},
+       2U,
+       (const char *const[]){"\"namespace\":\"transport-ns\"",
+                             "\"queue\":\"jobs\""},
        2U, 0, 200, watch_headers,
        sizeof(watch_headers) / sizeof(watch_headers[0]), NULL,
        "liblockdc test client", 0U}};
@@ -2552,7 +2555,8 @@ test_watch_stream_rejects_oversized_event_data_after_prior_event(void **state) {
   https_testserver_stop(&server);
   assert_int_equal(server.handled_count, 1U);
   if (server.failure_message[0] != '\0') {
-    assert_string_equal(server.failure_message, "failed to write HTTP response");
+    assert_string_equal(server.failure_message,
+                        "failed to write HTTP response");
   }
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
@@ -3023,8 +3027,8 @@ static void test_subscribe_rejects_oversized_boundary(void **state) {
        (const char *const[]){"Content-Type: application/json"}, 1U,
        (const char *const[]){"\"namespace\":\"transport-ns\"",
                              "\"queue\":\"jobs\""},
-       2U, 0, 200, NULL, 0U,
-       "--queue-boundary--\r\n", "liblockdc test client", 0U}};
+       2U, 0, 200, NULL, 0U, "--queue-boundary--\r\n", "liblockdc test client",
+       0U}};
   const char *response_headers[2];
   https_tls_material material;
   https_testserver server;
@@ -3037,8 +3041,8 @@ static void test_subscribe_rejects_oversized_boundary(void **state) {
   int rc;
 
   (void)state;
-  content_type = make_repeat_json_body("Content-Type: multipart/mixed; boundary=",
-                                       "", 256U, 'b');
+  content_type = make_repeat_json_body(
+      "Content-Type: multipart/mixed; boundary=", "", 256U, 'b');
   assert_non_null(content_type);
   response_headers[0] = "X-Correlation-Id: corr-subscribe-boundary-limit";
   response_headers[1] = content_type;
@@ -3209,7 +3213,8 @@ test_subscribe_rejects_oversized_header_after_completed_delivery(void **state) {
   free(response_body);
 }
 
-static void test_subscribe_rejects_payload_without_content_length(void **state) {
+static void
+test_subscribe_rejects_payload_without_content_length(void **state) {
   static const char response_body[] =
       "--queue-boundary\r\n"
       "Content-Disposition: form-data; name=\"meta\"\r\n"
@@ -3425,7 +3430,8 @@ static void test_subscribe_propagates_payload_callback_failure(void **state) {
   https_tls_material_cleanup(&material);
 }
 
-static void test_subscribe_treats_cancelled_callback_failure_as_ok(void **state) {
+static void
+test_subscribe_treats_cancelled_callback_failure_as_ok(void **state) {
   static const char response_body[] =
       "--queue-boundary\r\n"
       "Content-Disposition: form-data; name=\"meta\"\r\n"
@@ -5138,10 +5144,9 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   static const https_expectation expectations[] = {
       {"POST",
        "/v1/query?engine=scan%20engine%2F1&refresh=wait%26refresh%2Bnow",
-       query_headers,
-       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
-       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
-       sizeof(response_headers) / sizeof(response_headers[0]),
+       query_headers, sizeof(query_headers) / sizeof(query_headers[0]),
+       query_body, sizeof(query_body) / sizeof(query_body[0]), 0, 200,
+       response_headers, sizeof(response_headers) / sizeof(response_headers[0]),
        "{\"key\":\"resource/1\"}\n", "liblockdc test client"}};
   https_tls_material material;
   https_testserver server;
@@ -5216,19 +5221,20 @@ static void test_public_query_keys_streams_chunks_and_headers(void **state) {
       "X-Lockd-Query-Cursor: cursor-keys-1",
       "X-Lockd-Query-Index-Seq: 45",
       "X-Lockd-Query-Metadata: {\"source\":\"header\"}",
-      "X-Lockd-Query-Return: keys", "Content-Type: application/json"};
+      "X-Lockd-Query-Return: keys",
+      "Content-Type: application/json"};
   static const char response_body[] =
       "{\"namespace\":\"transport-ns\",\"keys\":[\"resource/one\","
       "\"resource/two\"],\"cursor\":\"body-cursor\",\"index_seq\":1,"
       "\"metadata\":{\"source\":\"body\"}}";
   https_expectation expectations[] = {
       {"POST",
-       "/v1/query?engine=index%26scan%2Ffast%2Bsafe&refresh=wait%20for%2Fseq%2B1",
-       query_headers,
-       sizeof(query_headers) / sizeof(query_headers[0]), query_body,
-       sizeof(query_body) / sizeof(query_body[0]), 0, 200, response_headers,
-       sizeof(response_headers) / sizeof(response_headers[0]), response_body,
-       "liblockdc test client", 3U, NULL, 0U}};
+       "/v1/"
+       "query?engine=index%26scan%2Ffast%2Bsafe&refresh=wait%20for%2Fseq%2B1",
+       query_headers, sizeof(query_headers) / sizeof(query_headers[0]),
+       query_body, sizeof(query_body) / sizeof(query_body[0]), 0, 200,
+       response_headers, sizeof(response_headers) / sizeof(response_headers[0]),
+       response_body, "liblockdc test client", 3U, NULL, 0U}};
   https_tls_material material;
   https_testserver server;
   lc_client_config config;
@@ -5340,8 +5346,7 @@ static void test_public_query_keys_captures_body_metadata(void **state) {
   assert_int_equal(capture.begin_calls, 2);
   assert_true(capture.chunk_calls >= 2);
   assert_int_equal(capture.end_calls, 2);
-  assert_string_equal(capture.bytes,
-                      "[resource/body-one][resource/body-two]");
+  assert_string_equal(capture.bytes, "[resource/body-one][resource/body-two]");
   assert_string_equal(res.cursor, "body-cursor");
   assert_int_equal(res.index_seq, 77UL);
   assert_string_equal(res.metadata_json, "{\"source\":\"body\"}");
@@ -5440,15 +5445,15 @@ static void test_public_query_keys_streams_large_response_without_client_alloc(
   free(response_body);
 }
 
-static void test_public_query_keys_propagates_chunk_callback_failure(
-    void **state) {
+static void
+test_public_query_keys_propagates_chunk_callback_failure(void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
       "Accept: application/x-ndjson, application/json"};
   static const char *query_body[] = {"\"return\":\"keys\""};
   static const char *response_headers[] = {
-      "X-Correlation-Id: corr-query-keys-fail",
-      "X-Lockd-Query-Return: keys", "Content-Type: application/json"};
+      "X-Correlation-Id: corr-query-keys-fail", "X-Lockd-Query-Return: keys",
+      "Content-Type: application/json"};
   static const char response_body[] = "{\"keys\":[\"resource/fail\"]}";
   https_expectation expectations[] = {
       {"POST", "/v1/query", query_headers,
@@ -5504,8 +5509,8 @@ static void test_public_query_keys_propagates_chunk_callback_failure(
   https_tls_material_cleanup(&material);
 }
 
-static void test_public_query_keys_propagates_end_callback_failure(
-    void **state) {
+static void
+test_public_query_keys_propagates_end_callback_failure(void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
       "Accept: application/x-ndjson, application/json"};
@@ -5629,13 +5634,14 @@ static void test_public_query_keys_rejects_malformed_keys_json(void **state) {
   https_tls_material_cleanup(&material);
 }
 
-static void test_public_query_stream_captures_trailers_after_body(void **state) {
+static void
+test_public_query_stream_captures_trailers_after_body(void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
       "Accept: application/x-ndjson, application/json"};
-  static const char *query_body[] = {"\"selector\":{\"eq\":{\"field\":\"/kind\"",
-                                     "\"value\":\"trailer-unit\"}}",
-                                     "\"return\":\"documents\""};
+  static const char *query_body[] = {
+      "\"selector\":{\"eq\":{\"field\":\"/kind\"",
+      "\"value\":\"trailer-unit\"}}", "\"return\":\"documents\""};
   static const char *response_headers[] = {
       "x-correlation-id: corr-query-stream-trailer",
       "x-lockd-query-return: documents",
@@ -5688,7 +5694,8 @@ static void test_public_query_stream_captures_trailers_after_body(void **state) 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
 
-  req.selector_json = "{\"eq\":{\"field\":\"/kind\",\"value\":\"trailer-unit\"}}";
+  req.selector_json =
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"trailer-unit\"}}";
   req.return_mode = "documents";
   req.engine = "index";
   rc = lc_query(client, &req, sink, &res, &error);
@@ -5716,9 +5723,9 @@ static void test_public_query_stream_trailers_override_headers(void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
       "Accept: application/x-ndjson, application/json"};
-  static const char *query_body[] = {"\"selector\":{\"eq\":{\"field\":\"/kind\"",
-                                     "\"value\":\"trailer-override\"}}",
-                                     "\"return\":\"documents\""};
+  static const char *query_body[] = {
+      "\"selector\":{\"eq\":{\"field\":\"/kind\"",
+      "\"value\":\"trailer-override\"}}", "\"return\":\"documents\""};
   static const char *response_headers[] = {
       "x-correlation-id: corr-query-stream-override",
       "x-lockd-query-return: headers-return",
@@ -5799,8 +5806,7 @@ static void test_public_query_stream_trailers_override_headers(void **state) {
   https_tls_material_cleanup(&material);
 }
 
-static void
-test_public_query_stream_retries_node_passive_and_cleans_trailers(
+static void test_public_query_stream_retries_node_passive_and_cleans_trailers(
     void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
@@ -5808,8 +5814,7 @@ test_public_query_stream_retries_node_passive_and_cleans_trailers(
   static const char *query_body[] = {"\"selector\":{\"owner\":\"owner-a\"}",
                                      "\"return\":\"documents\""};
   static const char *first_response_headers[] = {
-      "X-Correlation-Id: corr-query-passive",
-      "X-Lockd-Query-Return: documents",
+      "X-Correlation-Id: corr-query-passive", "X-Lockd-Query-Return: documents",
       "Trailer: x-lockd-query-cursor, x-lockd-query-index-seq, "
       "x-lockd-query-metadata",
       "Content-Type: application/json"};
@@ -5818,8 +5823,7 @@ test_public_query_stream_retries_node_passive_and_cleans_trailers(
       "x-lockd-query-index-seq: 88",
       "x-lockd-query-metadata: {\"source\":\"passive\"}"};
   static const char *second_response_headers[] = {
-      "X-Correlation-Id: corr-query-active",
-      "X-Lockd-Query-Return: documents",
+      "X-Correlation-Id: corr-query-active", "X-Lockd-Query-Return: documents",
       "Content-Type: application/x-ndjson"};
   static const https_expectation expectations[] = {
       {"POST", "/v1/query", query_headers,
@@ -5904,18 +5908,17 @@ test_public_query_stream_retries_node_passive_and_cleans_trailers(
   https_tls_material_cleanup(&material);
 }
 
-static void test_public_query_stream_rejects_invalid_trailer_index_seq(
-    void **state) {
+static void
+test_public_query_stream_rejects_invalid_trailer_index_seq(void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
       "Accept: application/x-ndjson, application/json"};
-  static const char *query_body[] = {"\"selector\":{\"eq\":{\"field\":\"/kind\"",
-                                     "\"value\":\"bad-trailer-unit\"}}",
-                                     "\"return\":\"documents\""};
+  static const char *query_body[] = {
+      "\"selector\":{\"eq\":{\"field\":\"/kind\"",
+      "\"value\":\"bad-trailer-unit\"}}", "\"return\":\"documents\""};
   static const char *response_headers[] = {
       "X-Correlation-Id: corr-query-stream-trailer",
-      "X-Lockd-Query-Return: documents",
-      "Trailer: x-lockd-query-index-seq",
+      "X-Lockd-Query-Return: documents", "Trailer: x-lockd-query-index-seq",
       "Content-Type: application/x-ndjson"};
   static const char *response_trailers[] = {
       "x-lockd-query-index-seq: not-a-number"};
@@ -5982,10 +5985,12 @@ static void test_public_lease_save_uses_mapped_lonejson_upload(void **state) {
       "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
   static const char *acquire_response_headers[] = {
       "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
-  static const char *update_headers[] = {
-      "Content-Type: application/json", "X-Fencing-Token: 11",
-      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4",
-      "Content-Length: 11"};
+  static const char *update_headers[] = {"Content-Type: application/json",
+                                         "X-Fencing-Token: 11",
+                                         "X-Lease-ID: lease-1",
+                                         "X-Txn-ID: txn-acquire",
+                                         "X-If-Version: 4",
+                                         "Content-Length: 11"};
   static const char *update_response_headers[] = {
       "X-Correlation-Id: corr-update", "Content-Type: application/json"};
   static const char *update_body[] = {"{\"value\":2}"};
@@ -6975,8 +6980,7 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   cmocka_unit_test(test_watch_transport_rejects_oversized_error_body)
 #elif defined(LC_HTTPS_CASE_WATCH_FILTERS_AND_FINISHES_TRAILING_EVENT)
 #define LC_HTTPS_UNIT_TESTS                                                    \
-  cmocka_unit_test(                                                            \
-      test_watch_stream_filters_events_and_finishes_trailing_event)
+  cmocka_unit_test(test_watch_stream_filters_events_and_finishes_trailing_event)
 #elif defined(LC_HTTPS_CASE_WATCH_REJECTS_MALFORMED_SELECTED_EVENT)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_watch_stream_rejects_malformed_selected_event)
@@ -7144,19 +7148,16 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(                                                            \
       test_public_query_keys_streams_large_response_without_client_alloc)
-#elif defined(                                                                 \
-    LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_PROPAGATES_CHUNK_CALLBACK_FAILURE)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_PROPAGATES_CHUNK_CALLBACK_FAILURE)
 #define LC_HTTPS_UNIT_TESTS                                                    \
-  cmocka_unit_test(                                                            \
-      test_public_query_keys_propagates_chunk_callback_failure)
+  cmocka_unit_test(test_public_query_keys_propagates_chunk_callback_failure)
 #elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_PROPAGATES_END_CALLBACK_FAILURE)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_query_keys_propagates_end_callback_failure)
 #elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_REJECTS_MALFORMED_KEYS_JSON)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_query_keys_rejects_malformed_keys_json)
-#elif defined(                                                                 \
-    LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_TRAILERS_AFTER_BODY)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_TRAILERS_AFTER_BODY)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_query_stream_captures_trailers_after_body)
 #elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_TRAILERS_OVERRIDE_HEADERS)
@@ -7267,7 +7268,7 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
       cmocka_unit_test(test_public_query_keys_streams_chunks_and_headers),        \
       cmocka_unit_test(test_public_query_keys_captures_body_metadata),            \
       cmocka_unit_test(                                                           \
-          test_public_query_keys_streams_large_response_without_client_alloc),     \
+          test_public_query_keys_streams_large_response_without_client_alloc),    \
       cmocka_unit_test(                                                           \
           test_public_query_keys_propagates_chunk_callback_failure),              \
       cmocka_unit_test(                                                           \

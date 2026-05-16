@@ -199,9 +199,7 @@ static int lc_acquire_for_update_sink_write(lc_sink *self, const void *bytes,
   return 1;
 }
 
-static void lc_acquire_for_update_sink_close(lc_sink *self) {
-  (void)self;
-}
+static void lc_acquire_for_update_sink_close(lc_sink *self) { (void)self; }
 
 int lc_client_acquire_for_update_method(
     lc_client *self, const lc_acquire_req *req,
@@ -243,8 +241,7 @@ int lc_client_acquire_for_update_method(
 
     fields[0] = lc_log_str_field("key", req->key);
     fields[1] = lc_log_str_field("owner", req->owner);
-    lc_log_trace(client->logger, "client.acquire_for_update.start", fields,
-                 2U);
+    lc_log_trace(client->logger, "client.acquire_for_update.start", fields, 2U);
   }
 
   rc = lc_acquire(self, req, &lease, error);
@@ -1831,8 +1828,8 @@ static int lc_query_key_bridge_set_engine_error(lc_engine_error *dst,
   }
   if (src != NULL && src->code != LC_OK) {
     dst->code = LC_ENGINE_ERROR_TRANSPORT;
-    dst->message = lc_strdup_local(src->message != NULL ? src->message
-                                                        : fallback);
+    dst->message =
+        lc_strdup_local(src->message != NULL ? src->message : fallback);
   } else {
     lc_engine_set_transport_error(dst, fallback);
   }
@@ -1915,9 +1912,9 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
   int rc;
 
   if (self == NULL || req == NULL || handler == NULL || out == NULL) {
-    return lc_error_set(
-        error, LC_ERR_INVALID, 0L,
-        "query_keys requires self, req, handler, and out", NULL, NULL, NULL);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "query_keys requires self, req, handler, and out", NULL,
+                        NULL, NULL);
   }
   client = (lc_client_handle *)self;
   {

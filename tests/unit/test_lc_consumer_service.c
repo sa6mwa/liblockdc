@@ -1960,7 +1960,8 @@ test_consumer_service_preserves_auto_ack_failure_details(void **state) {
   assert_int_equal(runtime_state.close_calls, 1U);
   assert_int_equal(runtime_state.error_events, 1U);
   assert_int_equal(runtime_state.end_callback_rejections, 1U);
-  assert_int_equal(runtime_state.end_callback_rejections_without_engine_error, 0U);
+  assert_int_equal(runtime_state.end_callback_rejections_without_engine_error,
+                   0U);
   assert_int_equal(runtime_state.last_error_attempt, 0);
   assert_int_equal(runtime_state.last_error_restart_in_ms, 0L);
   assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);
@@ -2165,7 +2166,8 @@ test_consumer_service_explicit_ack_then_handler_error_surfaces_without_nack(
   assert_int_equal(runtime_state.nack_calls, 0U);
   assert_int_equal(runtime_state.error_events, 1U);
   assert_int_equal(runtime_state.end_callback_rejections, 1U);
-  assert_int_equal(runtime_state.end_callback_rejections_without_engine_error, 0U);
+  assert_int_equal(runtime_state.end_callback_rejections_without_engine_error,
+                   0U);
   assert_int_equal(runtime_state.last_error_attempt, 0);
   assert_int_equal(runtime_state.last_error_restart_in_ms, 0L);
   assert_int_equal(runtime_state.last_error_code, LC_ERR_TRANSPORT);

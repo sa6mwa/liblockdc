@@ -89,9 +89,30 @@ foreach(symbol IN ITEMS
     lonejson_curl_read_callback
     lonejson_curl_upload_size
     lonejson_curl_upload_cleanup
+    lonejson_curl_array_parse_init
+    lonejson_curl_array_write_callback
+    lonejson_curl_array_parse_finish
+    lonejson_curl_array_parse_cleanup
+    lonejson_curl_string_array_parse_init
+    lonejson_curl_string_array_write_callback
+    lonejson_curl_string_array_parse_finish
+    lonejson_curl_string_array_parse_cleanup
+    lonejson_curl_string_items_parse_init
+    lonejson_curl_string_items_write_callback
+    lonejson_curl_string_items_parse_finish
+    lonejson_curl_string_items_parse_cleanup
     lonejson_generator_init
     lonejson_generator_read
     lonejson_generator_cleanup
+    lonejson_mapped_array_stream_init
+    lonejson_mapped_array_stream_set_handler
+    lonejson_array_stream_open_push
+    lonejson_array_stream_push
+    lonejson_array_stream_finish
+    lonejson_array_stream_push_string
+    lonejson_array_stream_finish_string
+    lonejson_array_stream_push_string_items
+    lonejson_array_stream_finish_string_items
     lonejson_default_sse_options
     lonejson_sse_open
     lonejson_sse_push
@@ -117,9 +138,30 @@ foreach(alias_symbol IN ITEMS
     lj_curl_read_callback
     lj_curl_upload_size
     lj_curl_upload_cleanup
+    lj_curl_array_parse_init
+    lj_curl_array_write_callback
+    lj_curl_array_parse_finish
+    lj_curl_array_parse_cleanup
+    lj_curl_string_array_parse_init
+    lj_curl_string_array_write_callback
+    lj_curl_string_array_parse_finish
+    lj_curl_string_array_parse_cleanup
+    lj_curl_string_items_parse_init
+    lj_curl_string_items_write_callback
+    lj_curl_string_items_parse_finish
+    lj_curl_string_items_parse_cleanup
     lj_generator_init
     lj_generator_read
     lj_generator_cleanup
+    lj_mapped_array_stream_init
+    lj_mapped_array_stream_set_handler
+    lj_array_stream_open_push
+    lj_array_stream_push
+    lj_array_stream_finish
+    lj_array_stream_push_string
+    lj_array_stream_finish_string
+    lj_array_stream_push_string_items
+    lj_array_stream_finish_string_items
     lj_default_sse_options
     lj_sse_open
     lj_sse_push
