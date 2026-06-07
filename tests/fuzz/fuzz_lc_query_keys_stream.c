@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "lc_internal.h"
+
 #include <lonejson.h>
 
 typedef struct fuzz_query_keys_capture {
@@ -101,7 +103,7 @@ fuzz_query_keys_read(void *user, unsigned char *buffer, size_t capacity) {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   static const unsigned char fallback[] = "{\"keys\":[]}";
-  lonejson_parse_options options;
+  lonejson *runtime;
   lonejson_array_stream_string_handler handler;
   lonejson_error error;
   fuzz_query_keys_capture capture;
@@ -112,6 +114,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   size_t chunk_size;
 
   memset(&handler, 0, sizeof(handler));
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return 0;
+  }
   lonejson_error_init(&error);
   memset(&capture, 0, sizeof(capture));
   memset(&reader, 0, sizeof(reader));
@@ -131,20 +137,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     json_size = sizeof(fallback) - 1U;
   }
 
-  options = lonejson_default_parse_options();
-  options.clear_destination = 0;
   reader.data = json;
   reader.len = json_size;
   reader.chunk_size = chunk_size;
-  lonejson_init(&fuzz_query_keys_response_map, &response);
-  if (lonejson_string_array_stream_set_handler(
-          &response.keys, &handler, &capture, &error) != LONEJSON_STATUS_OK) {
-    lonejson_cleanup(&fuzz_query_keys_response_map, &response);
+  runtime->init(runtime, &fuzz_query_keys_response_map, &response);
+  if (response.keys.set_handler(&response.keys, &handler, &capture, &error) !=
+      LONEJSON_STATUS_OK) {
+    runtime->cleanup(runtime, &fuzz_query_keys_response_map, &response);
     return 0;
   }
-  (void)lonejson_json_value_enable_parse_capture(&response.metadata, &error);
-  (void)lonejson_parse_reader(&fuzz_query_keys_response_map, &response,
-                              fuzz_query_keys_read, &reader, &options, &error);
-  lonejson_cleanup(&fuzz_query_keys_response_map, &response);
+  (void)response.metadata.methods->enable_parse_capture(&response.metadata,
+                                                        &error);
+  (void)runtime->parse_reader(runtime, &fuzz_query_keys_response_map, &response,
+                              fuzz_query_keys_read, &reader, &error);
+  runtime->cleanup(runtime, &fuzz_query_keys_response_map, &response);
   return 0;
 }

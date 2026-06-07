@@ -130,17 +130,12 @@ file(WRITE "${consumer_src_dir}/smoke.c" [=[
 
 int main(void) {
     lc_client_config config;
-    lonejson_parse_options parse_options;
     const char *version;
 
     lc_client_config_init(&config);
-    parse_options = lonejson_default_parse_options();
     version = lc_version_string();
     if (version == NULL || strcmp(version, LC_VERSION_STRING) != 0) {
         return 10;
-    }
-    if (parse_options.max_depth <= 0) {
-        return 11;
     }
 
     puts(version);

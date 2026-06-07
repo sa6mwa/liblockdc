@@ -136,13 +136,11 @@ file(WRITE "${consumer_src_dir}/main.c" [=[
 
 int main(void) {
     lc_client_config config;
-    lonejson_parse_options parse_options;
     lonejson_int64 value;
 
     value = 0;
     lc_client_config_init(&config);
-    parse_options = lonejson_default_parse_options();
-    return value == 0 && parse_options.max_depth > 0 ? 0 : 1;
+    return value == 0 && lc_version_string() != 0 ? 0 : 1;
 }
 ]=])
 
@@ -161,10 +159,7 @@ file(WRITE "${consumer_src_dir}/pkgconfig_shared_main.c" [=[
 #include <lc/lc.h>
 
 int main(void) {
-    lonejson_parse_options parse_options;
-
-    parse_options = lonejson_default_parse_options();
-    return lc_version_string() != 0 && parse_options.max_depth > 0 ? 0 : 1;
+    return lc_version_string() != 0 ? 0 : 1;
 }
 ]=])
 

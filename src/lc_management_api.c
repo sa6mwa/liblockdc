@@ -307,7 +307,6 @@ lc_engine_mgmt_request_headers(const lc_engine_header_pair **out_headers,
 static int lc_engine_mgmt_call_json_stream(
     lc_engine_client *client, const char *method, const char *path,
     const lonejson_map *body_map, const void *body_src,
-    const lonejson_write_options *body_options,
     const lonejson_map *response_map, void *response_json, void *response,
     lc_engine_error *error,
     int (*copy_fn)(const void *, const lc_engine_http_result *, void *,
@@ -320,19 +319,21 @@ static int lc_engine_mgmt_call_json_stream(
   memset(&result, 0, sizeof(result));
   lc_engine_mgmt_request_headers(&headers, &header_count);
   rc = lc_engine_http_json_request_stream(
-      client, method, path, body_map, body_src, body_options, headers,
-      header_count, response_map, response_json, &result, error);
+      client, method, path, body_map, body_src, headers, header_count,
+      response_map, response_json, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status < 200L || result.http_status >= 300L) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(response_map, response_json);
+    lc_engine_lonejson_runtime(client)->cleanup(
+        lc_engine_lonejson_runtime(client), response_map, response_json);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
   rc = copy_fn(response_json, &result, response, error);
-  lonejson_cleanup(response_map, response_json);
+  lc_engine_lonejson_runtime(client)->cleanup(
+      lc_engine_lonejson_runtime(client), response_map, response_json);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -842,10 +843,10 @@ int lc_engine_client_get_namespace_config(
     lc_engine_buffer_append_cstr(&path, encoded);
     free(encoded);
   }
-  rc = lc_engine_mgmt_call_json_stream(
-      client, "GET", path.data, NULL, NULL, NULL,
-      &lc_engine_namespace_config_response_map, &parsed, response, error,
-      lc_engine_parse_namespace_response);
+  rc = lc_engine_mgmt_call_json_stream(client, "GET", path.data, NULL, NULL,
+                                       &lc_engine_namespace_config_response_map,
+                                       &parsed, response, error,
+                                       lc_engine_parse_namespace_response);
   lc_engine_buffer_cleanup(&path);
   return rc;
 }
@@ -879,19 +880,21 @@ int lc_engine_client_update_namespace_config(
   headers[0].value = "application/json";
   rc = lc_engine_http_json_request_stream(
       client, "PUT", "/v1/namespace", &lc_engine_namespace_config_body_map,
-      &body_src, NULL, headers, 1U, &lc_engine_namespace_config_response_map,
-      &parsed, &result, error);
+      &body_src, headers, 1U, &lc_engine_namespace_config_response_map, &parsed,
+      &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status != 200L) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_namespace_config_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_namespace_config_response_map,
+                               &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
   rc = lc_engine_parse_namespace_response(&parsed, &result, response, error);
-  lonejson_cleanup(&lc_engine_namespace_config_response_map, &parsed);
+  lc_engine_lonejson_cleanup(client, &lc_engine_namespace_config_response_map,
+                             &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -929,7 +932,7 @@ int lc_engine_client_index_flush(lc_engine_client *client,
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/index/flush", &body_map, &body_src, NULL,
+      client, "POST", "/v1/index/flush", &body_map, &body_src,
       &lc_engine_index_flush_response_map, &parsed, response, error,
       lc_engine_parse_index_flush_response);
   return rc;
@@ -962,7 +965,7 @@ int lc_engine_client_txn_replay(lc_engine_client *client,
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/txn/replay", &body_map, &body_src, NULL,
+      client, "POST", "/v1/txn/replay", &body_map, &body_src,
       &lc_engine_txn_response_map, &parsed, response, error,
       lc_engine_parse_txn_response);
   return rc;
@@ -1056,7 +1059,7 @@ int lc_engine_client_txn_decide(lc_engine_client *client,
   (void)body_field_count;
   memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/txn/decide", &body_map, &body_src, NULL,
+      client, "POST", "/v1/txn/decide", &body_map, &body_src,
       &lc_engine_txn_response_map, &parsed, response, error,
       lc_engine_parse_txn_response);
   return rc;
@@ -1091,7 +1094,7 @@ int lc_engine_client_txn_commit(lc_engine_client *client,
   (void)body_field_count;
   memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/txn/commit", &body_map, &body_src, NULL,
+      client, "POST", "/v1/txn/commit", &body_map, &body_src,
       &lc_engine_txn_response_map, &parsed, response, error,
       lc_engine_parse_txn_response);
   return rc;
@@ -1126,7 +1129,7 @@ int lc_engine_client_txn_rollback(lc_engine_client *client,
   (void)body_field_count;
   memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/txn/rollback", &body_map, &body_src, NULL,
+      client, "POST", "/v1/txn/rollback", &body_map, &body_src,
       &lc_engine_txn_response_map, &parsed, response, error,
       lc_engine_parse_txn_response);
   return rc;
@@ -1163,7 +1166,7 @@ int lc_engine_client_tc_lease_acquire(
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/tc/lease/acquire", &body_map, &body_src, NULL,
+      client, "POST", "/v1/tc/lease/acquire", &body_map, &body_src,
       &lc_engine_tc_lease_response_map, &parsed, response, error,
       lc_engine_parse_tc_lease_acquire_response);
   return rc;
@@ -1198,7 +1201,7 @@ int lc_engine_client_tc_lease_renew(
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/tc/lease/renew", &body_map, &body_src, NULL,
+      client, "POST", "/v1/tc/lease/renew", &body_map, &body_src,
       &lc_engine_tc_lease_response_map, &parsed, response, error,
       lc_engine_parse_tc_lease_renew_response);
   return rc;
@@ -1231,7 +1234,7 @@ int lc_engine_client_tc_lease_release(
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/tc/lease/release", &body_map, &body_src, NULL,
+      client, "POST", "/v1/tc/lease/release", &body_map, &body_src,
       &lc_engine_tc_release_response_map, &parsed, response, error,
       lc_engine_parse_tc_lease_release_response);
   return rc;
@@ -1247,10 +1250,10 @@ int lc_engine_client_tc_leader(lc_engine_client *client,
         "tc_leader requires client, response, and error");
   }
   memset(&parsed, 0, sizeof(parsed));
-  return lc_engine_mgmt_call_json_stream(
-      client, "GET", "/v1/tc/leader", NULL, NULL, NULL,
-      &lc_engine_tc_lease_response_map, &parsed, response, error,
-      lc_engine_parse_tc_leader_response);
+  return lc_engine_mgmt_call_json_stream(client, "GET", "/v1/tc/leader", NULL,
+                                         NULL, &lc_engine_tc_lease_response_map,
+                                         &parsed, response, error,
+                                         lc_engine_parse_tc_leader_response);
 }
 
 int lc_engine_client_tc_cluster_announce(
@@ -1282,7 +1285,7 @@ int lc_engine_client_tc_cluster_announce(
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/tc/cluster/announce", &body_map, &body_src, NULL,
+      client, "POST", "/v1/tc/cluster/announce", &body_map, &body_src,
       &lc_engine_tc_cluster_response_map, &parsed, response, error,
       lc_engine_parse_tc_cluster_response);
   return rc;
@@ -1300,7 +1303,7 @@ int lc_engine_client_tc_cluster_leave(lc_engine_client *client,
   }
   memset(&parsed, 0, sizeof(parsed));
   return lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/tc/cluster/leave", NULL, NULL, NULL,
+      client, "POST", "/v1/tc/cluster/leave", NULL, NULL,
       &lc_engine_tc_cluster_response_map, &parsed, response, error,
       lc_engine_parse_tc_cluster_response);
 }
@@ -1316,7 +1319,7 @@ int lc_engine_client_tc_cluster_list(lc_engine_client *client,
   }
   memset(&parsed, 0, sizeof(parsed));
   return lc_engine_mgmt_call_json_stream(
-      client, "GET", "/v1/tc/cluster/list", NULL, NULL, NULL,
+      client, "GET", "/v1/tc/cluster/list", NULL, NULL,
       &lc_engine_tc_cluster_response_map, &parsed, response, error,
       lc_engine_parse_tc_cluster_response);
 }
@@ -1348,7 +1351,7 @@ int lc_engine_client_tcrm_register(
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/tc/rm/register", &body_map, &body_src, NULL,
+      client, "POST", "/v1/tc/rm/register", &body_map, &body_src,
       &lc_engine_tcrm_register_response_map, &parsed, response, error,
       lc_engine_parse_tcrm_register_response);
   return rc;
@@ -1381,7 +1384,7 @@ int lc_engine_client_tcrm_unregister(
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_mgmt_call_json_stream(
-      client, "POST", "/v1/tc/rm/unregister", &body_map, &body_src, NULL,
+      client, "POST", "/v1/tc/rm/unregister", &body_map, &body_src,
       &lc_engine_tcrm_register_response_map, &parsed, response, error,
       lc_engine_parse_tcrm_register_response);
   return rc;
@@ -1398,7 +1401,7 @@ int lc_engine_client_tcrm_list(lc_engine_client *client,
   }
   memset(&parsed, 0, sizeof(parsed));
   return lc_engine_mgmt_call_json_stream(
-      client, "GET", "/v1/tc/rm/list", NULL, NULL, NULL,
+      client, "GET", "/v1/tc/rm/list", NULL, NULL,
       &lc_engine_tcrm_list_response_map, &parsed, response, error,
       lc_engine_parse_tcrm_list_response);
 }

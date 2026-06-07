@@ -10,6 +10,34 @@
 #include "lc_api_internal.h"
 #include "lc_internal.h"
 
+static int fail_lonejson_new_count;
+
+typedef struct runtime_alloc_string_doc {
+  char *label;
+} runtime_alloc_string_doc;
+
+static const lonejson_field runtime_alloc_string_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC_REQ(runtime_alloc_string_doc, label, "label")};
+
+LONEJSON_MAP_DEFINE(runtime_alloc_string_map, runtime_alloc_string_doc,
+                    runtime_alloc_string_fields);
+
+lonejson *__real_lonejson_new(const lonejson_config *config,
+                              lonejson_error *error);
+
+lonejson *__wrap_lonejson_new(const lonejson_config *config,
+                              lonejson_error *error) {
+  if (fail_lonejson_new_count > 0) {
+    --fail_lonejson_new_count;
+    if (error != NULL) {
+      lonejson_error_init(error);
+      error->code = LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    return NULL;
+  }
+  return __real_lonejson_new(config, error);
+}
+
 static char *dup_cstr(const char *value) {
   size_t len;
   char *copy;
@@ -417,6 +445,185 @@ test_management_cleanup_helpers_release_nested_allocations(void **state) {
   assert_null(ns.correlation_id);
 }
 
+static void test_lonejson_prepare_parse_destination_resets_reused_allocations(
+    void **state) {
+  lonejson_config config;
+  lonejson_error error;
+  lonejson *runtime;
+  runtime_alloc_string_doc doc;
+  lonejson_status status;
+
+  (void)state;
+  memset(&doc, 0, sizeof(doc));
+  config = lonejson_default_config();
+  config.clear_destination_by_default = 0;
+  lonejson_error_init(&error);
+
+  runtime = lonejson_new(&config, &error);
+  assert_non_null(runtime);
+
+  lc_lonejson_prepare_parse_destination(runtime, &runtime_alloc_string_map,
+                                        &doc);
+  status = runtime->parse_cstr(runtime, &runtime_alloc_string_map, &doc,
+                               "{\"label\":\"first\"}", &error);
+  assert_int_equal(status, LONEJSON_STATUS_OK);
+  assert_string_equal(doc.label, "first");
+
+  lc_lonejson_prepare_parse_destination(runtime, &runtime_alloc_string_map,
+                                        &doc);
+  status = runtime->parse_cstr(runtime, &runtime_alloc_string_map, &doc,
+                               "{\"label\":\"second\"}", &error);
+  assert_int_equal(status, LONEJSON_STATUS_OK);
+  assert_string_equal(doc.label, "second");
+
+  runtime->cleanup(runtime, &runtime_alloc_string_map, &doc);
+  lonejson_free(runtime);
+}
+
+static void
+test_subscribe_meta_reports_thread_runtime_allocation_failure(void **state) {
+  lc_engine_dequeue_response response;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  memset(&response, 0, sizeof(response));
+  memset(&error, 0, sizeof(error));
+  fail_lonejson_new_count = 1;
+
+  rc = lc_engine_parse_subscribe_meta_json(
+      "{\"message\":{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+      "\"message_id\":\"msg-1\"}}",
+      "corr-fallback", &response, &error);
+
+  assert_int_equal(rc, LC_ENGINE_ERROR_NO_MEMORY);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_NO_MEMORY);
+  assert_string_equal(error.message,
+                      "failed to allocate thread-local JSON runtime");
+  assert_int_equal(fail_lonejson_new_count, 0);
+
+  lc_engine_dequeue_response_cleanup(&response);
+  lc_engine_error_cleanup(&error);
+}
+
+static void
+test_attach_response_reports_thread_runtime_allocation_failure(void **state) {
+  lc_engine_attach_response response;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  memset(&response, 0, sizeof(response));
+  memset(&error, 0, sizeof(error));
+  fail_lonejson_new_count = 1;
+
+  rc = lc_engine_parse_attach_response_json(
+      "{\"attachment\":{\"id\":\"att-1\"},\"noop\":false,\"version\":1}",
+      "corr-attach", &response, &error);
+
+  assert_int_equal(rc, LC_ENGINE_ERROR_NO_MEMORY);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_NO_MEMORY);
+  assert_string_equal(error.message,
+                      "failed to allocate thread-local JSON runtime");
+  assert_int_equal(fail_lonejson_new_count, 0);
+
+  lc_engine_attach_response_cleanup(&response);
+  lc_engine_error_cleanup(&error);
+}
+
+static void
+test_list_attachments_reports_thread_runtime_allocation_failure(void **state) {
+  lc_engine_list_attachments_response response;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  memset(&response, 0, sizeof(response));
+  memset(&error, 0, sizeof(error));
+  fail_lonejson_new_count = 1;
+
+  rc = lc_engine_parse_list_attachments_response_json(
+      "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+      "\"attachments\":[]}",
+      "corr-list", &response, &error);
+
+  assert_int_equal(rc, LC_ENGINE_ERROR_NO_MEMORY);
+  assert_int_equal(error.code, LC_ENGINE_ERROR_NO_MEMORY);
+  assert_string_equal(error.message,
+                      "failed to allocate thread-local JSON runtime");
+  assert_int_equal(fail_lonejson_new_count, 0);
+
+  lc_engine_list_attachments_response_cleanup(&response);
+  lc_engine_error_cleanup(&error);
+}
+
+static void test_attach_response_parses_with_thread_runtime(void **state) {
+  lc_engine_attach_response response;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  memset(&response, 0, sizeof(response));
+  memset(&error, 0, sizeof(error));
+
+  rc = lc_engine_parse_attach_response_json(
+      "{\"attachment\":{\"id\":\"att-1\",\"name\":\"blob.txt\","
+      "\"size\":11,\"plaintext_sha256\":\"sha-1\","
+      "\"content_type\":\"text/plain\",\"created_at_unix\":1000,"
+      "\"updated_at_unix\":1001},\"noop\":false,\"version\":5}",
+      "corr-attach", &response, &error);
+
+  assert_int_equal(rc, LC_ENGINE_OK);
+  assert_string_equal(response.attachment.id, "att-1");
+  assert_string_equal(response.attachment.name, "blob.txt");
+  assert_int_equal(response.attachment.size, 11L);
+  assert_string_equal(response.attachment.plaintext_sha256, "sha-1");
+  assert_string_equal(response.attachment.content_type, "text/plain");
+  assert_int_equal(response.attachment.created_at_unix, 1000L);
+  assert_int_equal(response.attachment.updated_at_unix, 1001L);
+  assert_false(response.noop);
+  assert_int_equal(response.version, 5L);
+  assert_string_equal(response.correlation_id, "corr-attach");
+
+  lc_engine_attach_response_cleanup(&response);
+  lc_engine_error_cleanup(&error);
+}
+
+static void
+test_list_attachments_response_parses_with_thread_runtime(void **state) {
+  lc_engine_list_attachments_response response;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  memset(&response, 0, sizeof(response));
+  memset(&error, 0, sizeof(error));
+
+  rc = lc_engine_parse_list_attachments_response_json(
+      "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+      "\"attachments\":[{\"id\":\"att-1\",\"name\":\"blob.txt\","
+      "\"size\":11,\"plaintext_sha256\":\"sha-1\","
+      "\"content_type\":\"text/plain\",\"created_at_unix\":1000,"
+      "\"updated_at_unix\":1001}]}",
+      "corr-list", &response, &error);
+
+  assert_int_equal(rc, LC_ENGINE_OK);
+  assert_string_equal(response.namespace_name, "transport-ns");
+  assert_string_equal(response.key, "resource/1");
+  assert_int_equal(response.attachment_count, 1U);
+  assert_string_equal(response.attachments[0].id, "att-1");
+  assert_string_equal(response.attachments[0].name, "blob.txt");
+  assert_int_equal(response.attachments[0].size, 11L);
+  assert_string_equal(response.attachments[0].plaintext_sha256, "sha-1");
+  assert_string_equal(response.attachments[0].content_type, "text/plain");
+  assert_int_equal(response.attachments[0].created_at_unix, 1000L);
+  assert_int_equal(response.attachments[0].updated_at_unix, 1001L);
+  assert_string_equal(response.correlation_id, "corr-list");
+
+  lc_engine_list_attachments_response_cleanup(&response);
+  lc_engine_error_cleanup(&error);
+}
+
 static void test_subscribe_meta_builds_queue_state_handle(void **state) {
   static const char json[] =
       "{\"message\":{\"namespace\":\"default\",\"queue\":\"workflow\","
@@ -518,6 +725,17 @@ int main(void) {
           test_client_open_rejects_missing_bundle_when_mtls_enabled),
       cmocka_unit_test(
           test_management_cleanup_helpers_release_nested_allocations),
+      cmocka_unit_test(
+          test_lonejson_prepare_parse_destination_resets_reused_allocations),
+      cmocka_unit_test(
+          test_subscribe_meta_reports_thread_runtime_allocation_failure),
+      cmocka_unit_test(
+          test_attach_response_reports_thread_runtime_allocation_failure),
+      cmocka_unit_test(
+          test_list_attachments_reports_thread_runtime_allocation_failure),
+      cmocka_unit_test(test_attach_response_parses_with_thread_runtime),
+      cmocka_unit_test(
+          test_list_attachments_response_parses_with_thread_runtime),
       cmocka_unit_test(test_subscribe_meta_builds_queue_state_handle),
       cmocka_unit_test(test_subscribe_meta_without_state_has_no_state_handle),
   };

@@ -12,7 +12,7 @@ Usage:
   draft_liblockdc_release.sh publish [--dry-run]
 
 Commands:
-  draft         Validate the tagged release locally, run tests, run make world,
+  draft         Validate the tagged release locally, run make release,
                 verify dist/, then check origin and create a GitHub draft release.
   resume-draft  Continue from a completed local validation after the tagged commit
                 and tag have been pushed to origin.
@@ -23,7 +23,7 @@ Options:
                        previous release tag on main. Use only after explicit
                        user confirmation.
   --dry-run            Print planned actions after preflight without running
-                       tests, make world, or gh release mutations.
+                       make release or gh release mutations.
   -h, --help           Show this help.
 EOF
 }
@@ -159,7 +159,7 @@ validate_dist() {
   local checksum_file="dist/liblockdc-${version}-CHECKSUMS"
   local line asset tarball_count
 
-  [ -d dist ] || die "dist/ is missing; run make world successfully before drafting the release"
+  [ -d dist ] || die "dist/ is missing; run make release successfully before drafting the release"
   [ -f "$checksum_file" ] || die "missing checksum file $checksum_file"
   [ -f "dist/lockdc-${version}-1.rockspec" ] || die "missing dist/lockdc-${version}-1.rockspec"
   [ -f "dist/lockdc-${version}-1.src.rock" ] || die "missing dist/lockdc-${version}-1.src.rock"
@@ -190,7 +190,7 @@ validate_dist() {
 
 assert_release_package_tests() {
   local release_dir="build/x86_64-linux-gnu-release"
-  [ -d "$release_dir" ] || die "missing $release_dir; run make world successfully before drafting the release"
+  [ -d "$release_dir" ] || die "missing $release_dir; run make release successfully before drafting the release"
   info "rerunning release package tests"
   ctest --test-dir "$release_dir" --output-on-failure -R '^(package_archives_test|release_tarball_sdk_test|lua_release_package_test)$'
 }
@@ -430,27 +430,15 @@ main() {
   assert_nonbump_policy "$current_tag" "$previous_tag" "$allow_nonbump"
 
   if [ "$dry_run" -eq 1 ]; then
-    info "dry run: would run make clean"
-    info "dry run: would run make test-all"
-    info "dry run: would run make test-e2e"
-    info "dry run: would run make world"
+    info "dry run: would run make release"
     info "dry run: would rerun release package tests"
     info "dry run: would validate dist/liblockdc-${current_version}-CHECKSUMS"
     info "dry run: would then require origin/main and tag $current_tag before creating a draft release"
     exit 0
   fi
 
-  info "cleaning repository-generated state for a blank-repo validation start"
-  make clean
-
-  info "running full non-e2e test matrix via Makefile"
-  make test-all
-
-  info "running e2e tests via Makefile"
-  make test-e2e
-
-  info "running make world in the foreground"
-  make world
+  info "running make release in the foreground"
+  make release
 
   assert_release_package_tests
   validate_dist "$current_version"

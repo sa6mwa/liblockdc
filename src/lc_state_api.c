@@ -785,7 +785,7 @@ int lc_engine_client_acquire(lc_engine_client *client,
   headers[0].value = "application/json";
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/acquire", &body_map, &body_src, NULL, headers, 1U,
+      client, "POST", "/v1/acquire", &body_map, &body_src, headers, 1U,
       &lc_engine_acquire_response_map, &response_json, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
@@ -828,7 +828,9 @@ int lc_engine_client_acquire(lc_engine_client *client,
                                         "failed to decode acquire response");
   }
 
-  lonejson_cleanup(&lc_engine_acquire_response_map, &response_json);
+  lc_engine_lonejson_runtime(client)->cleanup(
+      lc_engine_lonejson_runtime(client), &lc_engine_acquire_response_map,
+      &response_json);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -981,7 +983,7 @@ int lc_engine_client_keepalive(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/keepalive", &body_map, &body_src, NULL, headers, 2U,
+      client, "POST", "/v1/keepalive", &body_map, &body_src, headers, 2U,
       &lc_engine_keepalive_response_map, &response_json, &result, error);
   lc_engine_buffer_cleanup(&fence_value);
   if (rc != LC_ENGINE_OK) {
@@ -1012,7 +1014,9 @@ int lc_engine_client_keepalive(lc_engine_client *client,
                                         "failed to decode keepalive response");
   }
 
-  lonejson_cleanup(&lc_engine_keepalive_response_map, &response_json);
+  lc_engine_lonejson_runtime(client)->cleanup(
+      lc_engine_lonejson_runtime(client), &lc_engine_keepalive_response_map,
+      &response_json);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -1064,7 +1068,7 @@ int lc_engine_client_release(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/release", &body_map, &body_src, NULL, headers, 2U,
+      client, "POST", "/v1/release", &body_map, &body_src, headers, 2U,
       &lc_engine_release_response_map, &response_json, &result, error);
   lc_engine_buffer_cleanup(&fence_value);
   if (rc != LC_ENGINE_OK) {
@@ -1201,7 +1205,9 @@ int lc_engine_client_update(lc_engine_client *client,
                                         "failed to decode update response");
   }
 
-  lonejson_cleanup(&lc_engine_update_response_map, &response_json);
+  lc_engine_lonejson_runtime(client)->cleanup(
+      lc_engine_lonejson_runtime(client), &lc_engine_update_response_map,
+      &response_json);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -1210,7 +1216,6 @@ int lc_engine_client_update_stream(lc_engine_client *client,
                                    const lc_engine_update_request *request,
                                    const lonejson_map *body_map,
                                    const void *body_src,
-                                   const lonejson_write_options *body_options,
                                    lc_engine_update_response *response,
                                    lc_engine_error *error) {
   lc_engine_buffer path;
@@ -1276,9 +1281,8 @@ int lc_engine_client_update_stream(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
-      client, "POST", path.data, body_map, body_src, body_options, headers,
-      header_count, &lc_engine_update_response_map, &response_json, &result,
-      error);
+      client, "POST", path.data, body_map, body_src, headers, header_count,
+      &lc_engine_update_response_map, &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&version_value);
@@ -1313,7 +1317,9 @@ int lc_engine_client_update_stream(lc_engine_client *client,
                                         "failed to decode update response");
   }
 
-  lonejson_cleanup(&lc_engine_update_response_map, &response_json);
+  lc_engine_lonejson_runtime(client)->cleanup(
+      lc_engine_lonejson_runtime(client), &lc_engine_update_response_map,
+      &response_json);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -1396,9 +1402,8 @@ int lc_engine_client_mutate(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
-      client, "POST", path.data, &body_map, &body_src, NULL, headers,
-      header_count, &lc_engine_update_response_map, &response_json, &result,
-      error);
+      client, "POST", path.data, &body_map, &body_src, headers, header_count,
+      &lc_engine_update_response_map, &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&version_value);
@@ -1432,7 +1437,8 @@ int lc_engine_client_mutate(lc_engine_client *client,
                                         "failed to decode mutate response");
   }
 
-  lonejson_cleanup(&lc_engine_update_response_map, &response_json);
+  lc_engine_lonejson_cleanup(client, &lc_engine_update_response_map,
+                             &response_json);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -1520,10 +1526,9 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   lc_engine_lonejson_map_init(&body_map, "lc_engine_metadata_request",
                               body_fields, body_field_count, sizeof(*request));
   memset(&result, 0, sizeof(result));
-  rc = lc_engine_http_json_request_stream(client, "POST", path.data, &body_map,
-                                          request, NULL, headers, header_count,
-                                          &lc_engine_metadata_response_map,
-                                          &response_json, &result, error);
+  rc = lc_engine_http_json_request_stream(
+      client, "POST", path.data, &body_map, request, headers, header_count,
+      &lc_engine_metadata_response_map, &response_json, &result, error);
   lc_engine_buffer_cleanup(&path);
   lc_engine_buffer_cleanup(&fence_value);
   lc_engine_buffer_cleanup(&version_value);
@@ -1562,7 +1567,8 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
                                         "failed to decode metadata response");
   }
 
-  lonejson_cleanup(&lc_engine_metadata_response_map, &response_json);
+  lc_engine_lonejson_cleanup(client, &lc_engine_metadata_response_map,
+                             &response_json);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -1777,7 +1783,8 @@ int lc_engine_client_describe(lc_engine_client *client,
                                         "failed to decode describe response");
   }
 
-  lonejson_cleanup(&lc_engine_describe_response_map, &response_json);
+  lc_engine_lonejson_cleanup(client, &lc_engine_describe_response_map,
+                             &response_json);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -1786,6 +1793,7 @@ int lc_engine_client_query(lc_engine_client *client,
                            const lc_engine_query_request *request,
                            lc_engine_query_response *response,
                            lc_engine_error *error) {
+  lonejson *runtime;
   lc_engine_http_result result;
   lc_engine_header_pair headers[1];
   lc_engine_query_response_json parsed;
@@ -1805,23 +1813,24 @@ int lc_engine_client_query(lc_engine_client *client,
   }
 
   lc_engine_query_response_cleanup(response);
+  runtime = lc_engine_lonejson_runtime(client);
   memset(&body_src, 0, sizeof(body_src));
   body_src.namespace_name =
       (char *)lc_engine_effective_namespace(client, request->namespace_name);
   body_src.limit = request->limit;
   body_src.cursor = (char *)request->cursor;
   body_src.return_mode = (char *)request->return_mode;
-  lonejson_json_value_init(&body_src.selector);
-  lonejson_json_value_init(&body_src.fields);
+  runtime->json_value_init(runtime, &body_src.selector);
+  runtime->json_value_init(runtime, &body_src.fields);
   lonejson_error_init(&lj_error);
   selector_source.cursor = (const unsigned char *)"";
   selector_source.remaining = 0U;
   if (request->selector_json != NULL && request->selector_json[0] != '\0') {
     selector_source.cursor = (const unsigned char *)request->selector_json;
     selector_source.remaining = strlen(request->selector_json);
-    rc = lonejson_json_value_set_reader(&body_src.selector,
-                                        lc_engine_json_memory_reader,
-                                        &selector_source, &lj_error);
+    rc = body_src.selector.methods->set_reader(&body_src.selector,
+                                               lc_engine_json_memory_reader,
+                                               &selector_source, &lj_error);
     if (rc != LONEJSON_STATUS_OK) {
       rc = lc_engine_lonejson_error_from_status(
           error, rc, &lj_error, "failed to configure query selector");
@@ -1833,11 +1842,11 @@ int lc_engine_client_query(lc_engine_client *client,
   if (request->fields_json != NULL && request->fields_json[0] != '\0') {
     fields_source.cursor = (const unsigned char *)request->fields_json;
     fields_source.remaining = strlen(request->fields_json);
-    rc = lonejson_json_value_set_reader(&body_src.fields,
-                                        lc_engine_json_memory_reader,
-                                        &fields_source, &lj_error);
+    rc = body_src.fields.methods->set_reader(&body_src.fields,
+                                             lc_engine_json_memory_reader,
+                                             &fields_source, &lj_error);
     if (rc != LONEJSON_STATUS_OK) {
-      lonejson_json_value_cleanup(&body_src.selector);
+      runtime->json_value_cleanup(runtime, &body_src.selector);
       rc = lc_engine_lonejson_error_from_status(
           error, rc, &lj_error, "failed to configure query fields");
       return rc;
@@ -1868,16 +1877,16 @@ int lc_engine_client_query(lc_engine_client *client,
   memset(&result, 0, sizeof(result));
   memset(&parsed, 0, sizeof(parsed));
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/query", &body_map, &body_src, NULL, headers, 1U,
+      client, "POST", "/v1/query", &body_map, &body_src, headers, 1U,
       &lc_engine_query_response_map, &parsed, &result, error);
-  lonejson_json_value_cleanup(&body_src.selector);
-  lonejson_json_value_cleanup(&body_src.fields);
+  runtime->json_value_cleanup(runtime, &body_src.selector);
+  runtime->json_value_cleanup(runtime, &body_src.fields);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status != 200L) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_query_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_query_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
@@ -1894,13 +1903,13 @@ int lc_engine_client_query(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_query_response_cleanup(response);
-    lonejson_cleanup(&lc_engine_query_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_query_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
                                         "failed to decode query response");
   }
 
-  lonejson_cleanup(&lc_engine_query_response_map, &parsed);
+  runtime->cleanup(runtime, &lc_engine_query_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }

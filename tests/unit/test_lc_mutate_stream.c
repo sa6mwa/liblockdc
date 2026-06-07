@@ -86,6 +86,17 @@ static int test_resolver_open(void *context, const char *resolved_path,
                       resolved_path, NULL, NULL);
 }
 
+static int test_transport_failing_resolver_open(void *context,
+                                                const char *resolved_path,
+                                                lc_source **out,
+                                                lc_error *error) {
+  (void)context;
+  (void)out;
+  return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "synthetic resolver transport failure", resolved_path,
+                      NULL, NULL);
+}
+
 static FILE *tmp_with_text(const char *text) {
   FILE *fp;
   size_t length;
@@ -321,6 +332,198 @@ static void test_mutation_plan_increments_and_removes_fields(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_mutation_plan_increments_missing_object_path(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  char *json_text;
+  int rc;
+
+  (void)state;
+  exprs[0] = "/stats/views++";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_OK);
+  json_text = slurp_file(output);
+  assert_string_equal(json_text, "{\"stats\":{\"views\":1}}");
+
+  free(json_text);
+  fclose(output);
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void test_mutation_plan_rejects_increment_on_non_number(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "/counter++";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{\"counter\":\"one\"}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_non_null(error.message);
+  assert_non_null(strstr(error.message, "increment target is not numeric"));
+  assert_null(output);
+
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void test_mutation_plan_rewrites_existing_array_index(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  char *json_text;
+  int rc;
+
+  (void)state;
+  exprs[0] = "/items/0=\"new\"";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{\"items\":[\"old\",\"keep\"]}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_OK);
+  json_text = slurp_file(output);
+  assert_string_equal(json_text, "{\"items\":[\"new\",\"keep\"]}");
+
+  free(json_text);
+  fclose(output);
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void test_mutation_plan_removes_existing_array_index(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  char *json_text;
+  int rc;
+
+  (void)state;
+  exprs[0] = "rm:/items/0";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{\"items\":[\"old\",\"keep\"]}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_OK);
+  json_text = slurp_file(output);
+  assert_string_equal(json_text, "{\"items\":[\"keep\"]}");
+
+  free(json_text);
+  fclose(output);
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_mutation_plan_ignores_missing_remove_object_path(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  char *json_text;
+  int rc;
+
+  (void)state;
+  exprs[0] = "rm:/optional/field";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{\"keep\":1}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_OK);
+  json_text = slurp_file(output);
+  assert_string_equal(json_text, "{\"keep\":1}");
+
+  free(json_text);
+  fclose(output);
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_mutation_plan_ignores_missing_remove_array_index(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  char *json_text;
+  int rc;
+
+  (void)state;
+  exprs[0] = "rm:/items/5";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{\"items\":[\"keep\"]}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_OK);
+  json_text = slurp_file(output);
+  assert_string_equal(json_text, "{\"items\":[\"keep\"]}");
+
+  free(json_text);
+  fclose(output);
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
 static void test_mutation_plan_rejects_missing_array_path(void **state) {
   const char *exprs[1];
   lc_mutation_parse_options options;
@@ -347,6 +550,180 @@ static void test_mutation_plan_rejects_missing_array_path(void **state) {
   assert_null(output);
 
   fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void test_mutation_plan_reports_missing_file_as_transport(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "base64file:/payload=/definitely/missing/liblockdc-payload.bin";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_ERR_TRANSPORT);
+  assert_non_null(error.message);
+  assert_null(output);
+
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_mutation_plan_reports_missing_textfile_as_transport(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "textfile:/payload=/definitely/missing/liblockdc-payload.txt";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_ERR_TRANSPORT);
+  assert_non_null(error.message);
+  assert_null(output);
+
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_mutation_plan_preserves_resolver_transport_failure(void **state) {
+  const char *exprs[1];
+  lc_file_value_resolver file_resolver;
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "base64file:/payload=blob.bin";
+  memset(&file_resolver, 0, sizeof(file_resolver));
+  file_resolver.open = test_transport_failing_resolver_open;
+  memset(&options, 0, sizeof(options));
+  options.file_value_base_dir = "/virtual";
+  options.file_value_resolver = &file_resolver;
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_int_equal(error.code, LC_ERR_TRANSPORT);
+  assert_non_null(error.message);
+  assert_non_null(
+      strstr(error.message, "synthetic resolver transport failure"));
+  assert_null(output);
+
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_mutation_plan_rejects_missing_array_increment_path(void **state) {
+  const char *exprs[1];
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  int rc;
+
+  (void)state;
+  exprs[0] = "/items/0++";
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_non_null(error.message);
+  assert_non_null(strstr(error.message, "missing array paths"));
+  assert_null(output);
+
+  fclose(input);
+  lc_mutation_plan_close(plan);
+  lc_error_cleanup(&error);
+}
+
+static void test_mutation_plan_streams_base64file_direct_path(void **state) {
+  const char *exprs[1];
+  const unsigned char payload[] = {0x00, 0x01, 0x02, 'a'};
+  lc_mutation_parse_options options;
+  lc_mutation_plan *plan;
+  lc_error error;
+  FILE *input;
+  FILE *output;
+  char *json_text;
+  char expression[512];
+  char path[] = "/tmp/liblockdc-base64file-XXXXXX";
+  int fd;
+  int rc;
+
+  (void)state;
+  fd = mkstemp(path);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, payload, sizeof(payload)),
+                   (ssize_t)sizeof(payload));
+  assert_int_equal(close(fd), 0);
+  snprintf(expression, sizeof(expression), "base64file:/payload=%s", path);
+  exprs[0] = expression;
+  memset(&options, 0, sizeof(options));
+  plan = NULL;
+  lc_error_init(&error);
+
+  rc = lc_mutation_plan_build(exprs, 1U, &options, &plan, &error);
+  assert_int_equal(rc, LC_OK);
+  input = tmp_with_text("{}");
+  output = NULL;
+  rc = lc_mutation_plan_apply(plan, input, &output, &error);
+  assert_int_equal(rc, LC_OK);
+  json_text = slurp_file(output);
+  assert_string_equal(json_text, "{\"payload\":\"AAECYQ==\"}");
+
+  free(json_text);
+  fclose(output);
+  fclose(input);
+  assert_int_equal(unlink(path), 0);
   lc_mutation_plan_close(plan);
   lc_error_cleanup(&error);
 }
@@ -540,6 +917,8 @@ static void test_mutation_plan_rejects_invalid_utf8_textfile(void **state) {
   output = NULL;
   rc = lc_mutation_plan_apply(plan, input, &output, &error);
   assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
   assert_non_null(error.message);
   assert_true(strstr(error.message, "invalid UTF-8") != NULL);
   assert_null(output);
@@ -638,10 +1017,22 @@ int main(void) {
       cmocka_unit_test(test_mutation_plan_normalizes_rfc3339nano_literal),
       cmocka_unit_test(test_mutation_plan_rejects_invalid_time_literal),
       cmocka_unit_test(test_mutation_plan_increments_and_removes_fields),
+      cmocka_unit_test(test_mutation_plan_increments_missing_object_path),
+      cmocka_unit_test(test_mutation_plan_rejects_increment_on_non_number),
+      cmocka_unit_test(test_mutation_plan_rewrites_existing_array_index),
+      cmocka_unit_test(test_mutation_plan_removes_existing_array_index),
+      cmocka_unit_test(test_mutation_plan_ignores_missing_remove_object_path),
+      cmocka_unit_test(test_mutation_plan_ignores_missing_remove_array_index),
       cmocka_unit_test(test_mutation_plan_rejects_missing_array_path),
+      cmocka_unit_test(test_mutation_plan_reports_missing_file_as_transport),
+      cmocka_unit_test(
+          test_mutation_plan_reports_missing_textfile_as_transport),
+      cmocka_unit_test(test_mutation_plan_preserves_resolver_transport_failure),
+      cmocka_unit_test(test_mutation_plan_rejects_missing_array_increment_path),
       cmocka_unit_test(
           test_mutation_plan_rejects_truncated_object_key_without_crashing),
       cmocka_unit_test(test_mutation_plan_streams_base64file_value),
+      cmocka_unit_test(test_mutation_plan_streams_base64file_direct_path),
       cmocka_unit_test(test_mutation_plan_auto_file_mode_streams_in_one_pass),
       cmocka_unit_test(test_mutation_plan_rejects_invalid_utf8_textfile),
       cmocka_unit_test(test_mutation_plan_expands_home_prefix),

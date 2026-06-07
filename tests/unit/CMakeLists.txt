@@ -82,6 +82,9 @@ target_link_options(lc_unit_consumer_service PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_cond_destroy>
 )
 lc_add_unit_test(lc_unit_runtime test_lc_runtime.c)
+target_link_options(lc_unit_runtime PRIVATE
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lonejson_new>
+)
 lc_add_unit_test(lc_unit_mutate_stream test_lc_mutate_stream.c)
 
 lc_add_https_unit_test_case(
@@ -107,6 +110,10 @@ lc_add_https_unit_test_case(
 lc_add_https_unit_test_case(
   lc_unit_transport_https_state_paths_use_mtls
   LC_HTTPS_CASE_STATE_PATHS_USE_MTLS
+)
+lc_add_https_unit_test_case(
+  lc_unit_transport_https_state_parses_buffered_typed_json_response
+  LC_HTTPS_CASE_STATE_PARSES_BUFFERED_TYPED_JSON_RESPONSE
 )
 lc_add_https_unit_test_case(
   lc_unit_transport_https_state_accepts_numeric_headers_with_trailing_ows
@@ -253,6 +260,10 @@ lc_add_https_unit_test_case(
   LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_USES_MAPPED_LONEJSON_UPLOAD
 )
 lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_lease_save_ignores_response_limit_for_request_body
+  LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_IGNORES_RESPONSE_LIMIT_FOR_REQUEST_BODY
+)
+lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_get_refreshes_state_view
   LC_HTTPS_CASE_PUBLIC_LEASE_GET_REFRESHES_STATE_VIEW
 )
@@ -261,12 +272,24 @@ lc_add_https_unit_test_case(
   LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_PRESERVES_PREINITIALIZED_JSON_VALUE_CAPTURE
 )
 lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_client_load_clears_mixed_json_value_mapped_destination
+  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_CLEARS_MIXED_JSON_VALUE_MAPPED_DESTINATION
+)
+lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_client_load_clears_reused_mapped_destination
+  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_CLEARS_REUSED_MAPPED_DESTINATION
+)
+lc_add_https_unit_test_case(
   lc_unit_transport_https_public_client_load_fails_on_metadata_allocation
   LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_FAILS_ON_METADATA_ALLOCATION
 )
 lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_load_respects_configured_json_response_limit
   LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_RESPECTS_CONFIGURED_JSON_RESPONSE_LIMIT
+)
+lc_add_https_unit_test_case(
+  lc_unit_transport_https_public_client_load_respects_configured_spooled_response_limit
+  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_RESPECTS_CONFIGURED_SPOOLED_RESPONSE_LIMIT
 )
 lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_load_parse_failure_does_not_refresh_state_view

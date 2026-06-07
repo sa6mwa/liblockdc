@@ -47,6 +47,23 @@ static const lonejson_field example_hello_fields[] = {
 
 LONEJSON_MAP_DEFINE(example_hello_map, example_hello_doc, example_hello_fields);
 
+static lonejson *example_lonejson_runtime(void);
+
+static lonejson *example_runtime_instance;
+static pthread_once_t example_runtime_once = PTHREAD_ONCE_INIT;
+
+static void example_lonejson_runtime_init(void) {
+  lonejson_error error;
+
+  lonejson_error_init(&error);
+  example_runtime_instance = lonejson_new(NULL, &error);
+}
+
+static lonejson *example_lonejson_runtime(void) {
+  (void)pthread_once(&example_runtime_once, example_lonejson_runtime_init);
+  return example_runtime_instance;
+}
+
 static int fail_with_error(pslog_logger *logger, const char *step,
                            lc_error *error) {
   logger->errorf(logger, step, "code=%d http_status=%ld message=%s detail=%s",
@@ -60,6 +77,7 @@ static int fail_with_error(pslog_logger *logger, const char *step,
 static int parse_hello_json(const char *json_text, char *hello_out,
                             size_t hello_out_size) {
   example_hello_doc parsed;
+  lonejson *runtime;
   lonejson_error error;
   lonejson_status status;
   size_t hello_length;
@@ -71,12 +89,16 @@ static int parse_hello_json(const char *json_text, char *hello_out,
   if (json_text == NULL || json_text[0] == '\0') {
     return 1;
   }
+  runtime = example_lonejson_runtime();
+  if (runtime == NULL) {
+    return 1;
+  }
   memset(&parsed, 0, sizeof(parsed));
   memset(&error, 0, sizeof(error));
-  status =
-      lonejson_parse_cstr(&example_hello_map, &parsed, json_text, NULL, &error);
+  status = runtime->parse_cstr(runtime, &example_hello_map, &parsed, json_text,
+                               &error);
   if (status != LONEJSON_STATUS_OK || parsed.hello == NULL) {
-    lonejson_cleanup(&example_hello_map, &parsed);
+    runtime->cleanup(runtime, &example_hello_map, &parsed);
     return 1;
   }
   hello_length = strlen(parsed.hello);
@@ -85,13 +107,14 @@ static int parse_hello_json(const char *json_text, char *hello_out,
   }
   memcpy(hello_out, parsed.hello, hello_length);
   hello_out[hello_length] = '\0';
-  lonejson_cleanup(&example_hello_map, &parsed);
+  runtime->cleanup(runtime, &example_hello_map, &parsed);
   return 0;
 }
 
 static int load_state_counter(lc_lease *state, long *counter_out,
                               lc_error *error) {
   example_counter_doc doc;
+  lonejson *runtime;
   lc_get_res get_res;
   int rc;
 
@@ -103,11 +126,14 @@ static int load_state_counter(lc_lease *state, long *counter_out,
   if (state == NULL) {
     return LC_ERR_INVALID;
   }
+  runtime = example_lonejson_runtime();
+  if (runtime == NULL) {
+    return LC_ERR_INVALID;
+  }
 
   memset(&doc, 0, sizeof(doc));
   memset(&get_res, 0, sizeof(get_res));
-  rc = state->load(state, &example_counter_map, &doc, NULL, NULL, &get_res,
-                   error);
+  rc = state->load(state, &example_counter_map, &doc, NULL, &get_res, error);
   if (rc != LC_OK) {
     if (error != NULL &&
         (error->http_status == 204L || error->http_status == 404L)) {
@@ -122,12 +148,12 @@ static int load_state_counter(lc_lease *state, long *counter_out,
 
   if (doc.counter < (lonejson_int64)LONG_MIN ||
       doc.counter > (lonejson_int64)LONG_MAX) {
-    lonejson_cleanup(&example_counter_map, &doc);
+    runtime->cleanup(runtime, &example_counter_map, &doc);
     lc_get_res_cleanup(&get_res);
     return LC_ERR_PROTOCOL;
   }
   *counter_out = (long)doc.counter;
-  lonejson_cleanup(&example_counter_map, &doc);
+  runtime->cleanup(runtime, &example_counter_map, &doc);
   lc_get_res_cleanup(&get_res);
   return LC_OK;
 }
@@ -241,7 +267,7 @@ static int handle_message(void *context, lc_consumer_message *delivery,
   snprintf(state_json, sizeof(state_json), "{\"counter\":%ld}", counter);
   counter_doc.counter = (lonejson_int64)counter;
   rc = delivery->state->save(delivery->state, &example_counter_map,
-                             &counter_doc, NULL, error);
+                             &counter_doc, error);
   if (rc != LC_OK) {
     return rc;
   }

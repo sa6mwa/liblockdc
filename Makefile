@@ -30,16 +30,17 @@ FUZZ_TIME ?= 30
 	__deps-debug __deps-release __deps-cross \
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
+	__format \
 	__asan __coverage __fuzz __benchmarks \
 	__package __package-checksums __clean-dist \
-	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __release-package-only __clean __world \
+	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __release-matrix __release-package-only __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
 	asan coverage fuzz benchmarks \
 	package package-checksums verify-release-archives clean-dist \
-	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release clean world
+	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release release-matrix clean
 
 help:
 	@printf '%s\n' \
@@ -76,8 +77,8 @@ help:
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
-		'make release            Run the full Linux release matrix and package generation.' \
-		'make world              Run the full clean-slate workflow: clean, builds, tests, e2e, benchmarks, and final release verification; fuzz is included when Clang/libFuzzer is available.' \
+		'make release            Run the clean-slate final release workflow: tests, e2e, benchmarks, package generation, and final release verification; fuzz is included when Clang/libFuzzer is available.' \
+		'make release-matrix     Rebuild, test, package, and verify the release matrix while reusing existing build and dependency caches.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
 
 build: build-debug
@@ -200,6 +201,9 @@ __dev-reset:
 	bash ./scripts/dev-reset.sh
 
 format:
+	$(TIMED) format $(MAKE) __format
+
+__format:
 	rg --files -g '*.c' -g '*.h' | xargs $(CLANG_FORMAT) -i
 
 test-asan:
@@ -283,17 +287,17 @@ __cross-test: __cross-build
 release:
 	$(TIMED) release $(MAKE) __release
 
-__release: __build-release
+__release:
+	bash ./scripts/release.sh
+
+release-matrix:
+	$(TIMED) release-matrix $(MAKE) __release-matrix
+
+__release-matrix: __build-release
 	bash ./scripts/run_linux_release_matrix.sh
 
 __release-package-only: __build-release
 	bash ./scripts/run_linux_package_matrix.sh
-
-world:
-	$(TIMED) world $(MAKE) __world
-
-__world:
-	bash ./scripts/world.sh
 
 clean:
 	$(TIMED) clean $(MAKE) __clean

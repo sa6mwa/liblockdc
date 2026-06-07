@@ -1,6 +1,6 @@
 # liblockdc
 
-`liblockdc` is a C89/C90 client library for `lockd`. It provides a handle-oriented public API for leases, queue deliveries, attachments, management operations, and stream-based JSON and payload I/O. The project ships both static and shared libraries, a local development environment, a cross-architecture release workflow, and dependency-backed unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
+`liblockdc` is a C89/C90 client library for `lockd`. It provides a receiver-function public API for client, lease, queue delivery, attachment, management, and consumer-service handles, plus stream-based JSON and payload I/O. The project ships both static and shared libraries, a local development environment, a cross-architecture release workflow, and dependency-backed unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
 
 ## Supported targets
 
@@ -24,8 +24,11 @@ The library itself is delivered as:
 - HTTP/1.1 and HTTP/2 transport through bundled `libcurl` and `nghttp2`
 - Unix domain socket transport support for local `mem://` deployments
 - stream-oriented state and payload upload/download with `lc_source` and `lc_sink`
-- lease, queue, attachment, and management APIs
-- managed consumer support
+- receiver-function `lc_client`, `lc_lease`, `lc_message`, and `lc_consumer_service` APIs
+- lease, queue, attachment, namespace/index, transaction-coordinator, and resource-manager management APIs
+- mapped JSON state load/save through `lonejson`
+- streamed query-key callbacks and streaming queue subscribe/watch flows
+- managed consumer support with blocking and explicit start/stop/wait service modes
 - integrated SDK logging through `libpslog`
 
 ## Build system
@@ -103,6 +106,9 @@ make benchmarks
 
 All significant Make targets print total elapsed time on completion.
 
+`make format` runs `clang-format` over the C source/header tree and is also
+part of the clean-slate release workflow.
+
 ## Local development environment
 
 The repository includes a local `lockd` environment for integration testing and example execution. The stack includes:
@@ -141,10 +147,15 @@ The project ships one combined archive for each supported target.
 Create the complete release set:
 
 ```bash
-make clean-dist
 make release
-make verify-release-archives
 ```
+
+`make release` is the final clean-slate release workflow. It removes generated
+state, formats the C tree, runs the debug sanitizer, host, cross, e2e,
+benchmark, and optional fuzz layers, then generates and verifies the release
+archive set. Use
+`make release-matrix` when you explicitly want to reuse existing build and
+dependency caches for a faster release matrix/package rerun.
 
 Create only the `x86_64-linux-gnu` package:
 
@@ -179,7 +190,16 @@ Archive layout and contents are regression-tested. The release verification suit
 
 ## Public API model
 
-The public API is intentionally handle-oriented rather than a flat RPC wrapper.
+The public API is intentionally receiver-function based rather than a flat RPC
+wrapper. `lc_client_open()` returns an `lc_client *`; methods then live on the
+returned handle as function pointers such as `client->acquire(...)`,
+`lease->update(...)`, `message->ack(...)`, and `service->run(...)`.
+
+The standalone `lc_*` functions remain available as compatibility wrappers and
+as useful entry points for callers that prefer a flat symbol lookup, but the
+primary public surface and examples use the receiver-function form. New method
+slots are appended to preserve layout stability within the current
+shared-library ABI line.
 
 - `lc_client`
   - root client handle
@@ -199,6 +219,33 @@ Typical flow:
 5. finish with `release()`, `ack()`, or `close()`
 
 This keeps lease identity, transaction identifiers, and related lifecycle state on the handle instead of forcing callers to pass those values through every operation manually.
+
+### JSON and lonejson
+
+`liblockdc` depends on `lonejson 0.31.0` with shared-library ABI `16`.
+`lonejson` is used for:
+
+- typed JSON response parsing for management, attachment, queue, namespace,
+  transaction, and state metadata paths
+- mapped state `load()` and `save()` through caller-provided
+  `LONEJSON_FIELD_*` maps
+- streaming JSON request serialization through lonejson curl upload adapters
+- query-key streaming and queue subscribe multipart/metadata parsing
+- Lua JSON encode/decode helpers through the `lockdc` Lua rock dependency
+
+The client config field `http_json_response_limit_bytes` caps typed JSON
+responses parsed through `lonejson`. Zero uses
+`LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`, currently 100 MiB. The cap applies to
+dynamic strings, JSON value capture, and spool-backed mapped fields on response
+parsing. It does not cap request-side JSON serialization; large mapped saves
+should use lonejson source-backed fields when the source value is naturally
+file-backed or stream-backed.
+
+Mapped `load()` destinations may be reused. The SDK prepares destinations with
+the runtime `reset` path when they already own lonejson-managed storage and
+with `init` on first use, while preserving preconfigured `lonejson_json_value`
+capture sinks. Callers still own final cleanup of lonejson-owned mapped fields
+with a compatible lonejson runtime after the loaded value is no longer needed.
 
 ## Examples
 

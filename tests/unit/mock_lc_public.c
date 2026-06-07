@@ -132,27 +132,21 @@ static int mock_lease_get(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
 }
 
 static int mock_lease_load(lc_lease *self, const lonejson_map *map, void *dst,
-                           const lonejson_parse_options *parse_options,
                            const lc_get_opts *opts, lc_get_res *out,
                            lc_error *error) {
   lc_public_mock_lease *mock;
 
   mock = (lc_public_mock_lease *)self;
-  lc_public_mock_record(&mock->load_call, self, map, dst, parse_options, opts,
-                        out);
-  mock->load_call.arg6 = error;
+  lc_public_mock_record(&mock->load_call, self, map, dst, opts, out, error);
   return mock->rc;
 }
 
 static int mock_lease_save(lc_lease *self, const lonejson_map *map,
-                           const void *src,
-                           const lonejson_write_options *write_options,
-                           lc_error *error) {
+                           const void *src, lc_error *error) {
   lc_public_mock_lease *mock;
 
   mock = (lc_public_mock_lease *)self;
-  lc_public_mock_record(&mock->save_call, self, map, src, write_options, error,
-                        NULL);
+  lc_public_mock_record(&mock->save_call, self, map, src, error, NULL, NULL);
   return mock->rc;
 }
 
@@ -396,15 +390,13 @@ static int mock_client_get(lc_client *self, const char *key,
 
 static int mock_client_load(lc_client *self, const char *key,
                             const lonejson_map *map, void *dst,
-                            const lonejson_parse_options *parse_options,
                             const lc_get_opts *opts, lc_get_res *out,
                             lc_error *error) {
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->load_call, self, key, map, dst, parse_options,
-                        opts);
-  mock->load_call.arg6 = out;
+  lc_public_mock_record(&mock->load_call, self, key, map, dst, opts, out);
+  mock->load_call.arg6 = error;
   return mock->rc;
 }
 

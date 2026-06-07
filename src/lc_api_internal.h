@@ -191,7 +191,6 @@ int lc_client_get_method(lc_client *self, const char *key,
                          lc_error *error);
 int lc_client_load_method(lc_client *self, const char *key,
                           const lonejson_map *map, void *dst,
-                          const lonejson_parse_options *parse_options,
                           const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error);
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
@@ -315,13 +314,10 @@ int lc_lease_describe_method(lc_lease *self, lc_error *error);
 int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
                         lc_get_res *out, lc_error *error);
 int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
-                         const lonejson_parse_options *parse_options,
                          const lc_get_opts *opts, lc_get_res *out,
                          lc_error *error);
 int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
-                         const void *src,
-                         const lonejson_write_options *write_options,
-                         lc_error *error);
+                         const void *src, lc_error *error);
 int lc_lease_update_method(lc_lease *self, lc_source *src,
                            const lc_update_opts *opts, lc_error *error);
 int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
@@ -367,12 +363,25 @@ int lc_lonejson_error_from_status(lc_error *error, lonejson_status status,
                                   const char *message);
 int lc_engine_file_write_callback(void *context, const void *bytes,
                                   size_t count, lc_engine_error *error);
-int lc_lonejson_parse_file(FILE *fp, const lonejson_map *map, void *dst,
-                           const lonejson_parse_options *options,
-                           lc_error *error, const char *message);
-int lc_lonejson_serialize_file(FILE *fp, const lonejson_map *map,
-                               const void *src,
-                               const lonejson_write_options *options,
+size_t lc_lonejson_runtime_limit(size_t configured_limit);
+void lc_lonejson_config_init(lonejson_config *config, size_t limit);
+lonejson *lc_engine_lonejson_runtime(lc_engine_client *client);
+lonejson *lc_thread_lonejson_runtime(void);
+void lc_lonejson_cleanup_value(lonejson *runtime, const lonejson_map *map,
+                               void *value);
+void lc_engine_lonejson_cleanup(lc_engine_client *client,
+                                const lonejson_map *map, void *value);
+void lc_lonejson_prepare_parse_destination(lonejson *runtime,
+                                           const lonejson_map *map,
+                                           void *value);
+lonejson_status lc_lonejson_parse_cstr_value(lonejson *runtime,
+                                             const lonejson_map *map, void *dst,
+                                             const char *json,
+                                             lonejson_error *error);
+int lc_lonejson_parse_file(lonejson *runtime, FILE *fp, const lonejson_map *map,
+                           void *dst, lc_error *error, const char *message);
+int lc_lonejson_serialize_file(lonejson *runtime, FILE *fp,
+                               const lonejson_map *map, const void *src,
                                lc_error *error, const char *message);
 void lc_message_close_method(lc_message *self);
 

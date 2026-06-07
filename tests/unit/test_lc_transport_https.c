@@ -46,11 +46,68 @@ static const lonejson_field test_json_value_fields[] = {
 LONEJSON_MAP_DEFINE(test_json_value_map, test_json_value_doc,
                     test_json_value_fields);
 
+typedef struct test_json_value_with_label_doc {
+  lonejson_json_value payload;
+  char label[64];
+} test_json_value_with_label_doc;
+
+static const lonejson_field test_json_value_with_label_fields[] = {
+    LONEJSON_FIELD_JSON_VALUE_REQ(test_json_value_with_label_doc, payload,
+                                  "payload"),
+    LONEJSON_FIELD_STRING_FIXED(test_json_value_with_label_doc, label, "label",
+                                LONEJSON_OVERFLOW_FAIL)};
+
+LONEJSON_MAP_DEFINE(test_json_value_with_label_map,
+                    test_json_value_with_label_doc,
+                    test_json_value_with_label_fields);
+
+typedef struct test_large_payload_doc {
+  char payload[1024];
+} test_large_payload_doc;
+
+static const lonejson_field test_large_payload_fields[] = {
+    LONEJSON_FIELD_STRING_FIXED(test_large_payload_doc, payload, "payload",
+                                LONEJSON_OVERFLOW_FAIL)};
+
+LONEJSON_MAP_DEFINE(test_large_payload_map, test_large_payload_doc,
+                    test_large_payload_fields);
+
+typedef struct test_spooled_payload_doc {
+  lonejson_spooled payload;
+} test_spooled_payload_doc;
+
+static const lonejson_field test_spooled_payload_fields[] = {
+    LONEJSON_FIELD_STRING_STREAM_REQ(test_spooled_payload_doc, payload,
+                                     "payload")};
+
+LONEJSON_MAP_DEFINE(test_spooled_payload_map, test_spooled_payload_doc,
+                    test_spooled_payload_fields);
+
+typedef struct test_optional_label_doc {
+  lonejson_int64 value;
+  char label[64];
+} test_optional_label_doc;
+
+static const lonejson_field test_optional_label_fields[] = {
+    LONEJSON_FIELD_I64(test_optional_label_doc, value, "value"),
+    LONEJSON_FIELD_STRING_FIXED(test_optional_label_doc, label, "label",
+                                LONEJSON_OVERFLOW_FAIL)};
+
+LONEJSON_MAP_DEFINE(test_optional_label_map, test_optional_label_doc,
+                    test_optional_label_fields);
+
 typedef struct test_request_capture {
   char *data;
   size_t length;
   size_t capacity;
 } test_request_capture;
+
+static void test_lonejson_cleanup_value(const lonejson_map *map, void *value) {
+  lonejson *runtime;
+
+  runtime = lc_thread_lonejson_runtime();
+  runtime->cleanup(runtime, map, value);
+}
 
 typedef struct https_expectation {
   const char *method;
@@ -2040,6 +2097,67 @@ static void test_state_transport_paths_use_mtls(void **state) {
 
   lc_engine_acquire_response_cleanup(&acquire_res);
   lc_engine_get_response_cleanup(&get_res);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
+test_state_transport_parses_buffered_typed_json_response(void **state) {
+  static const char *response_headers[] = {"X-Correlation-Id: corr-describe",
+                                           "Content-Type: application/json"};
+  static const https_expectation expectations[] = {
+      {"GET", "/v1/describe?key=resource%2F1&namespace=transport-ns", NULL, 0U,
+       NULL, 0U, 1, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]),
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"expires_at_unix\":1000,\"version\":4,"
+       "\"state_etag\":\"etag-1\",\"updated_at_unix\":1001,"
+       "\"metadata\":{\"query_hidden\":true}}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_error error;
+  lc_engine_describe_request req;
+  lc_engine_describe_response res;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  client = NULL;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  req.key = "resource/1";
+  rc = lc_engine_client_describe(client, &req, &res, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+  assert_string_equal(res.namespace_name, "transport-ns");
+  assert_string_equal(res.key, "resource/1");
+  assert_string_equal(res.owner, "owner-a");
+  assert_string_equal(res.lease_id, "lease-1");
+  assert_int_equal(res.expires_at_unix, 1000L);
+  assert_int_equal(res.version, 4L);
+  assert_string_equal(res.state_etag, "etag-1");
+  assert_int_equal(res.updated_at_unix, 1001L);
+  assert_true(res.has_query_hidden);
+  assert_true(res.query_hidden);
+  assert_string_equal(res.correlation_id, "corr-describe");
+
+  lc_engine_describe_response_cleanup(&res);
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
 }
@@ -5985,12 +6103,9 @@ static void test_public_lease_save_uses_mapped_lonejson_upload(void **state) {
       "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
   static const char *acquire_response_headers[] = {
       "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
-  static const char *update_headers[] = {"Content-Type: application/json",
-                                         "X-Fencing-Token: 11",
-                                         "X-Lease-ID: lease-1",
-                                         "X-Txn-ID: txn-acquire",
-                                         "X-If-Version: 4",
-                                         "Content-Length: 11"};
+  static const char *update_headers[] = {
+      "Content-Type: application/json", "X-Fencing-Token: 11",
+      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
   static const char *update_response_headers[] = {
       "X-Correlation-Id: corr-update", "Content-Type: application/json"};
   static const char *update_body[] = {"{\"value\":2}"};
@@ -6043,12 +6158,91 @@ static void test_public_lease_save_uses_mapped_lonejson_upload(void **state) {
   assert_non_null(lease);
 
   value_doc.value = 2;
-  rc = lc_lease_save(lease, &test_value_map, &value_doc, NULL, &error);
+  rc = lc_lease_save(lease, &test_value_map, &value_doc, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 5L);
   assert_string_equal(lease->state_etag, "etag-2");
 
-  lonejson_cleanup(&test_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_value_map, &value_doc);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
+test_public_lease_save_ignores_response_limit_for_request_body(void **state) {
+  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *acquire_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"key\":\"resource/1\"",
+      "\"ttl_seconds\":30", "\"owner\":\"owner-a\""};
+  static const char *acquire_response_headers[] = {
+      "X-Correlation-Id: corr-acquire", "Content-Type: application/json"};
+  static const char *update_headers[] = {
+      "Content-Type: application/json", "X-Fencing-Token: 11",
+      "X-Lease-ID: lease-1", "X-Txn-ID: txn-acquire", "X-If-Version: 4"};
+  static const char *update_response_headers[] = {
+      "X-Correlation-Id: corr-update", "Content-Type: application/json"};
+  const char *update_body[1];
+  https_expectation expectations[] = {
+      {"POST", "/v1/acquire", json_header, 1U, acquire_body, 4U, 0, 200,
+       acquire_response_headers, 2U,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/1\","
+       "\"owner\":\"owner-a\",\"lease_id\":\"lease-1\","
+       "\"txn_id\":\"txn-acquire\",\"expires_at_unix\":1000,"
+       "\"version\":4,\"state_etag\":\"etag-1\",\"fencing_token\":11}",
+       "liblockdc test client"},
+      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns",
+       update_headers, sizeof(update_headers) / sizeof(update_headers[0]),
+       update_body, 1U, 0, 200, update_response_headers, 2U,
+       "{\"new_version\":5,\"new_state_etag\":\"etag-2\","
+       "\"bytes\":715}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  test_large_payload_doc value_doc;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&value_doc, 0, sizeof(value_doc));
+  memset(value_doc.payload, 'x', 700U);
+  value_doc.payload[700] = '\0';
+  update_body[0] = value_doc.payload;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&acquire_req, 0, sizeof(acquire_req));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  config.http_json_response_limit_bytes = 512U;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = "resource/1";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  rc = lc_lease_save(lease, &test_large_payload_map, &value_doc, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 5L);
+  assert_string_equal(lease->state_etag, "etag-2");
+
   lc_lease_close(lease);
   lc_client_close(client);
   https_testserver_stop(&server);
@@ -6215,8 +6409,8 @@ test_public_lease_load_respects_configured_json_response_limit(void **state) {
 
   ((lc_client_handle *)client)->http_json_response_limit_bytes = 1U;
   get_opts.public_read = 1;
-  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
-                     &get_res, &error);
+  rc = lc_lease_load(lease, &test_value_map, &value_doc, &get_opts, &get_res,
+                     &error);
   assert_int_equal(rc, LC_ERR_PROTOCOL);
   assert_int_equal(error.code, LC_ERR_PROTOCOL);
   assert_string_equal(error.message,
@@ -6226,7 +6420,7 @@ test_public_lease_load_respects_configured_json_response_limit(void **state) {
   assert_int_equal(((lc_lease_handle *)lease)->fencing_token, 7L);
   assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
 
-  lonejson_cleanup(&test_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_value_map, &value_doc);
   lc_get_res_cleanup(&get_res);
   lc_lease_close(lease);
   lc_client_close(client);
@@ -6234,6 +6428,65 @@ test_public_lease_load_respects_configured_json_response_limit(void **state) {
   assert_server_ok(&server);
   lc_error_cleanup(&error);
   https_tls_material_cleanup(&material);
+}
+
+static void test_public_client_load_respects_configured_spooled_response_limit(
+    void **state) {
+  const size_t payload_len = (size_t)LONEJSON_SPOOL_MAX_BYTES + 1024U;
+  static const char *get_headers[] = {
+      "X-Correlation-Id: corr-get", "Content-Type: application/json",
+      "ETag: etag-1", "X-Key-Version: 4", "X-Fencing-Token: 11"};
+  https_expectation expectations[] = {
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, get_headers, 5U, NULL, "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  test_spooled_payload_doc value_doc;
+  char *response_body;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  response_body =
+      make_repeat_json_body("{\"payload\":\"", "\"}", payload_len, 'x');
+  assert_non_null(response_body);
+  expectations[0].response_body = response_body;
+  memset(&config, 0, sizeof(config));
+  memset(&get_opts, 0, sizeof(get_opts));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&value_doc, 0, sizeof(value_doc));
+  memset(&error, 0, sizeof(error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  config.http_json_response_limit_bytes = payload_len + 4096U;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  get_opts.public_read = 1;
+  rc = lc_load(client, "resource/1", &test_spooled_payload_map, &value_doc,
+               &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lonejson_spooled_size(&value_doc.payload), payload_len);
+  assert_true(lonejson_spooled_spilled(&value_doc.payload));
+
+  test_lonejson_cleanup_value(&test_spooled_payload_map, &value_doc);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+  free(response_body);
 }
 
 static void test_public_client_load_preserves_preinitialized_json_value_capture(
@@ -6251,7 +6504,7 @@ static void test_public_client_load_preserves_preinitialized_json_value_capture(
   lc_client *client;
   lc_get_opts get_opts;
   lc_get_res get_res;
-  lonejson_parse_options parse_options;
+  lonejson *runtime;
   test_json_value_doc value_doc;
   test_request_capture capture;
   lonejson_error lj_error;
@@ -6260,6 +6513,7 @@ static void test_public_client_load_preserves_preinitialized_json_value_capture(
 
   (void)state;
   client = NULL;
+  runtime = NULL;
   memset(&value_doc, 0, sizeof(value_doc));
   memset(&capture, 0, sizeof(capture));
   memset(&lj_error, 0, sizeof(lj_error));
@@ -6277,25 +6531,177 @@ static void test_public_client_load_preserves_preinitialized_json_value_capture(
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
 
-  lonejson_init(&test_json_value_map, &value_doc);
-  parse_options = lonejson_default_parse_options();
-  parse_options.clear_destination = 0;
-  rc = lonejson_json_value_enable_parse_capture(&value_doc.payload, &lj_error);
+  runtime = lc_thread_lonejson_runtime();
+  runtime->init(runtime, &test_json_value_map, &value_doc);
+  rc = value_doc.payload.methods->enable_parse_capture(&value_doc.payload,
+                                                       &lj_error);
   assert_int_equal(rc, LONEJSON_STATUS_OK);
 
   get_opts.public_read = 1;
   rc = lc_load(client, "resource/1", &test_json_value_map, &value_doc,
-               &parse_options, &get_opts, &get_res, &error);
+               &get_opts, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
-  rc = lonejson_json_value_write_to_sink(
+  rc = value_doc.payload.methods->write_to_sink(
       &value_doc.payload, test_lonejson_capture_sink, &capture, &lj_error);
   assert_int_equal(rc, LONEJSON_STATUS_OK);
   assert_non_null(capture.data);
   assert_string_equal(capture.data, "{\"nested\":true}");
 
   buffer_cleanup(&capture);
-  lonejson_cleanup(&test_json_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_json_value_map, &value_doc);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_public_client_load_clears_mixed_json_value_mapped_destination(
+    void **state) {
+  static const char *first_headers[] = {
+      "X-Correlation-Id: corr-get-first", "Content-Type: application/json",
+      "ETag: etag-1", "X-Key-Version: 4", "X-Fencing-Token: 11"};
+  static const char *second_headers[] = {
+      "X-Correlation-Id: corr-get-second", "Content-Type: application/json",
+      "ETag: etag-2", "X-Key-Version: 5", "X-Fencing-Token: 12"};
+  static const https_expectation expectations[] = {
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, first_headers, 5U,
+       "{\"payload\":{\"nested\":true},\"label\":\"first\"}",
+       "liblockdc test client"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, second_headers, 5U,
+       "{\"payload\":{\"nested\":false}}", "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lonejson *runtime;
+  test_json_value_with_label_doc value_doc;
+  test_request_capture capture;
+  lonejson_error lj_error;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  runtime = NULL;
+  memset(&value_doc, 0, sizeof(value_doc));
+  memset(&capture, 0, sizeof(capture));
+  memset(&lj_error, 0, sizeof(lj_error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  memset(&get_opts, 0, sizeof(get_opts));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&error, 0, sizeof(error));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  runtime = lc_thread_lonejson_runtime();
+  runtime->init(runtime, &test_json_value_with_label_map, &value_doc);
+  rc = value_doc.payload.methods->enable_parse_capture(&value_doc.payload,
+                                                       &lj_error);
+  assert_int_equal(rc, LONEJSON_STATUS_OK);
+
+  get_opts.public_read = 1;
+  rc = lc_load(client, "resource/1", &test_json_value_with_label_map,
+               &value_doc, &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(value_doc.label, "first");
+  rc = value_doc.payload.methods->write_to_sink(
+      &value_doc.payload, test_lonejson_capture_sink, &capture, &lj_error);
+  assert_int_equal(rc, LONEJSON_STATUS_OK);
+  assert_non_null(capture.data);
+  assert_string_equal(capture.data, "{\"nested\":true}");
+  buffer_cleanup(&capture);
+  lc_get_res_cleanup(&get_res);
+
+  rc = lc_load(client, "resource/1", &test_json_value_with_label_map,
+               &value_doc, &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(value_doc.label, "");
+  rc = value_doc.payload.methods->write_to_sink(
+      &value_doc.payload, test_lonejson_capture_sink, &capture, &lj_error);
+  assert_int_equal(rc, LONEJSON_STATUS_OK);
+  assert_non_null(capture.data);
+  assert_string_equal(capture.data, "{\"nested\":false}");
+
+  buffer_cleanup(&capture);
+  test_lonejson_cleanup_value(&test_json_value_with_label_map, &value_doc);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
+test_public_client_load_clears_reused_mapped_destination(void **state) {
+  static const char *first_headers[] = {
+      "X-Correlation-Id: corr-get-first", "Content-Type: application/json",
+      "ETag: etag-1", "X-Key-Version: 4", "X-Fencing-Token: 11"};
+  static const char *second_headers[] = {
+      "X-Correlation-Id: corr-get-second", "Content-Type: application/json",
+      "ETag: etag-2", "X-Key-Version: 5", "X-Fencing-Token: 12"};
+  static const https_expectation expectations[] = {
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, first_headers, 5U,
+       "{\"value\":1,\"label\":\"first\"}", "liblockdc test client"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, second_headers, 5U, "{\"value\":2}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  test_optional_label_doc value_doc;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&config, 0, sizeof(config));
+  memset(&get_opts, 0, sizeof(get_opts));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&value_doc, 0, sizeof(value_doc));
+  memset(&error, 0, sizeof(error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  get_opts.public_read = 1;
+  rc = lc_load(client, "resource/1", &test_optional_label_map, &value_doc,
+               &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(value_doc.value, 1L);
+  assert_string_equal(value_doc.label, "first");
+  lc_get_res_cleanup(&get_res);
+
+  rc = lc_load(client, "resource/1", &test_optional_label_map, &value_doc,
+               &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(value_doc.value, 2L);
+  assert_string_equal(value_doc.label, "");
+
   lc_get_res_cleanup(&get_res);
   lc_client_close(client);
   https_testserver_stop(&server);
@@ -6342,8 +6748,8 @@ static void test_public_client_load_fails_on_metadata_allocation(void **state) {
 
   get_opts.public_read = 1;
   g_fail_lc_strdup_local_on_call = 1;
-  rc = lc_load(client, "resource/1", &test_value_map, &value_doc, NULL,
-               &get_opts, &get_res, &error);
+  rc = lc_load(client, "resource/1", &test_value_map, &value_doc, &get_opts,
+               &get_res, &error);
   assert_int_equal(rc, LC_ERR_NOMEM);
   assert_int_equal(error.code, LC_ERR_NOMEM);
   assert_string_equal(error.message, "failed to allocate mapped load metadata");
@@ -6353,7 +6759,7 @@ static void test_public_client_load_fails_on_metadata_allocation(void **state) {
   assert_int_equal(get_res.version, 0L);
   assert_int_equal(get_res.fencing_token, 0L);
 
-  lonejson_cleanup(&test_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_value_map, &value_doc);
   lc_get_res_cleanup(&get_res);
   lc_client_close(client);
   https_testserver_stop(&server);
@@ -6434,8 +6840,8 @@ test_public_lease_load_parse_failure_does_not_refresh_state_view(void **state) {
   assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
 
   get_opts.public_read = 1;
-  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
-                     &get_res, &error);
+  rc = lc_lease_load(lease, &test_value_map, &value_doc, &get_opts, &get_res,
+                     &error);
   assert_int_equal(rc, LC_ERR_PROTOCOL);
   assert_int_equal(error.code, LC_ERR_PROTOCOL);
   assert_non_null(error.message);
@@ -6445,7 +6851,7 @@ test_public_lease_load_parse_failure_does_not_refresh_state_view(void **state) {
   assert_int_equal(((lc_lease_handle *)lease)->fencing_token, 7L);
   assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
 
-  lonejson_cleanup(&test_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_value_map, &value_doc);
   lc_get_res_cleanup(&get_res);
   lc_lease_close(lease);
   lc_client_close(client);
@@ -6525,8 +6931,8 @@ static void test_public_lease_load_fails_on_metadata_allocation(void **state) {
 
   get_opts.public_read = 1;
   g_fail_lc_strdup_local_on_call = 1;
-  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
-                     &get_res, &error);
+  rc = lc_lease_load(lease, &test_value_map, &value_doc, &get_opts, &get_res,
+                     &error);
   assert_int_equal(rc, LC_ERR_NOMEM);
   assert_int_equal(error.code, LC_ERR_NOMEM);
   assert_string_equal(error.message, "failed to allocate mapped load metadata");
@@ -6537,7 +6943,7 @@ static void test_public_lease_load_fails_on_metadata_allocation(void **state) {
   assert_int_equal(((lc_lease_handle *)lease)->fencing_token, 7L);
   assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
 
-  lonejson_cleanup(&test_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_value_map, &value_doc);
   lc_get_res_cleanup(&get_res);
   lc_lease_close(lease);
   lc_client_close(client);
@@ -6613,7 +7019,7 @@ test_public_lease_save_fails_on_state_etag_allocation(void **state) {
 
   value_doc.value = 2;
   g_fail_lc_client_strdup_on_call = 1;
-  rc = lc_lease_save(lease, &test_value_map, &value_doc, NULL, &error);
+  rc = lc_lease_save(lease, &test_value_map, &value_doc, &error);
   assert_int_equal(rc, LC_ERR_NOMEM);
   assert_int_equal(error.code, LC_ERR_NOMEM);
   assert_string_equal(error.message,
@@ -6621,7 +7027,7 @@ test_public_lease_save_fails_on_state_etag_allocation(void **state) {
   assert_int_equal(lease->version, 4L);
   assert_string_equal(lease->state_etag, "etag-1");
 
-  lonejson_cleanup(&test_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_value_map, &value_doc);
   lc_lease_close(lease);
   lc_client_close(client);
   https_testserver_stop(&server);
@@ -6692,8 +7098,8 @@ test_public_lease_load_empty_does_not_refresh_state_view(void **state) {
   assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
 
   get_opts.public_read = 1;
-  rc = lc_lease_load(lease, &test_value_map, &value_doc, NULL, &get_opts,
-                     &get_res, &error);
+  rc = lc_lease_load(lease, &test_value_map, &value_doc, &get_opts, &get_res,
+                     &error);
   assert_int_equal(rc, LC_OK);
   assert_true(get_res.no_content);
   assert_null(get_res.etag);
@@ -6704,7 +7110,7 @@ test_public_lease_load_empty_does_not_refresh_state_view(void **state) {
   assert_int_equal(((lc_lease_handle *)lease)->fencing_token, 7L);
   assert_string_equal(((lc_lease_handle *)lease)->state_etag, "etag-prev");
 
-  lonejson_cleanup(&test_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_value_map, &value_doc);
   lc_get_res_cleanup(&get_res);
   lc_lease_close(lease);
   lc_client_close(client);
@@ -6744,7 +7150,7 @@ static void test_public_lease_load_preserves_preinitialized_json_value_capture(
   lc_lease *lease;
   lc_get_opts get_opts;
   lc_get_res get_res;
-  lonejson_parse_options parse_options;
+  lonejson *runtime;
   test_json_value_doc value_doc;
   test_request_capture capture;
   lonejson_error lj_error;
@@ -6754,6 +7160,7 @@ static void test_public_lease_load_preserves_preinitialized_json_value_capture(
   (void)state;
   client = NULL;
   lease = NULL;
+  runtime = NULL;
   memset(&value_doc, 0, sizeof(value_doc));
   memset(&capture, 0, sizeof(capture));
   memset(&lj_error, 0, sizeof(lj_error));
@@ -6779,25 +7186,25 @@ static void test_public_lease_load_preserves_preinitialized_json_value_capture(
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
 
-  lonejson_init(&test_json_value_map, &value_doc);
-  parse_options = lonejson_default_parse_options();
-  parse_options.clear_destination = 0;
-  rc = lonejson_json_value_enable_parse_capture(&value_doc.payload, &lj_error);
+  runtime = lc_thread_lonejson_runtime();
+  runtime->init(runtime, &test_json_value_map, &value_doc);
+  rc = value_doc.payload.methods->enable_parse_capture(&value_doc.payload,
+                                                       &lj_error);
   assert_int_equal(rc, LONEJSON_STATUS_OK);
 
   get_opts.public_read = 1;
-  rc = lc_lease_load(lease, &test_json_value_map, &value_doc, &parse_options,
-                     &get_opts, &get_res, &error);
+  rc = lc_lease_load(lease, &test_json_value_map, &value_doc, &get_opts,
+                     &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
-  rc = lonejson_json_value_write_to_sink(
+  rc = value_doc.payload.methods->write_to_sink(
       &value_doc.payload, test_lonejson_capture_sink, &capture, &lj_error);
   assert_int_equal(rc, LONEJSON_STATUS_OK);
   assert_non_null(capture.data);
   assert_string_equal(capture.data, "{\"nested\":true}");
 
   buffer_cleanup(&capture);
-  lonejson_cleanup(&test_json_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_json_value_map, &value_doc);
   lc_get_res_cleanup(&get_res);
   lc_lease_close(lease);
   lc_client_close(client);
@@ -6851,14 +7258,14 @@ test_public_client_load_parse_failure_does_not_log_success(void **state) {
   assert_int_equal(rc, LC_OK);
 
   get_opts.public_read = 1;
-  rc = lc_load(client, "resource/1", &test_value_map, &value_doc, NULL,
-               &get_opts, &get_res, &error);
+  rc = lc_load(client, "resource/1", &test_value_map, &value_doc, &get_opts,
+               &get_res, &error);
   assert_int_equal(rc, LC_ERR_PROTOCOL);
   assert_int_equal(error.code, LC_ERR_PROTOCOL);
   assert_non_null(error.message);
   assert_non_null(strstr(error.message, "failed to parse mapped state"));
 
-  lonejson_cleanup(&test_value_map, &value_doc);
+  test_lonejson_cleanup_value(&test_value_map, &value_doc);
   lc_get_res_cleanup(&get_res);
   lc_client_close(client);
   logger->destroy(logger);
@@ -6958,6 +7365,9 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_STATE_PATHS_USE_MTLS)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_state_transport_paths_use_mtls)
+#elif defined(LC_HTTPS_CASE_STATE_PARSES_BUFFERED_TYPED_JSON_RESPONSE)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_state_transport_parses_buffered_typed_json_response)
 #elif defined(LC_HTTPS_CASE_STATE_ACCEPTS_NUMERIC_HEADERS_WITH_TRAILING_OWS)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(                                                            \
@@ -7081,6 +7491,11 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_USES_MAPPED_LONEJSON_UPLOAD)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_IGNORES_RESPONSE_LIMIT_FOR_REQUEST_BODY)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(                                                            \
+      test_public_lease_save_ignores_response_limit_for_request_body)
 #elif defined(LC_HTTPS_CASE_PUBLIC_LEASE_GET_REFRESHES_STATE_VIEW)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_lease_get_refreshes_state_view)
@@ -7089,6 +7504,14 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(                                                            \
       test_public_client_load_preserves_preinitialized_json_value_capture)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_CLEARS_MIXED_JSON_VALUE_MAPPED_DESTINATION)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(                                                            \
+      test_public_client_load_clears_mixed_json_value_mapped_destination)
+#elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_CLEARS_REUSED_MAPPED_DESTINATION)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_client_load_clears_reused_mapped_destination)
 #elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_FAILS_ON_METADATA_ALLOCATION)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_client_load_fails_on_metadata_allocation)
@@ -7097,6 +7520,11 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(                                                            \
       test_public_lease_load_respects_configured_json_response_limit)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_RESPECTS_CONFIGURED_SPOOLED_RESPONSE_LIMIT)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(                                                            \
+      test_public_client_load_respects_configured_spooled_response_limit)
 #elif defined(                                                                 \
     LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_PARSE_FAILURE_DOES_NOT_REFRESH_STATE_VIEW)
 #define LC_HTTPS_UNIT_TESTS                                                    \
@@ -7192,6 +7620,8 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_public_client_open_accepts_chunked_callback_bundle_source),        \
       cmocka_unit_test(test_state_transport_paths_use_mtls),                      \
       cmocka_unit_test(                                                           \
+          test_state_transport_parses_buffered_typed_json_response),              \
+      cmocka_unit_test(                                                           \
           test_state_transport_accepts_numeric_headers_with_trailing_ows),        \
       cmocka_unit_test(                                                           \
           test_state_transport_rejects_invalid_numeric_headers_as_protocol),      \
@@ -7243,12 +7673,20 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_enqueue_from_retries_node_passive_and_cleans_parser_state),        \
       cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source),    \
       cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),       \
+      cmocka_unit_test(                                                           \
+          test_public_lease_save_ignores_response_limit_for_request_body),        \
       cmocka_unit_test(test_public_lease_get_refreshes_state_view),               \
       cmocka_unit_test(                                                           \
           test_public_client_load_preserves_preinitialized_json_value_capture),   \
+      cmocka_unit_test(                                                           \
+          test_public_client_load_clears_mixed_json_value_mapped_destination),    \
+      cmocka_unit_test(                                                           \
+          test_public_client_load_clears_reused_mapped_destination),              \
       cmocka_unit_test(test_public_client_load_fails_on_metadata_allocation),     \
       cmocka_unit_test(                                                           \
           test_public_lease_load_respects_configured_json_response_limit),        \
+      cmocka_unit_test(                                                           \
+          test_public_client_load_respects_configured_spooled_response_limit),    \
       cmocka_unit_test(                                                           \
           test_public_lease_load_parse_failure_does_not_refresh_state_view),      \
       cmocka_unit_test(                                                           \

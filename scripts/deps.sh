@@ -8,6 +8,7 @@ preset=${1:-deps-x86_64-linux-gnu}
 unset LD_LIBRARY_PATH
 dry_run=${LOCKDC_DEPS_DRY_RUN:-0}
 download_timeout=${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT:-300}
+lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-16}
 
 resolve_host_debug_preset() {
   local compiler triple
@@ -400,7 +401,7 @@ case "$preset" in
     zlib_shared_soname_path="$deps_root/zlib/install/lib/libz.1.${shared_ext}"
     zlib_shared_versioned_path="$deps_root/zlib/install/lib/libz.$zlib_version.${shared_ext}"
     pslog_shared_path="$deps_root/pslog/install/lib/libpslog.0.${shared_ext}"
-    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.4.${shared_ext}"
+    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.${lonejson_abi_version}.${shared_ext}"
     ;;
   *)
     shared_ext=so
@@ -411,7 +412,7 @@ case "$preset" in
     zlib_shared_soname_path="$deps_root/zlib/install/lib/libz.so.1"
     zlib_shared_versioned_path="$deps_root/zlib/install/lib/libz.so.$zlib_version"
     pslog_shared_path="$deps_root/pslog/install/lib/libpslog.so.0"
-    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.so.4"
+    lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.so.${lonejson_abi_version}"
     ;;
 esac
 curl_shared_path="$deps_root/curl/install/lib/libcurl.${shared_ext}"

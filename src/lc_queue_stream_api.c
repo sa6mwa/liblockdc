@@ -225,6 +225,7 @@ lc_engine_subscribe_multipart_options(lonejson_multipart_options *options) {
 }
 
 typedef struct lc_engine_watch_state {
+  lc_engine_client *client;
   lc_engine_queue_watch_handler handler;
   void *handler_context;
   lc_engine_error *error;
@@ -238,6 +239,7 @@ typedef struct lc_engine_watch_state {
 } lc_engine_watch_state;
 
 typedef struct lc_engine_subscribe_state {
+  lc_engine_client *client;
   lc_engine_queue_stream_handler handler;
   void *handler_context;
   lc_engine_error *error;
@@ -470,6 +472,7 @@ static lonejson_status
 lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
                                void *dst, lonejson_error *lj_error) {
   lc_engine_queue_watch_event event;
+  lonejson *runtime;
   lc_engine_watch_state *state;
   lc_engine_watch_event_json *parsed;
   int rc;
@@ -481,6 +484,7 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
   if (state == NULL || parsed == NULL) {
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
+  runtime = lc_engine_lonejson_runtime(state->client);
 
   memset(&event, 0, sizeof(event));
   event.namespace_name = lc_engine_strdup_local(parsed->namespace_name);
@@ -491,7 +495,7 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
       (parsed->queue != NULL && event.queue == NULL) ||
       (parsed->head_message_id != NULL && event.head_message_id == NULL)) {
     lc_engine_queue_watch_event_cleanup(&event);
-    lonejson_reset(&lc_engine_watch_event_map, parsed);
+    runtime->reset(runtime, &lc_engine_watch_event_map, parsed);
     lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                "failed to copy queue watch event");
     return LONEJSON_STATUS_CALLBACK_FAILED;
@@ -501,14 +505,14 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
       &event.changed_at_unix, state->error);
   if (rc != LC_ENGINE_OK) {
     lc_engine_queue_watch_event_cleanup(&event);
-    lonejson_reset(&lc_engine_watch_event_map, parsed);
+    runtime->reset(runtime, &lc_engine_watch_event_map, parsed);
     return LONEJSON_STATUS_CALLBACK_FAILED;
   }
   if (parsed->correlation_id != NULL) {
     event.correlation_id = lc_engine_strdup_local(parsed->correlation_id);
     if (event.correlation_id == NULL) {
       lc_engine_queue_watch_event_cleanup(&event);
-      lonejson_reset(&lc_engine_watch_event_map, parsed);
+      runtime->reset(runtime, &lc_engine_watch_event_map, parsed);
       lc_engine_set_client_error(
           state->error, LC_ENGINE_ERROR_NO_MEMORY,
           "failed to allocate queue watch correlation_id");
@@ -518,7 +522,7 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
     event.correlation_id = lc_engine_strdup_local(state->correlation_id);
     if (event.correlation_id == NULL) {
       lc_engine_queue_watch_event_cleanup(&event);
-      lonejson_reset(&lc_engine_watch_event_map, parsed);
+      runtime->reset(runtime, &lc_engine_watch_event_map, parsed);
       lc_engine_set_client_error(
           state->error, LC_ENGINE_ERROR_NO_MEMORY,
           "failed to allocate queue watch correlation_id");
@@ -528,7 +532,7 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
 
   if (!state->handler(state->handler_context, &event, state->error)) {
     lc_engine_queue_watch_event_cleanup(&event);
-    lonejson_reset(&lc_engine_watch_event_map, parsed);
+    runtime->reset(runtime, &lc_engine_watch_event_map, parsed);
     if (state->error->code == LC_ENGINE_OK) {
       lc_engine_set_transport_error(state->error, "queue watch handler failed");
     }
@@ -536,12 +540,13 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
   }
 
   lc_engine_queue_watch_event_cleanup(&event);
-  lonejson_reset(&lc_engine_watch_event_map, parsed);
+  runtime->reset(runtime, &lc_engine_watch_event_map, parsed);
   return LONEJSON_STATUS_OK;
 }
 
 static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
                                              size_t nmemb, void *userdata) {
+  lonejson *runtime;
   lc_engine_watch_state *state;
   lonejson_sse_json_options json_options;
   lonejson_sse_options sse_options;
@@ -550,6 +555,7 @@ static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
   size_t total;
 
   state = (lc_engine_watch_state *)userdata;
+  runtime = lc_engine_lonejson_runtime(state->client);
   total = size * nmemb;
   if (state->http_status >= 400L) {
     if (lc_engine_buffer_append_limited(&state->error_body, ptr, total,
@@ -578,8 +584,8 @@ static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
   json_options.event_name_count = sizeof(lc_engine_watch_sse_event_names) /
                                   sizeof(lc_engine_watch_sse_event_names[0]);
   status = lonejson_sse_push_json(
-      state->sse, &lc_engine_watch_event_map, &state->parsed, ptr, total,
-      &json_options, lc_engine_watch_sse_json_event, state, &lj_error);
+      runtime, state->sse, &lc_engine_watch_event_map, &state->parsed, ptr,
+      total, &json_options, lc_engine_watch_sse_json_event, state, &lj_error);
   if (status != LONEJSON_STATUS_OK) {
     state->callback_failed = 1;
     if (state->error->code == LC_ENGINE_OK) {
@@ -592,6 +598,7 @@ static size_t lc_engine_watch_write_callback(char *ptr, size_t size,
 }
 
 static int lc_engine_watch_finish(lc_engine_watch_state *state) {
+  lonejson *runtime;
   lonejson_sse_json_options json_options;
   lonejson_error lj_error;
   lonejson_status status;
@@ -599,14 +606,15 @@ static int lc_engine_watch_finish(lc_engine_watch_state *state) {
   if (state == NULL || state->sse == NULL) {
     return LC_ENGINE_OK;
   }
+  runtime = lc_engine_lonejson_runtime(state->client);
   memset(&json_options, 0, sizeof(json_options));
   memset(&lj_error, 0, sizeof(lj_error));
   json_options.event_names = lc_engine_watch_sse_event_names;
   json_options.event_name_count = sizeof(lc_engine_watch_sse_event_names) /
                                   sizeof(lc_engine_watch_sse_event_names[0]);
   status = lonejson_sse_finish_json(
-      state->sse, &lc_engine_watch_event_map, &state->parsed, &json_options,
-      lc_engine_watch_sse_json_event, state, &lj_error);
+      runtime, state->sse, &lc_engine_watch_event_map, &state->parsed,
+      &json_options, lc_engine_watch_sse_json_event, state, &lj_error);
   if (status != LONEJSON_STATUS_OK) {
     state->callback_failed = 1;
     if (state->error->code == LC_ENGINE_OK) {
@@ -620,12 +628,17 @@ static int lc_engine_watch_finish(lc_engine_watch_state *state) {
 }
 
 static void lc_engine_watch_state_cleanup(lc_engine_watch_state *state) {
+  lonejson *runtime;
   if (state == NULL) {
     return;
   }
+  runtime =
+      state->client != NULL ? lc_engine_lonejson_runtime(state->client) : NULL;
   lc_engine_buffer_cleanup(&state->error_body);
   lonejson_sse_close(state->sse);
-  lonejson_cleanup(&lc_engine_watch_event_map, &state->parsed);
+  if (runtime != NULL) {
+    runtime->cleanup(runtime, &lc_engine_watch_event_map, &state->parsed);
+  }
   lc_engine_free_string(&state->correlation_id);
 }
 
@@ -732,6 +745,7 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
                                         const char *fallback_correlation_id,
                                         lc_engine_dequeue_response *response,
                                         lc_engine_error *error) {
+  lonejson *runtime;
   lc_engine_subscribe_meta_json parsed;
   lc_engine_subscribe_message_json *message;
   lonejson_error lj_error;
@@ -745,14 +759,21 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
   }
 
   lc_engine_dequeue_response_cleanup(response);
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_NO_MEMORY,
+        "failed to allocate thread-local JSON runtime");
+  }
   memset(&parsed, 0, sizeof(parsed));
   memset(&lj_error, 0, sizeof(lj_error));
-  status = lonejson_parse_cstr(&lc_engine_subscribe_meta_map, &parsed, json,
-                               NULL, &lj_error);
+  runtime->init(runtime, &lc_engine_subscribe_meta_map, &parsed);
+  status = runtime->parse_cstr(runtime, &lc_engine_subscribe_meta_map, &parsed,
+                               json, &lj_error);
   rc = lc_engine_lonejson_error_from_status(
       error, status, &lj_error, "failed to parse subscribe meta body");
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_subscribe_meta_map, &parsed);
     return rc;
   }
 
@@ -830,7 +851,7 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
     }
   }
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_subscribe_meta_map, &parsed);
     lc_engine_dequeue_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to copy subscribe meta response");
@@ -889,14 +910,14 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
         &response->state_fencing_token, error);
   }
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_subscribe_meta_map, &parsed);
     lc_engine_dequeue_response_cleanup(response);
     return rc;
   }
   if (response->correlation_id == NULL && fallback_correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(fallback_correlation_id);
     if (response->correlation_id == NULL) {
-      lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
+      runtime->cleanup(runtime, &lc_engine_subscribe_meta_map, &parsed);
       lc_engine_dequeue_response_cleanup(response);
       return lc_engine_set_client_error(
           error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -904,7 +925,7 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
     }
   }
 
-  lonejson_cleanup(&lc_engine_subscribe_meta_map, &parsed);
+  runtime->cleanup(runtime, &lc_engine_subscribe_meta_map, &parsed);
   return LC_ENGINE_OK;
 }
 
@@ -1199,13 +1220,15 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
     int rc;
 
     memset(&body_upload, 0, sizeof(body_upload));
-    if (lonejson_curl_upload_init(&body_upload, &body_map, &body_src, NULL) !=
-        LONEJSON_STATUS_OK) {
+    if (lc_engine_lonejson_runtime(client)->curl_upload_init(
+            lc_engine_lonejson_runtime(client), &body_upload, &body_map,
+            &body_src) != LONEJSON_STATUS_OK) {
       curl_slist_free_all(headers);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to prepare watch_queue body");
     }
     memset(&state, 0, sizeof(state));
+    state.client = client;
     state.handler = handler;
     state.handler_context = handler_context;
     state.error = error;
@@ -1217,7 +1240,7 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
     url = (char *)malloc(url_length);
     if (url == NULL) {
       curl_slist_free_all(headers);
-      lonejson_curl_upload_cleanup(&body_upload);
+      lc_lonejson_curl_upload_cleanup(&body_upload);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate watch_queue URL");
     }
@@ -1228,7 +1251,7 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
     if (curl == NULL) {
       free(url);
       curl_slist_free_all(headers);
-      lonejson_curl_upload_cleanup(&body_upload);
+      lc_lonejson_curl_upload_cleanup(&body_upload);
       return lc_engine_set_transport_error(
           error, "failed to initialize curl for watch_queue");
     }
@@ -1273,7 +1296,7 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
     curl_rc = curl_easy_perform(curl);
     free(url);
     curl_easy_cleanup(curl);
-    lonejson_curl_upload_cleanup(&body_upload);
+    lc_lonejson_curl_upload_cleanup(&body_upload);
 
     if (curl_rc == CURLE_WRITE_ERROR && state.callback_failed) {
       rc = error->code;
@@ -1311,8 +1334,9 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
 
     lc_engine_queue_stream_log_error(client, "/v1/queue/watch", endpoint_index,
                                      "server returned error status");
-    rc = lc_engine_set_server_error_from_json(
-        error, state.http_status, state.correlation_id, state.error_body.data);
+    rc = lc_engine_set_server_error_from_json(client, error, state.http_status,
+                                              state.correlation_id,
+                                              state.error_body.data);
     lc_engine_watch_state_cleanup(&state);
     if (error->server_error_code == NULL ||
         strcmp(error->server_error_code, "node_passive") != 0) {
@@ -1407,20 +1431,24 @@ static int lc_engine_client_subscribe_internal(
       int rc;
 
       memset(&body_upload, 0, sizeof(body_upload));
-      if (lonejson_curl_upload_init(&body_upload, &body_map, &body_src, NULL) !=
-          LONEJSON_STATUS_OK) {
+      if (lc_engine_lonejson_runtime(client)->curl_upload_init(
+              lc_engine_lonejson_runtime(client), &body_upload, &body_map,
+              &body_src) != LONEJSON_STATUS_OK) {
         curl_slist_free_all(headers);
         return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                           "failed to prepare subscribe body");
       }
       memset(&state, 0, sizeof(state));
+      state.client = client;
       state.handler = *handler;
       state.handler_context = handler_context;
       state.error = error;
       state.error_limit = LC_ENGINE_QUEUE_ERROR_BODY_LIMIT;
-      state.meta_limit = client->http_json_response_limit_bytes > 0U
-                             ? client->http_json_response_limit_bytes
-                             : (size_t)LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT;
+      state.meta_limit = (size_t)LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT;
+      if (client->http_json_response_limit_bytes > 0U &&
+          client->http_json_response_limit_bytes < state.meta_limit) {
+        state.meta_limit = client->http_json_response_limit_bytes;
+      }
       lc_engine_buffer_init(&state.meta_buffer);
       lc_engine_buffer_init(&state.error_body);
 
@@ -1429,7 +1457,7 @@ static int lc_engine_client_subscribe_internal(
       url = (char *)malloc(url_length);
       if (url == NULL) {
         curl_slist_free_all(headers);
-        lonejson_curl_upload_cleanup(&body_upload);
+        lc_lonejson_curl_upload_cleanup(&body_upload);
         return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                           "failed to allocate subscribe URL");
       }
@@ -1440,7 +1468,7 @@ static int lc_engine_client_subscribe_internal(
       if (curl == NULL) {
         free(url);
         curl_slist_free_all(headers);
-        lonejson_curl_upload_cleanup(&body_upload);
+        lc_lonejson_curl_upload_cleanup(&body_upload);
         return lc_engine_set_transport_error(
             error, "failed to initialize curl for subscribe");
       }
@@ -1489,7 +1517,7 @@ static int lc_engine_client_subscribe_internal(
       curl_rc = curl_easy_perform(curl);
       free(url);
       curl_easy_cleanup(curl);
-      lonejson_curl_upload_cleanup(&body_upload);
+      lc_lonejson_curl_upload_cleanup(&body_upload);
 
       if (curl_rc == CURLE_ABORTED_BY_CALLBACK &&
           lc_engine_queue_stream_cancel_requested(client)) {
@@ -1568,9 +1596,9 @@ static int lc_engine_client_subscribe_internal(
 
       lc_engine_queue_stream_log_error(client, path, endpoint_index,
                                        "server returned error status");
-      rc = lc_engine_set_server_error_from_json(error, state.http_status,
-                                                state.correlation_id,
-                                                state.error_body.data);
+      rc = lc_engine_set_server_error_from_json(
+          client, error, state.http_status, state.correlation_id,
+          state.error_body.data);
       lc_engine_subscribe_state_cleanup(&state);
       if (error->server_error_code != NULL &&
           (strcmp(error->server_error_code, "waiting") == 0 ||

@@ -7,29 +7,26 @@ package.path = table.concat({
 }, ';')
 
 local function make_lonejson_stub()
-  local M = {}
+  local M = {
+    json_null = setmetatable({}, {
+      __tostring = function()
+        return 'lonejson.json_null'
+      end,
+    }),
+  }
 
-  function M.field(name, spec)
-    return { name = name, spec = spec }
+  function M.encode_json(value)
+    if value == M.json_null then
+      return 'null'
+    end
+    return tostring(value)
   end
 
-  function M.json_value(opts)
-    return opts or {}
-  end
-
-  function M.schema(_name, _fields)
-    return {
-      encode = function(_, doc)
-        return '{"value":' .. tostring(doc.value) .. '}'
-      end,
-      decode = function(_, text)
-        local payload = assert(text:match('^%{"value":(.*)%}$'), 'decode payload missing wrapper')
-        if payload == 'null' then
-          return { value = nil }
-        end
-        return { value = payload }
-      end,
-    }
+  function M.decode_json(text)
+    if text == 'null' then
+      return M.json_null
+    end
+    return text
   end
 
   return M
@@ -67,6 +64,7 @@ end
 local function test_json_helpers()
   assert_eq(lockdc.version_string(), 'test-version', 'version_string should delegate to core')
   assert_eq(lockdc.encode_json('123'), '123', 'encode_json should strip wrapper envelope')
+  assert_eq(lockdc.encode_json(nil), 'null', 'encode_json should preserve legacy top-level nil null')
   assert_eq(lockdc.decode_json('{"k":1}'), '{"k":1}', 'decode_json should unwrap envelope payload')
   assert_eq(lockdc.decode_json('null'), lockdc.json_null, 'decode_json should preserve top-level JSON null')
 end

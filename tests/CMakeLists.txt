@@ -13,6 +13,8 @@ if(LOCKDC_EXTERNAL_ROOT)
     COMMAND "${CMAKE_COMMAND}"
       -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
       -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
+      -DLOCKDC_LONEJSON_VERSION=${LOCKDC_LONEJSON_VERSION}
+      -DLOCKDC_LONEJSON_ABI_VERSION=${LOCKDC_LONEJSON_ABI_VERSION}
       -P "${CMAKE_SOURCE_DIR}/tests/lonejson_dependency_interface_test.cmake"
   )
   add_test(NAME zlib_dependency_interface
@@ -34,10 +36,10 @@ add_test(NAME public_api_boundary
     -P "${CMAKE_SOURCE_DIR}/tests/public_api_boundary_test.cmake"
 )
 
-add_test(NAME world_target_clang_guard_test
+add_test(NAME release_target_clang_guard_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
-    -P "${CMAKE_SOURCE_DIR}/tests/world_target_clang_guard_test.cmake"
+    -P "${CMAKE_SOURCE_DIR}/tests/release_target_clang_guard_test.cmake"
 )
 
 add_test(NAME lua_binding_source_layout_test

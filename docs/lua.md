@@ -36,8 +36,13 @@ SDK root or make `lockdc.pc` visible to `pkg-config`.
 The generated rockspec expects:
 
 - package `lockdc`
-- `lonejson == 0.16.0-1`
+- `lonejson == 0.31.0-1`
 - Lua `>= 5.5, < 5.6`
+
+The C SDK is pinned to the matching `lonejson 0.31.0` native dependency for
+mapped state load/save and internal typed JSON parsing. The Lua rock declares
+the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C
+SDK JSON boundary stay in the same release line.
 
 ## Dependency ownership
 
@@ -249,8 +254,10 @@ Use:
 - `message:payload_json()`
 
 These helpers are for idiomatic Lua workflow code. They do not replace the
-mapped `lonejson` APIs in the C SDK; they sit on top of the public `liblockdc`
-JSON transport surface.
+mapped `lonejson` APIs in the C SDK; those C APIs use caller-defined
+`LONEJSON_FIELD_*` maps for typed state load/save. The Lua helpers sit on top
+of the public `liblockdc` JSON transport surface and use the `lonejson`
+dependency version declared by the `lockdc` rock.
 
 Top-level JSON `null` is returned as `lockdc.json_null`. That keeps successful
 JSON `null` payloads distinct from the binding's existing `nil, err` and

@@ -27,6 +27,31 @@ static void assert_lc_ok(int rc, lc_error *error);
 static void assert_lc_server_error(int rc, lc_error *error, long http_status);
 static int buffer_contains(const void *bytes, size_t length,
                            const char *needle);
+static lonejson *e2e_lonejson_runtime(void);
+static void e2e_lonejson_cleanup(const lonejson_map *map, void *value);
+
+static lonejson *e2e_runtime_instance;
+static pthread_once_t e2e_runtime_once = PTHREAD_ONCE_INIT;
+
+static void e2e_lonejson_runtime_init(void) {
+  lonejson_error error;
+
+  lonejson_error_init(&error);
+  e2e_runtime_instance = lonejson_new(NULL, &error);
+}
+
+static lonejson *e2e_lonejson_runtime(void) {
+  (void)pthread_once(&e2e_runtime_once, e2e_lonejson_runtime_init);
+  return e2e_runtime_instance;
+}
+
+static void e2e_lonejson_cleanup(const lonejson_map *map, void *value) {
+  lonejson *runtime;
+
+  runtime = e2e_lonejson_runtime();
+  assert_non_null(runtime);
+  runtime->cleanup(runtime, map, value);
+}
 
 static void save_json_text_or_die(lc_lease *lease, const char *json_text,
                                   lc_error *error) {
@@ -315,7 +340,8 @@ static void assert_local_mutate_file_variants(lc_lease *lease,
                                               const char *text_path,
                                               const char *binary_path,
                                               lc_error *error) {
-  const char *mutations[8];
+  const char *mutations[9];
+  const char *failure_mutations[1];
   lc_mutate_local_req mutate_req;
   lc_get_opts get_opts;
   lc_get_res get_res;
@@ -326,6 +352,9 @@ static void assert_local_mutate_file_variants(lc_lease *lease,
   char base64_mutation[512];
   char auto_text_mutation[512];
   char auto_bin_mutation[512];
+  char missing_file_mutation[512];
+  char missing_path[] = "/tmp/liblockdc-local-mutate-missing-XXXXXX";
+  int missing_fd;
   int rc;
 
   lc_mutate_local_req_init(&mutate_req);
@@ -349,8 +378,9 @@ static void assert_local_mutate_file_variants(lc_lease *lease,
   snprintf(auto_bin_mutation, sizeof(auto_bin_mutation), "file:/auto_bin=%s",
            binary_path);
   mutations[7] = auto_bin_mutation;
+  mutations[8] = "rm:/optional/missing";
   mutate_req.mutations = mutations;
-  mutate_req.mutation_count = 8U;
+  mutate_req.mutation_count = 9U;
   rc = lease->mutate_local(lease, &mutate_req, error);
   assert_lc_ok(rc, error);
   assert_non_null(lease->state_etag);
@@ -374,6 +404,42 @@ static void assert_local_mutate_file_variants(lc_lease *lease,
   assert_true(buffer_contains(bytes, length, "\"auto_bin\":\"AAECYQ==\""));
   assert_true(buffer_contains(bytes, length, "\"ts\":\""));
   assert_false(buffer_contains(bytes, length, "\"remove_me\""));
+  assert_false(buffer_contains(bytes, length, "\"optional\""));
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+
+  missing_fd = mkstemp(missing_path);
+  assert_true(missing_fd >= 0);
+  assert_int_equal(close(missing_fd), 0);
+  assert_int_equal(unlink(missing_path), 0);
+  snprintf(missing_file_mutation, sizeof(missing_file_mutation),
+           "base64file:/missing=%s", missing_path);
+  failure_mutations[0] = missing_file_mutation;
+  lc_mutate_local_req_init(&mutate_req);
+  mutate_req.mutations = failure_mutations;
+  mutate_req.mutation_count = 1U;
+  lc_error_cleanup(error);
+  lc_error_init(error);
+  rc = lease->mutate_local(lease, &mutate_req, error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_int_equal(error->code, LC_ERR_TRANSPORT);
+  assert_non_null(error->message);
+
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_cleanup(error);
+  lc_error_init(error);
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  rc = lease->get(lease, sink, &get_opts, &get_res, error);
+  assert_lc_ok(rc, error);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  assert_lc_ok(rc, error);
+  assert_true(buffer_contains(bytes, length, "\"filename\":\"blob.txt\""));
+  assert_true(buffer_contains(bytes, length, "\"counter\":3"));
+  assert_false(buffer_contains(bytes, length, "\"missing\""));
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
 }
@@ -2332,12 +2398,12 @@ static int e2e_consumer_persist_state(e2e_consumer_context *consumer_context,
   memset(&doc, 0, sizeof(doc));
   memset(&get_res, 0, sizeof(get_res));
   doc.status = "from-consumer-service";
-  rc = state->save(state, &e2e_status_map, &doc, NULL, error);
+  rc = state->save(state, &e2e_status_map, &doc, error);
   if (rc != LC_OK) {
     return rc;
   }
   memset(&doc, 0, sizeof(doc));
-  rc = state->load(state, &e2e_status_map, &doc, NULL, NULL, &get_res, error);
+  rc = state->load(state, &e2e_status_map, &doc, NULL, &get_res, error);
   if (rc != LC_OK) {
     lc_get_res_cleanup(&get_res);
     return rc;
@@ -2357,7 +2423,7 @@ static int e2e_consumer_persist_state(e2e_consumer_context *consumer_context,
   }
   pthread_mutex_unlock(&consumer_context->mutex);
 
-  lonejson_cleanup(&e2e_status_map, &doc);
+  e2e_lonejson_cleanup(&e2e_status_map, &doc);
   lc_get_res_cleanup(&get_res);
   return LC_OK;
 }
@@ -3283,19 +3349,19 @@ static void test_mem_uds_dequeue_with_state_roundtrip(void **state) {
     e2e_status_doc doc;
 
     doc.status = "from-direct-state";
-    rc = state_lease->save(state_lease, &e2e_status_map, &doc, NULL, &error);
+    rc = state_lease->save(state_lease, &e2e_status_map, &doc, &error);
   }
   assert_lc_ok(rc, &error);
   {
     e2e_status_doc doc;
 
     memset(&doc, 0, sizeof(doc));
-    rc = state_lease->load(state_lease, &e2e_status_map, &doc, NULL, NULL,
-                           &get_res, &error);
+    rc = state_lease->load(state_lease, &e2e_status_map, &doc, NULL, &get_res,
+                           &error);
     assert_lc_ok(rc, &error);
     assert_non_null(doc.status);
     assert_string_equal(doc.status, "from-direct-state");
-    lonejson_cleanup(&e2e_status_map, &doc);
+    e2e_lonejson_cleanup(&e2e_status_map, &doc);
   }
   assert_lc_ok(rc, &error);
 
@@ -3376,19 +3442,19 @@ static void test_s3_dequeue_with_state_roundtrip(void **state) {
     e2e_status_doc doc;
 
     doc.status = "from-s3-direct-state";
-    rc = state_lease->save(state_lease, &e2e_status_map, &doc, NULL, &error);
+    rc = state_lease->save(state_lease, &e2e_status_map, &doc, &error);
   }
   assert_lc_ok(rc, &error);
   {
     e2e_status_doc doc;
 
     memset(&doc, 0, sizeof(doc));
-    rc = state_lease->load(state_lease, &e2e_status_map, &doc, NULL, NULL,
-                           &get_res, &error);
+    rc = state_lease->load(state_lease, &e2e_status_map, &doc, NULL, &get_res,
+                           &error);
     assert_lc_ok(rc, &error);
     assert_non_null(doc.status);
     assert_string_equal(doc.status, "from-s3-direct-state");
-    lonejson_cleanup(&e2e_status_map, &doc);
+    e2e_lonejson_cleanup(&e2e_status_map, &doc);
   }
   assert_lc_ok(rc, &error);
 

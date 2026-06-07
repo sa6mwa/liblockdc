@@ -3,10 +3,6 @@ local lonejson = require("lonejson")
 
 local M = { core = core }
 
-local JsonEnvelope = lonejson.schema("LockdcJsonEnvelope", {
-  lonejson.field("value", lonejson.json_value { required = true }),
-})
-
 local Client = {}
 Client.__index = Client
 
@@ -19,11 +15,7 @@ Message.__index = Message
 local Service = {}
 Service.__index = Service
 
-local JSON_NULL = setmetatable({}, {
-  __tostring = function()
-    return "lockdc.json_null"
-  end,
-})
+local JSON_NULL = lonejson.json_null
 
 local function wrap_client(core_client)
   return setmetatable({ _core = core_client }, Client)
@@ -45,21 +37,11 @@ local function normalize_result(a, b)
 end
 
 local function encode_json(value)
-  local encoded = JsonEnvelope:encode({ value = value })
-  local payload = encoded:match('^%{"value":(.*)%}$')
-
-  if payload == nil then
-    error("lockdc: failed to encode JSON payload")
-  end
-  return payload
+  return lonejson.encode_json(value == nil and JSON_NULL or value)
 end
 
 local function decode_json(payload)
-  local doc = JsonEnvelope:decode('{"value":' .. payload .. "}")
-  if doc.value == nil then
-    return JSON_NULL
-  end
-  return doc.value
+  return lonejson.decode_json(payload)
 end
 
 local function with_json_content_type(req)

@@ -8,7 +8,7 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 - [x] Confirm the client bundle format used by lockd-generated `client.pem` files.
 - [x] Establish an initial CMake build with both static and shared library targets.
 - [x] Add CMake-managed third-party dependency builds for OpenSSL, nghttp2, and libcurl.
-- [x] Add YAJL as the streaming JSON generator/parser dependency.
+- [x] Add lonejson as the mapped and streaming JSON generator/parser dependency.
 - [x] Define the initial public C API around config/request/response structs.
 - [x] Add client-level allocator hooks for new stream-first APIs.
 - [x] Implement the first transport slice with mTLS bundle loading, HTTP/1.1 + HTTP/2 preference, raw state bodies, multipart queue payloads, and endpoint failover for `node_passive`.
@@ -33,10 +33,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 - [x] Add `examples/` programs to exercise the public API shape.
 - [x] Add a root-level docker-compose e2e environment with disk, S3/MinIO, and mem-backed lockd instances.
 - [x] Add initial unit-test targets for stream helpers and public handle-contract wrappers.
-- [ ] Add standard unit-test targets for JSON helpers, bundle parsing, and response decoding.
-- [ ] Finish migrating the remaining convenience-only buffered paths onto the allocator-aware/stream-first plumbing.
-- [ ] Add an integration test harness against a containerized lockd instance.
-- [ ] Add install/export/package rules for downstream consumers.
+- [x] Add standard unit-test targets for JSON helpers, bundle parsing, and response decoding.
+- [x] Finish migrating the remaining convenience-only buffered paths onto the allocator-aware/stream-first plumbing.
+- [x] Add an integration test harness against a containerized lockd instance.
+- [x] Add install/export/package rules for downstream consumers.
 
 ## API coverage
 
@@ -82,8 +82,17 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 
 ## Next pass recommendation
 
-- [ ] Polish attachment DX around the new `lc_lease` object model.
-- [ ] Add query result helpers beyond raw JSON and cover document-return mode explicitly.
-- [ ] Add stream-first dequeue payload APIs.
-- [ ] Replace the remaining ad hoc JSON handling in older client paths with YAJL-backed helpers.
-- [ ] Add client-driven e2e tests against the root docker-compose lockd environment, including the UDS-backed mem instance.
+- [x] Polish attachment DX around the new `lc_lease` object model.
+- [x] Add query key helpers and cover document-return metadata paths explicitly.
+- [x] Add stream-first dequeue payload APIs.
+- [x] Replace ad hoc JSON handling in client paths with lonejson-backed helpers.
+- [x] Add client-driven e2e tests against the root docker-compose lockd environment, including the UDS-backed mem instance.
+
+## Current release-readiness focus
+
+- [ ] Keep API examples aligned with the receiver-function public surface.
+- [ ] Keep the Lua rock dependency boundary aligned with the pinned
+  `lonejson` release.
+- [ ] Expand e2e coverage when new lockd server surfaces are added.
+- [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
+  introduced.

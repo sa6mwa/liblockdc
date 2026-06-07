@@ -240,19 +240,14 @@ file(WRITE "${consumer_src_dir}/test.c" [=[
 
 int main(void) {
     lc_client_config config;
-    lonejson_parse_options parse_options;
     lonejson_int64 marker;
     const char *version;
 
     marker = 42;
     lc_client_config_init(&config);
-    parse_options = lonejson_default_parse_options();
     version = lc_version_string();
     if (marker != 42) {
         return 20;
-    }
-    if (parse_options.max_depth <= 0) {
-        return 23;
     }
     if (version == NULL) {
         return 21;
@@ -280,10 +275,7 @@ file(WRITE "${consumer_src_dir}/pkgconfig_shared_main.c" [=[
 #include <lc/lc.h>
 
 int main(void) {
-    lonejson_parse_options parse_options;
-
-    parse_options = lonejson_default_parse_options();
-    return lc_version_string() != 0 && parse_options.max_depth > 0 ? 0 : 1;
+    return lc_version_string() != 0 ? 0 : 1;
 }
 ]=])
 
@@ -349,8 +341,7 @@ int lockdc_release_tarball_touch_client_api(lc_client *client, lc_lease **lease,
 
     return lc_acquire(client, &acquire, lease, &error) +
            lc_get(client, "key", &get_opts, dst, &get_res, &error) +
-           lc_load(client, "key", map, (void *)0, (const lonejson_parse_options *)0,
-                   &get_opts, &get_res, &error) +
+           lc_load(client, "key", map, (void *)0, &get_opts, &get_res, &error) +
            lc_update(client, &update, src, &update_res, &error) +
            lc_mutate(client, &mutate, &mutate_res, &error) +
            lc_metadata(client, &metadata, &metadata_res, &error) +
@@ -408,10 +399,8 @@ int lockdc_release_tarball_touch_lease_api(lc_lease *lease, lc_source *src,
 
     return lc_lease_describe(lease, &error) +
            lc_lease_get(lease, dst, &get_opts, &get_res, &error) +
-           lc_lease_load(lease, map, (void *)0, (const lonejson_parse_options *)0,
-                         &get_opts, &get_res, &error) +
-           lc_lease_save(lease, map, (const void *)0,
-                         (const lonejson_write_options *)0, &error) +
+           lc_lease_load(lease, map, (void *)0, &get_opts, &get_res, &error) +
+           lc_lease_save(lease, map, (const void *)0, &error) +
            lc_lease_update(lease, src, &update_opts, &error) +
            lc_lease_mutate(lease, &mutate, &error) +
            lc_lease_mutate_local(lease, &mutate_local, &error) +

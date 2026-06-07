@@ -16,6 +16,7 @@ typedef struct lc_engine_http_error_json {
 } lc_engine_http_error_json;
 
 typedef struct lc_engine_stream_request_state {
+  lc_engine_client *client;
   lc_engine_write_callback writer;
   void *writer_context;
   lc_engine_error *error;
@@ -595,9 +596,10 @@ lc_engine_stream_state_cleanup(lc_engine_stream_request_state *state) {
   if (state == NULL) {
     return;
   }
-  lonejson_curl_parse_cleanup(&state->parse);
+  lc_lonejson_curl_parse_cleanup(&state->parse);
   if (state->parser_is_error) {
-    lonejson_cleanup(&lc_engine_http_error_map, &state->error_body);
+    lc_engine_lonejson_cleanup(state->client, &lc_engine_http_error_map,
+                               &state->error_body);
   }
   state->parser_initialized = 0;
   state->parser_is_error = 0;
@@ -612,8 +614,8 @@ lc_engine_stream_state_cleanup(lc_engine_stream_request_state *state) {
 
 static int
 lc_engine_stream_json_init_parser(lc_engine_stream_request_state *state) {
-  lonejson_parse_options options;
   const lonejson_map *map;
+  lonejson *runtime;
   void *dst;
   lonejson_status status;
 
@@ -627,8 +629,9 @@ lc_engine_stream_json_init_parser(lc_engine_stream_request_state *state) {
   if (map == NULL || dst == NULL) {
     return 0;
   }
-  options = lonejson_default_parse_options();
-  status = lonejson_curl_parse_init(&state->parse, map, dst, &options);
+  runtime = lc_engine_lonejson_runtime(state->client);
+  runtime->init(runtime, map, dst);
+  status = runtime->curl_parse_init(runtime, &state->parse, map, dst);
   if (status != LONEJSON_STATUS_OK) {
     lc_engine_lonejson_error_from_status(
         state->error, status, &state->parse.error,
@@ -685,7 +688,7 @@ static size_t lc_engine_stream_json_write_callback(char *contents, size_t size,
       return 0U;
     }
   }
-  written = lonejson_curl_write_callback(contents, 1U, total, &state->parse);
+  written = state->parse.write_callback(&state->parse, contents, 1U, total);
   if (written != total) {
     lc_engine_lonejson_error_from_status(state->error, state->parse.error.code,
                                          &state->parse.error,
@@ -787,6 +790,7 @@ static int lc_engine_perform_streaming(
     read_state.reader_context = reader_context;
     read_state.error = state->error;
 
+    state->client = client;
     state->http_status = 0L;
     state->stream_error = 0;
     state->key_version = 0L;
@@ -900,7 +904,7 @@ static int lc_engine_perform_streaming(
       if (state->parser_initialized && !state->parser_is_error) {
         lonejson_status parse_status;
 
-        parse_status = lonejson_curl_parse_finish(&state->parse);
+        parse_status = state->parse.finish(&state->parse);
         if (parse_status != LONEJSON_STATUS_OK) {
           lc_engine_lonejson_error_from_status(
               state->error, parse_status, &state->parse.error,
@@ -918,7 +922,7 @@ static int lc_engine_perform_streaming(
     if (state->parser_initialized && state->parser_is_error) {
       lonejson_status parse_status;
 
-      parse_status = lonejson_curl_parse_finish(&state->parse);
+      parse_status = state->parse.finish(&state->parse);
       if (parse_status != LONEJSON_STATUS_OK) {
         lc_engine_lonejson_error_from_status(
             state->error, parse_status, &state->parse.error,
@@ -1191,6 +1195,7 @@ int lc_engine_parse_attach_response_json(const char *json,
                                          const char *correlation_id,
                                          lc_engine_attach_response *response,
                                          lc_engine_error *error) {
+  lonejson *runtime;
   lc_engine_attach_response_json parsed;
   lonejson_error lj_error;
   lonejson_status status;
@@ -1203,20 +1208,27 @@ int lc_engine_parse_attach_response_json(const char *json,
   }
 
   lc_engine_attach_response_cleanup(response);
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_NO_MEMORY,
+        "failed to allocate thread-local JSON runtime");
+  }
   memset(&parsed, 0, sizeof(parsed));
   memset(&lj_error, 0, sizeof(lj_error));
-  status = lonejson_parse_cstr(&lc_engine_attach_response_map, &parsed, json,
-                               NULL, &lj_error);
+  runtime->init(runtime, &lc_engine_attach_response_map, &parsed);
+  status = runtime->parse_cstr(runtime, &lc_engine_attach_response_map, &parsed,
+                               json, &lj_error);
   rc = lc_engine_lonejson_error_from_status(error, status, &lj_error,
                                             "failed to parse attach response");
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_attach_response_map, &parsed);
     return rc;
   }
   rc = lc_engine_attachment_info_from_json(&response->attachment,
                                            &parsed.attachment, error);
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_attach_response_map, &parsed);
     lc_engine_attach_response_cleanup(response);
     return rc;
   }
@@ -1225,27 +1237,28 @@ int lc_engine_parse_attach_response_json(const char *json,
                                      "attach version is out of range",
                                      &response->version, error);
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_attach_response_map, &parsed);
     lc_engine_attach_response_cleanup(response);
     return rc;
   }
   if (correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(correlation_id);
     if (response->correlation_id == NULL) {
-      lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+      runtime->cleanup(runtime, &lc_engine_attach_response_map, &parsed);
       lc_engine_attach_response_cleanup(response);
       return lc_engine_set_client_error(
           error, LC_ENGINE_ERROR_NO_MEMORY,
           "failed to allocate attachment correlation id");
     }
   }
-  lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+  runtime->cleanup(runtime, &lc_engine_attach_response_map, &parsed);
   return LC_ENGINE_OK;
 }
 
 int lc_engine_parse_list_attachments_response_json(
     const char *json, const char *correlation_id,
     lc_engine_list_attachments_response *response, lc_engine_error *error) {
+  lonejson *runtime;
   lc_engine_list_attachments_response_json parsed;
   lonejson_error lj_error;
   lonejson_status status;
@@ -1258,21 +1271,31 @@ int lc_engine_parse_list_attachments_response_json(
   }
 
   lc_engine_list_attachments_response_cleanup(response);
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_NO_MEMORY,
+        "failed to allocate thread-local JSON runtime");
+  }
   memset(&parsed, 0, sizeof(parsed));
   memset(&lj_error, 0, sizeof(lj_error));
-  status = lonejson_parse_cstr(&lc_engine_list_attachments_response_map,
-                               &parsed, json, NULL, &lj_error);
+  runtime->init(runtime, &lc_engine_list_attachments_response_map, &parsed);
+  status =
+      runtime->parse_cstr(runtime, &lc_engine_list_attachments_response_map,
+                          &parsed, json, &lj_error);
   rc = lc_engine_lonejson_error_from_status(
       error, status, &lj_error, "failed to parse list_attachments response");
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_list_attachments_response_map,
+                     &parsed);
     return rc;
   }
   response->namespace_name = lc_engine_strdup_local(parsed.namespace_name);
   response->key = lc_engine_strdup_local(parsed.key);
   if ((parsed.namespace_name != NULL && response->namespace_name == NULL) ||
       (parsed.key != NULL && response->key == NULL)) {
-    lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_list_attachments_response_map,
+                     &parsed);
     lc_engine_list_attachments_response_cleanup(response);
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -1285,7 +1308,8 @@ int lc_engine_parse_list_attachments_response_json(
     response->attachments = (lc_engine_attachment_info *)calloc(
         parsed.attachments.count, sizeof(lc_engine_attachment_info));
     if (response->attachments == NULL) {
-      lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+      runtime->cleanup(runtime, &lc_engine_list_attachments_response_map,
+                       &parsed);
       lc_engine_list_attachments_response_cleanup(response);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate attachments array");
@@ -1296,7 +1320,8 @@ int lc_engine_parse_list_attachments_response_json(
       rc = lc_engine_attachment_info_from_json(&response->attachments[index],
                                                &items[index], error);
       if (rc != LC_ENGINE_OK) {
-        lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+        runtime->cleanup(runtime, &lc_engine_list_attachments_response_map,
+                         &parsed);
         lc_engine_list_attachments_response_cleanup(response);
         return rc;
       }
@@ -1305,13 +1330,14 @@ int lc_engine_parse_list_attachments_response_json(
   if (correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(correlation_id);
     if (response->correlation_id == NULL) {
-      lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+      runtime->cleanup(runtime, &lc_engine_list_attachments_response_map,
+                       &parsed);
       lc_engine_list_attachments_response_cleanup(response);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate correlation id");
     }
   }
-  lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+  runtime->cleanup(runtime, &lc_engine_list_attachments_response_map, &parsed);
   return LC_ENGINE_OK;
 }
 
@@ -1543,7 +1569,7 @@ int lc_engine_client_update_from(lc_engine_client *client,
   response->new_version = parsed.new_version;
   response->new_state_etag = lc_engine_strdup_local(parsed.new_state_etag);
   if (parsed.new_state_etag != NULL && response->new_state_etag == NULL) {
-    lonejson_cleanup(&lc_engine_update_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_update_response_map, &parsed);
     lc_engine_stream_state_cleanup(&state);
     lc_engine_update_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -1553,7 +1579,8 @@ int lc_engine_client_update_from(lc_engine_client *client,
   if (state.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(state.correlation_id);
     if (response->correlation_id == NULL) {
-      lonejson_cleanup(&lc_engine_update_response_map, &parsed);
+      lc_engine_lonejson_cleanup(client, &lc_engine_update_response_map,
+                                 &parsed);
       lc_engine_stream_state_cleanup(&state);
       lc_engine_update_response_cleanup(response);
       return lc_engine_set_client_error(
@@ -1561,7 +1588,7 @@ int lc_engine_client_update_from(lc_engine_client *client,
           "failed to allocate update_from correlation id");
     }
   }
-  lonejson_cleanup(&lc_engine_update_response_map, &parsed);
+  lc_engine_lonejson_cleanup(client, &lc_engine_update_response_map, &parsed);
   lc_engine_stream_state_cleanup(&state);
   return LC_ENGINE_OK;
 }
@@ -1612,8 +1639,9 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   meta_src.payload_content_type = (char *)payload_content_type;
   meta_owned = lonejson_default_owned_buffer();
   lonejson_error_init(&lj_error);
-  rc = lonejson_serialize_owned(&lc_engine_enqueue_meta_map, &meta_src,
-                                &meta_owned, NULL, &lj_error);
+  rc = lc_engine_lonejson_runtime(client)->serialize_owned(
+      lc_engine_lonejson_runtime(client), &lc_engine_enqueue_meta_map,
+      &meta_src, &meta_owned, &lj_error);
   if (rc != LONEJSON_STATUS_OK) {
     lonejson_owned_buffer_free(&meta_owned);
     return lc_engine_lonejson_error_from_status(
@@ -1719,7 +1747,8 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   lc_engine_buffer_cleanup(&content_type);
   if (rc != LC_ENGINE_OK) {
     lc_engine_stream_state_cleanup(&state);
-    lonejson_cleanup(&lc_engine_enqueue_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_enqueue_response_map,
+                               &parsed);
     return rc;
   }
   response->namespace_name = lc_engine_strdup_local(parsed.namespace_name);
@@ -1728,7 +1757,8 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   if ((parsed.namespace_name != NULL && response->namespace_name == NULL) ||
       (parsed.queue != NULL && response->queue == NULL) ||
       (parsed.message_id != NULL && response->message_id == NULL)) {
-    lonejson_cleanup(&lc_engine_enqueue_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_enqueue_response_map,
+                               &parsed);
     lc_engine_stream_state_cleanup(&state);
     lc_engine_enqueue_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -1765,7 +1795,8 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
                                        &response->payload_bytes, error);
   }
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_enqueue_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_enqueue_response_map,
+                               &parsed);
     lc_engine_enqueue_response_cleanup(response);
     lc_engine_stream_state_cleanup(&state);
     return rc;
@@ -1773,7 +1804,8 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
   if (state.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(state.correlation_id);
     if (response->correlation_id == NULL) {
-      lonejson_cleanup(&lc_engine_enqueue_response_map, &parsed);
+      lc_engine_lonejson_cleanup(client, &lc_engine_enqueue_response_map,
+                                 &parsed);
       lc_engine_stream_state_cleanup(&state);
       lc_engine_enqueue_response_cleanup(response);
       return lc_engine_set_client_error(
@@ -1781,7 +1813,7 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
           "failed to allocate enqueue_from correlation id");
     }
   }
-  lonejson_cleanup(&lc_engine_enqueue_response_map, &parsed);
+  lc_engine_lonejson_cleanup(client, &lc_engine_enqueue_response_map, &parsed);
   lc_engine_stream_state_cleanup(&state);
   return LC_ENGINE_OK;
 }
@@ -1837,7 +1869,7 @@ int lc_engine_client_attach_from(lc_engine_client *client,
   lc_engine_buffer_cleanup(&path);
   if (rc != LC_ENGINE_OK) {
     lc_engine_stream_state_cleanup(&state);
-    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_attach_response_map, &parsed);
     return rc;
   }
   rc = lc_engine_attachment_info_from_json(&response->attachment,
@@ -1849,7 +1881,7 @@ int lc_engine_client_attach_from(lc_engine_client *client,
                                        &response->version, error);
   }
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_attach_response_map, &parsed);
     lc_engine_attach_response_cleanup(response);
     lc_engine_stream_state_cleanup(&state);
     return rc;
@@ -1863,12 +1895,12 @@ int lc_engine_client_attach_from(lc_engine_client *client,
     }
   }
   if (rc != LC_ENGINE_OK) {
-    lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_attach_response_map, &parsed);
     lc_engine_attach_response_cleanup(response);
     lc_engine_stream_state_cleanup(&state);
     return rc;
   }
-  lonejson_cleanup(&lc_engine_attach_response_map, &parsed);
+  lc_engine_lonejson_cleanup(client, &lc_engine_attach_response_map, &parsed);
   lc_engine_stream_state_cleanup(&state);
   return rc;
 }
@@ -1937,7 +1969,8 @@ int lc_engine_client_list_attachments(
   }
   if (result.http_status < 200L || result.http_status >= 300L) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_list_attachments_response_map,
+                               &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
@@ -1945,7 +1978,8 @@ int lc_engine_client_list_attachments(
   response->key = lc_engine_strdup_local(parsed.key);
   if ((parsed.namespace_name != NULL && response->namespace_name == NULL) ||
       (parsed.key != NULL && response->key == NULL)) {
-    lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+    lc_engine_lonejson_cleanup(client, &lc_engine_list_attachments_response_map,
+                               &parsed);
     lc_engine_list_attachments_response_cleanup(response);
     return lc_engine_set_client_error(
         error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -1958,7 +1992,8 @@ int lc_engine_client_list_attachments(
     response->attachments = (lc_engine_attachment_info *)calloc(
         parsed.attachments.count, sizeof(lc_engine_attachment_info));
     if (response->attachments == NULL) {
-      lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+      lc_engine_lonejson_cleanup(
+          client, &lc_engine_list_attachments_response_map, &parsed);
       lc_engine_list_attachments_response_cleanup(response);
       lc_engine_http_result_cleanup(&result);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -1970,7 +2005,8 @@ int lc_engine_client_list_attachments(
       rc = lc_engine_attachment_info_from_json(&response->attachments[index],
                                                &items[index], error);
       if (rc != LC_ENGINE_OK) {
-        lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+        lc_engine_lonejson_cleanup(
+            client, &lc_engine_list_attachments_response_map, &parsed);
         lc_engine_list_attachments_response_cleanup(response);
         lc_engine_http_result_cleanup(&result);
         return rc;
@@ -1980,14 +2016,16 @@ int lc_engine_client_list_attachments(
   if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {
-      lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+      lc_engine_lonejson_cleanup(
+          client, &lc_engine_list_attachments_response_map, &parsed);
       lc_engine_list_attachments_response_cleanup(response);
       lc_engine_http_result_cleanup(&result);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate correlation id");
     }
   }
-  lonejson_cleanup(&lc_engine_list_attachments_response_map, &parsed);
+  lc_engine_lonejson_cleanup(client, &lc_engine_list_attachments_response_map,
+                             &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -2113,7 +2151,8 @@ int lc_engine_client_delete_attachment(
   }
   if (result.http_status < 200L || result.http_status >= 300L) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_delete_attachment_response_map, &parsed);
+    lc_engine_lonejson_cleanup(
+        client, &lc_engine_delete_attachment_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
@@ -2122,7 +2161,8 @@ int lc_engine_client_delete_attachment(
   if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
   }
-  lonejson_cleanup(&lc_engine_delete_attachment_response_map, &parsed);
+  lc_engine_lonejson_cleanup(client, &lc_engine_delete_attachment_response_map,
+                             &parsed);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }
@@ -2180,7 +2220,8 @@ int lc_engine_client_delete_all_attachments(
   }
   if (result.http_status < 200L || result.http_status >= 300L) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_delete_all_attachments_response_map, &parsed);
+    lc_engine_lonejson_cleanup(
+        client, &lc_engine_delete_all_attachments_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
@@ -2191,7 +2232,8 @@ int lc_engine_client_delete_all_attachments(
   if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
   }
-  lonejson_cleanup(&lc_engine_delete_all_attachments_response_map, &parsed);
+  lc_engine_lonejson_cleanup(
+      client, &lc_engine_delete_all_attachments_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return LC_ENGINE_OK;
 }

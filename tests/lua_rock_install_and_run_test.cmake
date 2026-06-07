@@ -127,16 +127,24 @@ else()
 endif()
 
 set(lonejson_cache_dir "${LOCKDC_BINARY_DIR}/lua-rock-cache")
-set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.16.0-1.src.rock")
-set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.16.0/lonejson-0.16.0-1.src.rock")
+set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.31.0-1.src.rock")
+set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.31.0/lonejson-0.31.0-1.src.rock")
+set(lonejson_src_rock_sha256 "9f00e58104adbda0c5966a5f1f5c5dca337eb0997d7e0578035d9e16250bdebb")
 set(lua_tree_dir "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/tree")
 set(lua_rock_workdir "${LOCKDC_ROOT}")
 
 file(MAKE_DIRECTORY "${lonejson_cache_dir}")
+if(EXISTS "${lonejson_src_rock}")
+    file(SHA256 "${lonejson_src_rock}" existing_lonejson_src_rock_sha256)
+    if(NOT existing_lonejson_src_rock_sha256 STREQUAL lonejson_src_rock_sha256)
+        file(REMOVE "${lonejson_src_rock}")
+    endif()
+endif()
 if(NOT EXISTS "${lonejson_src_rock}")
     file(DOWNLOAD
         "${lonejson_src_rock_url}"
         "${lonejson_src_rock}"
+        EXPECTED_HASH "SHA256=${lonejson_src_rock_sha256}"
         STATUS download_status
         SHOW_PROGRESS
     )

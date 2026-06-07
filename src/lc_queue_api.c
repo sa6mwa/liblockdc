@@ -373,6 +373,7 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
                                  lc_engine_queue_stats_response *response,
                                  lc_engine_error *error) {
   lc_engine_http_result result;
+  lonejson *runtime;
   const lc_engine_header_pair *headers;
   size_t header_count;
   lc_engine_queue_stats_request body_src;
@@ -394,6 +395,7 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   memset(&parsed, 0, sizeof(parsed));
+  runtime = lc_engine_lonejson_runtime(client);
   lc_engine_queue_request_headers(&headers, &header_count);
   body_src = *request;
   body_src.namespace_name =
@@ -408,7 +410,7 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/queue/stats", &body_map, &body_src, NULL, headers,
+      client, "POST", "/v1/queue/stats", &body_map, &body_src, headers,
       header_count, &lc_engine_queue_stats_response_map, &parsed, &result,
       error);
   if (rc != LC_ENGINE_OK) {
@@ -416,7 +418,7 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
   }
   if (result.http_status < 200 || result.http_status >= 300) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_queue_stats_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_queue_stats_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
@@ -428,7 +430,7 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
         lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                    "failed to copy queue_stats correlation_id");
   }
-  lonejson_cleanup(&lc_engine_queue_stats_response_map, &parsed);
+  runtime->cleanup(runtime, &lc_engine_queue_stats_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -438,6 +440,7 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
                                lc_engine_queue_ack_response *response,
                                lc_engine_error *error) {
   lc_engine_http_result result;
+  lonejson *runtime;
   const lc_engine_header_pair *headers;
   size_t header_count;
   lc_engine_queue_ack_request body_src;
@@ -461,6 +464,7 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   memset(&parsed, 0, sizeof(parsed));
+  runtime = lc_engine_lonejson_runtime(client);
   lc_engine_queue_request_headers(&headers, &header_count);
   body_src = *request;
   body_src.namespace_name =
@@ -495,14 +499,14 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/queue/ack", &body_map, &body_src, NULL, headers,
+      client, "POST", "/v1/queue/ack", &body_map, &body_src, headers,
       header_count, &lc_engine_queue_ack_response_map, &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status < 200 || result.http_status >= 300) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_queue_ack_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_queue_ack_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
@@ -513,7 +517,7 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
     rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                     "failed to copy queue_ack correlation_id");
   }
-  lonejson_cleanup(&lc_engine_queue_ack_response_map, &parsed);
+  runtime->cleanup(runtime, &lc_engine_queue_ack_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -523,6 +527,7 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
                                 lc_engine_queue_nack_response *response,
                                 lc_engine_error *error) {
   lc_engine_http_result result;
+  lonejson *runtime;
   const lc_engine_header_pair *headers;
   size_t header_count;
   lc_engine_queue_nack_response_json parsed;
@@ -548,6 +553,7 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   memset(&parsed, 0, sizeof(parsed));
+  runtime = lc_engine_lonejson_runtime(client);
   lc_engine_queue_request_headers(&headers, &header_count);
   memset(&body_src, 0, sizeof(body_src));
   body_src.namespace_name =
@@ -585,16 +591,16 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   if (request->delay_seconds > 0L) {
     body_fields[body_field_count++] = lc_engine_queue_nack_body_fields[8];
   }
-  lonejson_json_value_init(&body_src.last_error);
+  runtime->json_value_init(runtime, &body_src.last_error);
   lonejson_error_init(&lj_error);
   last_error_source.cursor = (const unsigned char *)"";
   last_error_source.remaining = 0U;
   if (request->last_error_json != NULL && request->last_error_json[0] != '\0') {
     last_error_source.cursor = (const unsigned char *)request->last_error_json;
     last_error_source.remaining = strlen(request->last_error_json);
-    rc = lonejson_json_value_set_reader(&body_src.last_error,
-                                        lc_engine_json_memory_reader,
-                                        &last_error_source, &lj_error);
+    rc = body_src.last_error.methods->set_reader(&body_src.last_error,
+                                                 lc_engine_json_memory_reader,
+                                                 &last_error_source, &lj_error);
     if (rc != LONEJSON_STATUS_OK) {
       rc = lc_engine_lonejson_error_from_status(
           error, rc, &lj_error, "failed to configure queue_nack last_error");
@@ -619,17 +625,17 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   body_map.field_count = body_field_count;
   if (rc == LC_ENGINE_OK) {
     rc = lc_engine_http_json_request_stream(
-        client, "POST", "/v1/queue/nack", &body_map, &body_src, NULL, headers,
+        client, "POST", "/v1/queue/nack", &body_map, &body_src, headers,
         header_count, &lc_engine_queue_nack_response_map, &parsed, &result,
         error);
   }
-  lonejson_json_value_cleanup(&body_src.last_error);
+  runtime->json_value_cleanup(runtime, &body_src.last_error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
   if (result.http_status < 200 || result.http_status >= 300) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_queue_nack_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_queue_nack_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
@@ -640,7 +646,7 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
     rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                     "failed to copy queue_nack correlation_id");
   }
-  lonejson_cleanup(&lc_engine_queue_nack_response_map, &parsed);
+  runtime->cleanup(runtime, &lc_engine_queue_nack_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }
@@ -650,6 +656,7 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
                                   lc_engine_queue_extend_response *response,
                                   lc_engine_error *error) {
   lc_engine_http_result result;
+  lonejson *runtime;
   const lc_engine_header_pair *headers;
   size_t header_count;
   lc_engine_queue_extend_request body_src;
@@ -673,6 +680,7 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
 
   memset(&result, 0, sizeof(result));
   memset(&parsed, 0, sizeof(parsed));
+  runtime = lc_engine_lonejson_runtime(client);
   lc_engine_queue_request_headers(&headers, &header_count);
   body_src = *request;
   body_src.namespace_name =
@@ -707,7 +715,7 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
   body_map.fields = body_fields;
   body_map.field_count = body_field_count;
   rc = lc_engine_http_json_request_stream(
-      client, "POST", "/v1/queue/extend", &body_map, &body_src, NULL, headers,
+      client, "POST", "/v1/queue/extend", &body_map, &body_src, headers,
       header_count, &lc_engine_queue_extend_response_map, &parsed, &result,
       error);
   if (rc != LC_ENGINE_OK) {
@@ -715,7 +723,7 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
   }
   if (result.http_status < 200 || result.http_status >= 300) {
     rc = lc_engine_set_server_error_from_result(error, &result);
-    lonejson_cleanup(&lc_engine_queue_extend_response_map, &parsed);
+    runtime->cleanup(runtime, &lc_engine_queue_extend_response_map, &parsed);
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
@@ -727,7 +735,7 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
         error, LC_ENGINE_ERROR_NO_MEMORY,
         "failed to copy queue_extend correlation_id");
   }
-  lonejson_cleanup(&lc_engine_queue_extend_response_map, &parsed);
+  runtime->cleanup(runtime, &lc_engine_queue_extend_response_map, &parsed);
   lc_engine_http_result_cleanup(&result);
   return rc;
 }

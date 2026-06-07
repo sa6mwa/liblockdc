@@ -59,7 +59,7 @@ static int lc_lease_lonejson_load_write_callback(void *context,
     return 1;
   }
   written =
-      lonejson_curl_write_callback((char *)bytes, 1U, count, &state->parse);
+      state->parse.write_callback(&state->parse, (char *)bytes, 1U, count);
   if (written != count) {
     lc_engine_lonejson_error_from_status(
         error, state->parse.error.code, &state->parse.error,
@@ -334,7 +334,6 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
 }
 
 int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
-                         const lonejson_parse_options *parse_options,
                          const lc_get_opts *opts, lc_get_res *out,
                          lc_error *error) {
   lc_lease_handle *lease;
@@ -342,7 +341,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   lc_engine_get_stream_response engine_res;
   lc_engine_error engine_error;
   lc_lease_lonejson_load_state load_state;
-  lonejson_parse_options options;
+  lonejson *runtime;
   int no_content;
   char *content_type;
   char *etag;
@@ -371,12 +370,12 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   memset(&load_state, 0, sizeof(load_state));
-  options =
-      parse_options != NULL ? *parse_options : lonejson_default_parse_options();
+  runtime = lc_engine_lonejson_runtime(lease->client->engine);
   load_state.byte_limit = lease->client->http_json_response_limit_bytes > 0U
                               ? lease->client->http_json_response_limit_bytes
                               : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
-  rc = lonejson_curl_parse_init(&load_state.parse, map, dst, &options);
+  lc_lonejson_prepare_parse_destination(runtime, map, dst);
+  rc = runtime->curl_parse_init(runtime, &load_state.parse, map, dst);
   if (rc != LONEJSON_STATUS_OK) {
     return lc_lonejson_error_from_status(
         error, rc, &load_state.parse.error,
@@ -410,7 +409,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
                          fields, 4U, error);
     }
     lc_engine_get_stream_response_cleanup(&engine_res);
-    lonejson_curl_parse_cleanup(&load_state.parse);
+    lc_lonejson_curl_parse_cleanup(&load_state.parse);
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
@@ -431,11 +430,11 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   etag = NULL;
   correlation_id = NULL;
   if (!engine_res.no_content) {
-    rc = lonejson_curl_parse_finish(&load_state.parse);
+    rc = load_state.parse.finish(&load_state.parse);
     if (rc != LONEJSON_STATUS_OK) {
       lc_engine_get_stream_response_cleanup(&engine_res);
       lc_engine_error_cleanup(&engine_error);
-      lonejson_curl_parse_cleanup(&load_state.parse);
+      lc_lonejson_curl_parse_cleanup(&load_state.parse);
       return lc_lonejson_error_from_status(
           error, rc, &load_state.parse.error,
           "failed to parse mapped lease state");
@@ -447,7 +446,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   if (rc != LC_OK) {
     lc_engine_get_stream_response_cleanup(&engine_res);
     lc_engine_error_cleanup(&engine_error);
-    lonejson_curl_parse_cleanup(&load_state.parse);
+    lc_lonejson_curl_parse_cleanup(&load_state.parse);
     return rc;
   }
   if (!engine_res.no_content) {
@@ -463,7 +462,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
       lc_log_trace(lease->client->logger, "client.get.success", fields, 5U);
     }
   }
-  lonejson_curl_parse_cleanup(&load_state.parse);
+  lc_lonejson_curl_parse_cleanup(&load_state.parse);
   out->no_content = no_content;
   out->content_type = content_type;
   out->etag = etag;
@@ -486,9 +485,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
 }
 
 int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
-                         const void *src,
-                         const lonejson_write_options *write_options,
-                         lc_error *error) {
+                         const void *src, lc_error *error) {
   lc_lease_handle *lease;
   lc_engine_update_request engine_req;
   lc_engine_update_response engine_res;
@@ -521,8 +518,7 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
   }
   engine_req.content_type = update_opts.content_type;
   rc = lc_engine_client_update_stream(lease->client->engine, &engine_req, map,
-                                      src, write_options, &engine_res,
-                                      &engine_error);
+                                      src, &engine_res, &engine_error);
   if (rc != LC_OK) {
     rc = lc_error_from_engine(error, &engine_error);
     {

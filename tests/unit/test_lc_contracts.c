@@ -184,8 +184,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_ptr_equal(client.get_call.arg2, "key-1");
 
-  rc = lc_load(&client.pub, "key-2", NULL, NULL, NULL, &get_opts, &get_res,
-               &error);
+  rc = lc_load(&client.pub, "key-2", NULL, NULL, &get_opts, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_ptr_equal(client.load_call.arg2, "key-2");
 
@@ -419,9 +418,9 @@ static void test_lease_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_lease_get(&lease.pub, &sink.pub, &get_opts, &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_lease_load(&lease.pub, NULL, NULL, NULL, &get_opts, &get_res, &error);
+  rc = lc_lease_load(&lease.pub, NULL, NULL, &get_opts, &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_lease_save(&lease.pub, NULL, NULL, NULL, &error);
+  rc = lc_lease_save(&lease.pub, NULL, NULL, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_lease_update(&lease.pub, &source_for_update, &update_opts, &error);
   assert_int_equal(rc, LC_OK);

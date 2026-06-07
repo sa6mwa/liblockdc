@@ -30,9 +30,10 @@ foreach(required_path
 endforeach()
 
 file(READ "${generated_rockspec_path}" rockspec_text)
+file(READ "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh" validate_luarocks_script)
 foreach(required_snippet
     "package = \"lockdc\""
-    "\"lonejson == 0.16.0-1\""
+    "\"lonejson == 0.31.0-1\""
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v"
     "scripts/build_lockdc_lua_rock.sh"
@@ -45,5 +46,25 @@ foreach(required_snippet
         message(FATAL_ERROR
             "generated rockspec is missing expected snippet '${required_snippet}'\n"
             "rockspec:\n${rockspec_text}")
+    endif()
+endforeach()
+
+foreach(required_snippet
+    "https://github.com/sa6mwa/lonejson/releases/download/v0.31.0/lonejson-0.31.0-1.src.rock"
+)
+    string(FIND "${validate_luarocks_script}" "${required_snippet}" snippet_index)
+    if(snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "LuaRocks validation script is missing expected snippet '${required_snippet}'")
+    endif()
+endforeach()
+
+foreach(stale_snippet
+    "https://github.com/sa6mwa/lonejson/releases/download/v0.16.0/lonejson-0.16.0-1.src.rock"
+)
+    string(FIND "${validate_luarocks_script}" "${stale_snippet}" snippet_index)
+    if(NOT snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "LuaRocks validation script contains stale snippet '${stale_snippet}'")
     endif()
 endforeach()

@@ -5,14 +5,14 @@ set -eu
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
 make_bin="${MAKE:-make}"
-dry_run="${LOCKDC_WORLD_DRY_RUN:-0}"
-clang_bin="${LOCKDC_WORLD_CLANG_BIN:-clang}"
+dry_run="${LOCKDC_RELEASE_DRY_RUN:-0}"
+clang_bin="${LOCKDC_RELEASE_CLANG_BIN:-clang}"
 
 run_step() {
     step="$1"
 
     if [ "$dry_run" = "1" ]; then
-        printf '[world] %s\n' "$step"
+        printf '[release] %s\n' "$step"
         return 0
     fi
 
@@ -29,13 +29,14 @@ should_run_fuzz() {
 cd "$repo_root"
 
 run_step __clean
+run_step __format
 run_step __test-debug
 run_step __test-host
 run_step __cross-test
 if should_run_fuzz; then
     run_step __fuzz
 else
-    printf '[world] skipping __fuzz: clang not available (%s)\n' "$clang_bin"
+    printf '[release] skipping __fuzz: clang not available (%s)\n' "$clang_bin"
 fi
 run_step __test-e2e
 run_step __benchmarks

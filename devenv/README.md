@@ -152,7 +152,12 @@ make release
 scripts/package-verify.sh
 ```
 
-Those flows also require the ABI-specific dependency roots to already exist. They do not invoke `scripts/deps.sh` implicitly.
+`make release` is the clean-slate release gate. It removes generated state,
+runs formatting, debug sanitizer tests, host and cross release suites,
+optional fuzzing when Clang/libFuzzer is available, e2e tests, benchmarks, and
+release package generation/verification. The primary Makefile release flow
+provisions the dependency roots it needs; direct lower-level packaging scripts
+still assume those roots already exist.
 
 By default `scripts/package.sh` now builds the full release matrix:
 
@@ -192,6 +197,8 @@ Current fuzz targets cover:
 - client bundle parsing during `lc_client_open()`
 - attachment response decoding
 - queue subscribe meta decoding
+- streamed query-key decoding
+- local mutate parsing and application
 
 ## Build and run the e2e suite
 

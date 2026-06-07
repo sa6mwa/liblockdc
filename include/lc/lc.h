@@ -7,7 +7,7 @@
 #include <stddef.h>
 
 /** Default maximum bytes accepted while parsing a typed JSON HTTP response. */
-#define LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT (1024UL * 1024UL)
+#define LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT (100UL * 1024UL * 1024UL)
 
 /** Opaque client handle. */
 typedef struct lc_client lc_client;
@@ -1219,12 +1219,11 @@ struct lc_lease {
    *
    * Callers define their struct and map with `LONEJSON_FIELD_*` and
    * `LONEJSON_MAP_DEFINE(...)`, then release lonejson-owned field storage with
-   * `lonejson_cleanup(map, dst)` when finished. For very large string or byte
-   * values, use lonejson spool-backed field mappings so load can spill those
-   * fields instead of forcing them to stay resident in memory.
+   * a lonejson runtime cleanup call when finished. For very large string or
+   * byte values, use lonejson spool-backed field mappings so load can spill
+   * those fields instead of forcing them to stay resident in memory.
    */
   int (*load)(lc_lease *self, const lonejson_map *map, void *dst,
-              const lonejson_parse_options *parse_options,
               const lc_get_opts *opts, lc_get_res *out, lc_error *error);
   /**
    * Convenience mapped-struct variant of `update()`.
@@ -1237,7 +1236,7 @@ struct lc_lease {
    * memory.
    */
   int (*save)(lc_lease *self, const lonejson_map *map, const void *src,
-              const lonejson_write_options *write_options, lc_error *error);
+              lc_error *error);
   /**
    * Replaces the state document from a streamed JSON source.
    *
@@ -1523,11 +1522,11 @@ struct lc_client {
    *
    * Callers define their struct and map with `LONEJSON_FIELD_*` and
    * `LONEJSON_MAP_DEFINE(...)`, then release lonejson-owned field storage with
-   * `lonejson_cleanup(map, dst)` when finished.
+   * a lonejson runtime cleanup call when finished.
    */
   int (*load)(lc_client *self, const char *key, const lonejson_map *map,
-              void *dst, const lonejson_parse_options *parse_options,
-              const lc_get_opts *opts, lc_get_res *out, lc_error *error);
+              void *dst, const lc_get_opts *opts, lc_get_res *out,
+              lc_error *error);
   /** Updates an existing lease reference from a streamed JSON source. */
   int (*update)(lc_client *self, const lc_update_req *req, lc_source *src,
                 lc_update_res *out, lc_error *error);
@@ -1918,8 +1917,8 @@ int lc_get(lc_client *client, const char *key, const lc_get_opts *opts,
            lc_sink *dst, lc_get_res *out, lc_error *error);
 /** Convenience `get()` variant that materializes the state into memory. */
 int lc_load(lc_client *client, const char *key, const lonejson_map *map,
-            void *dst, const lonejson_parse_options *parse_options,
-            const lc_get_opts *opts, lc_get_res *out, lc_error *error);
+            void *dst, const lc_get_opts *opts, lc_get_res *out,
+            lc_error *error);
 /** Updates a lease reference from a streamed source. */
 int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error);
@@ -2072,12 +2071,11 @@ int lc_lease_get(lc_lease *lease, lc_sink *dst, const lc_get_opts *opts,
 /** Convenience `get()` variant that materializes a bound lease state in memory.
  */
 int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
-                  const lonejson_parse_options *parse_options,
                   const lc_get_opts *opts, lc_get_res *out, lc_error *error);
 /** Convenience mapped-struct `update()` variant for lonejson-compatible data.
  */
 int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
-                  const lonejson_write_options *write_options, lc_error *error);
+                  lc_error *error);
 /** Streams a replacement state document into a bound lease. */
 int lc_lease_update(lc_lease *lease, lc_source *src, const lc_update_opts *opts,
                     lc_error *error);

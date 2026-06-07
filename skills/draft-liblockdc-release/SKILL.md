@@ -1,6 +1,6 @@
 ---
 name: draft-liblockdc-release
-description: Validate a tagged liblockdc release from the repository root, run the full local test and make world gates, verify dist/ artifacts and checksums, then draft or publish the matching GitHub release with gh once the tag and commit are on origin. Use when preparing a liblockdc GitHub release from a vX.Y.Z tag on HEAD.
+description: Validate a tagged liblockdc release from the repository root, run the full local release gate, verify dist/ artifacts and checksums, then draft or publish the matching GitHub release with gh once the tag and commit are on origin. Use when preparing a liblockdc GitHub release from a vX.Y.Z tag on HEAD.
 ---
 
 # Draft liblockdc Release
@@ -20,10 +20,7 @@ skills/draft-liblockdc-release/scripts/draft_liblockdc_release.sh draft
    - confirm `gh` is authenticated and can access the `origin` GitHub repository and API
    - confirm `HEAD` has exactly one `vX.Y.Z` tag
    - compare it to the previous release tag merged into `main`
-   - run `make clean`
-   - run `make test-all`
-   - run `make test-e2e`
-   - run `make world` in the foreground
+   - run `make release` in the foreground
    - rerun the release-package tests
    - verify `dist/` filenames and `CHECKSUMS`
    - only then check whether the tagged commit and tag are present on `origin`
@@ -35,7 +32,7 @@ skills/draft-liblockdc-release/scripts/draft_liblockdc_release.sh draft
 skills/draft-liblockdc-release/scripts/draft_liblockdc_release.sh draft --allow-nonbump-tag
 ```
 
-4. If the helper stops after local validation because `origin/main` or the release tag is not present yet, ask the user to push the commit and tag. After the user confirms that push is done, continue without rerunning `make world`:
+4. If the helper stops after local validation because `origin/main` or the release tag is not present yet, ask the user to push the commit and tag. After the user confirms that push is done, continue without rerunning `make release`:
 
 ```bash
 skills/draft-liblockdc-release/scripts/draft_liblockdc_release.sh resume-draft
@@ -54,7 +51,7 @@ skills/draft-liblockdc-release/scripts/draft_liblockdc_release.sh publish
 
 - Do not pull credentials from elsewhere. Use the existing `gh` authentication only.
 - Fail immediately if `HEAD` is not tagged with a proper `vX.Y.Z`.
-- Fail immediately if tests, `make world`, package tests, artifact checks, or checksum validation fail.
+- Fail immediately if `make release`, package tests, artifact checks, or checksum validation fail.
 - Treat the local validation phase as the release-readiness gate before anything must be on `origin`.
 - Use the exact tag value as the GitHub release title.
 - Derive the release notes from the commit message on `HEAD`.
@@ -65,5 +62,5 @@ skills/draft-liblockdc-release/scripts/draft_liblockdc_release.sh publish
 ## Notes
 
 - This skill is intentionally deterministic. It should not silently skip gates.
-- `make world` is expensive and must be run in the foreground so the invoking agent keeps contact with the run.
+- `make release` is expensive and must be run in the foreground so the invoking agent keeps contact with the run.
 - `resume-draft` exists specifically so a push to `origin` does not force another full rebuild.

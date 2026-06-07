@@ -65,7 +65,7 @@ static int lc_client_lonejson_load_write_callback(void *context,
     return 1;
   }
   written =
-      lonejson_curl_write_callback((char *)bytes, 1U, count, &state->parse);
+      state->parse.write_callback(&state->parse, (char *)bytes, 1U, count);
   if (written != count) {
     lc_engine_lonejson_error_from_status(
         error, state->parse.error.code, &state->parse.error,
@@ -479,7 +479,6 @@ int lc_client_get_method(lc_client *self, const char *key,
 
 int lc_client_load_method(lc_client *self, const char *key,
                           const lonejson_map *map, void *dst,
-                          const lonejson_parse_options *parse_options,
                           const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error) {
   lc_client_handle *client;
@@ -487,7 +486,7 @@ int lc_client_load_method(lc_client *self, const char *key,
   lc_engine_get_stream_response engine_res;
   lc_engine_error engine_error;
   lc_client_lonejson_load_state load_state;
-  lonejson_parse_options options;
+  lonejson *runtime;
   int no_content;
   char *content_type;
   char *etag;
@@ -515,12 +514,12 @@ int lc_client_load_method(lc_client *self, const char *key,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   memset(&load_state, 0, sizeof(load_state));
-  options =
-      parse_options != NULL ? *parse_options : lonejson_default_parse_options();
+  runtime = lc_engine_lonejson_runtime(client->engine);
   load_state.byte_limit = client->http_json_response_limit_bytes > 0U
                               ? client->http_json_response_limit_bytes
                               : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
-  rc = lonejson_curl_parse_init(&load_state.parse, map, dst, &options);
+  lc_lonejson_prepare_parse_destination(runtime, map, dst);
+  rc = runtime->curl_parse_init(runtime, &load_state.parse, map, dst);
   if (rc != LONEJSON_STATUS_OK) {
     return lc_lonejson_error_from_status(
         error, rc, &load_state.parse.error,
@@ -548,7 +547,7 @@ int lc_client_load_method(lc_client *self, const char *key,
               : "client.get.error",
           fields, 2U, error);
     }
-    lonejson_curl_parse_cleanup(&load_state.parse);
+    lc_lonejson_curl_parse_cleanup(&load_state.parse);
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
@@ -559,11 +558,11 @@ int lc_client_load_method(lc_client *self, const char *key,
   etag = NULL;
   correlation_id = NULL;
   if (!engine_res.no_content) {
-    rc = lonejson_curl_parse_finish(&load_state.parse);
+    rc = load_state.parse.finish(&load_state.parse);
     if (rc != LONEJSON_STATUS_OK) {
       lc_engine_get_stream_response_cleanup(&engine_res);
       lc_engine_error_cleanup(&engine_error);
-      lonejson_curl_parse_cleanup(&load_state.parse);
+      lc_lonejson_curl_parse_cleanup(&load_state.parse);
       return lc_lonejson_error_from_status(error, rc, &load_state.parse.error,
                                            "failed to parse mapped state");
     }
@@ -574,7 +573,7 @@ int lc_client_load_method(lc_client *self, const char *key,
   if (rc != LC_OK) {
     lc_engine_get_stream_response_cleanup(&engine_res);
     lc_engine_error_cleanup(&engine_error);
-    lonejson_curl_parse_cleanup(&load_state.parse);
+    lc_lonejson_curl_parse_cleanup(&load_state.parse);
     return rc;
   }
   if (!engine_res.no_content) {
@@ -591,7 +590,7 @@ int lc_client_load_method(lc_client *self, const char *key,
       lc_log_trace(client->logger, "client.get.success", fields, 5U);
     }
   }
-  lonejson_curl_parse_cleanup(&load_state.parse);
+  lc_lonejson_curl_parse_cleanup(&load_state.parse);
   out->no_content = no_content;
   out->content_type = content_type;
   out->etag = etag;

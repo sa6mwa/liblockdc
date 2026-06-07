@@ -6,10 +6,18 @@ if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT OR LOCKDC_DEPENDENCY_BUILD_ROOT STRE
     message(FATAL_ERROR "LOCKDC_DEPENDENCY_BUILD_ROOT is required")
 endif()
 
+if(NOT DEFINED LOCKDC_LONEJSON_VERSION OR LOCKDC_LONEJSON_VERSION STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_LONEJSON_VERSION is required")
+endif()
+
+if(NOT DEFINED LOCKDC_LONEJSON_ABI_VERSION OR LOCKDC_LONEJSON_ABI_VERSION STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_LONEJSON_ABI_VERSION is required")
+endif()
+
 set(lonejson_root "${LOCKDC_EXTERNAL_ROOT}/lonejson/install")
 set(lonejson_build_root "${LOCKDC_DEPENDENCY_BUILD_ROOT}/lonejson/build")
 set(lonejson_static_archive "${lonejson_root}/lib/liblonejson.a")
-set(lonejson_shared_library "${lonejson_root}/lib/liblonejson.so.4")
+set(lonejson_shared_library "${lonejson_root}/lib/liblonejson.so.${LOCKDC_LONEJSON_ABI_VERSION}")
 set(lonejson_header "${lonejson_root}/include/lonejson.h")
 
 foreach(path IN ITEMS
@@ -36,6 +44,19 @@ foreach(path IN ITEMS
         message(FATAL_ERROR "missing lonejson consumer metadata: ${path}")
     endif()
 endforeach()
+
+file(READ "${lonejson_root}/lib/pkgconfig/lonejson.pc" lonejson_pc_text)
+if(NOT lonejson_pc_text MATCHES "(^|\n)Version: ${LOCKDC_LONEJSON_VERSION}(\n|$)")
+    message(FATAL_ERROR
+        "lonejson pkg-config metadata does not match configured version "
+        "${LOCKDC_LONEJSON_VERSION}")
+endif()
+file(READ "${lonejson_root}/lib/cmake/lonejson/lonejsonConfigVersion.cmake" lonejson_cmake_version_text)
+if(NOT lonejson_cmake_version_text MATCHES "PACKAGE_VERSION \"${LOCKDC_LONEJSON_VERSION}\"")
+    message(FATAL_ERROR
+        "lonejson CMake package metadata does not match configured version "
+        "${LOCKDC_LONEJSON_VERSION}")
+endif()
 
 if(EXISTS "${lonejson_build_root}")
     message(FATAL_ERROR
@@ -113,6 +134,15 @@ foreach(symbol IN ITEMS
     lonejson_array_stream_finish_string
     lonejson_array_stream_push_string_items
     lonejson_array_stream_finish_string_items
+    lonejson_array_rewrite_reader
+    lonejson_array_rewrite_filep
+    lonejson_array_rewrite_path
+    lonejson_value_rewrite_reader
+    lonejson_value_rewrite_filep
+    lonejson_value_rewrite_path
+    lonejson_value_rewrite_selector_reader
+    lonejson_value_rewrite_selector_filep
+    lonejson_value_rewrite_selector_path
     lonejson_default_sse_options
     lonejson_sse_open
     lonejson_sse_push
@@ -126,7 +156,7 @@ foreach(symbol IN ITEMS
     lonejson_multipart_finish
     lonejson_multipart_close)
     assert_contains("${static_symbols}" "${symbol}" "${symbol} in liblonejson.a")
-    assert_contains("${shared_symbols}" "${symbol}" "${symbol} in liblonejson.so.4")
+    assert_contains("${shared_symbols}" "${symbol}" "${symbol} in liblonejson.so.${LOCKDC_LONEJSON_ABI_VERSION}")
 endforeach()
 
 foreach(alias_symbol IN ITEMS
@@ -175,5 +205,5 @@ foreach(alias_symbol IN ITEMS
     lj_multipart_finish
     lj_multipart_close)
     assert_not_contains("${static_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.a")
-    assert_not_contains("${shared_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.so.4")
+    assert_not_contains("${shared_symbols}" "${alias_symbol}" "${alias_symbol} in liblonejson.so.${LOCKDC_LONEJSON_ABI_VERSION}")
 endforeach()
