@@ -127,9 +127,9 @@ else()
 endif()
 
 set(lonejson_cache_dir "${LOCKDC_BINARY_DIR}/lua-rock-cache")
-set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.31.0-1.src.rock")
-set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.31.0/lonejson-0.31.0-1.src.rock")
-set(lonejson_src_rock_sha256 "9f00e58104adbda0c5966a5f1f5c5dca337eb0997d7e0578035d9e16250bdebb")
+set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.32.0-1.src.rock")
+set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.32.0/lonejson-0.32.0-1.src.rock")
+set(lonejson_src_rock_sha256 "87a680b338399de7f981c2dac0681c6cddc8542463d9a3cf6f2f0f17808e47d2")
 set(lua_tree_dir "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/tree")
 set(lua_rock_workdir "${LOCKDC_ROOT}")
 

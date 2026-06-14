@@ -33,7 +33,7 @@ file(READ "${generated_rockspec_path}" rockspec_text)
 file(READ "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh" validate_luarocks_script)
 foreach(required_snippet
     "package = \"lockdc\""
-    "\"lonejson == 0.31.0-1\""
+    "\"lonejson == 0.32.0-1\""
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v"
     "scripts/build_lockdc_lua_rock.sh"
@@ -50,7 +50,7 @@ foreach(required_snippet
 endforeach()
 
 foreach(required_snippet
-    "https://github.com/sa6mwa/lonejson/releases/download/v0.31.0/lonejson-0.31.0-1.src.rock"
+    "https://github.com/sa6mwa/lonejson/releases/download/v0.32.0/lonejson-0.32.0-1.src.rock"
 )
     string(FIND "${validate_luarocks_script}" "${required_snippet}" snippet_index)
     if(snippet_index EQUAL -1)

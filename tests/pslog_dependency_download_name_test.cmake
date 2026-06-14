@@ -5,6 +5,7 @@ if(NOT DEFINED LOCKDC_ROOT)
 endif()
 
 file(READ "${LOCKDC_ROOT}/cmake/LcDependencies.cmake" lc_dependencies_text)
+file(READ "${LOCKDC_ROOT}/scripts/deps.sh" deps_script_text)
 
 set(expected_asset_name
     "set(asset_name \"libpslog-\${LOCKDC_PSLOG_VERSION}-\${LOCKDC_TARGET_ID}.tar.gz\")")
@@ -16,8 +17,8 @@ if(asset_name_pos EQUAL -1)
 endif()
 
 set(expected_lonejson_asset_name
-    "set(asset_name \"liblonejson-\${LOCKDC_LONEJSON_VERSION}-\${LOCKDC_TARGET_ID}.tar.gz\")")
-string(FIND "${lc_dependencies_text}" "${expected_lonejson_asset_name}" lonejson_asset_name_pos)
+    "lonejson_asset_name=\"liblonejson-$lonejson_version-\${preset#deps-}.tar.gz\"")
+string(FIND "${deps_script_text}" "${expected_lonejson_asset_name}" lonejson_asset_name_pos)
 if(lonejson_asset_name_pos EQUAL -1)
   message(FATAL_ERROR
     "lonejson dependency asset naming no longer keys downloads by target.\n"

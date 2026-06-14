@@ -63,6 +63,13 @@ function(lc_configure_cpkt_package_roots)
   set(CURL_DIR "${CURL_DIR}" PARENT_SCOPE)
 endfunction()
 
+function(lc_configure_lonejson_package_root)
+  set(lonejson_root "${LOCKDC_EXTERNAL_ROOT}/lonejson/install")
+  lc_require_cpkt_config("lonejson" "${lonejson_root}/lib/cmake/lonejson/lonejsonConfig.cmake")
+  set(lonejson_DIR "${lonejson_root}/lib/cmake/lonejson" CACHE PATH "lonejson CMake package directory." FORCE)
+  set(lonejson_DIR "${lonejson_DIR}" PARENT_SCOPE)
+endfunction()
+
 function(lc_get_external_c_flags out_var)
   set(_flags "-O2 -DNDEBUG -g0")
   if(CMAKE_C_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
@@ -161,99 +168,10 @@ function(lc_add_curl)
   lc_add_interface_alias(lc::curl_shared cpkt::curl_shared)
 endfunction()
 
-function(lc_get_lonejson_asset_info out_name out_hash)
-  set(asset_name "liblonejson-${LOCKDC_LONEJSON_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
-
-  if(asset_name STREQUAL "liblonejson-0.31.0-x86_64-linux-gnu.tar.gz")
-    set(asset_hash "f3f1de0f04b4d9491dacc856de38cd1ecde488fb8befc539bf615ac4d9490b54")
-  elseif(asset_name STREQUAL "liblonejson-0.31.0-x86_64-linux-musl.tar.gz")
-    set(asset_hash "967c797ca17040960ee0fc3339abda040ab3f52c6f9b8d79e729284f433ad1af")
-  elseif(asset_name STREQUAL "liblonejson-0.31.0-aarch64-linux-gnu.tar.gz")
-    set(asset_hash "1594b8da68a5acda24addcad19a65f4001a75b2fac26a86e8455229352732ca8")
-  elseif(asset_name STREQUAL "liblonejson-0.31.0-aarch64-linux-musl.tar.gz")
-    set(asset_hash "81f045090cb81b727bc390cfcc9bf46b9ee8a0ed80fcf75fd1b9cdced3f787e1")
-  elseif(asset_name STREQUAL "liblonejson-0.31.0-armhf-linux-gnu.tar.gz")
-    set(asset_hash "34d03906e00888a2aa9fb01073668b398c271faef01e9f70232523bf0b4be481")
-  elseif(asset_name STREQUAL "liblonejson-0.31.0-armhf-linux-musl.tar.gz")
-    set(asset_hash "c7fbeda5ba8318c01fda0fabe65903f8dce39d6f96564afa7efd1aca80230644")
-  elseif(asset_name STREQUAL "liblonejson-0.31.0-arm64-apple-darwin.tar.gz")
-    set(asset_hash "b833e8b2f385294ba085d12dd5d576dd2d8ac271abcbabdf36c81237b27fa14a")
-  else()
-    message(FATAL_ERROR "Unsupported liblonejson release asset: ${asset_name}")
-  endif()
-
-  set(${out_name} "${asset_name}" PARENT_SCOPE)
-  set(${out_hash} "${asset_hash}" PARENT_SCOPE)
-endfunction()
-
 function(lc_add_lonejson)
-  set(project_name "lc_lonejson_project")
-  set(prefix_dir "${LOCKDC_DEPENDENCY_BUILD_ROOT}/lonejson")
-  set(source_dir "${prefix_dir}/src")
-  set(build_dir "${prefix_dir}/build")
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/lonejson/install")
-  set(stamp_dir "${prefix_dir}/stamp")
-  set(tmp_dir "${prefix_dir}/tmp")
-  set(download_dir "${LOCKDC_DOWNLOAD_ROOT}")
-  lc_get_lonejson_asset_info(asset_name asset_hash)
-  lc_get_strip_dependency_install_command(strip_install_command "${install_dir}")
-
-  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
-
-  if(LOCKDC_BUILD_DEPENDENCIES)
-    ExternalProject_Add(${project_name}
-      URL "https://github.com/sa6mwa/lonejson/releases/download/v${LOCKDC_LONEJSON_VERSION}/${asset_name}"
-      URL_HASH "SHA256=${asset_hash}"
-      DOWNLOAD_NAME "${asset_name}"
-      PREFIX "${prefix_dir}"
-      DOWNLOAD_DIR "${download_dir}"
-      SOURCE_DIR "${source_dir}"
-      STAMP_DIR "${stamp_dir}"
-      TMP_DIR "${tmp_dir}"
-      TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT}
-      INACTIVITY_TIMEOUT ${LOCKDC_DEPENDENCY_DOWNLOAD_INACTIVITY_TIMEOUT}
-      CONFIGURE_COMMAND ""
-      BUILD_COMMAND ""
-      INSTALL_COMMAND
-        ${CMAKE_COMMAND} -E rm -rf "${install_dir}"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${source_dir}" "${install_dir}"
-        COMMAND ${strip_install_command}
-      BUILD_IN_SOURCE 1
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-  endif()
-
-  add_library(lc::lonejson_static STATIC IMPORTED GLOBAL)
-  set_target_properties(lc::lonejson_static
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/liblonejson${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-  )
-  if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::lonejson_static ${project_name})
-    lc_record_dependency_target(${project_name})
-  else()
-    lc_require_dependency_file("${install_dir}/lib/liblonejson${CMAKE_STATIC_LIBRARY_SUFFIX}" "lonejson (static)")
-    lc_require_dependency_file("${install_dir}/include/lonejson.h" "lonejson header")
-  endif()
-
-  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(lonejson_shared_library "${install_dir}/lib/liblonejson.${LOCKDC_LONEJSON_ABI_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  else()
-    set(lonejson_shared_library "${install_dir}/lib/liblonejson${CMAKE_SHARED_LIBRARY_SUFFIX}.${LOCKDC_LONEJSON_ABI_VERSION}")
-  endif()
-
-  add_library(lc::lonejson_shared SHARED IMPORTED GLOBAL)
-  set_target_properties(lc::lonejson_shared
-    PROPERTIES
-      IMPORTED_LOCATION "${lonejson_shared_library}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-  )
-  if(LOCKDC_BUILD_DEPENDENCIES)
-    add_dependencies(lc::lonejson_shared ${project_name})
-  else()
-    lc_require_dependency_file("${lonejson_shared_library}" "lonejson (shared)")
-  endif()
+  find_package(lonejson ${LOCKDC_LONEJSON_VERSION} CONFIG REQUIRED)
+  lc_add_interface_alias(lc::lonejson_static lonejson::lonejson_static)
+  lc_add_interface_alias(lc::lonejson_shared lonejson::lonejson)
 endfunction()
 
 function(lc_add_cmocka)
@@ -407,6 +325,7 @@ endfunction()
 function(lc_configure_dependencies)
   if(LOCKDC_BUILD_STATIC OR LOCKDC_BUILD_SHARED)
     lc_configure_cpkt_package_roots()
+    lc_configure_lonejson_package_root()
     lc_add_openssl()
   endif()
 

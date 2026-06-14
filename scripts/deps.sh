@@ -211,6 +211,36 @@ case "$cpkt_asset_name" in
     ;;
 esac
 
+lonejson_asset_name="liblonejson-$lonejson_version-${preset#deps-}.tar.gz"
+lonejson_download_url="https://github.com/sa6mwa/lonejson/releases/download/v$lonejson_version/$lonejson_asset_name"
+case "$lonejson_asset_name" in
+  liblonejson-0.32.0-x86_64-linux-gnu.tar.gz)
+    lonejson_asset_hash=84f0abae33a1b1d91a0f962ad78ecd7be91a4055c4c6a4aa69e0df816f42812c
+    ;;
+  liblonejson-0.32.0-x86_64-linux-musl.tar.gz)
+    lonejson_asset_hash=326ee1f75e632db9899e05ac02f669b87a437064086242603519fe5197ea654a
+    ;;
+  liblonejson-0.32.0-aarch64-linux-gnu.tar.gz)
+    lonejson_asset_hash=74a515fcce5574f82dbae46a6ce3399d6b5d07d249fa9c98d53293b7baf8c35b
+    ;;
+  liblonejson-0.32.0-aarch64-linux-musl.tar.gz)
+    lonejson_asset_hash=0f2b6048caf74f5c9c02d332cea00bd67e2352764ba1b0d2f65b4266719fcd39
+    ;;
+  liblonejson-0.32.0-armhf-linux-gnu.tar.gz)
+    lonejson_asset_hash=8adad849699ea6380dc16ee9228f4d9695e9b3d49ce6c68b7f391e3196e9d6ad
+    ;;
+  liblonejson-0.32.0-armhf-linux-musl.tar.gz)
+    lonejson_asset_hash=e62f512dae09e5fe6402e876edaf1f6517159854e049ff161c32ee52df864566
+    ;;
+  liblonejson-0.32.0-arm64-apple-darwin.tar.gz)
+    lonejson_asset_hash=2a73b6bb7e2e690b1accfb811c64de075b2efb569bf9cc299547f4f577c151f7
+    ;;
+  *)
+    printf 'unsupported lonejson release asset: %s\n' "$lonejson_asset_name" >&2
+    exit 1
+    ;;
+esac
+
 compiler=${CC:-cc}
 compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
 compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
@@ -245,6 +275,8 @@ curl_version=$curl_version
 nghttp2_version=$nghttp2_version
 libssh2_version=$libssh2_version
 lonejson_version=$lonejson_version
+lonejson_asset_name=$lonejson_asset_name
+lonejson_asset_hash=$lonejson_asset_hash
 cmocka_version=$cmocka_version
 pslog_version=$pslog_version"
 
@@ -318,6 +350,30 @@ download_cpkt_bundle() {
   if [ "$actual_hash" != "$cpkt_asset_hash" ]; then
     printf 'c.pkt.systems checksum mismatch for %s\nexpected %s\nactual   %s\n' \
       "$cpkt_asset_name" "$cpkt_asset_hash" "$actual_hash" >&2
+    exit 1
+  fi
+
+  rm -rf "$extract_root"
+  mkdir -p "$extract_root"
+  tar -xzf "$archive_path" -C "$extract_root" --strip-components=1
+}
+
+download_lonejson_bundle() {
+  local archive_path="$repo_root/.cache/downloads/$lonejson_asset_name"
+  local extract_root="$deps_root/lonejson/install"
+  local actual_hash
+
+  mkdir -p "$repo_root/.cache/downloads" "$extract_root"
+  if [ ! -f "$archive_path" ]; then
+    curl -fL --connect-timeout "$download_timeout" \
+      --max-time "$download_timeout" \
+      -o "$archive_path" "$lonejson_download_url"
+  fi
+
+  actual_hash=$(sha256sum "$archive_path" | awk '{print $1}')
+  if [ "$actual_hash" != "$lonejson_asset_hash" ]; then
+    printf 'lonejson checksum mismatch for %s\nexpected %s\nactual   %s\n' \
+      "$lonejson_asset_name" "$lonejson_asset_hash" "$actual_hash" >&2
     exit 1
   fi
 
@@ -469,6 +525,9 @@ required_paths=(
   "$deps_root/lonejson/install/lib/liblonejson.a"
   "$deps_root/lonejson/install/include/lonejson.h"
   "$lonejson_shared_path"
+  "$deps_root/lonejson/install/lib/pkgconfig/lonejson.pc"
+  "$deps_root/lonejson/install/lib/cmake/lonejson/lonejsonConfig.cmake"
+  "$deps_root/lonejson/install/lib/cmake/lonejson/lonejsonConfigVersion.cmake"
 )
 if [ "$preset" != "deps-arm64-apple-darwin" ]; then
   required_paths+=("$deps_root/cmocka/install/lib/libcmocka.a")
@@ -505,6 +564,7 @@ fi
 
 reset_dependency_build_root
 stage_cpkt_component_layout
+download_lonejson_bundle
 cmake_extra_args+=("-DLOCKDC_ZLIB_VERSION=$zlib_version")
 cmake_extra_args+=("-DLOCKDC_CPKT_VERSION=$cpkt_version")
 cmake --preset "$cmake_preset" --fresh "${cmake_extra_args[@]}"
