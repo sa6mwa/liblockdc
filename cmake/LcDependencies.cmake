@@ -18,6 +18,51 @@ function(lc_normalize_prefix var path)
   set(${var} "${_normalized}" PARENT_SCOPE)
 endfunction()
 
+function(lc_require_cpkt_config package_name config_path)
+  if(NOT EXISTS "${config_path}")
+    message(FATAL_ERROR
+      "${package_name} CMake package metadata was not found at ${config_path}\n"
+      "liblockdc requires c.pkt.systems ${LOCKDC_CPKT_VERSION} or newer dependency bundles with CMake metadata.\n"
+      "Run scripts/deps.sh for the target preset or clean stale dependency roots with make clean.")
+  endif()
+endfunction()
+
+function(lc_add_interface_alias alias_target upstream_target)
+  if(TARGET "${alias_target}")
+    return()
+  endif()
+  if(NOT TARGET "${upstream_target}")
+    message(FATAL_ERROR "Cannot create ${alias_target}; missing upstream target ${upstream_target}")
+  endif()
+  add_library(${alias_target} INTERFACE IMPORTED GLOBAL)
+  set_target_properties(${alias_target}
+    PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${upstream_target}"
+  )
+endfunction()
+
+function(lc_configure_cpkt_package_roots)
+  set(cpkt_root "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install")
+
+  lc_require_cpkt_config("OpenSSL" "${cpkt_root}/lib/cmake/OpenSSL/OpenSSLConfig.cmake")
+  lc_require_cpkt_config("ZLIB" "${cpkt_root}/lib/cmake/zlib/ZLIBConfig.cmake")
+  lc_require_cpkt_config("nghttp2" "${cpkt_root}/lib/cmake/nghttp2/nghttp2Config.cmake")
+  lc_require_cpkt_config("libssh2" "${cpkt_root}/lib/cmake/libssh2/libssh2-config.cmake")
+  lc_require_cpkt_config("CURL" "${cpkt_root}/lib/cmake/CURL/CURLConfig.cmake")
+
+  set(OpenSSL_DIR "${cpkt_root}/lib/cmake/OpenSSL" CACHE PATH "c.pkt.systems OpenSSL CMake package directory." FORCE)
+  set(ZLIB_DIR "${cpkt_root}/lib/cmake/zlib" CACHE PATH "c.pkt.systems zlib CMake package directory." FORCE)
+  set(nghttp2_DIR "${cpkt_root}/lib/cmake/nghttp2" CACHE PATH "c.pkt.systems nghttp2 CMake package directory." FORCE)
+  set(Libssh2_DIR "${cpkt_root}/lib/cmake/libssh2" CACHE PATH "c.pkt.systems libssh2 CMake package directory." FORCE)
+  set(CURL_DIR "${cpkt_root}/lib/cmake/CURL" CACHE PATH "c.pkt.systems CURL CMake package directory." FORCE)
+
+  set(OpenSSL_DIR "${OpenSSL_DIR}" PARENT_SCOPE)
+  set(ZLIB_DIR "${ZLIB_DIR}" PARENT_SCOPE)
+  set(nghttp2_DIR "${nghttp2_DIR}" PARENT_SCOPE)
+  set(Libssh2_DIR "${Libssh2_DIR}" PARENT_SCOPE)
+  set(CURL_DIR "${CURL_DIR}" PARENT_SCOPE)
+endfunction()
+
 function(lc_get_external_c_flags out_var)
   set(_flags "-O2 -DNDEBUG -g0")
   if(CMAKE_C_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
@@ -85,184 +130,35 @@ function(lc_append_common_external_cmake_args out_var)
 endfunction()
 
 function(lc_add_openssl)
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/openssl/install")
-  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
-
-  add_library(lc::openssl_crypto_static STATIC IMPORTED GLOBAL)
-  set_target_properties(lc::openssl_crypto_static
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-  )
-  lc_require_dependency_file("${install_dir}/lib/libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}" "OpenSSL crypto (static)")
-
-  add_library(lc::openssl_ssl_static STATIC IMPORTED GLOBAL)
-  set_target_properties(lc::openssl_ssl_static
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_static;${CMAKE_DL_LIBS};Threads::Threads"
-  )
-  lc_require_dependency_file("${install_dir}/lib/libssl${CMAKE_STATIC_LIBRARY_SUFFIX}" "OpenSSL ssl (static)")
-
-  add_library(lc::openssl_crypto_shared SHARED IMPORTED GLOBAL)
-  set_target_properties(lc::openssl_crypto_shared
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-  )
-  lc_require_dependency_file("${install_dir}/lib/libcrypto${CMAKE_SHARED_LIBRARY_SUFFIX}" "OpenSSL crypto (shared)")
-
-  add_library(lc::openssl_ssl_shared SHARED IMPORTED GLOBAL)
-  set_target_properties(lc::openssl_ssl_shared
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_shared;${CMAKE_DL_LIBS};Threads::Threads"
-  )
-  lc_require_dependency_file("${install_dir}/lib/libssl${CMAKE_SHARED_LIBRARY_SUFFIX}" "OpenSSL ssl (shared)")
-
-  set(LOCKDC_OPENSSL_static_PREFIX "${install_dir}" PARENT_SCOPE)
-  set(LOCKDC_OPENSSL_shared_PREFIX "${install_dir}" PARENT_SCOPE)
+  find_package(OpenSSL ${LOCKDC_OPENSSL_VERSION} CONFIG REQUIRED)
+  lc_add_interface_alias(lc::openssl_crypto_static OpenSSL::Crypto)
+  lc_add_interface_alias(lc::openssl_ssl_static OpenSSL::SSL)
+  lc_add_interface_alias(lc::openssl_crypto_shared cpkt::openssl_crypto_shared)
+  lc_add_interface_alias(lc::openssl_ssl_shared cpkt::openssl_ssl_shared)
 endfunction()
 
 function(lc_add_nghttp2)
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install")
-  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
-
-  add_library(lc::nghttp2_static STATIC IMPORTED GLOBAL)
-  set_target_properties(lc::nghttp2_static
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libnghttp2${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-  )
-  lc_require_dependency_file("${install_dir}/lib/libnghttp2${CMAKE_STATIC_LIBRARY_SUFFIX}" "nghttp2 (static)")
-
-  add_library(lc::nghttp2_shared SHARED IMPORTED GLOBAL)
-  set_target_properties(lc::nghttp2_shared
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-  )
-  lc_require_dependency_file("${install_dir}/lib/libnghttp2${CMAKE_SHARED_LIBRARY_SUFFIX}" "nghttp2 (shared)")
-
-  set(LOCKDC_NGHTTP2_static_PREFIX "${install_dir}" PARENT_SCOPE)
-  set(LOCKDC_NGHTTP2_shared_PREFIX "${install_dir}" PARENT_SCOPE)
+  find_package(nghttp2 ${LOCKDC_NGHTTP2_VERSION} CONFIG REQUIRED)
+  lc_add_interface_alias(lc::nghttp2_static nghttp2::nghttp2)
+  lc_add_interface_alias(lc::nghttp2_shared cpkt::nghttp2_shared)
 endfunction()
 
 function(lc_add_zlib)
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/zlib/install")
-  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
-
-  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(zlib_shared_library "${install_dir}/lib/libz.${LOCKDC_ZLIB_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(zlib_shared_soname "${install_dir}/lib/libz.1${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    set(zlib_shared_link "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  else()
-    set(zlib_shared_library "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.${LOCKDC_ZLIB_VERSION}")
-    set(zlib_shared_soname "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}.1")
-    set(zlib_shared_link "${install_dir}/lib/libz${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  endif()
-  set(zlib_static_library "${install_dir}/lib/libz${CMAKE_STATIC_LIBRARY_SUFFIX}")
-
-  add_library(lc::zlib_static STATIC IMPORTED GLOBAL)
-  set_target_properties(lc::zlib_static
-    PROPERTIES
-      IMPORTED_LOCATION "${zlib_static_library}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-  )
-
-  add_library(lc::zlib_shared SHARED IMPORTED GLOBAL)
-  set_target_properties(lc::zlib_shared
-    PROPERTIES
-      IMPORTED_LOCATION "${zlib_shared_library}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-  )
-
-  lc_require_dependency_file("${zlib_static_library}" "zlib static library")
-  lc_require_dependency_file("${zlib_shared_library}" "zlib shared library")
-  lc_require_dependency_file("${zlib_shared_soname}" "zlib shared-library SONAME")
-  lc_require_dependency_file("${zlib_shared_link}" "zlib shared-library linker symlink")
-  lc_require_dependency_file("${install_dir}/include/zlib.h" "zlib header")
-  lc_require_dependency_file("${install_dir}/include/zconf.h" "zlib configuration header")
-
-  set(LOCKDC_ZLIB_PREFIX "${install_dir}" PARENT_SCOPE)
-  set(LOCKDC_ZLIB_SHARED_LIBRARY "${zlib_shared_library}" PARENT_SCOPE)
+  find_package(ZLIB ${LOCKDC_ZLIB_VERSION} CONFIG REQUIRED)
+  lc_add_interface_alias(lc::zlib_static ZLIB::ZLIB)
+  lc_add_interface_alias(lc::zlib_shared cpkt::zlib_shared)
 endfunction()
 
 function(lc_add_libssh2)
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/libssh2/install")
-  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
-
-  set(libssh2_shared_library "${install_dir}/lib/libssh2${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(libssh2_shared_library "${install_dir}/lib/libssh2.1${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  endif()
-  set(libssh2_static_library "${install_dir}/lib/libssh2${CMAKE_STATIC_LIBRARY_SUFFIX}")
-  if(NOT DEFINED LOCKDC_ZLIB_PREFIX OR "${LOCKDC_ZLIB_PREFIX}" STREQUAL "")
-    message(FATAL_ERROR "libssh2 requires zlib to be configured first")
-  endif()
-  if(DEFINED LOCKDC_OPENSSL_shared_PREFIX AND NOT "${LOCKDC_OPENSSL_shared_PREFIX}" STREQUAL "")
-    set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_shared_PREFIX}")
-    set(libssh2_openssl_build_variant "shared")
-  elseif(DEFINED LOCKDC_OPENSSL_static_PREFIX AND NOT "${LOCKDC_OPENSSL_static_PREFIX}" STREQUAL "")
-    set(libssh2_openssl_prefix "${LOCKDC_OPENSSL_static_PREFIX}")
-    set(libssh2_openssl_build_variant "static")
-  else()
-    message(FATAL_ERROR "libssh2 requires OpenSSL to be configured first")
-  endif()
-  if(DEFINED LOCKDC_OPENSSL_static_PREFIX AND NOT "${LOCKDC_OPENSSL_static_PREFIX}" STREQUAL "")
-    set(libssh2_openssl_link_variant "static")
-  else()
-    set(libssh2_openssl_link_variant "${libssh2_openssl_build_variant}")
-  endif()
-
-  add_library(lc::libssh2_static STATIC IMPORTED GLOBAL)
-  set_target_properties(lc::libssh2_static
-    PROPERTIES
-      IMPORTED_LOCATION "${libssh2_static_library}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_crypto_${libssh2_openssl_link_variant};lc::zlib_static"
-  )
-
-  add_library(lc::libssh2_shared SHARED IMPORTED GLOBAL)
-  set_target_properties(lc::libssh2_shared
-    PROPERTIES
-      IMPORTED_LOCATION "${libssh2_shared_library}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::zlib_shared"
-  )
-
-  lc_require_dependency_file("${libssh2_static_library}" "libssh2 static library")
-  lc_require_dependency_file("${libssh2_shared_library}" "libssh2 shared library")
-  lc_require_dependency_file("${install_dir}/include/libssh2.h" "libssh2 header")
-  lc_require_dependency_file("${install_dir}/include/libssh2_publickey.h" "libssh2 publickey header")
-  lc_require_dependency_file("${install_dir}/include/libssh2_sftp.h" "libssh2 sftp header")
-
-  set(LOCKDC_LIBSSH2_PREFIX "${install_dir}" PARENT_SCOPE)
+  find_package(Libssh2 ${LOCKDC_LIBSSH2_VERSION} CONFIG REQUIRED)
+  lc_add_interface_alias(lc::libssh2_static Libssh2::libssh2)
+  lc_add_interface_alias(lc::libssh2_shared cpkt::libssh2_shared)
 endfunction()
 
 function(lc_add_curl)
-  set(install_dir "${LOCKDC_EXTERNAL_ROOT}/curl/install")
-  file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
-
-  add_library(lc::curl_static STATIC IMPORTED GLOBAL)
-  set_target_properties(lc::curl_static
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libcurl${CMAKE_STATIC_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_static;lc::openssl_crypto_static;lc::nghttp2_static;lc::libssh2_static;lc::zlib_static;${CMAKE_DL_LIBS};Threads::Threads"
-  )
-  lc_require_dependency_file("${install_dir}/lib/libcurl${CMAKE_STATIC_LIBRARY_SUFFIX}" "curl (static)")
-
-  add_library(lc::curl_shared SHARED IMPORTED GLOBAL)
-  set_target_properties(lc::curl_shared
-    PROPERTIES
-      IMPORTED_LOCATION "${install_dir}/lib/libcurl${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${install_dir}/include"
-      INTERFACE_LINK_LIBRARIES "lc::openssl_ssl_shared;lc::openssl_crypto_shared;lc::nghttp2_shared;lc::libssh2_shared;lc::zlib_shared;${CMAKE_DL_LIBS};Threads::Threads"
-  )
-  lc_require_dependency_file("${install_dir}/lib/libcurl${CMAKE_SHARED_LIBRARY_SUFFIX}" "curl (shared)")
+  find_package(CURL ${LOCKDC_CURL_VERSION} CONFIG REQUIRED)
+  lc_add_interface_alias(lc::curl_static CURL::libcurl)
+  lc_add_interface_alias(lc::curl_shared cpkt::curl_shared)
 endfunction()
 
 function(lc_get_lonejson_asset_info out_name out_hash)
@@ -510,6 +406,7 @@ endfunction()
 
 function(lc_configure_dependencies)
   if(LOCKDC_BUILD_STATIC OR LOCKDC_BUILD_SHARED)
+    lc_configure_cpkt_package_roots()
     lc_add_openssl()
   endif()
 

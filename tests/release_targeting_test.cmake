@@ -48,10 +48,24 @@ if(NOT matrix_result EQUAL 0)
         "stderr:\n${matrix_stderr}")
 endif()
 
-string(FIND "${matrix_stdout}" "bash ./scripts/run_linux_release_matrix.sh" matrix_match)
-if(matrix_match EQUAL -1)
+string(FIND "${matrix_stdout}" "bash ./scripts/run_linux_release_matrix.sh" old_matrix_match)
+if(NOT old_matrix_match EQUAL -1)
     message(FATAL_ERROR
-        "Expected __release-matrix to invoke run_linux_release_matrix.sh\n"
+        "Did not expect __release-matrix to invoke the legacy release matrix script\n"
         "stdout:\n${matrix_stdout}\n"
         "stderr:\n${matrix_stderr}")
 endif()
+
+foreach(expected_step
+    "make __test-host"
+    "bash ./scripts/cross_test.sh release"
+    "bash ./scripts/run_linux_package_matrix.sh"
+)
+    string(FIND "${matrix_stdout}" "${expected_step}" step_match)
+    if(step_match EQUAL -1)
+        message(FATAL_ERROR
+            "Expected __release-matrix to include '${expected_step}'\n"
+            "stdout:\n${matrix_stdout}\n"
+            "stderr:\n${matrix_stderr}")
+    endif()
+endforeach()

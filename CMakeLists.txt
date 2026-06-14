@@ -74,7 +74,7 @@ set(LOCKDC_LONEJSON_VERSION "0.31.0" CACHE STRING "Pinned lonejson release used 
 set(LOCKDC_LONEJSON_ABI_VERSION "16" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.4.1" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
-set(LOCKDC_CPKT_VERSION "0.1.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version.")
+set(LOCKDC_CPKT_VERSION "0.2.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version.")
 set(LOCKDC_ABI_VERSION "1" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
@@ -402,6 +402,27 @@ function(lc_add_release_privacy_scan target)
     )
 endfunction()
 
+function(lc_add_build_tree_shared_dependency_lookup target)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+        return()
+    endif()
+    foreach(lockdc_external_library_dir
+        "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
+    )
+        if(EXISTS "${lockdc_external_library_dir}")
+            target_link_options(${target} INTERFACE
+                "$<BUILD_INTERFACE:LINKER:-rpath-link,${lockdc_external_library_dir}>"
+            )
+        endif()
+    endforeach()
+endfunction()
+
 if(LOCKDC_BUILD_STATIC)
     add_library(lc_static STATIC)
     add_library(lockdc::static ALIAS lc_static)
@@ -440,6 +461,7 @@ if(LOCKDC_BUILD_SHARED)
         lc::pslog_shared
         lc::lonejson_shared
     )
+    lc_add_build_tree_shared_dependency_lookup(lc_shared)
     set_target_properties(lc_shared PROPERTIES
         OUTPUT_NAME lockdc
         VERSION ${PROJECT_VERSION}

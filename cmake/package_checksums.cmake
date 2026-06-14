@@ -15,6 +15,7 @@ file(MAKE_DIRECTORY "${dist_dir}")
 
 set(checksum_inputs "")
 foreach(pattern
+    "${dist_dir}/liblockdc-${LOCKDC_VERSION}.tar.gz"
     "${dist_dir}/liblockdc-${LOCKDC_VERSION}-*.tar.gz"
     "${dist_dir}/lockdc-${LOCKDC_VERSION}-1.rockspec"
     "${dist_dir}/lockdc-${LOCKDC_VERSION}-1.src.rock"
@@ -25,6 +26,7 @@ endforeach()
 
 list(REMOVE_DUPLICATES checksum_inputs)
 list(FILTER checksum_inputs EXCLUDE REGEX "^${checksums_name}$")
+list(FILTER checksum_inputs EXCLUDE REGEX "^${checksums_name}\\.tar\\.gz$")
 list(LENGTH checksum_inputs checksum_input_count)
 if(checksum_input_count EQUAL 0)
     message(FATAL_ERROR "no release artifacts found in ${dist_dir} for version ${LOCKDC_VERSION}")

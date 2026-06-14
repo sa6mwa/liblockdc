@@ -32,14 +32,14 @@ FUZZ_TIME ?= 30
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__format \
 	__asan __coverage __fuzz __benchmarks \
-	__package __package-checksums __clean-dist \
+	__package __package-source __package-checksums __clean-dist \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __release-matrix __release-package-only __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
 	asan coverage fuzz benchmarks \
-	package package-checksums verify-release-archives clean-dist \
+	package package-source package-checksums verify-release-archives clean-dist \
 	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release release-matrix clean
 
 help:
@@ -70,7 +70,8 @@ help:
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
-		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive to dist/.' \
+		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive, source archive, and Lua source rock to dist/.' \
+		'make package-source     Build the source-only release archive.' \
 		'make package-checksums  Refresh the dist/ checksum manifest.' \
 		'make verify-release-archives  Assert the complete shipped Linux release archive set and checksums.' \
 		'make clean-dist         Reset dist/ release artifacts.' \
@@ -245,13 +246,21 @@ package:
 
 __package: __build-x86_64-linux-gnu-release
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_archive.cmake
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
+
+package-source:
+	$(TIMED) package-source $(MAKE) __package-source
+
+__package-source: __build-x86_64-linux-gnu-release
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
 
 package-checksums:
 	$(TIMED) package-checksums $(MAKE) __package-checksums
 
 __package-checksums: __deps-release
 	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_checksums.cmake
 
@@ -294,7 +303,9 @@ release-matrix:
 	$(TIMED) release-matrix $(MAKE) __release-matrix
 
 __release-matrix: __build-release
-	bash ./scripts/run_linux_release_matrix.sh
+	$(MAKE) __test-host
+	bash ./scripts/cross_test.sh release
+	bash ./scripts/run_linux_package_matrix.sh
 
 __release-package-only: __build-release
 	bash ./scripts/run_linux_package_matrix.sh

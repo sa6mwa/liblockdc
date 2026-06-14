@@ -30,8 +30,16 @@ if(NOT EXISTS "${cpkt_manifest}")
     message(FATAL_ERROR "missing c.pkt.systems manifest: ${cpkt_manifest}")
 endif()
 
+foreach(path IN ITEMS
+    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/zlib/ZLIBConfig.cmake"
+    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig/zlib.pc")
+    if(NOT EXISTS "${path}")
+        message(FATAL_ERROR "missing zlib dependency consumer metadata: ${path}")
+    endif()
+endforeach()
+
 file(READ "${cpkt_manifest}" cpkt_manifest_text)
-string(FIND "${cpkt_manifest_text}" "bundle_version=0.1.0" bundle_version_at)
+string(FIND "${cpkt_manifest_text}" "bundle_version=0.2.0" bundle_version_at)
 if(bundle_version_at EQUAL -1)
     message(FATAL_ERROR "c.pkt.systems manifest is missing bundle version")
 endif()

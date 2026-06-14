@@ -184,26 +184,26 @@ pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_
 cpkt_asset_name="c.pkt.systems-$cpkt_version-${preset#deps-}.tar.gz"
 cpkt_download_url="https://github.com/sa6mwa/c.pkt.systems/releases/download/v$cpkt_version/$cpkt_asset_name"
 case "$cpkt_asset_name" in
-  c.pkt.systems-0.1.0-x86_64-linux-gnu.tar.gz)
-    cpkt_asset_hash=4e6c4ca07c0647a05923b4a56ef12d440a1d1b53465224e30d990fc18777aa4e
+  c.pkt.systems-0.2.0-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=69e699d18374987ba16dfd82640ba1c263b71f0e1daeef8af2a2018a6f1e39ef
     ;;
-  c.pkt.systems-0.1.0-x86_64-linux-musl.tar.gz)
-    cpkt_asset_hash=d44f70558b961125c96d356d27ce83fc7d50c9cc650a335c2016c8d3778d98aa
+  c.pkt.systems-0.2.0-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=dcb1923af1d7529531f31637476f083070ccf1051ec217012d77a155ff4132d4
     ;;
-  c.pkt.systems-0.1.0-aarch64-linux-gnu.tar.gz)
-    cpkt_asset_hash=c20969872de3087f984e8bca3e01fa98e495a3581940e426d07ebed014cf8190
+  c.pkt.systems-0.2.0-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=54e9ef336a0b092d0e68a84d2026a499c051df3c3e61b7a7dab1f0103d1e082b
     ;;
-  c.pkt.systems-0.1.0-aarch64-linux-musl.tar.gz)
-    cpkt_asset_hash=8ff3cc3c457dc66918470beaea01744bc38c342a87c20c6b072761c56c858e19
+  c.pkt.systems-0.2.0-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=61f7cb43ca78f33a21b5719f84f864ac5ce5cf7d8268eef52a7a01da08582a38
     ;;
-  c.pkt.systems-0.1.0-armhf-linux-gnu.tar.gz)
-    cpkt_asset_hash=26787953d690b0f01a11538e8692f68f9c746b8e97a9baf47ac15241d9a947fc
+  c.pkt.systems-0.2.0-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=33bfe771f2f2b36562c9e18094f79168d8d687dc7a55393584930ca434547d7d
     ;;
-  c.pkt.systems-0.1.0-armhf-linux-musl.tar.gz)
-    cpkt_asset_hash=f0172a6ff928111cfaeb503b01b48b3cdd2c05a04d54047630180ee79f65af31
+  c.pkt.systems-0.2.0-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=7edc2f61e01370da6af96c496ae5bfbec72e43761247dd2c310ac7627923c591
     ;;
-  c.pkt.systems-0.1.0-arm64-apple-darwin.tar.gz)
-    cpkt_asset_hash=dba4424de9566c2418162f62e5e90c45b40266c6e750b5096d4a251bf96d8e9a
+  c.pkt.systems-0.2.0-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=204fcaa8d6d53b6affcdcb49668d60b0e41d2aa7ff5f4dc2c8fce0d24caa0022
     ;;
   *)
     printf 'unsupported c.pkt.systems release asset: %s\n' "$cpkt_asset_name" >&2
@@ -339,14 +339,20 @@ stage_cpkt_component_layout() {
 
   copy_matching_files "$deps_root/openssl/install/include" "$cpkt_root/include/openssl"
   copy_matching_files "$deps_root/openssl/install/lib" "$cpkt_root"/lib/libssl* "$cpkt_root"/lib/libcrypto*
+  copy_matching_files "$deps_root/openssl/install/lib/pkgconfig" "$cpkt_root"/lib/pkgconfig/libssl.pc "$cpkt_root"/lib/pkgconfig/libcrypto.pc "$cpkt_root"/lib/pkgconfig/openssl.pc
+  copy_matching_files "$deps_root/openssl/install/lib/cmake/OpenSSL" "$cpkt_root"/lib/cmake/OpenSSL/*.cmake
   stage_cpkt_license openssl
 
   copy_matching_files "$deps_root/curl/install/include" "$cpkt_root/include/curl"
   copy_matching_files "$deps_root/curl/install/lib" "$cpkt_root"/lib/libcurl*
+  copy_matching_files "$deps_root/curl/install/lib/pkgconfig" "$cpkt_root"/lib/pkgconfig/libcurl.pc
+  copy_matching_files "$deps_root/curl/install/lib/cmake/CURL" "$cpkt_root"/lib/cmake/CURL/*.cmake
   stage_cpkt_license curl
 
   copy_matching_files "$deps_root/nghttp2/install/include" "$cpkt_root/include/nghttp2"
   copy_matching_files "$deps_root/nghttp2/install/lib" "$cpkt_root"/lib/libnghttp2*
+  copy_matching_files "$deps_root/nghttp2/install/lib/pkgconfig" "$cpkt_root"/lib/pkgconfig/libnghttp2.pc
+  copy_matching_files "$deps_root/nghttp2/install/lib/cmake/nghttp2" "$cpkt_root"/lib/cmake/nghttp2/*.cmake
   stage_cpkt_license nghttp2
 
   copy_matching_files "$deps_root/libssh2/install/include" \
@@ -354,12 +360,16 @@ stage_cpkt_component_layout() {
     "$cpkt_root/include/libssh2_publickey.h" \
     "$cpkt_root/include/libssh2_sftp.h"
   copy_matching_files "$deps_root/libssh2/install/lib" "$cpkt_root"/lib/libssh2*
+  copy_matching_files "$deps_root/libssh2/install/lib/pkgconfig" "$cpkt_root"/lib/pkgconfig/libssh2.pc
+  copy_matching_files "$deps_root/libssh2/install/lib/cmake/libssh2" "$cpkt_root"/lib/cmake/libssh2/*.cmake
   stage_cpkt_license libssh2
 
   copy_matching_files "$deps_root/zlib/install/include" \
     "$cpkt_root/include/zlib.h" \
     "$cpkt_root/include/zconf.h"
   copy_matching_files "$deps_root/zlib/install/lib" "$cpkt_root"/lib/libz*
+  copy_matching_files "$deps_root/zlib/install/lib/pkgconfig" "$cpkt_root"/lib/pkgconfig/zlib.pc
+  copy_matching_files "$deps_root/zlib/install/lib/cmake/zlib" "$cpkt_root"/lib/cmake/zlib/*.cmake
   stage_cpkt_license zlib
 }
 
@@ -443,6 +453,16 @@ required_paths=(
   "$deps_root/zlib/install/include/zconf.h"
   "$deps_root/curl/install/lib/libcurl.a"
   "$curl_shared_path"
+  "$deps_root/c.pkt.systems/install/lib/cmake/CURL/CURLConfig.cmake"
+  "$deps_root/c.pkt.systems/install/lib/cmake/OpenSSL/OpenSSLConfig.cmake"
+  "$deps_root/c.pkt.systems/install/lib/cmake/libssh2/libssh2-config.cmake"
+  "$deps_root/c.pkt.systems/install/lib/cmake/nghttp2/nghttp2Config.cmake"
+  "$deps_root/c.pkt.systems/install/lib/cmake/zlib/ZLIBConfig.cmake"
+  "$deps_root/c.pkt.systems/install/lib/pkgconfig/libcurl.pc"
+  "$deps_root/c.pkt.systems/install/lib/pkgconfig/openssl.pc"
+  "$deps_root/c.pkt.systems/install/lib/pkgconfig/libssh2.pc"
+  "$deps_root/c.pkt.systems/install/lib/pkgconfig/libnghttp2.pc"
+  "$deps_root/c.pkt.systems/install/lib/pkgconfig/zlib.pc"
   "$deps_root/pslog/install/lib/libpslog.a"
   "$deps_root/pslog/install/include/pslog.h"
   "$pslog_shared_path"

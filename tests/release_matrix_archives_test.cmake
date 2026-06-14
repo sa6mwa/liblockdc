@@ -19,6 +19,13 @@ endif()
 
 include("${LOCKDC_ROOT}/tests/package_archive_assertions.cmake")
 
+if(DEFINED LOCKDC_VERIFY_WORK_DIR AND NOT "${LOCKDC_VERIFY_WORK_DIR}" STREQUAL "")
+    set(lockdc_verify_work_dir "${LOCKDC_VERIFY_WORK_DIR}")
+else()
+    set(lockdc_verify_work_dir "${LOCKDC_ROOT}/build/release-matrix-verify")
+endif()
+file(MAKE_DIRECTORY "${lockdc_verify_work_dir}")
+
 set(lockdc_expected_artifacts "")
 set(lockdc_expected_checksum_artifacts "")
 set(lockdc_release_version "")
@@ -72,10 +79,12 @@ if(lockdc_release_version STREQUAL "")
 endif()
 
 list(APPEND lockdc_expected_artifacts
+    "liblockdc-${lockdc_release_version}.tar.gz"
     "lockdc-${lockdc_release_version}-1.rockspec"
     "lockdc-${lockdc_release_version}-1.src.rock"
 )
 list(APPEND lockdc_expected_checksum_artifacts
+    "liblockdc-${lockdc_release_version}.tar.gz"
     "lockdc-${lockdc_release_version}-1.rockspec"
     "lockdc-${lockdc_release_version}-1.src.rock"
 )
@@ -134,6 +143,132 @@ lockdc_assert_file_has_no_private_traces(
     "${lockdc_checksums_path}"
     "dist release artifact"
 )
+
+set(lockdc_source_archive_path "${lockdc_dist_dir}/liblockdc-${lockdc_release_version}.tar.gz")
+set(lockdc_source_archive_root "liblockdc-${lockdc_release_version}")
+if(NOT EXISTS "${lockdc_source_archive_path}")
+    message(FATAL_ERROR "missing source archive: ${lockdc_source_archive_path}")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar tf "${lockdc_source_archive_path}"
+    OUTPUT_VARIABLE lockdc_source_listing
+    RESULT_VARIABLE lockdc_source_listing_result
+)
+if(NOT lockdc_source_listing_result EQUAL 0)
+    message(FATAL_ERROR "failed to list source archive: ${lockdc_source_archive_path}")
+endif()
+string(REGEX REPLACE "\n$" "" lockdc_source_listing_trimmed "${lockdc_source_listing}")
+string(REPLACE "\n" ";" lockdc_source_entries "${lockdc_source_listing_trimmed}")
+set(lockdc_source_actual_manifest "")
+foreach(lockdc_source_entry IN LISTS lockdc_source_entries)
+    if(lockdc_source_entry STREQUAL "")
+        continue()
+    endif()
+    if(lockdc_source_entry MATCHES "^\\./")
+        message(FATAL_ERROR "source archive contains invalid ./-prefixed entry: ${lockdc_source_entry}")
+    endif()
+    if(NOT lockdc_source_entry MATCHES "^${lockdc_source_archive_root}(/|$)")
+        message(FATAL_ERROR
+            "source archive contains entry outside ${lockdc_source_archive_root}/: ${lockdc_source_entry}")
+    endif()
+    if(lockdc_source_entry MATCHES "/$")
+        continue()
+    endif()
+    string(REGEX REPLACE "^${lockdc_source_archive_root}/" "" lockdc_source_relative_entry "${lockdc_source_entry}")
+    if(NOT lockdc_source_relative_entry STREQUAL "${lockdc_source_archive_root}")
+        list(APPEND lockdc_source_actual_manifest "${lockdc_source_relative_entry}")
+    endif()
+endforeach()
+list(SORT lockdc_source_actual_manifest)
+foreach(lockdc_required_source_entry
+    "VERSION"
+    "RELEASE_MANIFEST"
+    "CMakeLists.txt"
+    "include/lc/lc.h"
+    "cmake/LcVersion.cmake"
+    "scripts/stage_release_sources.sh"
+)
+    list(FIND lockdc_source_actual_manifest "${lockdc_required_source_entry}" lockdc_required_source_index)
+    if(lockdc_required_source_index EQUAL -1)
+        message(FATAL_ERROR
+            "source archive is missing required entry ${lockdc_required_source_entry}: ${lockdc_source_archive_path}")
+    endif()
+endforeach()
+foreach(lockdc_forbidden_source_entry
+    ".git"
+    ".cache"
+    "build"
+    "dist"
+)
+    foreach(lockdc_source_actual_entry IN LISTS lockdc_source_actual_manifest)
+        if(lockdc_source_actual_entry MATCHES "^${lockdc_forbidden_source_entry}(/|$)")
+            message(FATAL_ERROR
+                "source archive contains forbidden entry ${lockdc_source_actual_entry}: ${lockdc_source_archive_path}")
+        endif()
+    endforeach()
+endforeach()
+foreach(lockdc_source_actual_entry IN LISTS lockdc_source_actual_manifest)
+    if(lockdc_source_actual_entry MATCHES "^devenv/volumes/"
+       AND NOT lockdc_source_actual_entry MATCHES "/\\.gitkeep$")
+        message(FATAL_ERROR
+            "source archive contains forbidden generated devenv entry ${lockdc_source_actual_entry}: ${lockdc_source_archive_path}")
+    endif()
+endforeach()
+if(EXISTS "${LOCKDC_ROOT}/.git")
+    set(lockdc_expected_source_manifest_path "${lockdc_verify_work_dir}/lockdc-source-expected-manifest.txt")
+    set(lockdc_ignored_source_manifest_path "${lockdc_verify_work_dir}/lockdc-source-ignored-manifest.txt")
+    set(lockdc_actual_source_manifest_path "${lockdc_verify_work_dir}/lockdc-source-actual-manifest.txt")
+    execute_process(
+        COMMAND git -C "${LOCKDC_ROOT}" ls-files
+        OUTPUT_FILE "${lockdc_expected_source_manifest_path}"
+        RESULT_VARIABLE lockdc_git_ls_result
+    )
+    if(lockdc_git_ls_result EQUAL 0)
+        execute_process(
+            COMMAND git -C "${LOCKDC_ROOT}" check-ignore --no-index --stdin
+            INPUT_FILE "${lockdc_expected_source_manifest_path}"
+            OUTPUT_FILE "${lockdc_ignored_source_manifest_path}"
+            RESULT_VARIABLE lockdc_check_ignore_result
+            ERROR_QUIET
+        )
+        file(READ "${lockdc_expected_source_manifest_path}" lockdc_expected_source_manifest_text)
+        string(REGEX REPLACE "\n$" "" lockdc_expected_source_manifest_text "${lockdc_expected_source_manifest_text}")
+        string(REPLACE "\n" ";" lockdc_expected_source_manifest "${lockdc_expected_source_manifest_text}")
+        if(EXISTS "${lockdc_ignored_source_manifest_path}")
+            file(READ "${lockdc_ignored_source_manifest_path}" lockdc_ignored_source_manifest_text)
+            string(REGEX REPLACE "\n$" "" lockdc_ignored_source_manifest_text "${lockdc_ignored_source_manifest_text}")
+            string(REPLACE "\n" ";" lockdc_ignored_source_manifest "${lockdc_ignored_source_manifest_text}")
+            foreach(lockdc_ignored_source_entry IN LISTS lockdc_ignored_source_manifest)
+                if(NOT lockdc_ignored_source_entry STREQUAL "")
+                    list(REMOVE_ITEM lockdc_expected_source_manifest "${lockdc_ignored_source_entry}")
+                endif()
+            endforeach()
+        endif()
+        list(APPEND lockdc_expected_source_manifest "VERSION" "RELEASE_MANIFEST")
+        list(REMOVE_DUPLICATES lockdc_expected_source_manifest)
+        list(SORT lockdc_expected_source_manifest)
+        file(WRITE "${lockdc_expected_source_manifest_path}" "")
+        foreach(lockdc_expected_source_entry IN LISTS lockdc_expected_source_manifest)
+            file(APPEND "${lockdc_expected_source_manifest_path}" "${lockdc_expected_source_entry}\n")
+        endforeach()
+        file(WRITE "${lockdc_actual_source_manifest_path}" "")
+        foreach(lockdc_actual_source_entry IN LISTS lockdc_source_actual_manifest)
+            file(APPEND "${lockdc_actual_source_manifest_path}" "${lockdc_actual_source_entry}\n")
+        endforeach()
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E compare_files
+                "${lockdc_expected_source_manifest_path}"
+                "${lockdc_actual_source_manifest_path}"
+            RESULT_VARIABLE lockdc_manifest_compare_result
+        )
+        if(NOT lockdc_manifest_compare_result EQUAL 0)
+            message(FATAL_ERROR
+                "source archive does not match git-tracked non-ignored manifest\n"
+                "expected: ${lockdc_expected_source_manifest_path}\n"
+                "actual: ${lockdc_actual_source_manifest_path}")
+        endif()
+    endif()
+endif()
 
 execute_process(
     COMMAND sha256sum --check "${lockdc_checksums_name}"

@@ -74,6 +74,12 @@ add_test(NAME packaging_portability_source_test
     -P "${CMAKE_SOURCE_DIR}/tests/packaging_portability_source_test.cmake"
 )
 
+add_test(NAME package_source_dist_dir_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/package_source_dist_dir_test.cmake"
+)
+
 add_test(NAME coverage_pkgconfig_metadata_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}

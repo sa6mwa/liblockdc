@@ -34,8 +34,16 @@ if(NOT EXISTS "${cpkt_manifest}")
     message(FATAL_ERROR "missing c.pkt.systems manifest: ${cpkt_manifest}")
 endif()
 
+foreach(path IN ITEMS
+    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/CURL/CURLConfig.cmake"
+    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig/libcurl.pc")
+    if(NOT EXISTS "${path}")
+        message(FATAL_ERROR "missing curl dependency consumer metadata: ${path}")
+    endif()
+endforeach()
+
 file(READ "${cpkt_manifest}" cpkt_manifest_text)
-assert_literal_contains("${cpkt_manifest_text}" "bundle_version=0.1.0" "c.pkt.systems bundle version")
+assert_literal_contains("${cpkt_manifest_text}" "bundle_version=0.2.0" "c.pkt.systems bundle version")
 assert_literal_contains("${cpkt_manifest_text}" "curl_version=8.20.0" "curl bundle version")
 assert_literal_contains("${cpkt_manifest_text}" "libssh2_version=1.11.1" "libssh2 bundle version")
 assert_literal_contains("${cpkt_manifest_text}" "nghttp2_version=1.69.0" "nghttp2 bundle version")
