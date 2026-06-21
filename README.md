@@ -222,7 +222,7 @@ This keeps lease identity, transaction identifiers, and related lifecycle state 
 
 ### JSON and lonejson
 
-`liblockdc` depends on `lonejson 0.32.0` with shared-library ABI `16`.
+`liblockdc` depends on `lonejson 0.32.1` with shared-library ABI `16`.
 `lonejson` is used for:
 
 - typed JSON response parsing for management, attachment, queue, namespace,

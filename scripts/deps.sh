@@ -184,26 +184,26 @@ pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_
 cpkt_asset_name="c.pkt.systems-$cpkt_version-${preset#deps-}.tar.gz"
 cpkt_download_url="https://github.com/sa6mwa/c.pkt.systems/releases/download/v$cpkt_version/$cpkt_asset_name"
 case "$cpkt_asset_name" in
-  c.pkt.systems-0.2.0-x86_64-linux-gnu.tar.gz)
-    cpkt_asset_hash=69e699d18374987ba16dfd82640ba1c263b71f0e1daeef8af2a2018a6f1e39ef
+  c.pkt.systems-0.4.0-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=745fde56d564dcdcb22ed9f16a7b73c8c2e18f947d5fe37ab774e5154ef554b1
     ;;
-  c.pkt.systems-0.2.0-x86_64-linux-musl.tar.gz)
-    cpkt_asset_hash=dcb1923af1d7529531f31637476f083070ccf1051ec217012d77a155ff4132d4
+  c.pkt.systems-0.4.0-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=e3a563a71d6bb9e1e3bdf14343d65bcc0ad8897713e6a8ddfd97cc7bc6b9c6f3
     ;;
-  c.pkt.systems-0.2.0-aarch64-linux-gnu.tar.gz)
-    cpkt_asset_hash=54e9ef336a0b092d0e68a84d2026a499c051df3c3e61b7a7dab1f0103d1e082b
+  c.pkt.systems-0.4.0-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=574e02e193330fd8e8fa5c56442ae8d11e9c901b3e89a53f299d66557941b67c
     ;;
-  c.pkt.systems-0.2.0-aarch64-linux-musl.tar.gz)
-    cpkt_asset_hash=61f7cb43ca78f33a21b5719f84f864ac5ce5cf7d8268eef52a7a01da08582a38
+  c.pkt.systems-0.4.0-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=c1b1e6b482172760f5967d484d2ef271e1d44defaf7f8f6e35bc66811f4f48fc
     ;;
-  c.pkt.systems-0.2.0-armhf-linux-gnu.tar.gz)
-    cpkt_asset_hash=33bfe771f2f2b36562c9e18094f79168d8d687dc7a55393584930ca434547d7d
+  c.pkt.systems-0.4.0-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=1e4de9dd3de7345629c86cd140177d4dc591c740f7432041bcd423be9bf82496
     ;;
-  c.pkt.systems-0.2.0-armhf-linux-musl.tar.gz)
-    cpkt_asset_hash=7edc2f61e01370da6af96c496ae5bfbec72e43761247dd2c310ac7627923c591
+  c.pkt.systems-0.4.0-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=222236dacf9df80f01fbc14768ed5163e08cbcdb32ae6460a0f494df14330f0b
     ;;
-  c.pkt.systems-0.2.0-arm64-apple-darwin.tar.gz)
-    cpkt_asset_hash=204fcaa8d6d53b6affcdcb49668d60b0e41d2aa7ff5f4dc2c8fce0d24caa0022
+  c.pkt.systems-0.4.0-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=c5c0160ee65c94084350ee54eb21fc64c410b76c1d104071b29fb5e170ae0081
     ;;
   *)
     printf 'unsupported c.pkt.systems release asset: %s\n' "$cpkt_asset_name" >&2
@@ -214,26 +214,26 @@ esac
 lonejson_asset_name="liblonejson-$lonejson_version-${preset#deps-}.tar.gz"
 lonejson_download_url="https://github.com/sa6mwa/lonejson/releases/download/v$lonejson_version/$lonejson_asset_name"
 case "$lonejson_asset_name" in
-  liblonejson-0.32.0-x86_64-linux-gnu.tar.gz)
-    lonejson_asset_hash=84f0abae33a1b1d91a0f962ad78ecd7be91a4055c4c6a4aa69e0df816f42812c
+  liblonejson-0.32.1-x86_64-linux-gnu.tar.gz)
+    lonejson_asset_hash=2626df65f8ac33aadd76b9d33a22fd8038cadf4ee6b7fecad3b60739c359db1a
     ;;
-  liblonejson-0.32.0-x86_64-linux-musl.tar.gz)
-    lonejson_asset_hash=326ee1f75e632db9899e05ac02f669b87a437064086242603519fe5197ea654a
+  liblonejson-0.32.1-x86_64-linux-musl.tar.gz)
+    lonejson_asset_hash=1d5668be9d88e625735dadaa312bdff7fc0df51754a7891a3efb2be331c2adca
     ;;
-  liblonejson-0.32.0-aarch64-linux-gnu.tar.gz)
-    lonejson_asset_hash=74a515fcce5574f82dbae46a6ce3399d6b5d07d249fa9c98d53293b7baf8c35b
+  liblonejson-0.32.1-aarch64-linux-gnu.tar.gz)
+    lonejson_asset_hash=949a55b0958f0b4ac16295056a0302613ca2bc02b8dcfa6c6fb356231e7a04bf
     ;;
-  liblonejson-0.32.0-aarch64-linux-musl.tar.gz)
-    lonejson_asset_hash=0f2b6048caf74f5c9c02d332cea00bd67e2352764ba1b0d2f65b4266719fcd39
+  liblonejson-0.32.1-aarch64-linux-musl.tar.gz)
+    lonejson_asset_hash=2891e18cfe7843dd7c15e71a4d1bd03dea6f4d178eb189fd8f3b6ad7caf067d7
     ;;
-  liblonejson-0.32.0-armhf-linux-gnu.tar.gz)
-    lonejson_asset_hash=8adad849699ea6380dc16ee9228f4d9695e9b3d49ce6c68b7f391e3196e9d6ad
+  liblonejson-0.32.1-armhf-linux-gnu.tar.gz)
+    lonejson_asset_hash=0621cae1f1d5a3e8830f34005f3adf9b5fee7195486ab71b649bc8a61ca0c1b6
     ;;
-  liblonejson-0.32.0-armhf-linux-musl.tar.gz)
-    lonejson_asset_hash=e62f512dae09e5fe6402e876edaf1f6517159854e049ff161c32ee52df864566
+  liblonejson-0.32.1-armhf-linux-musl.tar.gz)
+    lonejson_asset_hash=975be93eff3e4ed08973f52fc57498d0a5faeec87b1ffa84eed8325c068c5344
     ;;
-  liblonejson-0.32.0-arm64-apple-darwin.tar.gz)
-    lonejson_asset_hash=2a73b6bb7e2e690b1accfb811c64de075b2efb569bf9cc299547f4f577c151f7
+  liblonejson-0.32.1-arm64-apple-darwin.tar.gz)
+    lonejson_asset_hash=1e51e13d3850de920f689a245c3372cd6949a8c9531863b574fc05425726be51
     ;;
   *)
     printf 'unsupported lonejson release asset: %s\n' "$lonejson_asset_name" >&2
