@@ -43,6 +43,8 @@ static long lc_pouch_now_unix(void) { return (long)time(NULL); }
 
 int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
                                  const lc_update_opts *opts, lc_error *error);
+static int lc_pouch_refresh_lease(lc_lease_handle *lease,
+                                  const lc_pouch_meta *meta, lc_error *error);
 
 static char *lc_pouch_new_lease_id(lc_client_handle *client, const char *key,
                                    long fencing_token) {
@@ -130,6 +132,34 @@ static int lc_pouch_copy_source_to_sink(lc_source *source, lc_sink *sink,
       return error != NULL && error->code != LC_OK ? error->code
                                                    : LC_ERR_TRANSPORT;
     }
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_copy_source_to_file_limited(lc_source *source, FILE *fp,
+                                                size_t limit,
+                                                lc_error *error) {
+  unsigned char buffer[8192];
+  size_t got;
+  size_t total;
+
+  total = 0U;
+  while (1) {
+    got = source->read(source, buffer, sizeof(buffer), error);
+    if (got == 0U) {
+      break;
+    }
+    if (limit > 0U && (total > limit || got > limit - total)) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "mapped state response exceeds configured byte limit",
+                          NULL, NULL, NULL);
+    }
+    if (fwrite(buffer, 1U, got, fp) != got) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to buffer pouch mapped state", NULL, NULL,
+                          NULL);
+    }
+    total += got;
   }
   return LC_OK;
 }
@@ -299,18 +329,127 @@ static int lc_pouch_prepare_queue_state_lease(
   return rc;
 }
 
-static int lc_pouch_lease_load_unsupported(lc_lease *self,
-                                           const lonejson_map *map, void *dst,
-                                           const lc_get_opts *opts,
-                                           lc_get_res *out, lc_error *error) {
-  (void)self;
-  (void)map;
-  (void)dst;
+static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
+                                      void *dst, const lc_get_opts *opts,
+                                      lc_get_res *out, lc_error *error) {
+  lc_lease_handle *lease;
+  lc_source *body;
+  lc_pouch_state_info info;
+  lc_pouch_meta_record record;
+  lc_pouch_allocator *allocator;
+  const char *namespace_name;
+  lonejson *runtime;
+  FILE *fp;
+  size_t limit;
+  int rc;
+
+  if (self == NULL || map == NULL || dst == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease load requires self, map, destination, "
+                        "and out",
+                        NULL, NULL, NULL);
+  }
   (void)opts;
-  (void)out;
-  return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch lease load is not implemented yet", NULL, NULL,
-                      NULL);
+  lease = (lc_lease_handle *)self;
+  allocator = &lease->client->pouch_allocator;
+  namespace_name = NULL;
+  body = NULL;
+  fp = NULL;
+  memset(out, 0, sizeof(*out));
+  memset(&info, 0, sizeof(info));
+  memset(&record, 0, sizeof(record));
+
+  rc = lc_pouch_public_namespace(lease->client, lease->namespace_name,
+                                 &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize lonejson runtime", NULL, NULL,
+                        NULL);
+  }
+  lc_lonejson_prepare_parse_destination(runtime, map, dst);
+  rc = lease->client->pouch_store->read_state(
+      lease->client->pouch_store, namespace_name, lease->key, &body, &info,
+      error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!info.no_content) {
+    fp = tmpfile();
+    if (fp == NULL) {
+      if (body != NULL) {
+        body->close(body);
+      }
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to create pouch mapped load buffer", NULL,
+                          NULL, NULL);
+    }
+    limit = lease->client->http_json_response_limit_bytes > 0U
+                ? lease->client->http_json_response_limit_bytes
+                : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
+    rc = lc_pouch_copy_source_to_file_limited(body, fp, limit, error);
+    body->close(body);
+    body = NULL;
+    if (rc != LC_OK) {
+      fclose(fp);
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return rc;
+    }
+    if (fflush(fp) != 0 || fseek(fp, 0L, SEEK_SET) != 0) {
+      fclose(fp);
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to rewind pouch mapped load buffer", NULL,
+                          NULL, NULL);
+    }
+    rc = lc_lonejson_parse_prepared_file(
+        runtime, fp, map, dst, error, "failed to parse mapped lease state");
+    fclose(fp);
+    fp = NULL;
+    if (rc != LC_OK) {
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return rc;
+    }
+  } else if (body != NULL) {
+    body->close(body);
+    body = NULL;
+  }
+
+  out->no_content = info.no_content;
+  out->version = info.version;
+  if (lc_pouch_copy_public(&out->content_type, info.content_type, error,
+                           "failed to copy pouch content type") != LC_OK ||
+      lc_pouch_copy_public(&out->etag, info.etag, error,
+                           "failed to copy pouch etag") != LC_OK) {
+    lc_get_res_cleanup(out);
+    lc_pouch_state_info_cleanup(allocator, &info);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  if (!info.no_content) {
+    rc = lease->client->pouch_store->load_meta(
+        lease->client->pouch_store, namespace_name, lease->key, &record, error);
+    if (rc != LC_OK) {
+      lc_get_res_cleanup(out);
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return rc;
+    }
+    if (record.found) {
+      rc = lc_pouch_refresh_lease(lease, &record.meta, error);
+      if (rc != LC_OK) {
+        lc_get_res_cleanup(out);
+        lc_pouch_meta_record_cleanup(allocator, &record);
+        lc_pouch_state_info_cleanup(allocator, &info);
+        return rc;
+      }
+    }
+    lc_pouch_meta_record_cleanup(allocator, &record);
+  }
+  lc_pouch_state_info_cleanup(allocator, &info);
+  return LC_OK;
 }
 
 static int lc_pouch_lease_save_method(lc_lease *self, const lonejson_map *map,
@@ -483,7 +622,7 @@ static void lc_pouch_install_lease_methods(lc_lease *lease) {
   }
   lease->describe = lc_pouch_lease_describe_method;
   lease->get = lc_pouch_lease_get_method;
-  lease->load = lc_pouch_lease_load_unsupported;
+  lease->load = lc_pouch_lease_load_method;
   lease->save = lc_pouch_lease_save_method;
   lease->update = lc_pouch_lease_update_method;
   lease->mutate = lc_pouch_lease_mutate_unsupported;

@@ -95,6 +95,28 @@ static lc_client *open_pouch_client_with_namespace(const char *endpoint,
   return client;
 }
 
+static lc_client *open_pouch_client_with_limit(const char *endpoint,
+                                               size_t json_limit) {
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  const char *endpoints[1];
+  int rc;
+
+  memset(&error, 0, sizeof(error));
+  lc_client_config_init(&config);
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "default";
+  config.http_json_response_limit_bytes = json_limit;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(client);
+  lc_error_cleanup(&error);
+  return client;
+}
+
 static lc_client *open_pouch_client(const char *endpoint) {
   return open_pouch_client_with_namespace(endpoint, "default");
 }
@@ -415,6 +437,7 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   lc_sink *sink;
   lc_error error;
   pouch_value_doc value_doc;
+  pouch_value_doc loaded_doc;
   char *text;
   int rc;
 
@@ -454,6 +477,17 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
 
+  memset(&loaded_doc, 0, sizeof(loaded_doc));
+  rc = lease->load(lease, &pouch_value_map, &loaded_doc, NULL, &get_res,
+                   &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_int_equal(get_res.version, 1L);
+  assert_int_equal(loaded_doc.value, 7);
+  assert_int_equal(lease->version, 1L);
+  lc_get_res_cleanup(&get_res);
+
   value_doc.value = 8;
   rc = lease->save(lease, &pouch_value_map, &value_doc, &error);
   assert_int_equal(rc, LC_OK);
@@ -471,6 +505,70 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   free(text);
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
+
+  memset(&loaded_doc, 0, sizeof(loaded_doc));
+  rc = lease->load(lease, &pouch_value_map, &loaded_doc, NULL, &get_res,
+                   &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_int_equal(get_res.version, 2L);
+  assert_int_equal(loaded_doc.value, 8);
+  assert_int_equal(lease->version, 2L);
+  lc_get_res_cleanup(&get_res);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_lease_load_respects_json_limit(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_error error;
+  pouch_value_doc value_doc;
+  pouch_value_doc loaded_doc;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "mapped-load-limit");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client_with_limit(endpoint, 4U);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "mapped-limit";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  value_doc.value = 7;
+  rc = lease->save(lease, &pouch_value_map, &value_doc, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+
+  memset(&loaded_doc, 0, sizeof(loaded_doc));
+  rc = lease->load(lease, &pouch_value_map, &loaded_doc, NULL, &get_res,
+                   &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_int_equal(error.code, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message,
+                      "mapped state response exceeds configured byte limit");
+  assert_int_equal(loaded_doc.value, 0);
+  assert_int_equal(lease->version, 1L);
+  lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
 
   lc_release_req_init(&release_req);
   rc = lease->release(lease, &release_req, &error);
@@ -1165,6 +1263,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
+      cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(
           test_pouch_endpoint_queue_visibility_handoff_rejects_stale_refs),

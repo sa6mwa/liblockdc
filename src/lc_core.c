@@ -856,7 +856,7 @@ lc_message *lc_message_new(lc_client_handle *client,
   message->pub.ack = lc_message_ack_method;
   message->pub.nack = lc_message_nack_method;
   message->pub.extend = lc_message_extend_method;
-  if (client->is_pouch) {
+  if (client != NULL && client->is_pouch) {
     message->pub.ack = lc_pouch_message_ack_method;
     message->pub.nack = lc_pouch_message_nack_method;
     message->pub.extend = lc_pouch_message_extend_method;

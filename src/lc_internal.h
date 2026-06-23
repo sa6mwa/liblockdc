@@ -119,6 +119,12 @@ void lc_engine_lonejson_cleanup(lc_engine_client *client,
 void lc_lonejson_prepare_parse_destination(lonejson *runtime,
                                            const lonejson_map *map,
                                            void *value);
+int lc_lonejson_parse_file(lonejson *runtime, FILE *fp,
+                           const lonejson_map *map, void *dst,
+                           lc_error *error, const char *message);
+int lc_lonejson_parse_prepared_file(lonejson *runtime, FILE *fp,
+                                    const lonejson_map *map, void *dst,
+                                    lc_error *error, const char *message);
 int lc_lonejson_serialize_file(lonejson *runtime, FILE *fp,
                                const lonejson_map *map, const void *src,
                                lc_error *error, const char *message);
