@@ -43,6 +43,15 @@ depend on storage ordering. Pouch can defer management and permissions, but it
 cannot defer these storage invariants if it is to be a lockd-compatible client
 backend.
 
+The key lesson from the server disk backend is that it is not a directory store
+with a log bolted on. It is a log-indexed coordination substrate. The append log
+is the durability boundary, in-memory maps are only rebuilt projections, marker
+files are invalidation hints, transaction records are durable decisions, and
+query/queue wakeups are derived from committed storage state. Pouch must be
+specified and tested at that level, because otherwise it will pass simple
+get/update cases while failing the workflows that depend on lockd's ordering
+model.
+
 ## Design Invariants From The Existing Disk Store
 
 The existing disk store is best understood as a durable projection system:
@@ -66,6 +75,12 @@ Required invariants:
 - Pending append records are not visible until their commit group succeeds.
   Pending maps are separate from committed indexes and are tracked per
   metadata/state/object key.
+- Pending maps hold the latest pending record for a key, but the pending queue
+  preserves append order. When one commit group completes before an earlier
+  group, records from the completed group may become visible, while segment
+  replay offsets may advance only across the contiguous committed/applied
+  prefix. This prevents later refreshes from rereading an uncommitted gap as
+  durable history.
 - A reader or CAS writer that encounters another commit group's pending record
   waits for that group, refreshes, and then re-evaluates. It must not observe
   the half-committed value.
@@ -84,6 +99,11 @@ Required invariants:
 - Segment `read_offset` advances only after a complete record has passed
   header, metadata, payload, and CRC validation. Any malformed or partial record
   stops replay for that segment.
+- Replay treats corrupt tails as an end-of-valid-history condition, not as an
+  opportunity to skip forward. This applies equally to short headers, short
+  keys, short metadata, short state-link payloads, short state/object payloads,
+  bad magic, unsupported versions, bad CRCs, unknown record types, and
+  truncated type-specific metadata.
 - State-link records are first-class state heads. They are used for staged
   promotion and can also arise during compaction/replay. Reads must resolve the
   linked payload span before opening the payload reader.
@@ -100,6 +120,11 @@ Required invariants:
 - Single-writer mode can skip peer-marker scans for the owning process, but it
   must publish an exclusive-writer heartbeat so other processes can fence or
   wait safely.
+- Shared-root safety is a layered contract: process-local stripe locks avoid
+  in-process races, global process stripe locks avoid two handles in one process
+  racing each other, advisory per-key file locks coordinate other processes or
+  hosts, and refresh/marker scans make other committed records visible after
+  locks are released.
 - `Close` performs graceful cleanup of background work and writer presence.
   `Abort` simulates process loss: it stops background work without removing
   crash-detectable writer presence.
@@ -424,6 +449,18 @@ Record metadata is intentionally type-specific and compact:
   ETag, content type, and descriptor bytes;
 - object delete records carry generation and modified time.
 
+Metadata ETag encodings and payload ETag encodings are deliberately different.
+Metadata records use an opaque generated identifier, while state/object ETags
+are hashes of the bytes that lockd exposes for CAS. The decoder must validate
+the expected byte length for each record family and must reject invalid or
+truncated descriptors before a record can update an index.
+
+State-link payloads are compact references: target segment or snapshot name,
+payload offset, and payload length. The segment name length must be bounded, the
+payload must be CRC-validated like other payloads, and resolution must choose a
+snapshot path when the target name is currently installed as a snapshot. Link
+targets must not accept absolute paths or path traversal.
+
 The C encoder must reject malformed descriptor/content-type lengths before
 writing. The decoder must reject truncated metadata for every record type.
 
@@ -463,6 +500,11 @@ Replay must be conservative:
 - unread offsets advance only after a whole record has been validated and
   applied.
 
+Replay must not allocate unbounded buffers from on-disk lengths. Key, metadata,
+payload, descriptor, content-type, and state-link segment lengths must be
+checked against explicit implementation limits before allocation. Length fields
+are untrusted even in files written by a previous pouch version.
+
 The reader must support linked payload records. A state-link record points at a
 payload span in another segment or snapshot. Link targets are live dependencies
 and must be protected from deletion until no current record references them.
@@ -492,6 +534,12 @@ The query summary path must decode only the fields needed by query planning and
 filtering: version, published version, state ETag, descriptor, plaintext byte
 count, and query-hidden status. Full metadata decoding should be avoided in
 large scans unless a query actually needs it.
+
+Summary rows use `published_version` when present and fall back to `version`.
+The query-hidden attribute must be reflected in the summary without requiring a
+full metadata decode. A cached summary is valid only while the corresponding
+metadata record ref remains the current head for that key; any newer metadata
+record must invalidate or replace the cached summary.
 
 Remove semantics are part of the visible lockd contract:
 
@@ -563,6 +611,12 @@ after a miss, after a pending wait completes, and after a metadata/payload decod
 failure. These extra refreshes are what make stale process-local indexes safe on
 shared roots.
 
+Decode failure handling is intentionally optimistic once. If a metadata payload
+or summary cannot be decoded from the current ref, the store must force refresh
+and retry the current head before returning the decode error. Another writer may
+have committed a newer record after this process indexed the stale or corrupt
+head. The retry must still fail if the refreshed current head decodes badly.
+
 Single-writer mode may skip marker checks for the owning process, but shared
 roots must default to safe refresh behavior.
 
@@ -571,6 +625,11 @@ equivalent conservative mode so readers on other clients see sealed data
 promptly. Queue filesystem watchers are an optional optimization and must be
 reported as disabled or polling-only on filesystems where watch correctness is
 unknown.
+
+Close-after-commit must still respect pending writes, in-flight writes, fsync
+batch drainage, and no-sync epochs. A segment must not be sealed merely because
+a commit returned; it can be sealed only when no foreground write can still
+extend it and no later sync boundary is needed to cover prior no-sync records.
 
 Refresh must also handle history written by older store versions or interrupted
 processes:
@@ -596,6 +655,12 @@ Legacy/open-tail handling is not optional. A store must tolerate:
 - current snapshots that are superseded by a newer tail record for the same
   key.
 
+Open-only manifests need a one-time repair path. If the manifest contains
+segment-open entries but no segment-seal entries, historical segments should be
+backfilled as sealed while preserving the current active tail as open. After
+the repair, those historical segments must become eligible for compaction
+rather than remaining as a permanent uncompactable tail.
+
 Read paths should cache open segment files with a bounded LRU, but must resolve
 linked payload spans against the current segment or snapshot path. Compaction
 cleanup must not close or delete files still needed by active readers.
@@ -616,6 +681,13 @@ Writers must coordinate with:
   process
 - an advisory file lock per namespace/key for cross-process and shared
   filesystem coordination
+
+All three layers are required in pouch. A process may hold two client/store
+handles against the same root; those handles must contend locally before
+touching the same lock file. Two processes or hosts must then contend through
+the advisory lock. Skipping the process-wide layer would make same-process
+multi-handle tests pass accidentally under low contention and fail under CAS
+races.
 
 Multi-key operations, especially staged promotion, must sort and deduplicate
 keys before acquiring locks. If two keys map to the same lock stripe, the stripe
@@ -665,6 +737,12 @@ buffer and batch contiguous appends into one write. For large payloads, it shoul
 write the prefix, stream the payload while computing CRC and content hash, then
 rewrite the finalized prefix with final lengths, CRC, and ETag metadata.
 
+Inline batching must compute each record ref's absolute record offset and
+payload offset before releasing the caller, and it must release pooled inline
+buffers exactly once on success or failure. Large streaming writes must hold the
+append write mutex while writing and finalizing the prefix so no other writer
+can interleave bytes into the same segment.
+
 Pending records must not become visible in indexes until their commit group has
 succeeded. Failed fsync must fail all pending records in that group and leave
 indexes unchanged.
@@ -687,6 +765,12 @@ Pending visibility has several invariants:
 No-sync writes still create pending records and update indexes only after their
 commit group is marked complete. They advance a no-sync epoch so an active
 segment is not sealed before the required later sync boundary has caught up.
+
+The fsync batcher should deduplicate segment files inside one batch: several
+logical commit requests against the same open segment should pay at most one
+physical sync while every waiter receives the same batch result. Diagnostics
+must expose batch count, request count, max batch size, sync latency, and bucket
+counts so benchmarks can prove whether batching is actually happening.
 
 Commit-group behavior is part of the storage contract, not only an optimization.
 When a logical operation writes multiple records, all records in the group share
@@ -860,6 +944,19 @@ objects. Recovery must support:
 - replay after restart;
 - cleanup of decided transaction records after replay completes.
 
+Transaction decision objects must be ordinary durable object records with a
+content type and ETag, but their namespace is reserved and unavailable to public
+lock operations. The replay worker must be able to scan these records after a
+fresh open, decode pending/commit/rollback decisions, apply all participants,
+and then delete or mark the decision complete through normal object-delete log
+records. Recovery correctness must not depend on an in-memory transaction
+manager surviving restart.
+
+Participants may span namespaces. Replay must normalize and lock each
+participant by namespace/key in a deterministic order before modifying staged
+state or metadata, otherwise cross-namespace transactions can deadlock or
+publish only a subset of their decision.
+
 Transaction replay must wake dependent queue and query paths after restart.
 This means replaying a decision record has to update the same metadata/state and
 queue object records that an online commit or rollback would have produced. A
@@ -898,6 +995,11 @@ backend must still expose operations needed by the client adapter:
 Queue change notification files may be touched after enqueue/nack/visibility
 changes as a future optimization. Correctness must come from polling and log
 refresh.
+
+Queue notification files are per queue and are not the queue state. A failed
+notification touch after a committed queue mutation must not roll back the
+mutation, and a missing notification file must not prevent pollers from
+discovering committed queue objects during their next refresh.
 
 The consumer service should be able to run against pouch without special public
 API changes. Internally, its wait loop should use the pouch queue polling
@@ -944,6 +1046,11 @@ auto-ack on handler success, explicit ack/nack support, nack on handler
 failure, state-save visibility for stateful handlers, and no duplicate acked
 delivery under contention.
 
+The polling-mode start-consumer path is the baseline, not a fallback after
+watch mode. Tests must run with filesystem notification disabled and prove that
+auto-ack, explicit ack/nack, deferred nack, handler failure, and state-save
+paths all complete within bounded polling intervals.
+
 ## Attachments
 
 Attachments should map to the object plane. Attachment metadata lives in the
@@ -968,6 +1075,11 @@ the same object plane and therefore share these invariants.
 Object copy is required for parity with attachment and transaction flows. A
 copy must preserve content type and descriptor and enforce expected-ETag and
 if-not-exists semantics on the destination.
+
+Copy must stream from the source object reader into the destination append path.
+It must not materialize large objects in memory, and it must re-run destination
+CAS/if-not-exists checks after acquiring the destination lock. Source read
+failure must leave the destination unchanged.
 
 ## Retention and Cleanup
 
@@ -1001,6 +1113,12 @@ shared with a future server stack:
 - staged promotion must not re-encrypt payloads unnecessarily; linking the
   staged payload preserves descriptor and byte metadata;
 - object payloads may carry descriptors and plaintext-size hints.
+
+Encrypted state reads need descriptor and plaintext-size override hooks because
+the authoritative metadata document may carry the descriptor that unlocks a
+state payload. The storage layer should keep those hooks internal, but the data
+model must not assume the state record alone always contains every decryption
+hint needed by higher lockd logic.
 
 Backend identity also needs a crypto migration path. If the backend-id marker
 was previously stored unencrypted and encryption is enabled later, the store may
