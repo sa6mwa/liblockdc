@@ -1,13 +1,17 @@
 #include "lc/lc.h"
 #include "lc_mutate_stream.h"
+#include "lc_pouch_store.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 
 typedef struct bench_case {
   const char *name;
+  long default_iterations;
   int (*run)(long iterations);
 } bench_case;
 
@@ -214,15 +218,190 @@ static int bench_mutate_apply(long iterations) {
   return 0;
 }
 
+static void bench_pouch_root_path(char *buffer, size_t buffer_size,
+                                  const char *suffix) {
+  snprintf(buffer, buffer_size, "/tmp/liblockdc-pouch-bench-%ld-%s",
+           (long)getpid(), suffix);
+}
+
+static void bench_pouch_cleanup_root(const char *root) {
+  char path[512];
+
+  snprintf(path, sizeof(path), "%s/store.log", root);
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/writer.lock", root);
+  unlink(path);
+  rmdir(root);
+}
+
+static lc_source *bench_source_from_text(const char *text, lc_error *error) {
+  lc_source *source;
+
+  source = NULL;
+  if (lc_source_from_memory(text, strlen(text), &source, error) != LC_OK) {
+    return NULL;
+  }
+  return source;
+}
+
+static int bench_pouch_read_and_check(lc_source *source, const char *expected,
+                                      lc_error *error) {
+  char buffer[128];
+  size_t got;
+
+  got = source->read(source, buffer, sizeof(buffer) - 1U, error);
+  if (error->code != LC_OK) {
+    return 1;
+  }
+  if (got >= sizeof(buffer)) {
+    got = sizeof(buffer) - 1U;
+  }
+  buffer[got] = '\0';
+  return strcmp(buffer, expected) == 0 ? 0 : 1;
+}
+
+static int bench_pouch_state_roundtrip(long iterations) {
+  char root[256];
+  char key[80];
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_error error;
+  long i;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "state");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
+  memset(&opts, 0, sizeof(opts));
+  opts.content_type = "application/json";
+
+  for (i = 0; i < iterations; ++i) {
+    snprintf(key, sizeof(key), "bench/state/%ld", i);
+    memset(&put_res, 0, sizeof(put_res));
+    memset(&info, 0, sizeof(info));
+    read_body = NULL;
+    source = bench_source_from_text("{\"value\":1}", &error);
+    if (source == NULL) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    rc = store->write_state(store, "bench", key, source, &opts, &put_res,
+                            &error);
+    lc_source_close(source);
+    if (rc != LC_OK) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    rc = store->read_state(store, "bench", key, &read_body, &info, &error);
+    if (rc != LC_OK || info.no_content || read_body == NULL ||
+        bench_pouch_read_and_check(read_body, "{\"value\":1}", &error) != 0) {
+      if (read_body != NULL) {
+        lc_source_close(read_body);
+      }
+      lc_pouch_state_info_cleanup(NULL, &info);
+      lc_pouch_put_state_res_cleanup(NULL, &put_res);
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    lc_source_close(read_body);
+    lc_pouch_state_info_cleanup(NULL, &info);
+    lc_pouch_put_state_res_cleanup(NULL, &put_res);
+  }
+
+  rc = store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_staged_promote(long iterations) {
+  char root[256];
+  char key[80];
+  char txn_id[80];
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res staged;
+  lc_pouch_put_state_res promoted;
+  lc_error error;
+  long i;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "staged");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
+  memset(&opts, 0, sizeof(opts));
+  opts.content_type = "application/json";
+
+  for (i = 0; i < iterations; ++i) {
+    snprintf(key, sizeof(key), "bench/staged/%ld", i);
+    snprintf(txn_id, sizeof(txn_id), "txn-%ld", i);
+    memset(&staged, 0, sizeof(staged));
+    memset(&promoted, 0, sizeof(promoted));
+    source = bench_source_from_text("{\"staged\":true}", &error);
+    if (source == NULL) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    rc = store->stage_state(store, "bench", key, txn_id, source, &opts,
+                            &staged, &error);
+    lc_source_close(source);
+    if (rc == LC_OK) {
+      rc = store->promote_staged_state(store, "bench", key, txn_id, NULL,
+                                       &promoted, &error);
+    }
+    lc_pouch_put_state_res_cleanup(NULL, &staged);
+    lc_pouch_put_state_res_cleanup(NULL, &promoted);
+    if (rc != LC_OK) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+  }
+
+  rc = store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int run_case(const bench_case *test_case, long iterations) {
   double start_seconds;
   double end_seconds;
   double elapsed_seconds;
   double ops_per_sec;
   double ns_per_op;
+  long effective_iterations;
 
+  effective_iterations =
+      iterations > 0L ? iterations : test_case->default_iterations;
   start_seconds = bench_now_seconds();
-  if (test_case->run(iterations) != 0) {
+  if (test_case->run(effective_iterations) != 0) {
     return 1;
   }
   end_seconds = bench_now_seconds();
@@ -231,9 +410,11 @@ static int run_case(const bench_case *test_case, long iterations) {
     elapsed_seconds = 0.000000001;
   }
 
-  ops_per_sec = (double)iterations / elapsed_seconds;
-  ns_per_op = (elapsed_seconds * 1000000000.0) / (double)iterations;
-  printf("%-16s %12ld %14.2f %14.2f\n", test_case->name, iterations,
+  ops_per_sec = (double)effective_iterations / elapsed_seconds;
+  ns_per_op =
+      (elapsed_seconds * 1000000000.0) / (double)effective_iterations;
+  printf("%-16s %12ld %14.2f %14.2f\n", test_case->name,
+         effective_iterations,
          ops_per_sec, ns_per_op);
   return 0;
 }
@@ -241,22 +422,25 @@ static int run_case(const bench_case *test_case, long iterations) {
 static void print_usage(const char *argv0) {
   fprintf(
       stderr,
-      "usage: %s [iterations] [all|streams|json|mutate-parse|mutate-apply]\n",
+      "usage: %s [iterations] "
+      "[all|streams|json|mutate-parse|mutate-apply|pouch-state|pouch-staged]\n",
       argv0);
 }
 
 int main(int argc, char **argv) {
   static const bench_case bench_cases[] = {
-      {"streams", bench_stream_copy},
-      {"json", bench_json_stream},
-      {"mutate-parse", bench_mutate_parse},
-      {"mutate-apply", bench_mutate_apply}};
+      {"streams", 200000L, bench_stream_copy},
+      {"json", 200000L, bench_json_stream},
+      {"mutate-parse", 200000L, bench_mutate_parse},
+      {"mutate-apply", 200000L, bench_mutate_apply},
+      {"pouch-state", 1000L, bench_pouch_state_roundtrip},
+      {"pouch-staged", 1000L, bench_pouch_staged_promote}};
   const char *scenario;
   long iterations;
   size_t i;
   int ran;
 
-  iterations = 200000L;
+  iterations = 0L;
   scenario = "all";
   if (argc >= 2) {
     iterations = strtol(argv[1], NULL, 10);
@@ -264,7 +448,7 @@ int main(int argc, char **argv) {
   if (argc >= 3) {
     scenario = argv[2];
   }
-  if (iterations <= 0L) {
+  if (iterations < 0L) {
     print_usage(argv[0]);
     return 2;
   }
