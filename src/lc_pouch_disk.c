@@ -1002,15 +1002,6 @@ static int lc_pouch_disk_upsert_object_entry(
   return 1;
 }
 
-static char *lc_pouch_make_object_id(lc_pouch_disk_store *store,
-                                     const char *name, const void *body,
-                                     size_t body_length) {
-  unsigned long crc;
-
-  crc = lc_pouch_crc32((const unsigned char *)body, body_length);
-  return lc_pouch_make_object_id_from_crc(store, name, crc);
-}
-
 static char *lc_pouch_make_object_id_from_crc(lc_pouch_disk_store *store,
                                               const char *name,
                                               unsigned long crc) {
@@ -1306,79 +1297,6 @@ static int lc_pouch_read_source_all(const lc_pouch_allocator *allocator,
           lc_pouch_free(allocator, buffer);
           return lc_pouch_set_invalid(error,
                                       "pouch state payload is too large");
-        }
-        new_capacity *= 2U;
-      }
-      grown =
-          (unsigned char *)lc_pouch_realloc(allocator, buffer, new_capacity);
-      if (grown == NULL) {
-        lc_pouch_free(allocator, buffer);
-        return lc_pouch_set_nomem(error, "failed to allocate pouch payload");
-      }
-      buffer = grown;
-      capacity = new_capacity;
-    }
-    memcpy(buffer + length, temp, got);
-    length += got;
-  }
-  *out = buffer;
-  *out_length = length;
-  return LC_OK;
-}
-
-static int lc_pouch_read_source_max_bytes(
-    const lc_pouch_allocator *allocator, lc_source *source, size_t max_bytes,
-    unsigned char **out, size_t *out_length, lc_error *error) {
-  unsigned char *buffer;
-  unsigned char temp[8192];
-  size_t capacity;
-  size_t length;
-  size_t want;
-  size_t remaining;
-  size_t got;
-
-  buffer = NULL;
-  capacity = 0U;
-  length = 0U;
-  while (1) {
-    want = sizeof(temp);
-    if (length <= max_bytes) {
-      remaining = max_bytes - length;
-      if (remaining < want) {
-        want = remaining == (size_t)-1 ? sizeof(temp) : remaining + 1U;
-      }
-    } else {
-      want = 1U;
-    }
-    got = source->read(source, temp, want, error);
-    if (got == 0U) {
-      break;
-    }
-    if (got > ((size_t)-1) - length) {
-      lc_pouch_free(allocator, buffer);
-      return lc_pouch_set_invalid(error, "pouch object payload is too large");
-    }
-    if ((unsigned long)(length + got) > LC_POUCH_MAX_INLINE_BODY_BYTES) {
-      lc_pouch_free(allocator, buffer);
-      return lc_pouch_set_invalid(error,
-                                  "pouch inline payload exceeds storage limit");
-    }
-    if (length + got > max_bytes) {
-      lc_pouch_free(allocator, buffer);
-      return lc_error_set(error, LC_ERR_SERVER, 413L,
-                          "pouch object exceeds max_bytes", NULL,
-                          "attachment_too_large", NULL);
-    }
-    if (length + got > capacity) {
-      size_t new_capacity;
-      unsigned char *grown;
-
-      new_capacity = capacity == 0U ? 8192U : capacity;
-      while (new_capacity < length + got) {
-        if (new_capacity > ((size_t)-1) / 2U) {
-          lc_pouch_free(allocator, buffer);
-          return lc_pouch_set_invalid(error,
-                                      "pouch object payload is too large");
         }
         new_capacity *= 2U;
       }
@@ -1995,6 +1913,92 @@ static int lc_pouch_disk_write_fd_span(int out_fd, int in_fd,
     }
     remaining -= (unsigned long)got;
   }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_spool_source_to_temp(
+    lc_pouch_disk_store *store, lc_source *source, int has_max_bytes,
+    size_t max_bytes, int *fd_out, unsigned long *length_out,
+    unsigned long *crc_out, lc_error *error) {
+  const char suffix[] = "/put-object-XXXXXX";
+  unsigned char buffer[8192];
+  char *template_path;
+  size_t root_len;
+  size_t suffix_len;
+  size_t want;
+  size_t got;
+  size_t remaining;
+  unsigned long length;
+  unsigned long crc;
+  int fd;
+
+  *fd_out = -1;
+  *length_out = 0UL;
+  *crc_out = 0UL;
+  root_len = strlen(store->root_path);
+  suffix_len = sizeof(suffix) - 1U;
+  template_path =
+      (char *)lc_pouch_alloc(&store->allocator, root_len + suffix_len + 1U);
+  if (template_path == NULL) {
+    return lc_pouch_set_nomem(error, "failed to allocate pouch temp path");
+  }
+  memcpy(template_path, store->root_path, root_len);
+  memcpy(template_path + root_len, suffix, suffix_len + 1U);
+  fd = mkstemp(template_path);
+  if (fd < 0) {
+    lc_pouch_free(&store->allocator, template_path);
+    return lc_pouch_set_errno(error, "failed to create pouch temp object");
+  }
+  (void)unlink(template_path);
+  lc_pouch_free(&store->allocator, template_path);
+
+  length = 0UL;
+  crc = 0xffffffffUL;
+  for (;;) {
+    want = sizeof(buffer);
+    if (has_max_bytes) {
+      if ((unsigned long)max_bytes < length) {
+        want = 1U;
+      } else {
+        remaining = max_bytes - (size_t)length;
+        if (remaining < want) {
+          want = remaining == (size_t)-1 ? sizeof(buffer) : remaining + 1U;
+        }
+      }
+    }
+    got = source->read(source, buffer, want, error);
+    if (got == 0U) {
+      break;
+    }
+    if ((unsigned long)got > ((unsigned long)-1) - length) {
+      close(fd);
+      return lc_pouch_set_invalid(error, "pouch object payload is too large");
+    }
+    if (length + (unsigned long)got > LC_POUCH_MAX_INLINE_BODY_BYTES) {
+      close(fd);
+      return lc_pouch_set_invalid(error,
+                                  "pouch inline payload exceeds storage limit");
+    }
+    if (has_max_bytes && length + (unsigned long)got > (unsigned long)max_bytes) {
+      close(fd);
+      return lc_error_set(error, LC_ERR_SERVER, 413L,
+                          "pouch object exceeds max_bytes", NULL,
+                          "attachment_too_large", NULL);
+    }
+    if (!lc_pouch_write_all(fd, buffer, got)) {
+      close(fd);
+      return lc_pouch_set_errno(error, "failed to write pouch temp object");
+    }
+    crc = lc_pouch_crc32_update(crc, buffer, got);
+    length += (unsigned long)got;
+  }
+  if (lseek(fd, 0, SEEK_SET) < 0) {
+    close(fd);
+    return lc_pouch_set_errno(error, "failed to rewind pouch temp object");
+  }
+  *fd_out = fd;
+  *length_out = length;
+  *crc_out = crc ^ 0xffffffffUL;
   return LC_OK;
 }
 
@@ -3284,17 +3288,15 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
                                     lc_pouch_object_info *out,
                                     lc_error *error) {
   lc_pouch_disk_store *store;
-  unsigned char *payload;
-  unsigned char *record_body;
   char *id;
   const char *name;
   const char *content_type;
-  size_t payload_length;
-  size_t content_type_length;
-  size_t record_length;
-  unsigned long body_offset;
+  unsigned long payload_length;
+  unsigned long payload_crc;
+  unsigned long payload_offset;
   long now_unix;
   int existing;
+  int temp_fd;
   int rc;
 
   if (self == NULL || namespace_name == NULL || key == NULL || body == NULL ||
@@ -3333,57 +3335,30 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
                         "pouch attachment already exists", NULL,
                         "attachment_exists", NULL);
   }
-  payload = NULL;
-  payload_length = 0U;
-  if (opts->has_max_bytes) {
-    rc = lc_pouch_read_source_max_bytes(&store->allocator, body,
-                                        (size_t)opts->max_bytes, &payload,
-                                        &payload_length, error);
-  } else {
-    rc = lc_pouch_read_source_all(&store->allocator, body, &payload,
-                                  &payload_length, error);
-  }
+  temp_fd = -1;
+  rc = lc_pouch_disk_spool_source_to_temp(
+      store, body, opts->has_max_bytes, (size_t)opts->max_bytes, &temp_fd,
+      &payload_length, &payload_crc, error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
     return rc;
   }
-  id = lc_pouch_make_object_id(store, name, payload, payload_length);
+  id = lc_pouch_make_object_id_from_crc(store, name, payload_crc);
   if (id == NULL) {
-    lc_pouch_free(&store->allocator, payload);
+    close(temp_fd);
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch object id");
   }
   now_unix = (long)time(NULL);
-  content_type_length = strlen(content_type);
-  record_length =
-      LC_POUCH_OBJECT_META_SIZE + content_type_length + payload_length;
-  record_body =
-      (unsigned char *)lc_pouch_alloc(&store->allocator, record_length);
-  if (record_body == NULL) {
-    lc_pouch_free(&store->allocator, id);
-    lc_pouch_free(&store->allocator, payload);
-    lc_pouch_disk_unlock(store, error);
-    return lc_pouch_set_nomem(error, "failed to allocate pouch object record");
-  }
-  lc_pouch_put_u64(record_body, (unsigned long)now_unix);
-  lc_pouch_put_u64(record_body + 8, (unsigned long)now_unix);
-  lc_pouch_put_u32(record_body + 16, (unsigned long)content_type_length);
-  lc_pouch_put_u64(record_body + 20, (unsigned long)payload_length);
-  memcpy(record_body + LC_POUCH_OBJECT_META_SIZE, content_type,
-         content_type_length);
-  if (payload_length > 0U) {
-    memcpy(record_body + LC_POUCH_OBJECT_META_SIZE + content_type_length,
-           payload, payload_length);
-  }
-  rc = lc_pouch_disk_append_record(
-      store, LC_POUCH_RECORD_OBJECT_PUT, namespace_name, key, name, id, 0L,
-      record_body, record_length, &body_offset, error);
+  rc = lc_pouch_disk_append_object_copy_record(
+      store, temp_fd, namespace_name, key, name, id, content_type, 0UL,
+      payload_length, now_unix, &payload_offset, error);
+  close(temp_fd);
   if (rc == LC_OK &&
       !lc_pouch_disk_upsert_object_entry(
           store, namespace_name, key, id, name, content_type,
           (long)payload_length, now_unix, now_unix,
-          body_offset + LC_POUCH_OBJECT_META_SIZE + content_type_length,
-          (unsigned long)payload_length, 0)) {
+          payload_offset, payload_length, 0)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch object index");
   }
   if (rc == LC_OK) {
@@ -3398,9 +3373,7 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
-  lc_pouch_free(&store->allocator, record_body);
   lc_pouch_free(&store->allocator, id);
-  lc_pouch_free(&store->allocator, payload);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }

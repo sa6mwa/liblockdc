@@ -1863,6 +1863,68 @@ static void test_object_max_bytes_reads_only_limit_plus_one(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_object_put_streams_payload_without_large_alloc(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source source;
+  lc_source *read_body;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info info;
+  lc_pouch_object_info fetched;
+  lc_error error;
+  size_t payload_length;
+  size_t read_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-put-stream");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&selector, 0, sizeof(selector));
+  memset(&info, 0, sizeof(info));
+  memset(&fetched, 0, sizeof(fetched));
+  store = NULL;
+  read_body = NULL;
+  payload_length = 128U * 1024U;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  tracked.max_malloc_size = 0U;
+  tracked.max_realloc_size = 0U;
+  counting_source_init(&source, payload_length);
+  opts.name = "large.bin";
+  opts.content_type = "application/octet-stream";
+  opts.prevent_overwrite = 1;
+  rc = store->put_object(store, "default", "lease-key", &source.pub, &opts,
+                         &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(info.size, (long)payload_length);
+  assert_true(tracked.max_malloc_size < payload_length);
+  assert_true(tracked.max_realloc_size < payload_length);
+
+  selector.name = "large.bin";
+  rc = store->get_object(store, "default", "lease-key", &selector, &read_body,
+                         &fetched, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(fetched.id, info.id);
+  read_length = read_source_count_x(read_body);
+  assert_int_equal(read_length, payload_length);
+
+  lc_source_close(read_body);
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+  lc_pouch_object_info_cleanup(&allocator, &info);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_object_copy_streams_existing_payload_without_large_alloc(
     void **state) {
   char root[256];
@@ -2508,6 +2570,7 @@ int main(void) {
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),
+      cmocka_unit_test(test_object_put_streams_payload_without_large_alloc),
       cmocka_unit_test(
           test_object_copy_streams_existing_payload_without_large_alloc),
       cmocka_unit_test(
