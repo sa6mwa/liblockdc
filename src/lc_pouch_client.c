@@ -563,6 +563,20 @@ static int lc_pouch_validate_active_lease(lc_client_handle *client,
                         "pouch lease is not active for this operation", NULL,
                         "lease_not_active", NULL);
   }
+  if (record->meta.txn_id != NULL && lease->txn_id == NULL) {
+    lc_pouch_meta_record_cleanup(&client->pouch_allocator, record);
+    return lc_error_set(error, LC_ERR_SERVER, 400L,
+                        "pouch operation requires transaction id for this "
+                        "lease",
+                        NULL, "missing_txn", NULL);
+  }
+  if (record->meta.txn_id != NULL && lease->txn_id != NULL &&
+      strcmp(record->meta.txn_id, lease->txn_id) != 0) {
+    lc_pouch_meta_record_cleanup(&client->pouch_allocator, record);
+    return lc_error_set(error, LC_ERR_SERVER, 409L,
+                        "pouch transaction id does not match active lease",
+                        NULL, "txn_mismatch", NULL);
+  }
   return LC_OK;
 }
 
