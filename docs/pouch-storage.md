@@ -304,6 +304,12 @@ magic, version, type, lengths, and CRC is sufficient for v1. The C
 implementation must define its own constants in the local pouch code and
 document them beside the encoder/decoder tests.
 
+Header lengths are 32-bit fields in the disk-log format. Pouch v1 should treat
+records whose key, metadata, or payload would overflow those fields as an
+explicit unsupported-size error before writing any bytes. If larger payloads are
+required later, they should be chunked into multiple records or moved to a new
+record version rather than silently wrapping lengths.
+
 Metadata records need generation numbers. Index replay should accept a record
 only when its generation is greater than or equal to the current indexed record
 for that key. This makes replay idempotent and keeps stale records from
@@ -332,6 +338,12 @@ Replay must be conservative:
 The reader must support linked payload records. A state-link record points at a
 payload span in another segment or snapshot. Link targets are live dependencies
 and must be protected from deletion until no current record references them.
+
+Large streaming records are written in two phases: write a provisional prefix,
+stream the payload while computing content hash and CRC, then rewrite the prefix
+with the final lengths, CRC, and ETag metadata. A crash before the final prefix
+rewrite must leave an unreadable trailing record, not a visible corrupt record.
+Replay must stop at that point and keep all prior validated records.
 
 ## Metadata Model
 
@@ -382,6 +394,12 @@ available, pouch can expose a narrow internal predicate/query boundary and a
 full ordered scan. The persistent format should not encode LQL-specific query
 plans.
 
+Query refresh contracts are storage-visible. A query that waits for a flush or
+refresh target must observe committed summary records without requiring a full
+payload read. Query pagination must be stable over lexical metadata keys,
+namespace-isolated, and able to resume from `start_after` even when some keys
+are concurrently deleted or become transiently unreadable.
+
 ## Refresh and Shared Filesystems
 
 Correctness must not require `fsnotify`. A store instance observes other writers
@@ -419,6 +437,12 @@ processes:
 Read paths should cache open segment files with a bounded LRU, but must resolve
 linked payload spans against the current segment or snapshot path. Compaction
 cleanup must not close or delete files still needed by active readers.
+
+Refresh is also the recovery path for restart and failover. A newly opened store
+must rebuild namespace state from manifest, installed snapshot, and tail
+segments without relying on any in-memory dispatcher state left by a prior
+process. Queue transaction decisions and ordinary state writes must become
+visible through this same replay path.
 
 ## Locking
 
@@ -497,6 +521,25 @@ No-sync writes still create pending records and update indexes only after their
 commit group is marked complete. They advance a no-sync epoch so an active
 segment is not sealed before the required later sync boundary has caught up.
 
+Commit-group behavior is part of the storage contract, not only an optimization.
+When a logical operation writes multiple records, all records in the group share
+one durability result and all waiters see the same success or failure. Finalizer
+work that depends on durable records must run only after commit waiters succeed.
+If a commit group is already committed when a new committer is registered, that
+committer must still run and be drained so pending state cannot be stranded.
+
+Crash windows to test explicitly:
+
+- crash before append write: no new record appears;
+- crash after partial record write: replay stops at the partial record;
+- crash after full write but before fsync: safe mode may lose the record after
+  filesystem recovery and must not expose it as committed before the commit
+  group succeeds;
+- crash after fsync before marker touch: refresh by segment scan must still see
+  the record;
+- crash after marker touch before another reader refreshes: marker is only a
+  wake/invalidation hint and must not be treated as a durability barrier.
+
 ## Segment Lifecycle
 
 Segments are append files. An active segment is sealed when:
@@ -566,6 +609,17 @@ Additional compaction invariants:
 - foreground reads must continue successfully while background compaction is
   copying payloads.
 
+Compaction snapshot records should materialize live linked state as normal state
+put records when their source segment is being compacted. If the live state-link
+record itself is outside the candidate set but points into a candidate segment,
+that target segment is protected instead. This avoids deleting payload bytes
+that are still reachable through a current committed state head.
+
+Cleanup is deliberately conservative. Obsolete files are eligible only after a
+grace period, delete failures keep the manifest obsolete entries intact for a
+later retry, and open read handles may outlive the namespace index entry that
+made the file obsolete.
+
 ## Staging and Transactions
 
 Pouch must implement transactional staging as a storage primitive, not as a
@@ -606,6 +660,12 @@ objects. Recovery must support:
 - replay after restart;
 - cleanup of decided transaction records after replay completes.
 
+Transaction replay must wake dependent queue and query paths after restart.
+This means replaying a decision record has to update the same metadata/state and
+queue object records that an online commit or rollback would have produced. A
+consumer or query client polling a pouch root must not require a separate
+server-owned wake channel to notice the result.
+
 ## Queue and Consumer Support
 
 Queues should use the object plane plus metadata conventions, but the storage
@@ -641,6 +701,20 @@ without requiring a continuous tight polling loop. Poll interval, jitter, and a
 slower resilient polling interval should be tunable. Filesystem notification, if
 enabled and supported, is only a wake optimization and must be disabled on
 filesystems where it is unreliable.
+
+Queue delivery invariants:
+
+- only one competing consumer may claim a visible message;
+- nack with a delay must hide the message until that delay expires and then
+  redeliver it with an incremented attempt count;
+- visibility timeout handoff must reject a stale ack from the old owner after a
+  different owner successfully claims and acks the message;
+- ack removes the message from available and in-flight views;
+- observability/stat calls must be read-only and must not perturb delivery
+  state;
+- subscribe and start-consumer must preserve auto-ack, explicit ack/nack,
+  handler-failure nack, and state-save behavior;
+- polling mode must pass the same semantics as watch mode.
 
 ## Attachments
 
