@@ -110,6 +110,12 @@ typedef struct lc_pouch_object_selector {
   const char *name;
 } lc_pouch_object_selector;
 
+typedef struct lc_pouch_copy_object_opts {
+  lc_pouch_object_selector source;
+  const char *name;
+  int prevent_overwrite;
+} lc_pouch_copy_object_opts;
+
 typedef struct lc_pouch_queue_message_info {
   char *namespace_name;
   char *queue;
@@ -197,6 +203,10 @@ struct lc_pouch_store {
                     const char *key, const lc_pouch_object_selector *selector,
                     lc_source **body, lc_pouch_object_info *out,
                     lc_error *error);
+  int (*copy_object)(lc_pouch_store *self, const char *namespace_name,
+                     const char *src_key, const char *dst_key,
+                     const lc_pouch_copy_object_opts *opts,
+                     lc_pouch_object_info *out, lc_error *error);
   int (*delete_object)(lc_pouch_store *self, const char *namespace_name,
                        const char *key,
                        const lc_pouch_object_selector *selector, int *deleted,

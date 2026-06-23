@@ -556,9 +556,11 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   lc_source *read_body;
   lc_pouch_put_object_opts opts;
   lc_pouch_object_info first;
+  lc_pouch_object_info copied;
   lc_pouch_object_info fetched;
   lc_pouch_object_list list;
   lc_pouch_object_selector selector;
+  lc_pouch_copy_object_opts copy_opts;
   lc_error error;
   char *text;
   int deleted;
@@ -572,9 +574,11 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   memset(&error, 0, sizeof(error));
   memset(&opts, 0, sizeof(opts));
   memset(&first, 0, sizeof(first));
+  memset(&copied, 0, sizeof(copied));
   memset(&fetched, 0, sizeof(fetched));
   memset(&list, 0, sizeof(list));
   memset(&selector, 0, sizeof(selector));
+  memset(&copy_opts, 0, sizeof(copy_opts));
   store = NULL;
   read_body = NULL;
 
@@ -629,6 +633,35 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   lc_source_close(read_body);
   lc_pouch_object_info_cleanup(&allocator, &fetched);
 
+  copy_opts.source.name = "result.txt";
+  copy_opts.prevent_overwrite = 1;
+  rc = store->copy_object(store, "default", "lease-key", "copy-key",
+                          &copy_opts, &copied, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(copied.name, "result.txt");
+  assert_string_equal(copied.id, first.id);
+  assert_string_equal(copied.content_type, "text/plain");
+  assert_int_equal(copied.size, 11L);
+
+  rc = store->copy_object(store, "default", "lease-key", "copy-key",
+                          &copy_opts, &fetched, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  lc_error_cleanup(&error);
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+
+  selector.name = "result.txt";
+  rc = store->get_object(store, "default", "copy-key", &selector, &read_body,
+                         &fetched, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(fetched.id, first.id);
+  assert_string_equal(fetched.content_type, "text/plain");
+  text = read_source_text(read_body);
+  assert_string_equal(text, "payload-one");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+
   rc = store->delete_object(store, "default", "lease-key", &selector, &deleted,
                             &error);
   assert_int_equal(rc, LC_OK);
@@ -655,6 +688,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   assert_int_equal(deleted_count, 1);
 
   lc_pouch_object_info_cleanup(&allocator, &first);
+  lc_pouch_object_info_cleanup(&allocator, &copied);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);

@@ -181,6 +181,12 @@ static int lc_pouch_disk_get_object(lc_pouch_store *self,
                                     const lc_pouch_object_selector *selector,
                                     lc_source **body, lc_pouch_object_info *out,
                                     lc_error *error);
+static int lc_pouch_disk_copy_object(lc_pouch_store *self,
+                                     const char *namespace_name,
+                                     const char *src_key, const char *dst_key,
+                                     const lc_pouch_copy_object_opts *opts,
+                                     lc_pouch_object_info *out,
+                                     lc_error *error);
 static int lc_pouch_disk_delete_object(lc_pouch_store *self,
                                        const char *namespace_name,
                                        const char *key,
@@ -2482,6 +2488,46 @@ static int lc_pouch_disk_get_object(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_copy_object(lc_pouch_store *self,
+                                     const char *namespace_name,
+                                     const char *src_key, const char *dst_key,
+                                     const lc_pouch_copy_object_opts *opts,
+                                     lc_pouch_object_info *out,
+                                     lc_error *error) {
+  lc_source *body;
+  lc_pouch_disk_store *store;
+  lc_pouch_object_info src_info;
+  lc_pouch_put_object_opts put_opts;
+  int rc;
+
+  if (self == NULL || namespace_name == NULL || src_key == NULL ||
+      dst_key == NULL || opts == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "copy_object requires store, namespace, "
+                                "source key, destination key, options, and "
+                                "output metadata");
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&src_info, 0, sizeof(src_info));
+  memset(&put_opts, 0, sizeof(put_opts));
+  body = NULL;
+  store = (lc_pouch_disk_store *)self->impl;
+
+  rc = lc_pouch_disk_get_object(self, namespace_name, src_key, &opts->source,
+                                &body, &src_info, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  put_opts.name = opts->name != NULL ? opts->name : src_info.name;
+  put_opts.content_type = src_info.content_type;
+  put_opts.prevent_overwrite = opts->prevent_overwrite;
+  rc = lc_pouch_disk_put_object(self, namespace_name, dst_key, body, &put_opts,
+                                out, error);
+  lc_source_close(body);
+  lc_pouch_object_info_cleanup(&store->allocator, &src_info);
+  return rc;
+}
+
 static int lc_pouch_disk_delete_object(lc_pouch_store *self,
                                        const char *namespace_name,
                                        const char *key,
@@ -3262,6 +3308,7 @@ int lc_pouch_disk_open(const char *root_path,
   store->pub.put_object = lc_pouch_disk_put_object;
   store->pub.list_objects = lc_pouch_disk_list_objects;
   store->pub.get_object = lc_pouch_disk_get_object;
+  store->pub.copy_object = lc_pouch_disk_copy_object;
   store->pub.delete_object = lc_pouch_disk_delete_object;
   store->pub.delete_all_objects = lc_pouch_disk_delete_all_objects;
   store->pub.enqueue_message = lc_pouch_disk_enqueue_message;
