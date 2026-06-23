@@ -609,6 +609,56 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_rejects_missing_acquire_owner(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "missing-acquire-owner");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  client = open_pouch_client(endpoint);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "owner-required";
+  acquire.ttl_seconds = 60L;
+  lease = NULL;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  assert_null(lease);
+  lc_error_cleanup(&error);
+
+  acquire.owner = "";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  assert_null(lease);
+  lc_error_cleanup(&error);
+
+  acquire.owner = "owner-a";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  assert_string_equal(lease->owner, "owner-a");
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_rejects_missing_or_wrong_txn_id(void **state) {
   char root[256];
   char endpoint[320];
@@ -1778,6 +1828,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
+      cmocka_unit_test(test_pouch_endpoint_rejects_missing_acquire_owner),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_or_wrong_txn_id),
       cmocka_unit_test(test_pouch_endpoint_remove_without_state_is_noop),
       cmocka_unit_test(

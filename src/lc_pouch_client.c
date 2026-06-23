@@ -670,6 +670,11 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                         "pouch acquire requires self, req, key, and out", NULL,
                         NULL, NULL);
   }
+  if (req->owner == NULL || req->owner[0] == '\0') {
+    return lc_error_set(error, LC_ERR_SERVER, 400L,
+                        "pouch acquire requires owner", NULL, "missing_owner",
+                        NULL);
+  }
   client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
   namespace_name = NULL;
