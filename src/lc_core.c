@@ -62,6 +62,14 @@ typedef struct lc_bundle_capture_source {
   size_t capacity;
 } lc_bundle_capture_source;
 
+static int lc_endpoint_is_pouch(const char *endpoint) {
+  return endpoint != NULL && strncmp(endpoint, "pouch://", 8U) == 0;
+}
+
+static const char *lc_pouch_endpoint_path(const char *endpoint) {
+  return endpoint != NULL ? endpoint + 8 : NULL;
+}
+
 typedef struct lc_fd_sink {
   lc_sink_impl base;
   int fd;
@@ -1066,6 +1074,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   size_t bundle_length;
   lc_client_handle *client;
   size_t i;
+  int is_pouch;
   int rc;
 
   if (config == NULL || out == NULL) {
@@ -1077,6 +1086,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   memset(&bundle_capture, 0, sizeof(bundle_capture));
   bundle_bytes = NULL;
   bundle_length = 0U;
+  is_pouch = config->endpoint_count == 1U &&
+             lc_endpoint_is_pouch(
+                 config->endpoints != NULL ? config->endpoints[0] : NULL);
   if (!config->disable_mtls && config->client_bundle_source != NULL) {
     bundle_capture.inner = config->client_bundle_source;
     bundle_capture.allocator = &config->allocator;
@@ -1096,7 +1108,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
       bundle_capture.inner == NULL ? config->client_bundle_path : NULL;
   engine_config.default_namespace = config->default_namespace;
   engine_config.timeout_ms = config->timeout_ms;
-  engine_config.disable_mtls = config->disable_mtls;
+  engine_config.disable_mtls = is_pouch ? 1 : config->disable_mtls;
   engine_config.insecure_skip_verify = config->insecure_skip_verify;
   engine_config.prefer_http_2 = config->prefer_http_2;
   engine_config.http_json_response_limit_bytes =
@@ -1117,6 +1129,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                         NULL, NULL, NULL);
   }
   client->allocator = config->allocator;
+  client->is_pouch = is_pouch;
+  lc_pouch_allocator_from_lc(&config->allocator, &client->pouch_allocator);
   rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);
   if (rc != LC_ENGINE_OK) {
     int public_rc;
@@ -1126,6 +1140,17 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
     lc_free_with_allocator(&config->allocator, client);
     return public_rc;
+  }
+  if (client->is_pouch) {
+    rc = lc_pouch_disk_open(lc_pouch_endpoint_path(config->endpoints[0]),
+                            &client->pouch_allocator, &client->pouch_store,
+                            error);
+    if (rc != LC_OK) {
+      lc_client_close_method(&client->pub);
+      lc_engine_error_cleanup(&engine_error);
+      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      return rc;
+    }
   }
   bundle_bytes = bundle_capture.bytes;
   bundle_length = bundle_capture.length;
@@ -1238,6 +1263,16 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.new_consumer_service = lc_client_new_consumer_service_method;
   client->pub.watch_queue = lc_client_watch_queue_method;
   client->pub.close = lc_client_close_method;
+  if (client->is_pouch) {
+    client->pub.acquire = lc_pouch_client_acquire_method;
+    client->pub.describe = lc_pouch_client_describe_method;
+    client->pub.get = lc_pouch_client_get_method;
+    client->pub.update = lc_pouch_client_update_method;
+    client->pub.metadata = lc_pouch_client_metadata_method;
+    client->pub.remove = lc_pouch_client_remove_method;
+    client->pub.keepalive = lc_pouch_client_keepalive_method;
+    client->pub.release = lc_pouch_client_release_method;
+  }
   client->pub.default_namespace = client->default_namespace;
   *out = &client->pub;
   lc_engine_error_cleanup(&engine_error);

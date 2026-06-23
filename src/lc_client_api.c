@@ -2714,6 +2714,9 @@ void lc_client_close_method(lc_client *self) {
     return;
   }
   client = (lc_client_handle *)self;
+  if (client->pouch_store != NULL) {
+    client->pouch_store->close(client->pouch_store, NULL);
+  }
   if (client->engine != NULL) {
     lc_engine_client_close(client->engine);
   }

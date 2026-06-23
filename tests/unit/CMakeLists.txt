@@ -87,6 +87,7 @@ target_link_options(lc_unit_runtime PRIVATE
 )
 lc_add_unit_test(lc_unit_mutate_stream test_lc_mutate_stream.c)
 lc_add_unit_test(lc_unit_pouch_disk test_lc_pouch_disk.c)
+lc_add_unit_test(lc_unit_pouch_client test_lc_pouch_client.c)
 
 lc_add_https_unit_test_case(
   lc_unit_transport_https_client_open_rejects_bundle_without_ca

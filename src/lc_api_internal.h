@@ -14,6 +14,7 @@
 #endif
 #include "lc/lc.h"
 #include "lc_engine_api.h"
+#include "lc_pouch_store.h"
 
 #include <pslog.h>
 #include <pthread.h>
@@ -31,6 +32,9 @@ typedef struct lc_consumer_service_handle lc_consumer_service_handle;
 struct lc_client_handle {
   lc_client pub;
   lc_engine_client *engine;
+  lc_pouch_store *pouch_store;
+  lc_pouch_allocator pouch_allocator;
+  int is_pouch;
   char **endpoints;
   size_t endpoint_count;
   char *unix_socket_path;
@@ -180,6 +184,39 @@ lc_message *lc_message_new(lc_client_handle *client,
 
 int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                              lc_lease **out, lc_error *error);
+int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
+                                   lc_lease **out, lc_error *error);
+int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
+                                    lc_describe_res *out, lc_error *error);
+int lc_pouch_client_get_method(lc_client *self, const char *key,
+                               const lc_get_opts *opts, lc_sink *dst,
+                               lc_get_res *out, lc_error *error);
+int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
+                                  lc_source *src, lc_update_res *out,
+                                  lc_error *error);
+int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
+                                    lc_metadata_res *out, lc_error *error);
+int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
+                                  lc_remove_res *out, lc_error *error);
+int lc_pouch_client_keepalive_method(lc_client *self,
+                                     const lc_keepalive_op *req,
+                                     lc_keepalive_res *out, lc_error *error);
+int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
+                                   lc_release_res *out, lc_error *error);
+int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error);
+int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
+                              const lc_get_opts *opts, lc_get_res *out,
+                              lc_error *error);
+int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
+                                 const lc_update_opts *opts, lc_error *error);
+int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
+                                   lc_error *error);
+int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
+                                 lc_error *error);
+int lc_pouch_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
+                                    lc_error *error);
+int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
+                                  lc_error *error);
 int lc_client_acquire_for_update_method(
     lc_client *self, const lc_acquire_req *req,
     lc_acquire_for_update_handler_fn handler, void *handler_context,
