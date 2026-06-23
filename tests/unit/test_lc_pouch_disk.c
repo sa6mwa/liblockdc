@@ -100,6 +100,40 @@ static char *read_source_text(lc_source *source) {
   return copy;
 }
 
+static void corrupt_first_log_match(const char *root, const char *needle) {
+  char log_path[512];
+  unsigned char *bytes;
+  size_t needle_len;
+  size_t index;
+  struct stat st;
+  int fd;
+  int found;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  fd = open(log_path, O_RDWR);
+  assert_true(fd >= 0);
+  assert_int_equal(fstat(fd, &st), 0);
+  assert_true(st.st_size > 0);
+  bytes = (unsigned char *)malloc((size_t)st.st_size);
+  assert_non_null(bytes);
+  assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
+  assert_int_equal(read(fd, bytes, (size_t)st.st_size), st.st_size);
+  needle_len = strlen(needle);
+  found = 0;
+  for (index = 0U; index + needle_len <= (size_t)st.st_size; ++index) {
+    if (memcmp(bytes + index, needle, needle_len) == 0) {
+      bytes[index] ^= 1U;
+      assert_int_equal(lseek(fd, (off_t)index, SEEK_SET), (off_t)index);
+      assert_int_equal(write(fd, bytes + index, 1U), 1);
+      found = 1;
+      break;
+    }
+  }
+  free(bytes);
+  close(fd);
+  assert_true(found);
+}
+
 typedef struct scan_capture {
   char keys[8][64];
   long versions[8];
@@ -640,6 +674,91 @@ static void test_replay_truncates_trailing_partial_record(void **state) {
   lc_source_close(read_body);
   lc_pouch_state_info_cleanup(&allocator, &info);
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_replay_stops_at_corrupt_record_and_discards_later_records(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res first;
+  lc_pouch_put_state_res second;
+  lc_pouch_put_state_res third;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "corrupt");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&third, 0, sizeof(third));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("stable-prefix");
+  rc = store->write_state(store, "default", "good", source, NULL, &first,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("corrupt-middle");
+  rc = store->write_state(store, "default", "corrupt", source, NULL, &second,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("later-record");
+  rc = store->write_state(store, "default", "later", source, NULL, &third,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  corrupt_first_log_match(root, "corrupt-middle");
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "good", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "stable-prefix");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->read_state(store, "default", "corrupt", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->read_state(store, "default", "later", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &first);
+  lc_pouch_put_state_res_cleanup(&allocator, &second);
+  lc_pouch_put_state_res_cleanup(&allocator, &third);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -1222,6 +1341,8 @@ int main(void) {
       cmocka_unit_test(test_staged_state_promote_discard_and_reopen),
       cmocka_unit_test(test_staged_state_listing_orders_paginates_and_replays),
       cmocka_unit_test(test_replay_truncates_trailing_partial_record),
+      cmocka_unit_test(
+          test_replay_stops_at_corrupt_record_and_discards_later_records),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
