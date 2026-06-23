@@ -25,6 +25,7 @@
 #define LC_POUCH_RECORD_QUEUE_PUT 7U
 #define LC_POUCH_RECORD_QUEUE_UPDATE 8U
 #define LC_POUCH_RECORD_QUEUE_REMOVE 9U
+#define LC_POUCH_RECORD_STATE_LINK 10U
 #define LC_POUCH_BACKEND_NAMESPACE ".lockd"
 #define LC_POUCH_BACKEND_KEY "backend-id"
 #define LC_POUCH_BACKEND_CONTENT_TYPE "text/plain"
@@ -1738,7 +1739,8 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
          type != LC_POUCH_RECORD_OBJECT_REMOVE &&
          type != LC_POUCH_RECORD_QUEUE_PUT &&
          type != LC_POUCH_RECORD_QUEUE_UPDATE &&
-         type != LC_POUCH_RECORD_QUEUE_REMOVE) ||
+         type != LC_POUCH_RECORD_QUEUE_REMOVE &&
+         type != LC_POUCH_RECORD_STATE_LINK) ||
         payload_len > (unsigned long)(((size_t)-1) - 1U)) {
       break;
     }
@@ -1797,12 +1799,40 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
         return lc_pouch_set_nomem(error, "failed to decode pouch replay key");
       }
       if (type == LC_POUCH_RECORD_STATE_PUT ||
-          type == LC_POUCH_RECORD_STATE_REMOVE) {
+          type == LC_POUCH_RECORD_STATE_REMOVE ||
+          type == LC_POUCH_RECORD_STATE_LINK) {
+        unsigned long indexed_body_offset;
+        unsigned long indexed_body_len;
+
+        indexed_body_offset =
+            offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
+            etag_len;
+        indexed_body_len = body_len;
+        if (type == LC_POUCH_RECORD_STATE_LINK) {
+          if (body_len != 16UL) {
+            lc_pouch_free(&store->allocator, ns_copy);
+            lc_pouch_free(&store->allocator, key_copy);
+            lc_pouch_free(&store->allocator, ct_copy);
+            lc_pouch_free(&store->allocator, etag_copy);
+            lc_pouch_free(&store->allocator, payload);
+            break;
+          }
+          indexed_body_offset = lc_pouch_get_u64(body_begin);
+          indexed_body_len = lc_pouch_get_u64(body_begin + 8);
+          if (indexed_body_offset > offset ||
+              indexed_body_len > offset - indexed_body_offset) {
+            lc_pouch_free(&store->allocator, ns_copy);
+            lc_pouch_free(&store->allocator, key_copy);
+            lc_pouch_free(&store->allocator, ct_copy);
+            lc_pouch_free(&store->allocator, etag_copy);
+            lc_pouch_free(&store->allocator, payload);
+            break;
+          }
+        }
         if (!lc_pouch_disk_upsert_entry(
                 store, ns_copy, key_copy, ct_copy, etag_copy, (long)version,
-                offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
-                    etag_len,
-                body_len, type == LC_POUCH_RECORD_STATE_REMOVE)) {
+                indexed_body_offset, indexed_body_len,
+                type == LC_POUCH_RECORD_STATE_REMOVE)) {
           lc_pouch_free(&store->allocator, ns_copy);
           lc_pouch_free(&store->allocator, key_copy);
           lc_pouch_free(&store->allocator, ct_copy);
@@ -2427,80 +2457,6 @@ static int lc_pouch_disk_load_staged_state(lc_pouch_store *self,
   return rc;
 }
 
-static int lc_pouch_disk_read_entry_payload(lc_pouch_disk_store *store,
-                                            lc_pouch_disk_state_entry *entry,
-                                            unsigned char **out,
-                                            size_t *out_length,
-                                            lc_error *error) {
-  unsigned char *payload;
-  int short_read;
-
-  *out = NULL;
-  *out_length = (size_t)entry->body_length;
-  if (entry->body_length == 0UL) {
-    return LC_OK;
-  }
-  if (entry->body_length > (unsigned long)((size_t)-1)) {
-    return lc_pouch_set_invalid(error, "pouch staged state is too large");
-  }
-  payload = (unsigned char *)lc_pouch_alloc(&store->allocator,
-                                            (size_t)entry->body_length);
-  if (payload == NULL) {
-    return lc_pouch_set_nomem(error,
-                              "failed to allocate pouch staged state payload");
-  }
-  if (lseek(store->log_fd, (off_t)entry->body_offset, SEEK_SET) < 0) {
-    lc_pouch_free(&store->allocator, payload);
-    return lc_pouch_set_errno(error, "failed to seek pouch staged state body");
-  }
-  if (!lc_pouch_read_all(store->log_fd, payload, (size_t)entry->body_length,
-                         &short_read) ||
-      short_read) {
-    lc_pouch_free(&store->allocator, payload);
-    if (short_read) {
-      errno = EIO;
-    }
-    return lc_pouch_set_errno(error, "failed to read pouch staged state body");
-  }
-  *out = payload;
-  return LC_OK;
-}
-
-static int lc_pouch_disk_append_state_put_locked(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
-    const char *content_type, const unsigned char *payload,
-    size_t payload_length, lc_pouch_put_state_res *out, lc_error *error) {
-  char *etag;
-  unsigned long body_offset;
-  long version;
-  int rc;
-
-  version = store->next_version++;
-  etag = lc_pouch_make_etag(store, version, payload, payload_length);
-  if (etag == NULL) {
-    return lc_pouch_set_nomem(error, "failed to allocate pouch state etag");
-  }
-  rc = lc_pouch_disk_append_record(
-      store, LC_POUCH_RECORD_STATE_PUT, namespace_name, key, content_type, etag,
-      version, payload, payload_length, &body_offset, error);
-  if (rc == LC_OK &&
-      !lc_pouch_disk_upsert_entry(store, namespace_name, key, content_type,
-                                  etag, version, body_offset,
-                                  (unsigned long)payload_length, 0)) {
-    rc = lc_pouch_set_nomem(error, "failed to update pouch state index");
-  }
-  if (rc == LC_OK && out != NULL) {
-    out->new_version = version;
-    out->new_state_etag = lc_pouch_strdup(&store->allocator, etag);
-    out->bytes = (long)payload_length;
-    if (out->new_state_etag == NULL) {
-      rc = lc_pouch_set_nomem(error, "failed to copy pouch state etag");
-    }
-  }
-  lc_pouch_free(&store->allocator, etag);
-  return rc;
-}
-
 static int lc_pouch_disk_append_state_remove_locked(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     lc_error *error) {
@@ -2526,6 +2482,45 @@ static int lc_pouch_disk_append_state_remove_locked(
   return rc;
 }
 
+static int lc_pouch_disk_append_state_link_locked(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
+    const lc_pouch_disk_state_entry *target, lc_pouch_put_state_res *out,
+    lc_error *error) {
+  unsigned char link_body[16];
+  const char *content_type;
+  unsigned long link_body_offset;
+  long version;
+  int rc;
+
+  if (target == NULL || target->deleted || target->etag == NULL) {
+    return lc_pouch_set_invalid(error, "pouch state link requires live target");
+  }
+  version = store->next_version++;
+  content_type =
+      target->content_type != NULL ? target->content_type : "application/json";
+  lc_pouch_put_u64(link_body, target->body_offset);
+  lc_pouch_put_u64(link_body + 8, target->body_length);
+  rc = lc_pouch_disk_append_record(
+      store, LC_POUCH_RECORD_STATE_LINK, namespace_name, key, content_type,
+      target->etag, version, link_body, sizeof(link_body), &link_body_offset,
+      error);
+  if (rc == LC_OK &&
+      !lc_pouch_disk_upsert_entry(store, namespace_name, key, content_type,
+                                  target->etag, version, target->body_offset,
+                                  target->body_length, 0)) {
+    rc = lc_pouch_set_nomem(error, "failed to update pouch state link index");
+  }
+  if (rc == LC_OK && out != NULL) {
+    out->new_version = version;
+    out->new_state_etag = lc_pouch_strdup(&store->allocator, target->etag);
+    out->bytes = (long)target->body_length;
+    if (out->new_state_etag == NULL) {
+      rc = lc_pouch_set_nomem(error, "failed to copy pouch state link etag");
+    }
+  }
+  return rc;
+}
+
 static int lc_pouch_disk_promote_staged_state(
     lc_pouch_store *self, const char *namespace_name, const char *key,
     const char *txn_id, const lc_pouch_promote_staged_opts *opts,
@@ -2534,10 +2529,7 @@ static int lc_pouch_disk_promote_staged_state(
   lc_pouch_disk_state_entry *staged;
   lc_pouch_disk_state_entry *head;
   lc_pouch_put_state_res committed;
-  unsigned char *payload;
   char *staged_key;
-  const char *content_type;
-  size_t payload_length;
   int staged_index;
   int head_index;
   int rc;
@@ -2559,8 +2551,6 @@ static int lc_pouch_disk_promote_staged_state(
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   memset(&committed, 0, sizeof(committed));
-  payload = NULL;
-  payload_length = 0U;
   staged_key = lc_pouch_disk_make_staged_key(store, key, txn_id);
   if (staged_key == NULL) {
     return lc_pouch_set_nomem(error, "failed to allocate pouch staged key");
@@ -2594,20 +2584,8 @@ static int lc_pouch_disk_promote_staged_state(
     lc_pouch_free(&store->allocator, staged_key);
     return rc;
   }
-  rc = lc_pouch_disk_read_entry_payload(store, staged, &payload,
-                                        &payload_length, error);
-  if (rc != LC_OK) {
-    lc_pouch_disk_unlock(store, error);
-    lc_pouch_free(&store->allocator, staged_key);
-    return rc;
-  }
-  content_type =
-      staged->content_type != NULL ? staged->content_type : "application/json";
-  rc = lc_pouch_disk_append_state_put_locked(store, namespace_name, key,
-                                             content_type, payload,
-                                             payload_length, &committed, error);
-  lc_pouch_free(&store->allocator, payload);
-  payload = NULL;
+  rc = lc_pouch_disk_append_state_link_locked(store, namespace_name, key,
+                                              staged, &committed, error);
   if (rc == LC_OK) {
     rc = lc_pouch_disk_append_state_remove_locked(store, namespace_name,
                                                   staged_key, error);

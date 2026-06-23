@@ -15,6 +15,7 @@
 
 #define TEST_POUCH_HEADER_SIZE 64U
 #define TEST_POUCH_HEADER_RECORD_VERSION_OFFSET 56U
+#define TEST_POUCH_RECORD_STATE_LINK 10U
 
 typedef struct tracked_allocator {
   size_t malloc_calls;
@@ -110,6 +111,43 @@ static unsigned long test_get_u32(const unsigned char *src) {
 
 static unsigned long test_get_u64(const unsigned char *src) {
   return test_get_u32(src) | (test_get_u32(src + 4) << 32);
+}
+
+static size_t count_log_records_of_type(const char *root, unsigned long type) {
+  char log_path[512];
+  unsigned char header[TEST_POUCH_HEADER_SIZE];
+  unsigned long payload_len;
+  unsigned long record_type;
+  size_t count;
+  ssize_t got;
+  int fd;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  fd = open(log_path, O_RDONLY);
+  assert_true(fd >= 0);
+  count = 0U;
+  for (;;) {
+    got = read(fd, header, sizeof(header));
+    if (got == 0) {
+      break;
+    }
+    if (got != (ssize_t)sizeof(header)) {
+      break;
+    }
+    if (memcmp(header, "LCP1", 4U) != 0) {
+      break;
+    }
+    record_type = test_get_u32(header + 8);
+    payload_len = test_get_u64(header + 44);
+    if (record_type == type) {
+      count++;
+    }
+    if (lseek(fd, (off_t)payload_len, SEEK_CUR) < 0) {
+      break;
+    }
+  }
+  close(fd);
+  return count;
 }
 
 static void test_put_u32(unsigned char *dst, unsigned long value) {
@@ -471,7 +509,10 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
                                    NULL, &promoted, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(promoted.new_state_etag);
+  assert_string_equal(promoted.new_state_etag, staged.new_state_etag);
   assert_int_equal(promoted.bytes, 9L);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_LINK),
+                   1U);
 
   rc = store->load_staged_state(store, "default", "lease-key", "txn-1",
                                 &read_body, &info, &error);
@@ -516,8 +557,12 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
                                    &promote_opts, &second_promoted, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(second_promoted.new_state_etag);
+  assert_string_equal(second_promoted.new_state_etag,
+                      second_staged.new_state_etag);
   assert_string_not_equal(second_promoted.new_state_etag,
                           promoted.new_state_etag);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_LINK),
+                   2U);
 
   source = source_from_text("discard-me");
   rc = store->stage_state(store, "default", "lease-key", "txn-3", source,
