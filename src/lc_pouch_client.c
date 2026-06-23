@@ -1,4 +1,5 @@
 #include "lc_api_internal.h"
+#include "lc_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -39,6 +40,9 @@ static int lc_pouch_public_namespace(lc_client_handle *client,
 }
 
 static long lc_pouch_now_unix(void) { return (long)time(NULL); }
+
+int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
+                                 const lc_update_opts *opts, lc_error *error);
 
 static char *lc_pouch_new_lease_id(lc_client_handle *client, const char *key,
                                    long fencing_token) {
@@ -309,15 +313,61 @@ static int lc_pouch_lease_load_unsupported(lc_lease *self,
                       NULL);
 }
 
-static int lc_pouch_lease_save_unsupported(lc_lease *self,
-                                           const lonejson_map *map,
-                                           const void *src, lc_error *error) {
-  (void)self;
-  (void)map;
-  (void)src;
-  return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch lease save is not implemented yet", NULL, NULL,
-                      NULL);
+static int lc_pouch_lease_save_method(lc_lease *self, const lonejson_map *map,
+                                      const void *src, lc_error *error) {
+  lc_lease_handle *lease;
+  lc_source *source;
+  lc_update_opts opts;
+  lonejson *runtime;
+  FILE *fp;
+  int rc;
+
+  if (self == NULL || map == NULL || src == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease save requires self, map, and source",
+                        NULL, NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize lonejson runtime", NULL, NULL,
+                        NULL);
+  }
+  fp = tmpfile();
+  if (fp == NULL) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create pouch mapped save buffer", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_lonejson_serialize_file(runtime, fp, map, src, error,
+                                  "failed to serialize pouch mapped state");
+  if (rc != LC_OK) {
+    fclose(fp);
+    return rc;
+  }
+  if (fflush(fp) != 0 || fseek(fp, 0L, SEEK_SET) != 0) {
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to rewind pouch mapped save buffer", NULL,
+                        NULL, NULL);
+  }
+  source = lc_source_from_open_file(fp, 1);
+  if (source == NULL) {
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to wrap pouch mapped save buffer", NULL, NULL,
+                        NULL);
+  }
+  lc_update_opts_init(&opts);
+  opts.content_type = "application/json";
+  if (lease->version > 0L) {
+    opts.if_version = lease->version;
+    opts.has_if_version = 1;
+  }
+  rc = lc_pouch_lease_update_method(self, source, &opts, error);
+  lc_source_close(source);
+  return rc;
 }
 
 static int lc_pouch_lease_mutate_unsupported(lc_lease *self,
@@ -434,7 +484,7 @@ static void lc_pouch_install_lease_methods(lc_lease *lease) {
   lease->describe = lc_pouch_lease_describe_method;
   lease->get = lc_pouch_lease_get_method;
   lease->load = lc_pouch_lease_load_unsupported;
-  lease->save = lc_pouch_lease_save_unsupported;
+  lease->save = lc_pouch_lease_save_method;
   lease->update = lc_pouch_lease_update_method;
   lease->mutate = lc_pouch_lease_mutate_unsupported;
   lease->mutate_local = lc_pouch_lease_mutate_local_unsupported;

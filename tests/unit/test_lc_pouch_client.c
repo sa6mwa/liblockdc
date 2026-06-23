@@ -11,6 +11,15 @@
 
 #include "lc/lc.h"
 
+typedef struct pouch_value_doc {
+  lonejson_int64 value;
+} pouch_value_doc;
+
+static const lonejson_field pouch_value_fields[] = {
+    LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
+
+LONEJSON_MAP_DEFINE(pouch_value_map, pouch_value_doc, pouch_value_fields);
+
 static void test_root_path(char *buffer, size_t buffer_size,
                            const char *suffix) {
   snprintf(buffer, buffer_size, "/tmp/liblockdc-pouch-client-%ld-%s",
@@ -391,6 +400,82 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   assert_int_equal(rc, LC_OK);
   client->close(client);
   lc_attach_res_cleanup(&attach_res);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_sink *sink;
+  lc_error error;
+  pouch_value_doc value_doc;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "mapped-save");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client(endpoint);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "mapped";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  value_doc.value = 7;
+  rc = lease->save(lease, &pouch_value_map, &value_doc, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_non_null(lease->state_etag);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_int_equal(get_res.version, 1L);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "{\"value\":7}");
+  free(text);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+
+  value_doc.value = 8;
+  rc = lease->save(lease, &pouch_value_map, &value_doc, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 2L);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_int_equal(get_res.version, 2L);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "{\"value\":8}");
+  free(text);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
@@ -1079,6 +1164,7 @@ static void test_pouch_endpoint_consumer_service_with_state(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(
           test_pouch_endpoint_queue_visibility_handoff_rejects_stale_refs),
