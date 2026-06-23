@@ -85,6 +85,37 @@ static lc_client *open_pouch_client(const char *endpoint) {
   return client;
 }
 
+typedef struct subscribe_test_state {
+  size_t handled;
+  const char *expected[2];
+} subscribe_test_state;
+
+static int subscribe_test_handle(void *context, lc_message *message,
+                                 lc_error *error) {
+  subscribe_test_state *state;
+  lc_sink *sink;
+  char *text;
+  size_t written;
+  int rc;
+
+  state = (subscribe_test_state *)context;
+  assert_true(state->handled < 2U);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_int_equal(rc, LC_OK);
+  written = 0U;
+  rc = message->write_payload(message, sink, &written, error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, state->expected[state->handled]);
+  free(text);
+  lc_sink_close(sink);
+  ++state->handled;
+  rc = message->ack(message, error);
+  assert_int_equal(rc, LC_OK);
+  return LC_OK;
+}
+
 static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   char root[256];
   char endpoint[320];
@@ -487,11 +518,80 @@ static void test_pouch_endpoint_dequeue_batch_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_subscribe_lifecycle(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req subscribe_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_consumer consumer;
+  subscribe_test_state subscribe_state;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "subscribe");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats_res, 0, sizeof(stats_res));
+  memset(&consumer, 0, sizeof(consumer));
+  memset(&subscribe_state, 0, sizeof(subscribe_state));
+  subscribe_state.expected[0] = "first";
+  subscribe_state.expected[1] = "second";
+  client = open_pouch_client(endpoint);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("first");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  source = source_from_text("second");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  lc_dequeue_req_init(&subscribe_req);
+  subscribe_req.queue = "jobs";
+  subscribe_req.owner = "subscriber";
+  subscribe_req.visibility_timeout_seconds = 30L;
+  subscribe_req.page_size = 2;
+  consumer.handle = subscribe_test_handle;
+  consumer.context = &subscribe_state;
+  rc = client->subscribe(client, &subscribe_req, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(subscribe_state.handled, 2U);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+
+  lc_queue_stats_res_cleanup(&stats_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

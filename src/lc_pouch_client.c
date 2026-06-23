@@ -1036,8 +1036,10 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
   return rc;
 }
 
-int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
-                                   lc_message **out, lc_error *error) {
+static int lc_pouch_client_dequeue_one(lc_client *self,
+                                       const lc_dequeue_req *req,
+                                       lc_message **out, int *terminal_flag,
+                                       lc_error *error) {
   lc_client_handle *client;
   lc_pouch_dequeue_opts opts;
   lc_pouch_queue_message_info info;
@@ -1068,7 +1070,7 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
                                             error);
   if (rc == LC_OK && body != NULL) {
     lc_pouch_queue_info_to_engine(&info, &engine);
-    *out = lc_message_new(client, &engine, body, NULL);
+    *out = lc_message_new(client, &engine, body, terminal_flag);
     if (*out == NULL) {
       body->close(body);
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -1078,6 +1080,11 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
   }
   lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
   return rc;
+}
+
+int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
+                                   lc_message **out, lc_error *error) {
+  return lc_pouch_client_dequeue_one(self, req, out, NULL, error);
 }
 
 int lc_pouch_client_dequeue_batch_method(lc_client *self,
@@ -1124,6 +1131,71 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
     out->messages = grown;
     out->messages[out->count] = message;
     out->count += 1U;
+  }
+  return LC_OK;
+}
+
+int lc_pouch_client_subscribe_method(lc_client *self, const lc_dequeue_req *req,
+                                     const lc_consumer *consumer,
+                                     lc_error *error) {
+  lc_dequeue_req single_req;
+  lc_message *message;
+  lc_nack_req nack_req;
+  lc_error nack_error;
+  int limit;
+  int index;
+  int terminal;
+  int rc;
+
+  if (self == NULL || req == NULL || req->queue == NULL || req->owner == NULL ||
+      consumer == NULL || consumer->handle == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch subscribe requires self, req, queue, owner, and "
+                        "consumer",
+                        NULL, NULL, NULL);
+  }
+  single_req = *req;
+  single_req.page_size = 1;
+  limit = req->page_size > 0 ? req->page_size : 1;
+  for (index = 0; index < limit; ++index) {
+    terminal = 0;
+    message = NULL;
+    rc = lc_pouch_client_dequeue_one(self, &single_req, &message, &terminal,
+                                     error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (message == NULL) {
+      return LC_OK;
+    }
+    rc = consumer->handle(consumer->context, message, error);
+    if (rc == LC_OK && !terminal) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "consumer callback must ack() or nack() before "
+                        "returning LC_OK",
+                        NULL, NULL, NULL);
+    }
+    if (rc != LC_OK && !terminal) {
+      lc_nack_req_init(&nack_req);
+      nack_req.intent = LC_NACK_INTENT_FAILURE;
+      nack_req.delay_seconds = 0L;
+      lc_error_init(&nack_error);
+      if (message->nack(message, &nack_req, &nack_error) == LC_OK) {
+        terminal = 1;
+        message = NULL;
+      } else if (error != NULL && error->code == LC_OK) {
+        lc_error_set(error, nack_error.code, nack_error.http_status,
+                     nack_error.message, nack_error.detail,
+                     nack_error.server_code, nack_error.correlation_id);
+      }
+      lc_error_cleanup(&nack_error);
+    }
+    if (message != NULL && !terminal) {
+      message->close(message);
+    }
+    if (rc != LC_OK) {
+      return error != NULL && error->code != LC_OK ? error->code : rc;
+    }
   }
   return LC_OK;
 }
