@@ -15,6 +15,7 @@
 
 #define TEST_POUCH_HEADER_SIZE 64U
 #define TEST_POUCH_HEADER_RECORD_VERSION_OFFSET 56U
+#define TEST_POUCH_RECORD_OBJECT_PUT 5U
 #define TEST_POUCH_RECORD_STATE_LINK 10U
 
 typedef struct tracked_allocator {
@@ -22,6 +23,12 @@ typedef struct tracked_allocator {
   size_t realloc_calls;
   size_t free_calls;
 } tracked_allocator;
+
+typedef struct counting_source {
+  lc_source pub;
+  size_t length;
+  size_t position;
+} counting_source;
 
 static void *tracked_malloc(void *context, size_t size) {
   tracked_allocator *tracked;
@@ -85,6 +92,43 @@ static lc_source *source_from_text(const char *text) {
   assert_non_null(source);
   lc_error_cleanup(&error);
   return source;
+}
+
+static size_t counting_source_read(lc_source *self, void *buffer, size_t count,
+                                   lc_error *error) {
+  counting_source *source;
+  size_t remaining;
+  size_t produced;
+
+  (void)error;
+  source = (counting_source *)self;
+  if (source->position >= source->length) {
+    return 0U;
+  }
+  remaining = source->length - source->position;
+  produced = remaining < count ? remaining : count;
+  memset(buffer, 'x', produced);
+  source->position += produced;
+  return produced;
+}
+
+static int counting_source_reset(lc_source *self, lc_error *error) {
+  counting_source *source;
+
+  (void)error;
+  source = (counting_source *)self;
+  source->position = 0U;
+  return LC_OK;
+}
+
+static void counting_source_close(lc_source *self) { (void)self; }
+
+static void counting_source_init(counting_source *source, size_t length) {
+  memset(source, 0, sizeof(*source));
+  source->pub.read = counting_source_read;
+  source->pub.reset = counting_source_reset;
+  source->pub.close = counting_source_close;
+  source->length = length;
 }
 
 static char *read_source_text(lc_source *source) {
@@ -1494,6 +1538,56 @@ static void test_object_listing_orders_by_name_after_replay(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_object_max_bytes_reads_only_limit_plus_one(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source source;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_info info;
+  lc_pouch_object_list list;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-max-bytes");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&info, 0, sizeof(info));
+  memset(&list, 0, sizeof(list));
+  store = NULL;
+  counting_source_init(&source, 100U);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.name = "large.bin";
+  opts.content_type = "application/octet-stream";
+  opts.has_max_bytes = 1;
+  opts.max_bytes = 5L;
+  rc = store->put_object(store, "default", "lease-key", &source.pub, &opts,
+                         &info, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 413L);
+  assert_int_equal(source.position, 6U);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  rc = store->list_objects(store, "default", "lease-key", &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 0U);
+  lc_pouch_object_list_cleanup(&allocator, &list);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -1705,6 +1799,7 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
+      cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
   };

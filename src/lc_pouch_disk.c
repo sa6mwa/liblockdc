@@ -1213,6 +1213,74 @@ static int lc_pouch_read_source_all(const lc_pouch_allocator *allocator,
   return LC_OK;
 }
 
+static int lc_pouch_read_source_max_bytes(
+    const lc_pouch_allocator *allocator, lc_source *source, size_t max_bytes,
+    unsigned char **out, size_t *out_length, lc_error *error) {
+  unsigned char *buffer;
+  unsigned char temp[8192];
+  size_t capacity;
+  size_t length;
+  size_t want;
+  size_t remaining;
+  size_t got;
+
+  buffer = NULL;
+  capacity = 0U;
+  length = 0U;
+  while (1) {
+    want = sizeof(temp);
+    if (length <= max_bytes) {
+      remaining = max_bytes - length;
+      if (remaining < want) {
+        want = remaining == (size_t)-1 ? sizeof(temp) : remaining + 1U;
+      }
+    } else {
+      want = 1U;
+    }
+    got = source->read(source, temp, want, error);
+    if (got == 0U) {
+      break;
+    }
+    if (got > ((size_t)-1) - length) {
+      lc_pouch_free(allocator, buffer);
+      return lc_pouch_set_invalid(error, "pouch object payload is too large");
+    }
+    if (length + got > max_bytes) {
+      lc_pouch_free(allocator, buffer);
+      return lc_error_set(error, LC_ERR_SERVER, 413L,
+                          "pouch object exceeds max_bytes", NULL,
+                          "attachment_too_large", NULL);
+    }
+    if (length + got > capacity) {
+      size_t new_capacity;
+      unsigned char *grown;
+
+      new_capacity = capacity == 0U ? 8192U : capacity;
+      while (new_capacity < length + got) {
+        if (new_capacity > ((size_t)-1) / 2U) {
+          lc_pouch_free(allocator, buffer);
+          return lc_pouch_set_invalid(error,
+                                      "pouch object payload is too large");
+        }
+        new_capacity *= 2U;
+      }
+      grown =
+          (unsigned char *)lc_pouch_realloc(allocator, buffer, new_capacity);
+      if (grown == NULL) {
+        lc_pouch_free(allocator, buffer);
+        return lc_pouch_set_nomem(error, "failed to allocate pouch payload");
+      }
+      buffer = grown;
+      capacity = new_capacity;
+    }
+    memcpy(buffer + length, temp, got);
+    length += got;
+  }
+  *out = buffer;
+  *out_length = length;
+  return LC_OK;
+}
+
 static int lc_pouch_encode_queue_record(
     lc_pouch_disk_store *store, const lc_pouch_disk_queue_entry *entry,
     const unsigned char *payload, size_t payload_length,
@@ -2874,6 +2942,10 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
+  if (opts->has_max_bytes && opts->max_bytes < 0L) {
+    return lc_pouch_set_invalid(error,
+                                "put_object requires non-negative max_bytes");
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
     return rc;
@@ -2891,18 +2963,17 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
   }
   payload = NULL;
   payload_length = 0U;
-  rc = lc_pouch_read_source_all(&store->allocator, body, &payload,
-                                &payload_length, error);
+  if (opts->has_max_bytes) {
+    rc = lc_pouch_read_source_max_bytes(&store->allocator, body,
+                                        (size_t)opts->max_bytes, &payload,
+                                        &payload_length, error);
+  } else {
+    rc = lc_pouch_read_source_all(&store->allocator, body, &payload,
+                                  &payload_length, error);
+  }
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
     return rc;
-  }
-  if (opts->has_max_bytes && payload_length > (size_t)opts->max_bytes) {
-    lc_pouch_free(&store->allocator, payload);
-    lc_pouch_disk_unlock(store, error);
-    return lc_error_set(error, LC_ERR_SERVER, 413L,
-                        "pouch attachment exceeds max_bytes", NULL,
-                        "attachment_too_large", NULL);
   }
   id = lc_pouch_make_object_id(store, name, payload, payload_length);
   if (id == NULL) {
