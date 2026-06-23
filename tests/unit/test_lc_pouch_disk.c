@@ -608,6 +608,7 @@ static void test_cas_and_remove_semantics(void **state) {
   lc_pouch_put_state_res second;
   lc_pouch_state_info info;
   lc_error error;
+  int removed;
   int rc;
 
   (void)state;
@@ -621,9 +622,14 @@ static void test_cas_and_remove_semantics(void **state) {
   memset(&info, 0, sizeof(info));
   store = NULL;
   read_body = NULL;
+  removed = 0;
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
+
+  rc = store->remove_state(store, "default", "beta", NULL, &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(removed);
 
   source = source_from_text("one");
   rc = store->write_state(store, "default", "beta", source, NULL, &first,
@@ -648,13 +654,25 @@ static void test_cas_and_remove_semantics(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(second.new_version, 2L);
 
-  rc = store->remove_state(store, "default", "beta", "wrong", &error);
+  rc = store->remove_state(store, "default", "beta", "wrong", &removed,
+                           &error);
   assert_int_equal(rc, LC_ERR_SERVER);
   lc_error_cleanup(&error);
 
   rc = store->remove_state(store, "default", "beta", second.new_state_etag,
-                           &error);
+                           &removed, &error);
   assert_int_equal(rc, LC_OK);
+  assert_true(removed);
+
+  rc = store->remove_state(store, "default", "beta", NULL, &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(removed);
+
+  rc = store->remove_state(store, "default", "beta", second.new_state_etag,
+                           &removed, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
 
   rc = store->read_state(store, "default", "beta", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);

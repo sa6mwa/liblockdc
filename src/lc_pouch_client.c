@@ -1069,6 +1069,7 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   lc_pouch_store_meta_res stored;
   lc_pouch_allocator *allocator;
   lc_pouch_meta next_meta;
+  int removed;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1081,14 +1082,15 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   memset(out, 0, sizeof(*out));
   memset(&record, 0, sizeof(record));
   memset(&stored, 0, sizeof(stored));
+  removed = 0;
   rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
   if (rc != LC_OK) {
     return rc;
   }
   rc = client->pouch_store->remove_state(client->pouch_store,
                                          record.namespace_name, req->lease.key,
-                                         req->if_state_etag, error);
-  if (rc == LC_OK) {
+                                         req->if_state_etag, &removed, error);
+  if (rc == LC_OK && removed) {
     next_meta = record.meta;
     next_meta.version = record.meta.version + 1L;
     next_meta.state_etag = NULL;
@@ -1097,8 +1099,8 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
         record.etag, &stored, error);
   }
   if (rc == LC_OK) {
-    out->removed = 1;
-    out->new_version = next_meta.version;
+    out->removed = removed;
+    out->new_version = removed ? next_meta.version : record.meta.version;
   }
   lc_pouch_store_meta_res_cleanup(allocator, &stored);
   lc_pouch_meta_record_cleanup(allocator, &record);

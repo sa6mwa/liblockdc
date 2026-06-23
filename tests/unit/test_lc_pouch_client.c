@@ -609,6 +609,125 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_remove_without_state_is_noop(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_lease *reacquired;
+  lc_acquire_req acquire_req;
+  lc_remove_op remove_op;
+  lc_remove_res remove_res;
+  lc_update_opts update_opts;
+  lc_keepalive_req keepalive_req;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "remove-noop");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&remove_res, 0, sizeof(remove_res));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+  reacquired = NULL;
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "empty";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  assert_int_equal(lease->version, 0L);
+  assert_null(lease->state_etag);
+
+  lc_remove_op_init(&remove_op);
+  remove_op.lease.namespace_name = lease->namespace_name;
+  remove_op.lease.key = lease->key;
+  remove_op.lease.lease_id = lease->lease_id;
+  remove_op.lease.txn_id = lease->txn_id;
+  remove_op.lease.fencing_token = lease->fencing_token;
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(remove_res.removed);
+  assert_int_equal(remove_res.new_version, 0L);
+  lc_remove_res_cleanup(&remove_res);
+
+  lc_keepalive_req_init(&keepalive_req);
+  keepalive_req.ttl_seconds = 60L;
+  rc = lease->keepalive(lease, &keepalive_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 0L);
+  assert_null(lease->state_etag);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"n\":1}");
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_non_null(lease->state_etag);
+
+  lc_remove_op_init(&remove_op);
+  remove_op.lease.namespace_name = lease->namespace_name;
+  remove_op.lease.key = lease->key;
+  remove_op.lease.lease_id = lease->lease_id;
+  remove_op.lease.txn_id = lease->txn_id;
+  remove_op.lease.fencing_token = lease->fencing_token;
+  remove_op.if_state_etag = lease->state_etag;
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(remove_res.removed);
+  assert_int_equal(remove_res.new_version, 2L);
+  lc_remove_res_cleanup(&remove_res);
+
+  update_opts.if_state_etag = lease->state_etag;
+  source = source_from_text("{\"n\":2}");
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+  assert_int_equal(lease->version, 1L);
+
+  rc = lease->keepalive(lease, &keepalive_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  acquire_req.owner = "owner-b";
+  rc = client->acquire(client, &acquire_req, &reacquired, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(reacquired);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reacquired->get(reacquired, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  assert_int_equal(get_res.version, 0L);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  rc = reacquired->release(reacquired, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_lease_load_respects_json_limit(void **state) {
   char root[256];
   char endpoint[320];
@@ -1348,6 +1467,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
+      cmocka_unit_test(test_pouch_endpoint_remove_without_state_is_noop),
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(

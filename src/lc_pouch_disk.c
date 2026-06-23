@@ -177,7 +177,7 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key,
                                       const char *expected_etag,
-                                      lc_error *error);
+                                      int *removed, lc_error *error);
 static int lc_pouch_disk_stage_state(lc_pouch_store *self,
                                      const char *namespace_name,
                                      const char *key, const char *txn_id,
@@ -3309,7 +3309,7 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key,
                                       const char *expected_etag,
-                                      lc_error *error) {
+                                      int *removed, lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_state_entry *entry;
   char *etag;
@@ -3318,10 +3318,13 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
   int index;
   int rc;
 
-  if (self == NULL || namespace_name == NULL || key == NULL) {
+  if (self == NULL || namespace_name == NULL || key == NULL ||
+      removed == NULL) {
     return lc_pouch_set_invalid(error,
-                                "remove_state requires store, namespace, key");
+                                "remove_state requires store, namespace, key, "
+                                "and removed output");
   }
+  *removed = 0;
   rc = lc_pouch_disk_validate_namespace_key(error, "remove_state",
                                            namespace_name, key);
   if (rc != LC_OK) {
@@ -3339,6 +3342,12 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
     lc_pouch_disk_unlock(store, error);
     return rc;
   }
+  if (entry == NULL || entry->deleted) {
+    if (lc_pouch_disk_unlock(store, error) != LC_OK) {
+      return LC_ERR_TRANSPORT;
+    }
+    return LC_OK;
+  }
   version = store->next_version++;
   etag = lc_pouch_make_etag(store, version, NULL, 0U);
   if (etag == NULL) {
@@ -3354,6 +3363,7 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
     rc = lc_pouch_set_nomem(error, "failed to update pouch remove index");
   }
   if (rc == LC_OK) {
+    *removed = 1;
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   lc_pouch_free(&store->allocator, etag);

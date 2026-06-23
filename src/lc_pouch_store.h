@@ -223,7 +223,7 @@ struct lc_pouch_store {
                      lc_pouch_put_state_res *out, lc_error *error);
   int (*remove_state)(lc_pouch_store *self, const char *namespace_name,
                       const char *key, const char *expected_etag,
-                      lc_error *error);
+                      int *removed, lc_error *error);
   int (*stage_state)(lc_pouch_store *self, const char *namespace_name,
                      const char *key, const char *txn_id, lc_source *body,
                      const lc_pouch_put_state_opts *opts,
