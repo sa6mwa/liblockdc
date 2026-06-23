@@ -1393,6 +1393,96 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_queue_variants_reject_missing_owner(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_batch_res batch;
+  lc_consumer consumer;
+  subscribe_test_state subscribe_state;
+  lc_message *message;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-owner-variants");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&batch, 0, sizeof(batch));
+  memset(&consumer, 0, sizeof(consumer));
+  memset(&subscribe_state, 0, sizeof(subscribe_state));
+  client = open_pouch_client(endpoint);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("body");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.page_size = 2;
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  assert_int_equal(batch.count, 0U);
+  lc_error_cleanup(&error);
+
+  dequeue_req.owner = "";
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  assert_int_equal(batch.count, 0U);
+  lc_error_cleanup(&error);
+
+  consumer.handle = subscribe_test_handle;
+  consumer.context = &subscribe_state;
+  dequeue_req.owner = NULL;
+  rc = client->subscribe(client, &dequeue_req, &consumer, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  assert_int_equal(subscribe_state.handled, 0U);
+  lc_error_cleanup(&error);
+
+  dequeue_req.owner = "";
+  rc = client->subscribe_with_state(client, &dequeue_req, &consumer, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  assert_int_equal(subscribe_state.handled, 0U);
+  lc_error_cleanup(&error);
+
+  dequeue_req.owner = "worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  message = NULL;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_queue_visibility_handoff_rejects_stale_refs(
     void **state) {
   char root[256];
@@ -2111,6 +2201,8 @@ int main(void) {
           test_pouch_endpoint_release_preserves_state_for_reacquire),
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
+      cmocka_unit_test(
+          test_pouch_endpoint_queue_variants_reject_missing_owner),
       cmocka_unit_test(
           test_pouch_endpoint_queue_visibility_handoff_rejects_stale_refs),
       cmocka_unit_test(

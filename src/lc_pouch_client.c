@@ -1756,12 +1756,16 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
   int index;
   int rc;
 
-  if (self == NULL || req == NULL || req->queue == NULL || req->owner == NULL ||
-      out == NULL) {
+  if (self == NULL || req == NULL || req->queue == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch dequeue_batch requires self, req, queue, owner, "
-                        "and out",
+                        "pouch dequeue_batch requires self, req, queue, and "
+                        "out",
                         NULL, NULL, NULL);
+  }
+  if (req->owner == NULL || req->owner[0] == '\0') {
+    return lc_error_set(error, LC_ERR_SERVER, 400L,
+                        "pouch dequeue_batch requires owner", NULL,
+                        "missing_owner", NULL);
   }
   memset(out, 0, sizeof(*out));
   single_req = *req;
@@ -1807,12 +1811,17 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
   int terminal;
   int rc;
 
-  if (self == NULL || req == NULL || req->queue == NULL || req->owner == NULL ||
-      consumer == NULL || consumer->handle == NULL) {
+  if (self == NULL || req == NULL || req->queue == NULL || consumer == NULL ||
+      consumer->handle == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch subscribe requires self, req, queue, owner, and "
+                        "pouch subscribe requires self, req, queue, and "
                         "consumer",
                         NULL, NULL, NULL);
+  }
+  if (req->owner == NULL || req->owner[0] == '\0') {
+    return lc_error_set(error, LC_ERR_SERVER, 400L,
+                        "pouch subscribe requires owner", NULL,
+                        "missing_owner", NULL);
   }
   single_req = *req;
   single_req.page_size = 1;
