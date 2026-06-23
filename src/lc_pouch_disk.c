@@ -4219,8 +4219,7 @@ int lc_pouch_disk_open(const char *root_path,
     lc_pouch_disk_close(&store->pub, error);
     return rc;
   }
-  rc = lc_pouch_disk_replay(store, error);
-  if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+  if (lc_pouch_disk_unlock(store, error) != LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   if (rc != LC_OK) {

@@ -2035,6 +2035,130 @@ static void test_backend_hash_persists_across_handles(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_independent_handles_refresh_before_operations(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res first_put;
+  lc_pouch_put_state_res second_put;
+  lc_pouch_state_info state_info;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res first_meta;
+  lc_pouch_store_meta_res second_meta;
+  lc_pouch_meta_record loaded_meta;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "shared-refresh");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&first_put, 0, sizeof(first_put));
+  memset(&second_put, 0, sizeof(second_put));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&meta, 0, sizeof(meta));
+  memset(&first_meta, 0, sizeof(first_meta));
+  memset(&second_meta, 0, sizeof(second_meta));
+  memset(&loaded_meta, 0, sizeof(loaded_meta));
+  first = NULL;
+  second = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+
+  state_opts.content_type = "application/json";
+  source = source_from_text("{\"owner\":\"first\"}");
+  rc = first->write_state(first, "default", "shared-key", source, &state_opts,
+                          &first_put, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  rc = second->read_state(second, "default", "shared-key", &body, &state_info,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  assert_string_equal(state_info.etag, first_put.new_state_etag);
+  text = read_source_text(body);
+  assert_string_equal(text, "{\"owner\":\"first\"}");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  state_opts.if_state_etag = first_put.new_state_etag;
+  source = source_from_text("{\"owner\":\"second\"}");
+  rc = second->write_state(second, "default", "shared-key", source,
+                           &state_opts, &second_put, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_true(second_put.new_version > first_put.new_version);
+
+  rc = first->read_state(first, "default", "shared-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  assert_string_equal(state_info.etag, second_put.new_state_etag);
+  text = read_source_text(body);
+  assert_string_equal(text, "{\"owner\":\"second\"}");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  meta.owner = "first-owner";
+  meta.lease_id = "lease-a";
+  meta.version = 100L;
+  meta.fencing_token = 1L;
+  rc = first->store_meta(first, "default", "shared-key", &meta, NULL,
+                         &first_meta, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = second->load_meta(second, "default", "shared-key", &loaded_meta,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded_meta.found);
+  assert_string_equal(loaded_meta.etag, first_meta.etag);
+  assert_string_equal(loaded_meta.meta.owner, "first-owner");
+  lc_pouch_meta_record_cleanup(&allocator, &loaded_meta);
+
+  meta.owner = "second-owner";
+  meta.lease_id = "lease-b";
+  meta.version = 101L;
+  meta.fencing_token = 2L;
+  rc = second->store_meta(second, "default", "shared-key", &meta,
+                          first_meta.etag, &second_meta, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = first->load_meta(first, "default", "shared-key", &loaded_meta, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded_meta.found);
+  assert_string_equal(loaded_meta.etag, second_meta.etag);
+  assert_string_equal(loaded_meta.meta.owner, "second-owner");
+
+  lc_pouch_meta_record_cleanup(&allocator, &loaded_meta);
+  lc_pouch_store_meta_res_cleanup(&allocator, &first_meta);
+  lc_pouch_store_meta_res_cleanup(&allocator, &second_meta);
+  lc_pouch_put_state_res_cleanup(&allocator, &first_put);
+  lc_pouch_put_state_res_cleanup(&allocator, &second_put);
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -2055,6 +2179,7 @@ int main(void) {
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
+      cmocka_unit_test(test_independent_handles_refresh_before_operations),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
   };
 
