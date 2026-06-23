@@ -264,6 +264,190 @@ static void test_cas_and_remove_semantics(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_staged_state_promote_discard_and_reopen(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res staged;
+  lc_pouch_put_state_res promoted;
+  lc_pouch_put_state_res second_staged;
+  lc_pouch_put_state_res second_promoted;
+  lc_pouch_put_state_res discarded;
+  lc_pouch_promote_staged_opts promote_opts;
+  lc_pouch_discard_staged_opts discard_opts;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "staged");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&staged, 0, sizeof(staged));
+  memset(&promoted, 0, sizeof(promoted));
+  memset(&second_staged, 0, sizeof(second_staged));
+  memset(&second_promoted, 0, sizeof(second_promoted));
+  memset(&discarded, 0, sizeof(discarded));
+  memset(&promote_opts, 0, sizeof(promote_opts));
+  memset(&discard_opts, 0, sizeof(discard_opts));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->stage_state);
+  assert_non_null(store->load_staged_state);
+  assert_non_null(store->promote_staged_state);
+  assert_non_null(store->discard_staged_state);
+
+  state_opts.content_type = "text/plain";
+  source = source_from_text("draft-one");
+  rc = store->stage_state(store, "default", "lease-key", "txn-1", source,
+                          &state_opts, &staged, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(staged.new_state_etag);
+
+  rc = store->load_staged_state(store, "default", "lease-key", "txn-1",
+                                &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.content_type, "text/plain");
+  assert_string_equal(info.etag, staged.new_state_etag);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "draft-one");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->read_state(store, "default", "lease-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->promote_staged_state(store, "default", "lease-key", "txn-1",
+                                   NULL, &promoted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(promoted.new_state_etag);
+  assert_int_equal(promoted.bytes, 9L);
+
+  rc = store->load_staged_state(store, "default", "lease-key", "txn-1",
+                                &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->read_state(store, "default", "lease-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, promoted.new_state_etag);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "draft-one");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  source = source_from_text("draft-two");
+  rc = store->stage_state(store, "default", "lease-key", "txn-2", source,
+                          &state_opts, &second_staged, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->promote_staged_state(store, "default", "lease-key", "txn-2",
+                                   NULL, &second_promoted, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+
+  promote_opts.expected_head_etag = "wrong";
+  rc = store->promote_staged_state(store, "default", "lease-key", "txn-2",
+                                   &promote_opts, &second_promoted, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+
+  promote_opts.expected_head_etag = promoted.new_state_etag;
+  rc = store->promote_staged_state(store, "default", "lease-key", "txn-2",
+                                   &promote_opts, &second_promoted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_promoted.new_state_etag);
+  assert_string_not_equal(second_promoted.new_state_etag,
+                          promoted.new_state_etag);
+
+  source = source_from_text("discard-me");
+  rc = store->stage_state(store, "default", "lease-key", "txn-3", source,
+                          &state_opts, &discarded, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  discard_opts.expected_etag = "wrong";
+  rc = store->discard_staged_state(store, "default", "lease-key", "txn-3",
+                                   &discard_opts, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+
+  discard_opts.expected_etag = discarded.new_state_etag;
+  rc = store->discard_staged_state(store, "default", "lease-key", "txn-3",
+                                   &discard_opts, &error);
+  assert_int_equal(rc, LC_OK);
+
+  discard_opts.expected_etag = NULL;
+  discard_opts.ignore_not_found = 1;
+  rc = store->discard_staged_state(store, "default", "lease-key", "txn-3",
+                                   &discard_opts, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->read_state(store, "default", "lease-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, second_promoted.new_state_etag);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "draft-two");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->load_staged_state(store, "default", "lease-key", "txn-3",
+                                &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &staged);
+  lc_pouch_put_state_res_cleanup(&allocator, &promoted);
+  lc_pouch_put_state_res_cleanup(&allocator, &second_staged);
+  lc_pouch_put_state_res_cleanup(&allocator, &second_promoted);
+  lc_pouch_put_state_res_cleanup(&allocator, &discarded);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_replay_truncates_trailing_partial_record(void **state) {
   char root[256];
   char log_path[512];
@@ -895,6 +1079,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
       cmocka_unit_test(test_cas_and_remove_semantics),
+      cmocka_unit_test(test_staged_state_promote_discard_and_reopen),
       cmocka_unit_test(test_replay_truncates_trailing_partial_record),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),

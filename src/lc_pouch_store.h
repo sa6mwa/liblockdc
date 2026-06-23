@@ -36,6 +36,15 @@ typedef struct lc_pouch_put_state_res {
   long bytes;
 } lc_pouch_put_state_res;
 
+typedef struct lc_pouch_promote_staged_opts {
+  const char *expected_head_etag;
+} lc_pouch_promote_staged_opts;
+
+typedef struct lc_pouch_discard_staged_opts {
+  const char *expected_etag;
+  int ignore_not_found;
+} lc_pouch_discard_staged_opts;
+
 typedef struct lc_pouch_meta {
   char *owner;
   char *lease_id;
@@ -192,6 +201,22 @@ struct lc_pouch_store {
   int (*remove_state)(lc_pouch_store *self, const char *namespace_name,
                       const char *key, const char *expected_etag,
                       lc_error *error);
+  int (*stage_state)(lc_pouch_store *self, const char *namespace_name,
+                     const char *key, const char *txn_id, lc_source *body,
+                     const lc_pouch_put_state_opts *opts,
+                     lc_pouch_put_state_res *out, lc_error *error);
+  int (*load_staged_state)(lc_pouch_store *self, const char *namespace_name,
+                           const char *key, const char *txn_id,
+                           lc_source **body, lc_pouch_state_info *out,
+                           lc_error *error);
+  int (*promote_staged_state)(lc_pouch_store *self, const char *namespace_name,
+                              const char *key, const char *txn_id,
+                              const lc_pouch_promote_staged_opts *opts,
+                              lc_pouch_put_state_res *out, lc_error *error);
+  int (*discard_staged_state)(lc_pouch_store *self, const char *namespace_name,
+                              const char *key, const char *txn_id,
+                              const lc_pouch_discard_staged_opts *opts,
+                              lc_error *error);
   int (*put_object)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, lc_source *body,
                     const lc_pouch_put_object_opts *opts,
