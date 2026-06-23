@@ -33,6 +33,10 @@
 #define LC_POUCH_META_FLAG_QUERY_HIDDEN 2UL
 #define LC_POUCH_OBJECT_META_SIZE 28U
 #define LC_POUCH_QUEUE_META_SIZE 88U
+#define LC_POUCH_MAX_NAME_BYTES 4096UL
+#define LC_POUCH_MAX_CONTENT_TYPE_BYTES 4096UL
+#define LC_POUCH_MAX_ETAG_BYTES 4096UL
+#define LC_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -312,6 +316,39 @@ static int lc_pouch_disk_validate_namespace_queue(lc_error *error,
     return rc;
   }
   return lc_pouch_disk_validate_name(error, operation, "queue", queue);
+}
+
+static int lc_pouch_disk_add_overflows(unsigned long left,
+                                       unsigned long right,
+                                       unsigned long *out) {
+  if (left > ((unsigned long)-1) - right) {
+    return 1;
+  }
+  *out = left + right;
+  return 0;
+}
+
+static int lc_pouch_disk_validate_record_lengths(
+    unsigned long ns_len, unsigned long key_len, unsigned long ct_len,
+    unsigned long etag_len, unsigned long body_len, unsigned long payload_len) {
+  unsigned long total;
+
+  if (ns_len == 0UL || key_len == 0UL || ns_len > LC_POUCH_MAX_NAME_BYTES ||
+      key_len > LC_POUCH_MAX_NAME_BYTES ||
+      ct_len > LC_POUCH_MAX_CONTENT_TYPE_BYTES ||
+      etag_len > LC_POUCH_MAX_ETAG_BYTES ||
+      body_len > LC_POUCH_MAX_INLINE_BODY_BYTES ||
+      payload_len > (unsigned long)(((size_t)-1) - 1U)) {
+    return 0;
+  }
+  total = ns_len;
+  if (lc_pouch_disk_add_overflows(total, key_len, &total) ||
+      lc_pouch_disk_add_overflows(total, ct_len, &total) ||
+      lc_pouch_disk_add_overflows(total, etag_len, &total) ||
+      lc_pouch_disk_add_overflows(total, body_len, &total)) {
+    return 0;
+  }
+  return total == payload_len;
 }
 
 static void lc_pouch_put_u32(unsigned char *dst, unsigned long value) {
@@ -1223,6 +1260,11 @@ static int lc_pouch_read_source_all(const lc_pouch_allocator *allocator,
       lc_pouch_free(allocator, buffer);
       return lc_pouch_set_invalid(error, "pouch state payload is too large");
     }
+    if ((unsigned long)(length + got) > LC_POUCH_MAX_INLINE_BODY_BYTES) {
+      lc_pouch_free(allocator, buffer);
+      return lc_pouch_set_invalid(error,
+                                  "pouch inline payload exceeds storage limit");
+    }
     if (length + got > capacity) {
       size_t new_capacity;
       unsigned char *grown;
@@ -1284,6 +1326,11 @@ static int lc_pouch_read_source_max_bytes(
     if (got > ((size_t)-1) - length) {
       lc_pouch_free(allocator, buffer);
       return lc_pouch_set_invalid(error, "pouch object payload is too large");
+    }
+    if ((unsigned long)(length + got) > LC_POUCH_MAX_INLINE_BODY_BYTES) {
+      lc_pouch_free(allocator, buffer);
+      return lc_pouch_set_invalid(error,
+                                  "pouch inline payload exceeds storage limit");
     }
     if (length + got > max_bytes) {
       lc_pouch_free(allocator, buffer);
@@ -1780,8 +1827,17 @@ static int lc_pouch_disk_append_record(
   key_len = (unsigned long)strlen(key);
   ct_len = content_type != NULL ? (unsigned long)strlen(content_type) : 0UL;
   etag_len = etag != NULL ? (unsigned long)strlen(etag) : 0UL;
-  payload_len =
-      ns_len + key_len + ct_len + etag_len + (unsigned long)body_length;
+  if (lc_pouch_disk_add_overflows(ns_len, key_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, ct_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, etag_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, (unsigned long)body_length,
+                                  &payload_len) ||
+      !lc_pouch_disk_validate_record_lengths(
+          ns_len, key_len, ct_len, etag_len, (unsigned long)body_length,
+          payload_len)) {
+    return lc_pouch_set_invalid(error,
+                                "pouch log record exceeds inline limits");
+  }
   start = lseek(store->log_fd, 0, SEEK_END);
   if (start < 0) {
     return lc_pouch_set_errno(error, "failed to seek pouch log");
@@ -1882,8 +1938,8 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
     record_version = lc_pouch_get_u32(header + 56);
     if (header_size != LC_POUCH_HEADER_SIZE ||
         (record_version != 0UL && record_version != LC_POUCH_RECORD_VERSION) ||
-        payload_len != ns_len + key_len + ct_len + etag_len + body_len ||
-        ns_len == 0UL || key_len == 0UL ||
+        !lc_pouch_disk_validate_record_lengths(
+            ns_len, key_len, ct_len, etag_len, body_len, payload_len) ||
         (type != LC_POUCH_RECORD_STATE_PUT &&
          type != LC_POUCH_RECORD_STATE_REMOVE &&
          type != LC_POUCH_RECORD_META_PUT &&
@@ -1893,8 +1949,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
          type != LC_POUCH_RECORD_QUEUE_PUT &&
          type != LC_POUCH_RECORD_QUEUE_UPDATE &&
          type != LC_POUCH_RECORD_QUEUE_REMOVE &&
-         type != LC_POUCH_RECORD_STATE_LINK) ||
-        payload_len > (unsigned long)(((size_t)-1) - 1U)) {
+         type != LC_POUCH_RECORD_STATE_LINK)) {
       break;
     }
     payload = (unsigned char *)lc_pouch_alloc(&store->allocator,

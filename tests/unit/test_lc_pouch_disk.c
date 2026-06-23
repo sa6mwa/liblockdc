@@ -14,12 +14,15 @@
 #include "lc_pouch_store.h"
 
 #define TEST_POUCH_HEADER_SIZE 64U
+#define TEST_POUCH_HEADER_BODY_LENGTH_OFFSET 28U
+#define TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET 44U
 #define TEST_POUCH_HEADER_RECORD_VERSION_OFFSET 56U
 #define TEST_POUCH_RECORD_STATE_PUT 1U
 #define TEST_POUCH_RECORD_META_PUT 3U
 #define TEST_POUCH_RECORD_OBJECT_PUT 5U
 #define TEST_POUCH_RECORD_QUEUE_PUT 7U
 #define TEST_POUCH_RECORD_STATE_LINK 10U
+#define TEST_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
 
 typedef struct tracked_allocator {
   size_t malloc_calls;
@@ -204,6 +207,11 @@ static void test_put_u32(unsigned char *dst, unsigned long value) {
   dst[3] = (unsigned char)((value >> 24) & 255UL);
 }
 
+static void test_put_u64(unsigned char *dst, unsigned long value) {
+  test_put_u32(dst, value & 0xffffffffUL);
+  test_put_u32(dst + 4, (value >> 32) & 0xffffffffUL);
+}
+
 static void corrupt_first_log_match(const char *root, const char *needle) {
   char log_path[512];
   unsigned char *bytes;
@@ -280,6 +288,84 @@ static void set_first_log_match_record_version(const char *root,
           assert_int_equal(
               write(fd, header + TEST_POUCH_HEADER_RECORD_VERSION_OFFSET, 4U),
               4);
+          found = 1;
+          break;
+        }
+      }
+    }
+    free(payload);
+    if (!found) {
+      assert_int_equal(lseek(fd, record_offset + TEST_POUCH_HEADER_SIZE +
+                                     (off_t)payload_len,
+                              SEEK_SET),
+                       record_offset + TEST_POUCH_HEADER_SIZE +
+                           (off_t)payload_len);
+    }
+  }
+  close(fd);
+}
+
+static void set_first_log_match_body_length(const char *root,
+                                            const char *needle,
+                                            unsigned long body_length) {
+  char log_path[512];
+  unsigned char header[TEST_POUCH_HEADER_SIZE];
+  unsigned char *payload;
+  size_t needle_len;
+  unsigned long ns_len;
+  unsigned long key_len;
+  unsigned long ct_len;
+  unsigned long etag_len;
+  unsigned long payload_len;
+  off_t record_offset;
+  int fd;
+  int found;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  fd = open(log_path, O_RDWR);
+  assert_true(fd >= 0);
+  assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
+  needle_len = strlen(needle);
+  found = 0;
+  while (!found) {
+    record_offset = lseek(fd, 0, SEEK_CUR);
+    assert_true(record_offset >= 0);
+    assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
+    assert_memory_equal(header, "LCP1", 4U);
+    payload_len = test_get_u64(header + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET);
+    payload = (unsigned char *)malloc((size_t)payload_len);
+    assert_non_null(payload);
+    assert_int_equal(read(fd, payload, (size_t)payload_len), payload_len);
+    if (payload_len >= needle_len) {
+      size_t index;
+
+      for (index = 0U; index + needle_len <= payload_len; ++index) {
+        if (memcmp(payload + index, needle, needle_len) == 0) {
+          ns_len = test_get_u32(header + 12);
+          key_len = test_get_u32(header + 16);
+          ct_len = test_get_u32(header + 20);
+          etag_len = test_get_u32(header + 24);
+          payload_len = ns_len + key_len + ct_len + etag_len + body_length;
+          test_put_u64(header + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET,
+                       body_length);
+          test_put_u64(header + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET,
+                       payload_len);
+          assert_int_equal(
+              lseek(fd,
+                    record_offset + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET,
+                    SEEK_SET),
+              record_offset + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET);
+          assert_int_equal(
+              write(fd, header + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET, 8U),
+              8);
+          assert_int_equal(
+              lseek(fd,
+                    record_offset + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET,
+                    SEEK_SET),
+              record_offset + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET);
+          assert_int_equal(
+              write(fd, header + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET, 8U),
+              8);
           found = 1;
           break;
         }
@@ -1098,6 +1184,92 @@ static void test_replay_stops_at_unsupported_record_version(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_replay_stops_at_oversized_record_without_allocating_payload(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res first;
+  lc_pouch_put_state_res second;
+  lc_pouch_put_state_res third;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "oversized-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&third, 0, sizeof(third));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("oversized-prefix");
+  rc = store->write_state(store, "default", "good", source, NULL, &first,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("oversized-middle");
+  rc = store->write_state(store, "default", "oversized", source, NULL,
+                          &second, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("oversized-later");
+  rc = store->write_state(store, "default", "later", source, NULL, &third,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  set_first_log_match_body_length(root, "oversized-middle",
+                                  TEST_POUCH_MAX_INLINE_BODY_BYTES + 1UL);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "good", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "oversized-prefix");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->read_state(store, "default", "oversized", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->read_state(store, "default", "later", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &first);
+  lc_pouch_put_state_res_cleanup(&allocator, &second);
+  lc_pouch_put_state_res_cleanup(&allocator, &third);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -1874,6 +2046,8 @@ int main(void) {
       cmocka_unit_test(
           test_replay_stops_at_corrupt_record_and_discards_later_records),
       cmocka_unit_test(test_replay_stops_at_unsupported_record_version),
+      cmocka_unit_test(
+          test_replay_stops_at_oversized_record_without_allocating_payload),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
