@@ -311,6 +311,8 @@ set(lc_sources
     src/lc_management_api.c
     src/lc_message_api.c
     src/lc_mutate_stream.c
+    src/lc_pouch_allocator.c
+    src/lc_pouch_disk.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
     src/lc_log.c
