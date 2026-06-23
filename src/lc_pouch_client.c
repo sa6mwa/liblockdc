@@ -55,6 +55,15 @@ static char *lc_pouch_new_lease_id(lc_client_handle *client, const char *key,
   return lc_client_strdup(client, stack);
 }
 
+static char *lc_pouch_new_txn_id(lc_client_handle *client, const char *key,
+                                 long fencing_token) {
+  char stack[160];
+
+  snprintf(stack, sizeof(stack), "pouch-txn-%ld-%ld-%s", (long)time(NULL),
+           fencing_token, key != NULL ? key : "lease");
+  return lc_client_strdup(client, stack);
+}
+
 static char *lc_pouch_queue_state_key(lc_client_handle *client,
                                       const char *queue,
                                       const char *message_id) {
@@ -660,7 +669,9 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   lc_pouch_store_meta_res stored;
   lc_pouch_allocator *allocator;
   const char *namespace_name;
+  const char *txn_id;
   char *lease_id;
+  char *generated_txn_id;
   lc_lease *lease;
   long now_unix;
   int rc;
@@ -678,6 +689,8 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
   namespace_name = NULL;
+  txn_id = req->txn_id;
+  generated_txn_id = NULL;
   rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
                                  error);
   if (rc != LC_OK) {
@@ -710,12 +723,24 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   meta.fencing_token = existing.found ? existing.meta.fencing_token + 1L : 1L;
   meta.lease_expires_at_unix =
       now_unix + (req->ttl_seconds > 0L ? req->ttl_seconds : 30L);
+  if (txn_id == NULL || txn_id[0] == '\0') {
+    generated_txn_id =
+        lc_pouch_new_txn_id(client, req->key, meta.fencing_token);
+    if (generated_txn_id == NULL) {
+      lc_pouch_meta_record_cleanup(allocator, &existing);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch transaction id", NULL,
+                          NULL, NULL);
+    }
+    txn_id = generated_txn_id;
+  }
   meta.owner = (char *)req->owner;
-  meta.txn_id = (char *)req->txn_id;
+  meta.txn_id = (char *)txn_id;
   meta.has_query_hidden = existing.meta.has_query_hidden;
   meta.query_hidden = existing.meta.query_hidden;
   lease_id = lc_pouch_new_lease_id(client, req->key, meta.fencing_token);
   if (lease_id == NULL) {
+    lc_client_free(client, generated_txn_id);
     lc_pouch_meta_record_cleanup(allocator, &existing);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch lease id", NULL, NULL, NULL);
@@ -726,13 +751,15 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                                        error);
   if (rc != LC_OK) {
     lc_client_free(client, lease_id);
+    lc_client_free(client, generated_txn_id);
     lc_pouch_meta_record_cleanup(allocator, &existing);
     return rc;
   }
   lease = lc_lease_new(client, namespace_name, req->key, req->owner, lease_id,
-                       req->txn_id, meta.fencing_token, meta.version,
+                       txn_id, meta.fencing_token, meta.version,
                        meta.state_etag, NULL);
   lc_client_free(client, lease_id);
+  lc_client_free(client, generated_txn_id);
   if (lease == NULL) {
     lc_pouch_store_meta_res_cleanup(allocator, &stored);
     lc_pouch_meta_record_cleanup(allocator, &existing);
