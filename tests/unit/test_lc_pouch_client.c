@@ -835,6 +835,82 @@ static void test_pouch_endpoint_release_is_idempotent_for_stale_refs(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_reports_lockd_lease_validation_errors(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_release_op release_op;
+  lc_release_res release_res;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "lease-validation-errors");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&release_res, 0, sizeof(release_res));
+  memset(&update_res, 0, sizeof(update_res));
+  client = open_pouch_client(endpoint);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "lease-validation";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  lease = NULL;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  lc_update_req_init(&update_req);
+  update_req.lease.namespace_name = lease->namespace_name;
+  update_req.lease.key = lease->key;
+  update_req.lease.lease_id = lease->lease_id;
+  update_req.lease.txn_id = lease->txn_id;
+  update_req.lease.fencing_token = lease->fencing_token + 1L;
+  update_req.content_type = "application/json";
+  source = source_from_text("{\"fencing\":false}");
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 403L);
+  assert_string_equal(error.server_code, "fencing_mismatch");
+  lc_update_res_cleanup(&update_res);
+  lc_error_cleanup(&error);
+
+  lc_release_op_init(&release_op);
+  release_op.lease.namespace_name = lease->namespace_name;
+  release_op.lease.key = lease->key;
+  release_op.lease.lease_id = lease->lease_id;
+  release_op.lease.txn_id = lease->txn_id;
+  release_op.lease.fencing_token = lease->fencing_token;
+  rc = client->release(client, &release_op, &release_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(release_res.released);
+  lc_release_res_cleanup(&release_res);
+
+  update_req.lease.fencing_token = lease->fencing_token;
+  source = source_from_text("{\"released\":false}");
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 403L);
+  assert_string_equal(error.server_code, "lease_required");
+  lc_update_res_cleanup(&update_res);
+  lc_error_cleanup(&error);
+
+  lc_lease_close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_rejects_missing_or_wrong_txn_id(void **state) {
   char root[256];
   char endpoint[320];
@@ -2008,6 +2084,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_generates_implicit_txn_id),
       cmocka_unit_test(
           test_pouch_endpoint_release_is_idempotent_for_stale_refs),
+      cmocka_unit_test(
+          test_pouch_endpoint_reports_lockd_lease_validation_errors),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_or_wrong_txn_id),
       cmocka_unit_test(test_pouch_endpoint_remove_without_state_is_noop),
       cmocka_unit_test(

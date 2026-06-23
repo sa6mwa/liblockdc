@@ -564,13 +564,22 @@ static int lc_pouch_validate_active_lease(lc_client_handle *client,
   }
   now_unix = lc_pouch_now_unix();
   if (!record->found || record->meta.lease_id == NULL ||
-      strcmp(record->meta.lease_id, lease->lease_id) != 0 ||
-      record->meta.lease_expires_at_unix <= now_unix ||
-      record->meta.fencing_token != lease->fencing_token) {
+      strcmp(record->meta.lease_id, lease->lease_id) != 0) {
     lc_pouch_meta_record_cleanup(&client->pouch_allocator, record);
-    return lc_error_set(error, LC_ERR_SERVER, 409L,
-                        "pouch lease is not active for this operation", NULL,
-                        "lease_not_active", NULL);
+    return lc_error_set(error, LC_ERR_SERVER, 403L,
+                        "pouch operation requires active lease", NULL,
+                        "lease_required", NULL);
+  }
+  if (record->meta.lease_expires_at_unix <= now_unix) {
+    lc_pouch_meta_record_cleanup(&client->pouch_allocator, record);
+    return lc_error_set(error, LC_ERR_SERVER, 403L, "pouch lease expired",
+                        NULL, "lease_expired", NULL);
+  }
+  if (record->meta.fencing_token != lease->fencing_token) {
+    lc_pouch_meta_record_cleanup(&client->pouch_allocator, record);
+    return lc_error_set(error, LC_ERR_SERVER, 403L,
+                        "pouch fencing token mismatch", NULL,
+                        "fencing_mismatch", NULL);
   }
   if (record->meta.txn_id != NULL && lease->txn_id == NULL) {
     lc_pouch_meta_record_cleanup(&client->pouch_allocator, record);
