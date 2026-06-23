@@ -4001,10 +4001,12 @@ static int lc_pouch_disk_dequeue_message(
     lc_pouch_queue_message_info *out, lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_queue_entry *entry;
+  lc_pouch_disk_queue_entry updated;
   lc_source *source_pub;
   lc_pouch_file_source *source;
   char *lease_id;
   char *meta_etag;
+  char *txn_id;
   long now_unix;
   size_t index;
   int found;
@@ -4058,25 +4060,29 @@ static int lc_pouch_disk_dequeue_message(
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch queue lease");
   }
-  lc_pouch_free(&store->allocator, entry->lease_id);
-  lc_pouch_free(&store->allocator, entry->txn_id);
-  lc_pouch_free(&store->allocator, entry->meta_etag);
-  entry->lease_id = lease_id;
-  entry->txn_id = lc_pouch_strdup(&store->allocator, opts->txn_id);
-  entry->meta_etag = meta_etag;
-  if (opts->txn_id != NULL && entry->txn_id == NULL) {
+  txn_id = lc_pouch_strdup(&store->allocator, opts->txn_id);
+  if (opts->txn_id != NULL && txn_id == NULL) {
+    lc_pouch_free(&store->allocator, lease_id);
+    lc_pouch_free(&store->allocator, meta_etag);
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch queue txn id");
   }
-  entry->attempts += 1;
-  entry->fencing_token += 1L;
-  entry->visibility_timeout_seconds = opts->visibility_timeout_seconds > 0L
-                                          ? opts->visibility_timeout_seconds
-                                          : entry->visibility_timeout_seconds;
-  entry->not_visible_until_unix = now_unix + entry->visibility_timeout_seconds;
-  entry->lease_expires_at_unix = entry->not_visible_until_unix;
+  updated = *entry;
+  updated.lease_id = lease_id;
+  updated.txn_id = txn_id;
+  updated.meta_etag = meta_etag;
+  updated.attempts += 1;
+  updated.fencing_token += 1L;
+  updated.visibility_timeout_seconds =
+      opts->visibility_timeout_seconds > 0L ? opts->visibility_timeout_seconds
+                                            : entry->visibility_timeout_seconds;
+  updated.not_visible_until_unix = now_unix + updated.visibility_timeout_seconds;
+  updated.lease_expires_at_unix = updated.not_visible_until_unix;
   rc = lc_pouch_disk_append_queue_entry(store, LC_POUCH_RECORD_QUEUE_UPDATE,
-                                        entry, NULL, 0U, 0, error);
+                                        &updated, NULL, 0U, 0, error);
+  lc_pouch_free(&store->allocator, lease_id);
+  lc_pouch_free(&store->allocator, txn_id);
+  lc_pouch_free(&store->allocator, meta_etag);
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
@@ -4124,6 +4130,7 @@ static int lc_pouch_disk_ack_message(lc_pouch_store *self,
                                      lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_queue_entry *entry;
+  lc_pouch_disk_queue_entry updated;
   int index;
   int rc;
 
@@ -4145,10 +4152,11 @@ static int lc_pouch_disk_ack_message(lc_pouch_store *self,
   entry = index >= 0 ? &store->queue_entries[index] : NULL;
   rc = lc_pouch_disk_queue_ref_valid(entry, ref, error);
   if (rc == LC_OK) {
-    entry->deleted = 1;
-    entry->fencing_token += 1L;
+    updated = *entry;
+    updated.deleted = 1;
+    updated.fencing_token += 1L;
     rc = lc_pouch_disk_append_queue_entry(store, LC_POUCH_RECORD_QUEUE_REMOVE,
-                                          entry, NULL, 0U, 0, error);
+                                          &updated, NULL, 0U, 0, error);
     if (rc == LC_OK) {
       *acked = 1;
     }
@@ -4169,6 +4177,8 @@ static int lc_pouch_disk_nack_message(lc_pouch_store *self,
                                       lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_queue_entry *entry;
+  lc_pouch_disk_queue_entry updated;
+  char *meta_etag;
   int index;
   int rc;
 
@@ -4190,25 +4200,31 @@ static int lc_pouch_disk_nack_message(lc_pouch_store *self,
   entry = index >= 0 ? &store->queue_entries[index] : NULL;
   rc = lc_pouch_disk_queue_ref_valid(entry, ref, error);
   if (rc == LC_OK) {
-    entry->not_visible_until_unix =
+    updated = *entry;
+    updated.not_visible_until_unix =
         (long)time(NULL) + (delay_seconds > 0L ? delay_seconds : 0L);
-    entry->lease_expires_at_unix = 0L;
-    entry->fencing_token += 1L;
+    updated.lease_expires_at_unix = 0L;
+    updated.fencing_token += 1L;
     if (count_failure) {
-      entry->failure_attempts += 1;
+      updated.failure_attempts += 1;
     }
-    lc_pouch_free(&store->allocator, entry->lease_id);
-    lc_pouch_free(&store->allocator, entry->meta_etag);
-    entry->lease_id = NULL;
-    entry->meta_etag =
-        lc_pouch_make_etag(store, entry->fencing_token, entry->message_id,
-                           strlen(entry->message_id));
-    if (entry->meta_etag == NULL) {
+    updated.lease_id = NULL;
+    meta_etag = lc_pouch_make_etag(store, updated.fencing_token,
+                                   updated.message_id,
+                                   strlen(updated.message_id));
+    updated.meta_etag = meta_etag;
+    if (meta_etag == NULL) {
       rc = lc_pouch_set_nomem(error, "failed to allocate pouch queue etag");
     } else {
       rc = lc_pouch_disk_append_queue_entry(store, LC_POUCH_RECORD_QUEUE_UPDATE,
-                                            entry, NULL, 0U, 0, error);
+                                            &updated, NULL, 0U, 0, error);
+      lc_pouch_free(&store->allocator, meta_etag);
     }
+  }
+  if (rc == LC_OK) {
+    index = lc_pouch_disk_find_queue_entry(store, ref->namespace_name,
+                                           ref->queue, ref->message_id);
+    entry = index >= 0 ? &store->queue_entries[index] : NULL;
   }
   if (rc == LC_OK &&
       !lc_pouch_queue_info_from_entry(&store->allocator, out, entry)) {
@@ -4230,6 +4246,8 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
                                         lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_queue_entry *entry;
+  lc_pouch_disk_queue_entry updated;
+  char *meta_etag;
   int index;
   int rc;
 
@@ -4251,23 +4269,30 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
   entry = index >= 0 ? &store->queue_entries[index] : NULL;
   rc = lc_pouch_disk_queue_ref_valid(entry, ref, error);
   if (rc == LC_OK) {
-    entry->visibility_timeout_seconds = extend_by_seconds > 0L
-                                            ? extend_by_seconds
-                                            : entry->visibility_timeout_seconds;
-    entry->not_visible_until_unix =
-        (long)time(NULL) + entry->visibility_timeout_seconds;
-    entry->lease_expires_at_unix = entry->not_visible_until_unix;
-    entry->fencing_token += 1L;
-    lc_pouch_free(&store->allocator, entry->meta_etag);
-    entry->meta_etag =
-        lc_pouch_make_etag(store, entry->fencing_token, entry->message_id,
-                           strlen(entry->message_id));
-    if (entry->meta_etag == NULL) {
+    updated = *entry;
+    updated.visibility_timeout_seconds = extend_by_seconds > 0L
+                                             ? extend_by_seconds
+                                             : entry->visibility_timeout_seconds;
+    updated.not_visible_until_unix =
+        (long)time(NULL) + updated.visibility_timeout_seconds;
+    updated.lease_expires_at_unix = updated.not_visible_until_unix;
+    updated.fencing_token += 1L;
+    meta_etag = lc_pouch_make_etag(store, updated.fencing_token,
+                                   updated.message_id,
+                                   strlen(updated.message_id));
+    updated.meta_etag = meta_etag;
+    if (meta_etag == NULL) {
       rc = lc_pouch_set_nomem(error, "failed to allocate pouch queue etag");
     } else {
       rc = lc_pouch_disk_append_queue_entry(store, LC_POUCH_RECORD_QUEUE_UPDATE,
-                                            entry, NULL, 0U, 0, error);
+                                            &updated, NULL, 0U, 0, error);
+      lc_pouch_free(&store->allocator, meta_etag);
     }
+  }
+  if (rc == LC_OK) {
+    index = lc_pouch_disk_find_queue_entry(store, ref->namespace_name,
+                                           ref->queue, ref->message_id);
+    entry = index >= 0 ? &store->queue_entries[index] : NULL;
   }
   if (rc == LC_OK &&
       !lc_pouch_queue_info_from_entry(&store->allocator, out, entry)) {
