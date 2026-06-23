@@ -110,6 +110,8 @@ static long lc_consumer_owner_seq = 0L;
 static void *lc_consumer_delivery_handler_main(void *context);
 static void *lc_consumer_delivery_extend_main(void *context);
 static int lc_consumer_is_stop_requested(lc_consumer_service_handle *service);
+static int lc_consumer_wait_delay(lc_consumer_service_handle *service,
+                                  long delay_ms);
 static void
 lc_consumer_delivery_stop_extender(lc_consumer_delivery_bridge *bridge);
 static lc_message *
@@ -1537,6 +1539,265 @@ static int lc_consumer_delivery_end(void *context,
   return rc == LC_OK;
 }
 
+static int
+lc_consumer_delivery_begin_message(lc_consumer_delivery_bridge *bridge,
+                                   lc_message *inner) {
+  int rc;
+
+  if (bridge == NULL || inner == NULL) {
+    return LC_ERR_INVALID;
+  }
+  {
+    pslog_field fields[8];
+
+    fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
+    fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
+    fields[2] = lc_log_str_field("namespace",
+                                 bridge->worker->config.request.namespace_name);
+    fields[3] = lc_log_str_field("message_id", inner->message_id);
+    fields[4] = pslog_i64("attempts", (pslog_int64)inner->attempts);
+    fields[5] =
+        pslog_i64("failure_attempts", (pslog_int64)inner->failure_attempts);
+    fields[6] =
+        lc_log_bool_field("with_state", bridge->worker->config.with_state);
+    fields[7] = lc_log_str_field("cid", inner->correlation_id);
+    lc_log_debug(bridge->worker->service->logger, "client.queue.delivery.begin",
+                 fields, 8U);
+  }
+  bridge->state = LC_CONSUMER_DELIVERY_STATE_OPEN;
+  bridge->handler_rc = LC_OK;
+  bridge->runtime_fatal = 0;
+  bridge->handler_done = 0;
+  bridge->message = NULL;
+  bridge->inner_message = inner;
+  bridge->handler_thread_started = 0;
+  bridge->extend_thread_started = 0;
+  bridge->state_mutex_initialized = 0;
+  bridge->state_cond_initialized = 0;
+  bridge->op_mutex_initialized = 0;
+  rc = pthread_mutex_init(&bridge->state_mutex, NULL);
+  if (rc != 0) {
+    bridge->runtime_fatal = 1;
+    inner->close(inner);
+    bridge->inner_message = NULL;
+    lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
+                 "failed to initialize consumer delivery state", NULL, NULL,
+                 NULL);
+    return LC_ERR_TRANSPORT;
+  }
+  bridge->state_mutex_initialized = 1;
+  rc = pthread_cond_init(&bridge->state_cond, NULL);
+  if (rc != 0) {
+    bridge->runtime_fatal = 1;
+    inner->close(inner);
+    bridge->inner_message = NULL;
+    pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->state_mutex_initialized = 0;
+    lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
+                 "failed to initialize consumer delivery state", NULL, NULL,
+                 NULL);
+    return LC_ERR_TRANSPORT;
+  }
+  bridge->state_cond_initialized = 1;
+  rc = pthread_mutex_init(&bridge->op_mutex, NULL);
+  if (rc != 0) {
+    bridge->runtime_fatal = 1;
+    inner->close(inner);
+    bridge->inner_message = NULL;
+    pthread_cond_destroy(&bridge->state_cond);
+    pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
+    lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
+                 "failed to initialize consumer delivery state", NULL, NULL,
+                 NULL);
+    return LC_ERR_TRANSPORT;
+  }
+  bridge->op_mutex_initialized = 1;
+  bridge->message = lc_consumer_runtime_message_wrap(
+      bridge, bridge->inner_message, bridge->error);
+  if (bridge->message == NULL) {
+    bridge->runtime_fatal = 1;
+    inner->close(inner);
+    bridge->inner_message = NULL;
+    pthread_mutex_destroy(&bridge->op_mutex);
+    pthread_cond_destroy(&bridge->state_cond);
+    pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->op_mutex_initialized = 0;
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
+    return bridge->error != NULL && bridge->error->code != LC_OK
+               ? bridge->error->code
+               : LC_ERR_NOMEM;
+  }
+  rc = pthread_create(&bridge->handler_thread, NULL,
+                      lc_consumer_delivery_handler_main, bridge);
+  if (rc != 0) {
+    bridge->runtime_fatal = 1;
+    bridge->message->close(bridge->message);
+    bridge->message = NULL;
+    bridge->inner_message = NULL;
+    lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
+                 "failed to start consumer delivery thread", NULL, NULL, NULL);
+    pthread_mutex_destroy(&bridge->op_mutex);
+    pthread_cond_destroy(&bridge->state_cond);
+    pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->op_mutex_initialized = 0;
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
+    return LC_ERR_TRANSPORT;
+  }
+  bridge->handler_thread_started = 1;
+  rc = pthread_create(&bridge->extend_thread, NULL,
+                      lc_consumer_delivery_extend_main, bridge);
+  if (rc != 0) {
+    bridge->runtime_fatal = 1;
+    pthread_join(bridge->handler_thread, NULL);
+    bridge->handler_thread_started = 0;
+    if (bridge->message != NULL) {
+      bridge->message->close(bridge->message);
+      bridge->message = NULL;
+      bridge->inner_message = NULL;
+    }
+    lc_error_set(bridge->error, LC_ERR_TRANSPORT, 0L,
+                 "failed to start consumer delivery extender", NULL, NULL,
+                 NULL);
+    pthread_mutex_destroy(&bridge->op_mutex);
+    pthread_cond_destroy(&bridge->state_cond);
+    pthread_mutex_destroy(&bridge->state_mutex);
+    bridge->op_mutex_initialized = 0;
+    bridge->state_cond_initialized = 0;
+    bridge->state_mutex_initialized = 0;
+    return LC_ERR_TRANSPORT;
+  }
+  bridge->extend_thread_started = 1;
+  return LC_OK;
+}
+
+static int lc_consumer_process_pouch_message(lc_consumer_worker_state *worker,
+                                             lc_client_handle *client,
+                                             lc_message *message,
+                                             lc_error *error) {
+  lc_consumer_delivery_bridge bridge;
+  int rc;
+
+  memset(&bridge, 0, sizeof(bridge));
+  bridge.worker = worker;
+  bridge.client = client;
+  bridge.error = error;
+  rc = lc_consumer_delivery_begin_message(&bridge, message);
+  if (rc != LC_OK) {
+    lc_consumer_delivery_cleanup(&bridge);
+    return rc;
+  }
+  pthread_join(bridge.handler_thread, NULL);
+  bridge.handler_thread_started = 0;
+  lc_consumer_delivery_stop_extender(&bridge);
+  rc = bridge.handler_rc;
+  {
+    pslog_field fields[7];
+
+    fields[0] = lc_log_str_field("consumer", worker->config.name);
+    fields[1] = lc_log_str_field("queue", worker->config.request.queue);
+    fields[2] =
+        lc_log_str_field("namespace", worker->config.request.namespace_name);
+    fields[3] = lc_log_str_field("message_id", NULL);
+    fields[4] = lc_log_bool_field(
+        "terminal", lc_consumer_delivery_state_is_terminal(bridge.state));
+    fields[5] = lc_log_i64_field("handler_rc", rc);
+    fields[6] = lc_log_str_field("cid", NULL);
+    lc_log_debug(worker->service->logger,
+                 rc == LC_OK ? "client.queue.delivery.complete"
+                             : "client.queue.delivery.handler_error",
+                 fields, 7U);
+  }
+  lc_consumer_delivery_cleanup(&bridge);
+  return rc;
+}
+
+static int lc_consumer_worker_run_pouch(lc_consumer_worker_state *worker,
+                                        lc_client *client, lc_error *error) {
+  lc_consumer_service_handle *service;
+  lc_message *message;
+  lc_error delivery_error;
+  int attempt;
+  int failures;
+  int rc;
+  long poll_delay_ms;
+
+  service = worker->service;
+  attempt = 0;
+  failures = 0;
+  if (worker->config.with_state) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch consumer service with state is not implemented yet",
+                 NULL, NULL, NULL);
+    lc_consumer_set_fatal_error(service, error->code, error,
+                                "pouch stateful consumer unsupported");
+    return error->code;
+  }
+  poll_delay_ms = worker->config.request.wait_seconds > 0L
+                      ? worker->config.request.wait_seconds * 1000L
+                      : 100L;
+  if (poll_delay_ms > 1000L) {
+    poll_delay_ms = 1000L;
+  }
+  lc_error_init(&delivery_error);
+  while (!lc_consumer_is_stop_requested(service)) {
+    attempt += 1;
+    lc_consumer_invoke_start(&worker->config, attempt);
+    lc_consumer_log_subscribe_event(service, &worker->config,
+                                    "client.queue.subscribe.begin");
+    lc_error_cleanup(error);
+    lc_error_init(error);
+    message = NULL;
+    rc = client->dequeue(client, &worker->config.request, &message, error);
+    if (rc == LC_OK && message == NULL) {
+      lc_consumer_log_subscribe_event(service, &worker->config,
+                                      "client.queue.subscribe.complete");
+      lc_consumer_invoke_stop(&worker->config, attempt, NULL);
+      failures = 0;
+      if (lc_consumer_wait_delay(service, poll_delay_ms)) {
+        break;
+      }
+      continue;
+    }
+    if (rc == LC_OK && message != NULL) {
+      lc_error_cleanup(&delivery_error);
+      lc_error_init(&delivery_error);
+      rc = lc_consumer_process_pouch_message(worker, (lc_client_handle *)client,
+                                             message, &delivery_error);
+      if (rc == LC_OK && delivery_error.code == LC_OK) {
+        lc_consumer_log_subscribe_event(service, &worker->config,
+                                        "client.queue.subscribe.complete");
+        lc_consumer_invoke_stop(&worker->config, attempt, NULL);
+        failures = 0;
+        continue;
+      }
+      lc_consumer_log_subscribe_error(service, &worker->config,
+                                      &delivery_error);
+      lc_consumer_invoke_stop(&worker->config, attempt, &delivery_error);
+      if (lc_consumer_report_delivery_failure(
+              service, &worker->config, &delivery_error, error) != LC_OK) {
+        lc_consumer_set_fatal_error(service, error->code, error,
+                                    "consumer service stopped after failure");
+        break;
+      }
+      continue;
+    }
+    lc_consumer_log_subscribe_error(service, &worker->config, error);
+    lc_consumer_invoke_stop(&worker->config, attempt, error);
+    if (lc_consumer_handle_failure(service, &worker->config, &failures, error,
+                                   error) != LC_OK) {
+      lc_consumer_set_fatal_error(service, error->code, error,
+                                  "consumer service stopped after failure");
+      break;
+    }
+  }
+  lc_error_cleanup(&delivery_error);
+  return LC_OK;
+}
+
 static void *lc_consumer_delivery_handler_main(void *context) {
   lc_consumer_delivery_bridge *bridge;
   lc_nack_req nack_req;
@@ -1763,6 +2024,14 @@ static void *lc_consumer_worker_main(void *context) {
     goto done;
   }
   client_handle = (lc_client_handle *)client;
+  if (client_handle->is_pouch) {
+    rc = lc_consumer_worker_run_pouch(worker, client, &error);
+    if (rc != LC_OK && !lc_consumer_is_stop_requested(service)) {
+      lc_consumer_set_fatal_error(service, rc, &error,
+                                  "pouch consumer worker failed");
+    }
+    goto done;
+  }
 
   memset(&request, 0, sizeof(request));
   request.namespace_name = worker->config.request.namespace_name;

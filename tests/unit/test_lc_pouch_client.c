@@ -90,6 +90,12 @@ typedef struct subscribe_test_state {
   const char *expected[2];
 } subscribe_test_state;
 
+typedef struct consumer_service_test_state {
+  lc_consumer_service *service;
+  size_t handled;
+  const char *expected[2];
+} consumer_service_test_state;
+
 static int subscribe_test_handle(void *context, lc_message *message,
                                  lc_error *error) {
   subscribe_test_state *state;
@@ -113,6 +119,39 @@ static int subscribe_test_handle(void *context, lc_message *message,
   ++state->handled;
   rc = message->ack(message, error);
   assert_int_equal(rc, LC_OK);
+  return LC_OK;
+}
+
+static int consumer_service_test_handle(void *context,
+                                        lc_consumer_message *message,
+                                        lc_error *error) {
+  consumer_service_test_state *state;
+  lc_sink *sink;
+  char *text;
+  size_t written;
+  int rc;
+
+  state = (consumer_service_test_state *)context;
+  assert_non_null(message);
+  assert_non_null(message->message);
+  assert_false(message->with_state);
+  assert_null(message->state);
+  assert_true(state->handled < 2U);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_int_equal(rc, LC_OK);
+  written = 0U;
+  rc = message->message->write_payload(message->message, sink, &written, error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, state->expected[state->handled]);
+  free(text);
+  lc_sink_close(sink);
+  ++state->handled;
+  if (state->handled == 2U) {
+    rc = lc_consumer_service_stop(state->service);
+    assert_int_equal(rc, LC_OK);
+  }
   return LC_OK;
 }
 
@@ -586,12 +625,90 @@ static void test_pouch_endpoint_subscribe_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_consumer_service_auto_ack(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  consumer_service_test_state service_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "consumer-service");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats_res, 0, sizeof(stats_res));
+  memset(&service_state, 0, sizeof(service_state));
+  service_state.expected[0] = "first";
+  service_state.expected[1] = "second";
+  client = open_pouch_client(endpoint);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("first");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  source = source_from_text("second");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.request.queue = "jobs";
+  consumer_config.request.owner = "managed-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.handle = consumer_service_test_handle;
+  consumer_config.context = &service_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+  service = NULL;
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(service);
+  service_state.service = service;
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(service_state.handled, 2U);
+  service->close(service);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+
+  lc_queue_stats_res_cleanup(&stats_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_consumer_service_auto_ack),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
