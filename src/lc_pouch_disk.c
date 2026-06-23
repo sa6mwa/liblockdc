@@ -24,6 +24,9 @@
 #define LC_POUCH_RECORD_QUEUE_PUT 7U
 #define LC_POUCH_RECORD_QUEUE_UPDATE 8U
 #define LC_POUCH_RECORD_QUEUE_REMOVE 9U
+#define LC_POUCH_BACKEND_NAMESPACE ".lockd"
+#define LC_POUCH_BACKEND_KEY "backend-id"
+#define LC_POUCH_BACKEND_CONTENT_TYPE "text/plain"
 #define LC_POUCH_META_FLAG_QUERY_HIDDEN_SET 1UL
 #define LC_POUCH_META_FLAG_QUERY_HIDDEN 2UL
 #define LC_POUCH_OBJECT_META_SIZE 28U
@@ -215,6 +218,8 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
                                      const char *queue,
                                      lc_pouch_queue_stats *out,
                                      lc_error *error);
+static int lc_pouch_disk_backend_hash(lc_pouch_store *self, char **out,
+                                      lc_error *error);
 static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error);
 static int lc_pouch_disk_abort(lc_pouch_store *self, lc_error *error);
 
@@ -3022,6 +3027,118 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
   return LC_OK;
 }
 
+static char *lc_pouch_disk_make_backend_hash(lc_pouch_disk_store *store) {
+  unsigned long crc;
+  char stack[96];
+
+  crc = lc_pouch_crc32((const unsigned char *)store->root_path,
+                       strlen(store->root_path));
+  snprintf(stack, sizeof(stack), "pouch-%08lx", crc);
+  return lc_pouch_strdup(&store->allocator, stack);
+}
+
+static int lc_pouch_disk_read_backend_hash_object(lc_pouch_store *self,
+                                                  char **out,
+                                                  lc_error *error) {
+  lc_pouch_disk_store *store;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info info;
+  lc_source *body;
+  unsigned char *payload;
+  size_t payload_length;
+  int rc;
+
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(&selector, 0, sizeof(selector));
+  memset(&info, 0, sizeof(info));
+  selector.name = LC_POUCH_BACKEND_KEY;
+  body = NULL;
+  payload = NULL;
+  payload_length = 0U;
+
+  rc = lc_pouch_disk_get_object(self, LC_POUCH_BACKEND_NAMESPACE,
+                                LC_POUCH_BACKEND_KEY, &selector, &body, &info,
+                                error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_read_source_all(&store->allocator, body, &payload,
+                                &payload_length, error);
+  lc_source_close(body);
+  lc_pouch_object_info_cleanup(&store->allocator, &info);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, payload);
+    return rc;
+  }
+  if (payload_length == 0U) {
+    lc_pouch_free(&store->allocator, payload);
+    return lc_pouch_set_invalid(error, "pouch backend id is empty");
+  }
+  *out = lc_pouch_dup_bytes(&store->allocator, payload, payload_length);
+  lc_pouch_free(&store->allocator, payload);
+  if (*out == NULL) {
+    return lc_pouch_set_nomem(error, "failed to copy pouch backend id");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_backend_hash(lc_pouch_store *self, char **out,
+                                      lc_error *error) {
+  lc_pouch_disk_store *store;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_info info;
+  lc_source *source;
+  char *candidate;
+  int rc;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "backend_hash requires store and output");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  *out = NULL;
+
+  rc = lc_pouch_disk_read_backend_hash_object(self, out, error);
+  if (rc == LC_OK) {
+    return LC_OK;
+  }
+  if (rc != LC_ERR_SERVER || error == NULL || error->http_status != 404L) {
+    return rc;
+  }
+  lc_error_cleanup(error);
+
+  candidate = lc_pouch_disk_make_backend_hash(store);
+  if (candidate == NULL) {
+    return lc_pouch_set_nomem(error, "failed to allocate pouch backend id");
+  }
+  source = NULL;
+  rc = lc_source_from_memory(candidate, strlen(candidate), &source, error);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, candidate);
+    return rc;
+  }
+  memset(&opts, 0, sizeof(opts));
+  memset(&info, 0, sizeof(info));
+  opts.name = LC_POUCH_BACKEND_KEY;
+  opts.content_type = LC_POUCH_BACKEND_CONTENT_TYPE;
+  opts.prevent_overwrite = 1;
+  rc = lc_pouch_disk_put_object(self, LC_POUCH_BACKEND_NAMESPACE,
+                                LC_POUCH_BACKEND_KEY, source, &opts, &info,
+                                error);
+  lc_source_close(source);
+  lc_pouch_object_info_cleanup(&store->allocator, &info);
+  if (rc == LC_OK) {
+    *out = candidate;
+    return LC_OK;
+  }
+  lc_pouch_free(&store->allocator, candidate);
+  if (rc == LC_ERR_SERVER && error != NULL && error->http_status == 409L) {
+    lc_error_cleanup(error);
+    return lc_pouch_disk_read_backend_hash_object(self, out, error);
+  }
+  return rc;
+}
+
 static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_allocator allocator;
@@ -3153,6 +3270,7 @@ int lc_pouch_disk_open(const char *root_path,
   store->pub.nack_message = lc_pouch_disk_nack_message;
   store->pub.extend_message = lc_pouch_disk_extend_message;
   store->pub.queue_stats = lc_pouch_disk_queue_stats;
+  store->pub.backend_hash = lc_pouch_disk_backend_hash;
   store->pub.close = lc_pouch_disk_close;
   store->pub.abort = lc_pouch_disk_abort;
   *out = &store->pub;

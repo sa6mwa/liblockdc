@@ -223,6 +223,7 @@ struct lc_pouch_store {
   int (*queue_stats)(lc_pouch_store *self, const char *namespace_name,
                      const char *queue, lc_pouch_queue_stats *out,
                      lc_error *error);
+  int (*backend_hash)(lc_pouch_store *self, char **out, lc_error *error);
   int (*close)(lc_pouch_store *self, lc_error *error);
   int (*abort)(lc_pouch_store *self, lc_error *error);
 };

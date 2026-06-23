@@ -781,6 +781,82 @@ static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_backend_hash_persists_across_handles(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info info;
+  lc_source *body;
+  lc_error error;
+  char *first_hash;
+  char *second_hash;
+  char *stored_hash;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "backend-hash");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&selector, 0, sizeof(selector));
+  memset(&info, 0, sizeof(info));
+  first = NULL;
+  second = NULL;
+  body = NULL;
+  first_hash = NULL;
+  second_hash = NULL;
+  stored_hash = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = first->backend_hash(first, &first_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first_hash);
+  assert_true(strncmp(first_hash, "pouch-", 6U) == 0);
+
+  rc = second->backend_hash(second, &second_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(second_hash, first_hash);
+
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  first = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_free(&allocator, second_hash);
+  second_hash = NULL;
+  rc = first->backend_hash(first, &second_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(second_hash, first_hash);
+
+  selector.name = "backend-id";
+  rc = first->get_object(first, ".lockd", "backend-id", &selector, &body,
+                         &info, &error);
+  assert_int_equal(rc, LC_OK);
+  stored_hash = read_source_text(body);
+  assert_string_equal(stored_hash, first_hash);
+  free(stored_hash);
+  stored_hash = NULL;
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_object_info_cleanup(&allocator, &info);
+
+  lc_pouch_free(&allocator, first_hash);
+  lc_pouch_free(&allocator, second_hash);
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -790,6 +866,7 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
+      cmocka_unit_test(test_backend_hash_persists_across_handles),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
