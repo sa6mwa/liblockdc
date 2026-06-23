@@ -274,6 +274,46 @@ static int lc_pouch_set_nomem(lc_error *error, const char *message) {
   return lc_error_set(error, LC_ERR_NOMEM, 0L, message, NULL, NULL, NULL);
 }
 
+static int lc_pouch_disk_validate_name(lc_error *error, const char *operation,
+                                       const char *kind, const char *value) {
+  char message[160];
+
+  if (value != NULL && value[0] != '\0') {
+    return LC_OK;
+  }
+  snprintf(message, sizeof(message), "%s requires a non-empty %s", operation,
+           kind);
+  return lc_pouch_set_invalid(error, message);
+}
+
+static int lc_pouch_disk_validate_namespace_key(lc_error *error,
+                                                const char *operation,
+                                                const char *namespace_name,
+                                                const char *key) {
+  int rc;
+
+  rc = lc_pouch_disk_validate_name(error, operation, "namespace",
+                                   namespace_name);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_disk_validate_name(error, operation, "key", key);
+}
+
+static int lc_pouch_disk_validate_namespace_queue(lc_error *error,
+                                                  const char *operation,
+                                                  const char *namespace_name,
+                                                  const char *queue) {
+  int rc;
+
+  rc = lc_pouch_disk_validate_name(error, operation, "namespace",
+                                   namespace_name);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_disk_validate_name(error, operation, "queue", queue);
+}
+
 static void lc_pouch_put_u32(unsigned char *dst, unsigned long value) {
   dst[0] = (unsigned char)(value & 255UL);
   dst[1] = (unsigned char)((value >> 8) & 255UL);
@@ -1412,6 +1452,11 @@ static int lc_pouch_disk_load_meta(lc_pouch_store *self,
                                 "load_meta requires store, namespace, key, "
                                 "and output metadata");
   }
+  index = lc_pouch_disk_validate_namespace_key(error, "load_meta",
+                                               namespace_name, key);
+  if (index != LC_OK) {
+    return index;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   index = lc_pouch_disk_lock(store, error);
@@ -1462,6 +1507,11 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
     return lc_pouch_set_invalid(error,
                                 "store_meta requires store, namespace, key, "
                                 "metadata, and output metadata");
+  }
+  rc = lc_pouch_disk_validate_namespace_key(error, "store_meta",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
@@ -1529,6 +1579,11 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
     return lc_pouch_set_invalid(error,
                                 "delete_meta requires store, namespace, key");
   }
+  rc = lc_pouch_disk_validate_namespace_key(error, "delete_meta",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
@@ -1581,6 +1636,11 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
     return lc_pouch_set_invalid(error,
                                 "scan_meta requires store, request, "
                                 "namespace, visitor, and output");
+  }
+  rc = lc_pouch_disk_validate_name(error, "scan_meta", "namespace",
+                                   req->namespace_name);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
@@ -2219,6 +2279,11 @@ static int lc_pouch_disk_read_state(lc_pouch_store *self,
                                 "read_state requires store, namespace, key, "
                                 "body, and output metadata");
   }
+  index = lc_pouch_disk_validate_namespace_key(error, "read_state",
+                                               namespace_name, key);
+  if (index != LC_OK) {
+    return index;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   *body = NULL;
@@ -2307,6 +2372,11 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
                                 "write_state requires store, namespace, key, "
                                 "body, and output metadata");
   }
+  rc = lc_pouch_disk_validate_namespace_key(error, "write_state",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   rc = lc_pouch_disk_lock(store, error);
@@ -2382,6 +2452,11 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
     return lc_pouch_set_invalid(error,
                                 "remove_state requires store, namespace, key");
   }
+  rc = lc_pouch_disk_validate_namespace_key(error, "remove_state",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
@@ -2453,6 +2528,10 @@ static int lc_pouch_disk_validate_staged_args(lc_error *error,
   if (self == NULL || namespace_name == NULL || key == NULL ||
       key[0] == '\0' || txn_id == NULL || txn_id[0] == '\0') {
     return lc_pouch_set_invalid(error, operation);
+  }
+  if (namespace_name[0] == '\0') {
+    return lc_pouch_disk_validate_name(error, operation, "namespace",
+                                       namespace_name);
   }
   key_len = strlen(key);
   while (key_len > 0U && key[key_len - 1U] == '/') {
@@ -2797,6 +2876,11 @@ static int lc_pouch_disk_list_staged_state(
                                 "list_staged_state requires store, request, "
                                 "namespace, key, and output");
   }
+  rc = lc_pouch_disk_validate_name(error, "list_staged_state", "namespace",
+                                   req->namespace_name);
+  if (rc != LC_OK) {
+    return rc;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   matches = NULL;
@@ -2940,6 +3024,15 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
                                 "put_object requires store, namespace, key, "
                                 "body, name, and output metadata");
   }
+  rc = lc_pouch_disk_validate_namespace_key(error, "put_object",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_validate_name(error, "put_object", "name", opts->name);
+  if (rc != LC_OK) {
+    return rc;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   if (opts->has_max_bytes && opts->max_bytes < 0L) {
@@ -3041,18 +3134,24 @@ static int lc_pouch_disk_list_objects(lc_pouch_store *self,
   lc_pouch_disk_object_entry **matches;
   size_t index;
   size_t count;
+  int rc;
 
   if (self == NULL || namespace_name == NULL || key == NULL || out == NULL) {
     return lc_pouch_set_invalid(error,
                                 "list_objects requires store, namespace, key, "
                                 "and output list");
   }
+  rc = lc_pouch_disk_validate_namespace_key(error, "list_objects",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   matches = NULL;
-  count = (size_t)lc_pouch_disk_lock(store, error);
-  if ((int)count != LC_OK) {
-    return (int)count;
+  rc = lc_pouch_disk_lock(store, error);
+  if (rc != LC_OK) {
+    return rc;
   }
   count = 0U;
   for (index = 0U; index < store->object_entry_count; ++index) {
@@ -3128,6 +3227,11 @@ static int lc_pouch_disk_get_object(lc_pouch_store *self,
     return lc_pouch_set_invalid(error,
                                 "get_object requires store, namespace, key, "
                                 "selector, body, and output metadata");
+  }
+  index = lc_pouch_disk_validate_namespace_key(error, "get_object",
+                                               namespace_name, key);
+  if (index != LC_OK) {
+    return index;
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
@@ -3207,6 +3311,21 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                                 "source key, destination key, options, and "
                                 "output metadata");
   }
+  rc = lc_pouch_disk_validate_name(error, "copy_object", "namespace",
+                                   namespace_name);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_validate_name(error, "copy_object", "source key",
+                                   src_key);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_validate_name(error, "copy_object", "destination key",
+                                   dst_key);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(out, 0, sizeof(*out));
   memset(&src_info, 0, sizeof(src_info));
   memset(&put_opts, 0, sizeof(put_opts));
@@ -3245,6 +3364,11 @@ static int lc_pouch_disk_delete_object(lc_pouch_store *self,
                                 "delete_object requires store, namespace, key, "
                                 "selector, and deleted output");
   }
+  rc = lc_pouch_disk_validate_namespace_key(error, "delete_object",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
+  }
   store = (lc_pouch_disk_store *)self->impl;
   *deleted = 0;
   rc = lc_pouch_disk_lock(store, error);
@@ -3282,6 +3406,11 @@ static int lc_pouch_disk_delete_all_objects(lc_pouch_store *self,
     return lc_pouch_set_invalid(error,
                                 "delete_all_objects requires store, namespace, "
                                 "key, and deleted_count");
+  }
+  rc = lc_pouch_disk_validate_namespace_key(error, "delete_all_objects",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   *deleted_count = 0;
@@ -3324,6 +3453,24 @@ static int lc_pouch_disk_queue_ref_valid(lc_pouch_disk_queue_entry *entry,
                         "queue_lease_not_active", NULL);
   }
   return LC_OK;
+}
+
+static int lc_pouch_disk_validate_queue_ref(lc_error *error,
+                                            const char *operation,
+                                            const lc_pouch_queue_ref *ref) {
+  int rc;
+
+  if (ref == NULL || ref->namespace_name == NULL || ref->queue == NULL ||
+      ref->message_id == NULL) {
+    return lc_pouch_set_invalid(error, operation);
+  }
+  rc = lc_pouch_disk_validate_namespace_queue(error, operation,
+                                              ref->namespace_name, ref->queue);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_disk_validate_name(error, operation, "message id",
+                                     ref->message_id);
 }
 
 static int lc_pouch_disk_append_queue_entry(lc_pouch_disk_store *store,
@@ -3389,6 +3536,11 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
     return lc_pouch_set_invalid(
         error, "enqueue_message requires store, namespace, queue, body, opts, "
                "and out");
+  }
+  rc = lc_pouch_disk_validate_namespace_queue(error, "enqueue_message",
+                                              namespace_name, queue);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
@@ -3482,6 +3634,11 @@ static int lc_pouch_disk_dequeue_message(
     return lc_pouch_set_invalid(
         error, "dequeue_message requires store, namespace, queue, owner, body, "
                "and out");
+  }
+  rc = lc_pouch_disk_validate_namespace_queue(error, "dequeue_message",
+                                              namespace_name, queue);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
@@ -3585,9 +3742,12 @@ static int lc_pouch_disk_ack_message(lc_pouch_store *self,
   int index;
   int rc;
 
-  if (self == NULL || ref == NULL || ref->namespace_name == NULL ||
-      ref->queue == NULL || ref->message_id == NULL || acked == NULL) {
+  if (self == NULL || ref == NULL || acked == NULL) {
     return lc_pouch_set_invalid(error, "ack_message requires message ref");
+  }
+  rc = lc_pouch_disk_validate_queue_ref(error, "ack_message", ref);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   *acked = 0;
@@ -3626,6 +3786,10 @@ static int lc_pouch_disk_nack_message(lc_pouch_store *self,
 
   if (self == NULL || ref == NULL || out == NULL) {
     return lc_pouch_set_invalid(error, "nack_message requires message ref");
+  }
+  rc = lc_pouch_disk_validate_queue_ref(error, "nack_message", ref);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
@@ -3680,6 +3844,10 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
 
   if (self == NULL || ref == NULL || out == NULL) {
     return lc_pouch_set_invalid(error, "extend_message requires message ref");
+  }
+  rc = lc_pouch_disk_validate_queue_ref(error, "extend_message", ref);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
@@ -3736,6 +3904,11 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
     return lc_pouch_set_invalid(error,
                                 "queue_stats requires store, namespace, queue, "
                                 "and out");
+  }
+  rc = lc_pouch_disk_validate_namespace_queue(error, "queue_stats",
+                                              namespace_name, queue);
+  if (rc != LC_OK) {
+    return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));

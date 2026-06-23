@@ -15,7 +15,10 @@
 
 #define TEST_POUCH_HEADER_SIZE 64U
 #define TEST_POUCH_HEADER_RECORD_VERSION_OFFSET 56U
+#define TEST_POUCH_RECORD_STATE_PUT 1U
+#define TEST_POUCH_RECORD_META_PUT 3U
 #define TEST_POUCH_RECORD_OBJECT_PUT 5U
+#define TEST_POUCH_RECORD_QUEUE_PUT 7U
 #define TEST_POUCH_RECORD_STATE_LINK 10U
 
 typedef struct tracked_allocator {
@@ -1588,6 +1591,82 @@ static void test_object_max_bytes_reads_only_limit_plus_one(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_empty_identifiers_are_rejected_before_append(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res state_res;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_put_object_opts object_opts;
+  lc_pouch_object_info object_info;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_queue_message_info queue_info;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "empty-identifiers");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&state_res, 0, sizeof(state_res));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&object_opts, 0, sizeof(object_opts));
+  memset(&object_info, 0, sizeof(object_info));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&queue_info, 0, sizeof(queue_info));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("state");
+  rc = store->write_state(store, "", "key", source, &state_opts, &state_res,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "", &meta, NULL, &meta_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  object_opts.name = "";
+  source = source_from_text("object");
+  rc = store->put_object(store, "default", "key", source, &object_opts,
+                         &object_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  source = source_from_text("queue");
+  rc = store->enqueue_message(store, "default", "", source, &enqueue_opts,
+                              &queue_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_QUEUE_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -1800,6 +1879,7 @@ int main(void) {
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),
+      cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
   };
