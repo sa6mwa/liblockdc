@@ -503,6 +503,94 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_queue_visibility_handoff_rejects_stale_refs(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *first_client;
+  lc_client *second_client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_extend_req extend_req;
+  lc_message *first_message;
+  lc_message *second_message;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-handoff");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  first_client = open_pouch_client(endpoint);
+  second_client = open_pouch_client(endpoint);
+  first_message = NULL;
+  second_message = NULL;
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 1L;
+  enqueue_req.ttl_seconds = 60L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("handoff");
+  rc = first_client->enqueue(first_client, &enqueue_req, source, &enqueue_res,
+                             &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 1L;
+  rc = first_client->dequeue(first_client, &dequeue_req, &first_message,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first_message);
+  assert_string_equal(first_message->message_id, enqueue_res.message_id);
+  assert_int_equal(first_message->attempts, 1);
+
+  sleep(2U);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-b";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = second_client->dequeue(second_client, &dequeue_req, &second_message,
+                              &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_message);
+  assert_string_equal(second_message->message_id, enqueue_res.message_id);
+  assert_int_equal(second_message->attempts, 2);
+  assert_true(second_message->fencing_token > first_message->fencing_token);
+
+  rc = first_message->ack(first_message, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  lc_error_cleanup(&error);
+
+  lc_extend_req_init(&extend_req);
+  extend_req.extend_by_seconds = 30L;
+  rc = first_message->extend(first_message, &extend_req, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  lc_error_cleanup(&error);
+
+  rc = second_message->ack(second_message, &error);
+  assert_int_equal(rc, LC_OK);
+  second_message = NULL;
+  first_message->close(first_message);
+
+  second_client->close(second_client);
+  first_client->close(first_client);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_dequeue_with_state_lifecycle(void **state) {
   char root[256];
   char endpoint[320];
@@ -908,6 +996,8 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
+      cmocka_unit_test(
+          test_pouch_endpoint_queue_visibility_handoff_rejects_stale_refs),
       cmocka_unit_test(test_pouch_endpoint_dequeue_with_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),
