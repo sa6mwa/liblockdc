@@ -4,6 +4,8 @@
 #include <string.h>
 #include <time.h>
 
+#define LC_POUCH_RESERVED_BACKEND_NAMESPACE ".lockd"
+
 static const char *lc_pouch_default_namespace(lc_client_handle *client,
                                               const char *namespace_name) {
   if (namespace_name != NULL && namespace_name[0] != '\0') {
@@ -14,6 +16,26 @@ static const char *lc_pouch_default_namespace(lc_client_handle *client,
     return client->default_namespace;
   }
   return "default";
+}
+
+static int lc_pouch_public_namespace(lc_client_handle *client,
+                                     const char *namespace_name,
+                                     const char **out, lc_error *error) {
+  const char *resolved;
+
+  if (client == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace resolution requires client and out",
+                        NULL, NULL, NULL);
+  }
+  resolved = lc_pouch_default_namespace(client, namespace_name);
+  if (strcmp(resolved, LC_POUCH_RESERVED_BACKEND_NAMESPACE) == 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace is reserved for internal storage",
+                        resolved, "reserved_namespace", NULL);
+  }
+  *out = resolved;
+  return LC_OK;
 }
 
 static long lc_pouch_now_unix(void) { return (long)time(NULL); }
@@ -323,6 +345,7 @@ static int lc_pouch_validate_active_lease(lc_client_handle *client,
                                           lc_error *error) {
   int rc;
   long now_unix;
+  const char *namespace_name;
 
   memset(record, 0, sizeof(*record));
   if (lease == NULL || lease->key == NULL || lease->lease_id == NULL) {
@@ -330,10 +353,14 @@ static int lc_pouch_validate_active_lease(lc_client_handle *client,
                         "pouch operation requires lease key and lease_id", NULL,
                         NULL, NULL);
   }
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, lease->namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = client->pouch_store->load_meta(
-      client->pouch_store,
-      lc_pouch_default_namespace(client, lease->namespace_name), lease->key,
-      record, error);
+      client->pouch_store, namespace_name, lease->key, record, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -442,7 +469,12 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
   client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
-  namespace_name = lc_pouch_default_namespace(client, req->namespace_name);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(&existing, 0, sizeof(existing));
   memset(&meta, 0, sizeof(meta));
   memset(&stored, 0, sizeof(stored));
@@ -525,7 +557,12 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
   }
   client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
-  namespace_name = lc_pouch_default_namespace(client, req->namespace_name);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(out, 0, sizeof(*out));
   memset(&record, 0, sizeof(record));
   rc = client->pouch_store->load_meta(client->pouch_store, namespace_name,
@@ -583,7 +620,11 @@ int lc_pouch_client_get_method(lc_client *self, const char *key,
   (void)opts;
   client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
-  namespace_name = lc_pouch_default_namespace(client, NULL);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, NULL, &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   body = NULL;
   memset(out, 0, sizeof(*out));
   memset(&info, 0, sizeof(info));
@@ -1098,7 +1139,12 @@ int lc_pouch_client_queue_stats_method(lc_client *self,
                         NULL, NULL, NULL);
   }
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_default_namespace(client, req->namespace_name);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(out, 0, sizeof(*out));
   memset(&stats, 0, sizeof(stats));
   rc = client->pouch_store->queue_stats(client->pouch_store, namespace_name,
@@ -1144,7 +1190,12 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
                         NULL, NULL, NULL);
   }
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_default_namespace(client, req->namespace_name);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(out, 0, sizeof(*out));
   memset(&opts, 0, sizeof(opts));
   memset(&info, 0, sizeof(info));
@@ -1205,7 +1256,12 @@ static int lc_pouch_client_dequeue_one(lc_client *self,
                         NULL, NULL, NULL);
   }
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_default_namespace(client, req->namespace_name);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(&opts, 0, sizeof(opts));
   memset(&info, 0, sizeof(info));
   memset(&engine, 0, sizeof(engine));
@@ -1407,6 +1463,7 @@ int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
                                      lc_ack_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_queue_ref ref;
+  const char *namespace_name;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1417,6 +1474,13 @@ int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
   client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
   lc_pouch_queue_ref_from_message(&req->message, &ref);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, ref.namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  ref.namespace_name = namespace_name;
   rc = client->pouch_store->ack_message(client->pouch_store, &ref, &out->acked,
                                         error);
   return rc;
@@ -1427,6 +1491,7 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
   lc_client_handle *client;
   lc_pouch_queue_ref ref;
   lc_pouch_queue_message_info info;
+  const char *namespace_name;
   int count_failure;
   int rc;
 
@@ -1439,6 +1504,13 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
   memset(out, 0, sizeof(*out));
   memset(&info, 0, sizeof(info));
   lc_pouch_queue_ref_from_message(&req->message, &ref);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, ref.namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  ref.namespace_name = namespace_name;
   count_failure = req->intent != LC_NACK_INTENT_DEFER;
   rc = client->pouch_store->nack_message(client->pouch_store, &ref,
                                          req->delay_seconds, count_failure,
@@ -1458,6 +1530,7 @@ int lc_pouch_client_queue_extend_method(lc_client *self,
   lc_client_handle *client;
   lc_pouch_queue_ref ref;
   lc_pouch_queue_message_info info;
+  const char *namespace_name;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1469,6 +1542,13 @@ int lc_pouch_client_queue_extend_method(lc_client *self,
   memset(out, 0, sizeof(*out));
   memset(&info, 0, sizeof(info));
   lc_pouch_queue_ref_from_message(&req->message, &ref);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, ref.namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  ref.namespace_name = namespace_name;
   rc = client->pouch_store->extend_message(
       client->pouch_store, &ref, req->extend_by_seconds, &info, error);
   if (rc == LC_OK) {

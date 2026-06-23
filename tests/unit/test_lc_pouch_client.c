@@ -65,7 +65,8 @@ static char *memory_sink_text(lc_sink *sink) {
   return text;
 }
 
-static lc_client *open_pouch_client(const char *endpoint) {
+static lc_client *open_pouch_client_with_namespace(const char *endpoint,
+                                                   const char *namespace_name) {
   lc_client_config config;
   lc_client *client;
   lc_error error;
@@ -77,12 +78,16 @@ static lc_client *open_pouch_client(const char *endpoint) {
   endpoints[0] = endpoint;
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.default_namespace = "default";
+  config.default_namespace = namespace_name;
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(client);
   lc_error_cleanup(&error);
   return client;
+}
+
+static lc_client *open_pouch_client(const char *endpoint) {
+  return open_pouch_client_with_namespace(endpoint, "default");
 }
 
 typedef struct subscribe_test_state {
@@ -591,6 +596,85 @@ static void test_pouch_endpoint_queue_visibility_handoff_rejects_stale_refs(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *reserved_default_client;
+  lc_acquire_req acquire_req;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_ack_op ack_req;
+  lc_ack_res ack_res;
+  lc_get_res get_res;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "reserved-ns");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&ack_res, 0, sizeof(ack_res));
+  client = open_pouch_client(endpoint);
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.namespace_name = ".lockd";
+  acquire_req.key = "backend-id";
+  acquire_req.owner = "owner";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.namespace_name = ".lockd";
+  enqueue_req.queue = "jobs";
+  source = source_from_text("reserved");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_error_cleanup(&error);
+
+  memset(&ack_req, 0, sizeof(ack_req));
+  ack_req.message.namespace_name = ".lockd";
+  ack_req.message.queue = "jobs";
+  ack_req.message.message_id = "message";
+  ack_req.message.lease_id = "lease";
+  ack_req.message.fencing_token = 1L;
+  rc = client->queue_ack(client, &ack_req, &ack_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_ack_res_cleanup(&ack_res);
+  lc_error_cleanup(&error);
+  client->close(client);
+
+  reserved_default_client = open_pouch_client_with_namespace(endpoint, ".lockd");
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "alpha";
+  acquire_req.owner = "owner";
+  rc = reserved_default_client->acquire(reserved_default_client, &acquire_req,
+                                        &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reserved_default_client->get(reserved_default_client, "alpha", NULL,
+                                    sink, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+  reserved_default_client->close(reserved_default_client);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_dequeue_with_state_lifecycle(void **state) {
   char root[256];
   char endpoint[320];
@@ -998,6 +1082,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(
           test_pouch_endpoint_queue_visibility_handoff_rejects_stale_refs),
+      cmocka_unit_test(test_pouch_endpoint_rejects_reserved_namespace),
       cmocka_unit_test(test_pouch_endpoint_dequeue_with_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),
