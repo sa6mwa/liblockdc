@@ -851,6 +851,108 @@ int lc_pouch_client_get_method(lc_client *self, const char *key,
   return LC_OK;
 }
 
+int lc_pouch_client_load_method(lc_client *self, const char *key,
+                                const lonejson_map *map, void *dst,
+                                const lc_get_opts *opts, lc_get_res *out,
+                                lc_error *error) {
+  lc_client_handle *client;
+  lc_source *body;
+  lc_pouch_state_info info;
+  lc_pouch_allocator *allocator;
+  const char *namespace_name;
+  lonejson *runtime;
+  FILE *fp;
+  size_t limit;
+  int rc;
+
+  if (self == NULL || key == NULL || map == NULL || dst == NULL ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch load requires self, key, map, destination, "
+                        "and out",
+                        NULL, NULL, NULL);
+  }
+  (void)opts;
+  client = (lc_client_handle *)self;
+  allocator = &client->pouch_allocator;
+  namespace_name = NULL;
+  body = NULL;
+  fp = NULL;
+  memset(out, 0, sizeof(*out));
+  memset(&info, 0, sizeof(info));
+
+  rc = lc_pouch_public_namespace(client, NULL, &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize lonejson runtime", NULL, NULL,
+                        NULL);
+  }
+  lc_lonejson_prepare_parse_destination(runtime, map, dst);
+  rc = client->pouch_store->read_state(client->pouch_store, namespace_name, key,
+                                       &body, &info, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!info.no_content) {
+    fp = tmpfile();
+    if (fp == NULL) {
+      if (body != NULL) {
+        body->close(body);
+      }
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to create pouch mapped load buffer", NULL,
+                          NULL, NULL);
+    }
+    limit = client->http_json_response_limit_bytes > 0U
+                ? client->http_json_response_limit_bytes
+                : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
+    rc = lc_pouch_copy_source_to_file_limited(body, fp, limit, error);
+    body->close(body);
+    body = NULL;
+    if (rc != LC_OK) {
+      fclose(fp);
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return rc;
+    }
+    if (fflush(fp) != 0 || fseek(fp, 0L, SEEK_SET) != 0) {
+      fclose(fp);
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to rewind pouch mapped load buffer", NULL,
+                          NULL, NULL);
+    }
+    rc = lc_lonejson_parse_prepared_file(runtime, fp, map, dst, error,
+                                         "failed to parse mapped state");
+    fclose(fp);
+    fp = NULL;
+    if (rc != LC_OK) {
+      lc_pouch_state_info_cleanup(allocator, &info);
+      return rc;
+    }
+  } else if (body != NULL) {
+    body->close(body);
+    body = NULL;
+  }
+
+  out->no_content = info.no_content;
+  out->version = info.version;
+  if (lc_pouch_copy_public(&out->content_type, info.content_type, error,
+                           "failed to copy pouch content type") != LC_OK ||
+      lc_pouch_copy_public(&out->etag, info.etag, error,
+                           "failed to copy pouch etag") != LC_OK) {
+    lc_get_res_cleanup(out);
+    lc_pouch_state_info_cleanup(allocator, &info);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  lc_pouch_state_info_cleanup(allocator, &info);
+  return LC_OK;
+}
+
 int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error) {

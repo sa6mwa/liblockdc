@@ -191,6 +191,10 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
 int lc_pouch_client_get_method(lc_client *self, const char *key,
                                const lc_get_opts *opts, lc_sink *dst,
                                lc_get_res *out, lc_error *error);
+int lc_pouch_client_load_method(lc_client *self, const char *key,
+                                const lonejson_map *map, void *dst,
+                                const lc_get_opts *opts, lc_get_res *out,
+                                lc_error *error);
 int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error);

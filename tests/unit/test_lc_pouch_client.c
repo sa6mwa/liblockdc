@@ -430,6 +430,7 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
+  lc_client *reader_client;
   lc_lease *lease;
   lc_acquire_req acquire;
   lc_get_res get_res;
@@ -448,6 +449,7 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   memset(&error, 0, sizeof(error));
   memset(&get_res, 0, sizeof(get_res));
   client = open_pouch_client(endpoint);
+  reader_client = NULL;
 
   lc_acquire_req_init(&acquire);
   acquire.key = "mapped";
@@ -476,6 +478,19 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   free(text);
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
+
+  reader_client = open_pouch_client(endpoint);
+  memset(&loaded_doc, 0, sizeof(loaded_doc));
+  rc = reader_client->load(reader_client, "mapped", &pouch_value_map,
+                           &loaded_doc, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_int_equal(get_res.version, 1L);
+  assert_int_equal(loaded_doc.value, 7);
+  lc_get_res_cleanup(&get_res);
+  reader_client->close(reader_client);
+  reader_client = NULL;
 
   memset(&loaded_doc, 0, sizeof(loaded_doc));
   rc = lease->load(lease, &pouch_value_map, &loaded_doc, NULL, &get_res,
