@@ -1424,6 +1424,76 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_object_listing_orders_by_name_after_replay(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_info info;
+  lc_pouch_object_list list;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "objects-order");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&info, 0, sizeof(info));
+  memset(&list, 0, sizeof(list));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "text/plain";
+  opts.name = "zeta.txt";
+  source = source_from_text("zeta");
+  rc = store->put_object(store, "default", "lease-key", source, &opts, &info,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &info);
+
+  opts.name = "alpha.txt";
+  source = source_from_text("alpha");
+  rc = store->put_object(store, "default", "lease-key", source, &opts, &info,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &info);
+
+  opts.name = "middle.txt";
+  source = source_from_text("middle");
+  rc = store->put_object(store, "default", "lease-key", source, &opts, &info,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->list_objects(store, "default", "lease-key", &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 3U);
+  assert_string_equal(list.items[0].name, "alpha.txt");
+  assert_string_equal(list.items[1].name, "middle.txt");
+  assert_string_equal(list.items[2].name, "zeta.txt");
+
+  lc_pouch_object_list_cleanup(&allocator, &list);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -1634,6 +1704,7 @@ int main(void) {
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
+      cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
   };

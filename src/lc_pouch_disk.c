@@ -587,6 +587,31 @@ static int lc_pouch_disk_meta_entry_ptr_compare(const void *left,
   return strcmp((*left_entry)->key, (*right_entry)->key);
 }
 
+static int lc_pouch_disk_object_entry_ptr_compare(const void *left,
+                                                  const void *right) {
+  const lc_pouch_disk_object_entry *const *left_entry;
+  const lc_pouch_disk_object_entry *const *right_entry;
+
+  left_entry = (const lc_pouch_disk_object_entry *const *)left;
+  right_entry = (const lc_pouch_disk_object_entry *const *)right;
+  return strcmp((*left_entry)->name, (*right_entry)->name);
+}
+
+static int lc_pouch_disk_queue_entry_before(
+    const lc_pouch_disk_queue_entry *candidate,
+    const lc_pouch_disk_queue_entry *current) {
+  if (current == NULL) {
+    return 1;
+  }
+  if (candidate->enqueued_at_unix != current->enqueued_at_unix) {
+    return candidate->enqueued_at_unix < current->enqueued_at_unix;
+  }
+  if (candidate->body_offset != current->body_offset) {
+    return candidate->body_offset < current->body_offset;
+  }
+  return strcmp(candidate->message_id, current->message_id) < 0;
+}
+
 static void lc_pouch_disk_scan_meta_copy_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_disk_scan_meta_copy *copy) {
   if (copy == NULL) {
@@ -2942,6 +2967,7 @@ static int lc_pouch_disk_list_objects(lc_pouch_store *self,
                                       lc_pouch_object_list *out,
                                       lc_error *error) {
   lc_pouch_disk_store *store;
+  lc_pouch_disk_object_entry **matches;
   size_t index;
   size_t count;
 
@@ -2952,6 +2978,7 @@ static int lc_pouch_disk_list_objects(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
+  matches = NULL;
   count = (size_t)lc_pouch_disk_lock(store, error);
   if ((int)count != LC_OK) {
     return (int)count;
@@ -2971,29 +2998,41 @@ static int lc_pouch_disk_list_objects(lc_pouch_store *self,
     }
     return LC_OK;
   }
+  matches = (lc_pouch_disk_object_entry **)lc_pouch_calloc(
+      &store->allocator, count, sizeof(matches[0]));
+  if (matches == NULL) {
+    lc_pouch_disk_unlock(store, error);
+    return lc_pouch_set_nomem(error, "failed to allocate pouch object refs");
+  }
   out->items = (lc_pouch_object_info *)lc_pouch_calloc(&store->allocator, count,
                                                        sizeof(out->items[0]));
   if (out->items == NULL) {
+    lc_pouch_free(&store->allocator, matches);
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch object list");
   }
-  out->count = count;
   count = 0U;
   for (index = 0U; index < store->object_entry_count; ++index) {
     if (!store->object_entries[index].deleted &&
         strcmp(store->object_entries[index].namespace_name, namespace_name) ==
             0 &&
         strcmp(store->object_entries[index].key, key) == 0) {
-      if (!lc_pouch_object_info_from_entry(&store->allocator,
-                                           &out->items[count],
-                                           &store->object_entries[index])) {
-        lc_pouch_object_list_cleanup(&store->allocator, out);
-        lc_pouch_disk_unlock(store, error);
-        return lc_pouch_set_nomem(error, "failed to copy pouch object list");
-      }
-      ++count;
+      matches[count++] = &store->object_entries[index];
     }
   }
+  qsort(matches, count, sizeof(matches[0]),
+        lc_pouch_disk_object_entry_ptr_compare);
+  out->count = count;
+  for (index = 0U; index < count; ++index) {
+    if (!lc_pouch_object_info_from_entry(&store->allocator, &out->items[index],
+                                         matches[index])) {
+      lc_pouch_object_list_cleanup(&store->allocator, out);
+      lc_pouch_free(&store->allocator, matches);
+      lc_pouch_disk_unlock(store, error);
+      return lc_pouch_set_nomem(error, "failed to copy pouch object list");
+    }
+  }
+  lc_pouch_free(&store->allocator, matches);
   if (lc_pouch_disk_unlock(store, error) != LC_OK) {
     lc_pouch_object_list_cleanup(&store->allocator, out);
     return LC_ERR_TRANSPORT;
@@ -3389,8 +3428,8 @@ static int lc_pouch_disk_dequeue_message(
         entry->not_visible_until_unix <= now_unix &&
         entry->expires_at_unix > now_unix &&
         entry->failure_attempts < entry->max_attempts &&
-        (found < 0 || entry->enqueued_at_unix <
-                          store->queue_entries[found].enqueued_at_unix)) {
+        lc_pouch_disk_queue_entry_before(
+            entry, found >= 0 ? &store->queue_entries[found] : NULL)) {
       found = (int)index;
     }
   }
@@ -3617,6 +3656,7 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
                                      lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_queue_entry *entry;
+  lc_pouch_disk_queue_entry *head_entry;
   long now_unix;
   size_t index;
   int rc;
@@ -3632,6 +3672,7 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
   if (rc != LC_OK) {
     return rc;
   }
+  head_entry = NULL;
   now_unix = (long)time(NULL);
   for (index = 0U; index < store->queue_entry_count; ++index) {
     entry = &store->queue_entries[index];
@@ -3640,8 +3681,7 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
       ++out->pending_candidates;
       if (entry->not_visible_until_unix <= now_unix) {
         out->available += 1;
-        if (out->head_message_id == NULL ||
-            entry->enqueued_at_unix < out->head_enqueued_at_unix) {
+        if (lc_pouch_disk_queue_entry_before(entry, head_entry)) {
           lc_pouch_free(&store->allocator, out->head_message_id);
           out->head_message_id =
               lc_pouch_strdup(&store->allocator, entry->message_id);
@@ -3650,6 +3690,7 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
             lc_pouch_disk_unlock(store, error);
             return lc_pouch_set_nomem(error, "failed to copy pouch queue head");
           }
+          head_entry = entry;
           out->head_enqueued_at_unix = entry->enqueued_at_unix;
           out->head_not_visible_until_unix = entry->not_visible_until_unix;
         }
