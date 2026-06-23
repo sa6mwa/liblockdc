@@ -45,6 +45,29 @@ typedef struct lc_pouch_discard_staged_opts {
   int ignore_not_found;
 } lc_pouch_discard_staged_opts;
 
+typedef struct lc_pouch_list_staged_req {
+  const char *namespace_name;
+  const char *key;
+  const char *start_after;
+  size_t limit;
+} lc_pouch_list_staged_req;
+
+typedef struct lc_pouch_staged_state_info {
+  char *key;
+  char *txn_id;
+  char *content_type;
+  char *etag;
+  long version;
+  long bytes;
+} lc_pouch_staged_state_info;
+
+typedef struct lc_pouch_staged_state_list {
+  lc_pouch_staged_state_info *items;
+  size_t count;
+  int truncated;
+  char *next_start_after;
+} lc_pouch_staged_state_list;
+
 typedef struct lc_pouch_meta {
   char *owner;
   char *lease_id;
@@ -217,6 +240,9 @@ struct lc_pouch_store {
                               const char *key, const char *txn_id,
                               const lc_pouch_discard_staged_opts *opts,
                               lc_error *error);
+  int (*list_staged_state)(lc_pouch_store *self,
+                           const lc_pouch_list_staged_req *req,
+                           lc_pouch_staged_state_list *out, lc_error *error);
   int (*put_object)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, lc_source *body,
                     const lc_pouch_put_object_opts *opts,
@@ -287,6 +313,10 @@ void lc_pouch_store_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                      lc_pouch_store_meta_res *res);
 void lc_pouch_scan_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_scan_meta_res *res);
+void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
+                                        lc_pouch_staged_state_info *info);
+void lc_pouch_staged_state_list_cleanup(const lc_pouch_allocator *allocator,
+                                        lc_pouch_staged_state_list *list);
 void lc_pouch_object_info_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_object_info *info);
 void lc_pouch_object_list_cleanup(const lc_pouch_allocator *allocator,

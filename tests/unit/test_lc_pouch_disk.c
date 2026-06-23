@@ -307,6 +307,7 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
   assert_non_null(store->load_staged_state);
   assert_non_null(store->promote_staged_state);
   assert_non_null(store->discard_staged_state);
+  assert_non_null(store->list_staged_state);
 
   state_opts.content_type = "text/plain";
   source = source_from_text("draft-one");
@@ -442,6 +443,145 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
   lc_pouch_put_state_res_cleanup(&allocator, &second_staged);
   lc_pouch_put_state_res_cleanup(&allocator, &second_promoted);
   lc_pouch_put_state_res_cleanup(&allocator, &discarded);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_staged_state_listing_orders_paginates_and_replays(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res staged_alpha;
+  lc_pouch_put_state_res staged_bravo;
+  lc_pouch_put_state_res staged_charlie;
+  lc_pouch_put_state_res staged_other;
+  lc_pouch_put_state_res nested;
+  lc_pouch_put_state_res promoted;
+  lc_pouch_discard_staged_opts discard_opts;
+  lc_pouch_list_staged_req req;
+  lc_pouch_staged_state_list list;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "staged-list");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&staged_alpha, 0, sizeof(staged_alpha));
+  memset(&staged_bravo, 0, sizeof(staged_bravo));
+  memset(&staged_charlie, 0, sizeof(staged_charlie));
+  memset(&staged_other, 0, sizeof(staged_other));
+  memset(&nested, 0, sizeof(nested));
+  memset(&promoted, 0, sizeof(promoted));
+  memset(&discard_opts, 0, sizeof(discard_opts));
+  memset(&req, 0, sizeof(req));
+  memset(&list, 0, sizeof(list));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  state_opts.content_type = "text/plain";
+  source = source_from_text("bravo");
+  rc = store->stage_state(store, "default", "lease-key", "txn-bravo", source,
+                          &state_opts, &staged_bravo, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("alpha");
+  rc = store->stage_state(store, "default", "lease-key", "txn-alpha", source,
+                          &state_opts, &staged_alpha, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("charlie");
+  rc = store->stage_state(store, "default", "lease-key", "txn-charlie",
+                          source, &state_opts, &staged_charlie, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("other");
+  rc = store->stage_state(store, "default", "other-key", "txn-other", source,
+                          &state_opts, &staged_other, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("nested");
+  rc = store->write_state(store, "default",
+                          "lease-key/.staging/txn-nested/attachments/blob",
+                          source, &state_opts, &nested, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  discard_opts.expected_etag = staged_bravo.new_state_etag;
+  rc = store->discard_staged_state(store, "default", "lease-key", "txn-bravo",
+                                   &discard_opts, &error);
+  assert_int_equal(rc, LC_OK);
+
+  req.namespace_name = "default";
+  req.key = "lease-key";
+  req.limit = 1U;
+  rc = store->list_staged_state(store, &req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_true(list.truncated);
+  assert_string_equal(list.items[0].key, "lease-key");
+  assert_string_equal(list.items[0].txn_id, "txn-alpha");
+  assert_string_equal(list.items[0].etag, staged_alpha.new_state_etag);
+  assert_string_equal(list.items[0].content_type, "text/plain");
+  assert_int_equal(list.items[0].bytes, 5L);
+  assert_string_equal(list.next_start_after, "txn-alpha");
+  lc_pouch_staged_state_list_cleanup(&allocator, &list);
+
+  req.start_after = "txn-alpha";
+  req.limit = 0U;
+  rc = store->list_staged_state(store, &req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_false(list.truncated);
+  assert_null(list.next_start_after);
+  assert_string_equal(list.items[0].txn_id, "txn-charlie");
+  assert_string_equal(list.items[0].etag, staged_charlie.new_state_etag);
+  lc_pouch_staged_state_list_cleanup(&allocator, &list);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  req.start_after = NULL;
+  req.limit = 0U;
+  rc = store->list_staged_state(store, &req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 2U);
+  assert_string_equal(list.items[0].txn_id, "txn-alpha");
+  assert_string_equal(list.items[1].txn_id, "txn-charlie");
+  lc_pouch_staged_state_list_cleanup(&allocator, &list);
+
+  rc = store->promote_staged_state(store, "default", "lease-key", "txn-alpha",
+                                   NULL, &promoted, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->list_staged_state(store, &req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_string_equal(list.items[0].txn_id, "txn-charlie");
+  lc_pouch_staged_state_list_cleanup(&allocator, &list);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &staged_alpha);
+  lc_pouch_put_state_res_cleanup(&allocator, &staged_bravo);
+  lc_pouch_put_state_res_cleanup(&allocator, &staged_charlie);
+  lc_pouch_put_state_res_cleanup(&allocator, &staged_other);
+  lc_pouch_put_state_res_cleanup(&allocator, &nested);
+  lc_pouch_put_state_res_cleanup(&allocator, &promoted);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -1080,6 +1220,7 @@ int main(void) {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_staged_state_promote_discard_and_reopen),
+      cmocka_unit_test(test_staged_state_listing_orders_paginates_and_replays),
       cmocka_unit_test(test_replay_truncates_trailing_partial_record),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),

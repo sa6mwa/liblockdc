@@ -178,6 +178,33 @@ void lc_pouch_scan_meta_res_cleanup(const lc_pouch_allocator *allocator,
   memset(res, 0, sizeof(*res));
 }
 
+void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
+                                        lc_pouch_staged_state_info *info) {
+  if (info == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, info->key);
+  lc_pouch_free(allocator, info->txn_id);
+  lc_pouch_free(allocator, info->content_type);
+  lc_pouch_free(allocator, info->etag);
+  memset(info, 0, sizeof(*info));
+}
+
+void lc_pouch_staged_state_list_cleanup(const lc_pouch_allocator *allocator,
+                                        lc_pouch_staged_state_list *list) {
+  size_t index;
+
+  if (list == NULL) {
+    return;
+  }
+  for (index = 0U; index < list->count; ++index) {
+    lc_pouch_staged_state_info_cleanup(allocator, &list->items[index]);
+  }
+  lc_pouch_free(allocator, list->items);
+  lc_pouch_free(allocator, list->next_start_after);
+  memset(list, 0, sizeof(*list));
+}
+
 void lc_pouch_object_info_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_object_info *info) {
   if (info == NULL) {
