@@ -742,6 +742,99 @@ static void test_pouch_endpoint_generates_implicit_txn_id(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_release_is_idempotent_for_stale_refs(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *first_lease;
+  lc_lease *second_lease;
+  lc_acquire_req acquire;
+  lc_release_op release_op;
+  lc_release_res release_res;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "release-idempotent");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&release_res, 0, sizeof(release_res));
+  memset(&update_res, 0, sizeof(update_res));
+  client = open_pouch_client(endpoint);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "release-idempotent";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  first_lease = NULL;
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first_lease);
+
+  lc_release_op_init(&release_op);
+  release_op.lease.namespace_name = first_lease->namespace_name;
+  release_op.lease.key = first_lease->key;
+  release_op.lease.lease_id = first_lease->lease_id;
+  release_op.lease.txn_id = first_lease->txn_id;
+  release_op.lease.fencing_token = first_lease->fencing_token;
+  rc = client->release(client, &release_op, &release_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(release_res.released);
+  lc_release_res_cleanup(&release_res);
+
+  rc = client->release(client, &release_op, &release_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(release_res.released);
+  lc_release_res_cleanup(&release_res);
+
+  acquire.owner = "owner-b";
+  second_lease = NULL;
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_lease);
+  assert_int_equal(second_lease->fencing_token, first_lease->fencing_token + 1L);
+
+  rc = client->release(client, &release_op, &release_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(release_res.released);
+  lc_release_res_cleanup(&release_res);
+
+  lc_update_req_init(&update_req);
+  update_req.lease.namespace_name = second_lease->namespace_name;
+  update_req.lease.key = second_lease->key;
+  update_req.lease.lease_id = second_lease->lease_id;
+  update_req.lease.txn_id = second_lease->txn_id;
+  update_req.lease.fencing_token = second_lease->fencing_token;
+  update_req.content_type = "application/json";
+  source = source_from_text("{\"still_active\":true}");
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(update_res.new_version, 1L);
+  lc_update_res_cleanup(&update_res);
+
+  release_op.lease.namespace_name = second_lease->namespace_name;
+  release_op.lease.key = second_lease->key;
+  release_op.lease.lease_id = second_lease->lease_id;
+  release_op.lease.txn_id = second_lease->txn_id;
+  release_op.lease.fencing_token = second_lease->fencing_token;
+  rc = client->release(client, &release_op, &release_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(release_res.released);
+  lc_release_res_cleanup(&release_res);
+
+  lc_lease_close(first_lease);
+  lc_lease_close(second_lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_rejects_missing_or_wrong_txn_id(void **state) {
   char root[256];
   char endpoint[320];
@@ -1913,6 +2006,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_acquire_owner),
       cmocka_unit_test(test_pouch_endpoint_generates_implicit_txn_id),
+      cmocka_unit_test(
+          test_pouch_endpoint_release_is_idempotent_for_stale_refs),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_or_wrong_txn_id),
       cmocka_unit_test(test_pouch_endpoint_remove_without_state_is_noop),
       cmocka_unit_test(

@@ -1203,6 +1203,8 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   lc_pouch_store_meta_res stored;
   lc_pouch_allocator *allocator;
   lc_pouch_meta next_meta;
+  const char *namespace_name;
+  long now_unix;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1210,14 +1212,62 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                         "pouch release requires self, req, and out", NULL, NULL,
                         NULL);
   }
+  if (req->lease.key == NULL || req->lease.lease_id == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch release requires lease key and lease_id", NULL,
+                        NULL, NULL);
+  }
+  if (req->lease.txn_id == NULL || req->lease.txn_id[0] == '\0') {
+    return lc_error_set(error, LC_ERR_SERVER, 400L,
+                        "pouch release requires transaction id", NULL,
+                        "missing_txn", NULL);
+  }
   client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
   memset(out, 0, sizeof(*out));
   memset(&record, 0, sizeof(record));
   memset(&stored, 0, sizeof(stored));
-  rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, req->lease.namespace_name,
+                                 &namespace_name, error);
   if (rc != LC_OK) {
     return rc;
+  }
+  rc = client->pouch_store->load_meta(client->pouch_store, namespace_name,
+                                      req->lease.key, &record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  now_unix = lc_pouch_now_unix();
+  if (!record.found || record.meta.lease_id == NULL ||
+      strcmp(record.meta.lease_id, req->lease.lease_id) != 0 ||
+      record.meta.fencing_token != req->lease.fencing_token) {
+    out->released = 1;
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return LC_OK;
+  }
+  if (record.meta.lease_expires_at_unix <= now_unix) {
+    next_meta = record.meta;
+    next_meta.owner = NULL;
+    next_meta.lease_id = NULL;
+    next_meta.txn_id = NULL;
+    next_meta.lease_expires_at_unix = 0L;
+    rc = client->pouch_store->store_meta(
+        client->pouch_store, record.namespace_name, req->lease.key, &next_meta,
+        record.etag, &stored, error);
+    if (rc == LC_OK) {
+      out->released = 1;
+    }
+    lc_pouch_store_meta_res_cleanup(allocator, &stored);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return rc;
+  }
+  if (record.meta.txn_id != NULL &&
+      strcmp(record.meta.txn_id, req->lease.txn_id) != 0) {
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return lc_error_set(error, LC_ERR_SERVER, 409L,
+                        "pouch transaction id does not match active lease",
+                        NULL, "txn_mismatch", NULL);
   }
   next_meta = record.meta;
   next_meta.owner = NULL;
