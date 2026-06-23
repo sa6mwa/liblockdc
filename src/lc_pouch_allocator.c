@@ -194,3 +194,27 @@ void lc_pouch_object_list_cleanup(const lc_pouch_allocator *allocator,
   lc_pouch_free(allocator, list->items);
   memset(list, 0, sizeof(*list));
 }
+
+void lc_pouch_queue_message_info_cleanup(const lc_pouch_allocator *allocator,
+                                         lc_pouch_queue_message_info *info) {
+  if (info == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, info->namespace_name);
+  lc_pouch_free(allocator, info->queue);
+  lc_pouch_free(allocator, info->message_id);
+  lc_pouch_free(allocator, info->payload_content_type);
+  lc_pouch_free(allocator, info->lease_id);
+  lc_pouch_free(allocator, info->txn_id);
+  lc_pouch_free(allocator, info->meta_etag);
+  memset(info, 0, sizeof(*info));
+}
+
+void lc_pouch_queue_stats_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_queue_stats *stats) {
+  if (stats == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, stats->head_message_id);
+  memset(stats, 0, sizeof(*stats));
+}

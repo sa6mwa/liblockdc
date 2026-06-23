@@ -89,6 +89,58 @@ typedef struct lc_pouch_object_selector {
   const char *name;
 } lc_pouch_object_selector;
 
+typedef struct lc_pouch_queue_message_info {
+  char *namespace_name;
+  char *queue;
+  char *message_id;
+  char *payload_content_type;
+  char *lease_id;
+  char *txn_id;
+  char *meta_etag;
+  int attempts;
+  int max_attempts;
+  int failure_attempts;
+  long enqueued_at_unix;
+  long not_visible_until_unix;
+  long visibility_timeout_seconds;
+  long expires_at_unix;
+  long lease_expires_at_unix;
+  long fencing_token;
+  long payload_bytes;
+} lc_pouch_queue_message_info;
+
+typedef struct lc_pouch_enqueue_opts {
+  const char *content_type;
+  long delay_seconds;
+  long visibility_timeout_seconds;
+  long ttl_seconds;
+  int max_attempts;
+} lc_pouch_enqueue_opts;
+
+typedef struct lc_pouch_dequeue_opts {
+  const char *owner;
+  const char *txn_id;
+  long visibility_timeout_seconds;
+} lc_pouch_dequeue_opts;
+
+typedef struct lc_pouch_queue_ref {
+  const char *namespace_name;
+  const char *queue;
+  const char *message_id;
+  const char *lease_id;
+  const char *txn_id;
+  long fencing_token;
+  const char *meta_etag;
+} lc_pouch_queue_ref;
+
+typedef struct lc_pouch_queue_stats {
+  int available;
+  int pending_candidates;
+  char *head_message_id;
+  long head_enqueued_at_unix;
+  long head_not_visible_until_unix;
+} lc_pouch_queue_stats;
+
 struct lc_pouch_store {
   void *impl;
   int (*load_meta)(lc_pouch_store *self, const char *namespace_name,
@@ -128,6 +180,25 @@ struct lc_pouch_store {
   int (*delete_all_objects)(lc_pouch_store *self, const char *namespace_name,
                             const char *key, int *deleted_count,
                             lc_error *error);
+  int (*enqueue_message)(lc_pouch_store *self, const char *namespace_name,
+                         const char *queue, lc_source *body,
+                         const lc_pouch_enqueue_opts *opts,
+                         lc_pouch_queue_message_info *out, lc_error *error);
+  int (*dequeue_message)(lc_pouch_store *self, const char *namespace_name,
+                         const char *queue, const lc_pouch_dequeue_opts *opts,
+                         lc_source **body, lc_pouch_queue_message_info *out,
+                         lc_error *error);
+  int (*ack_message)(lc_pouch_store *self, const lc_pouch_queue_ref *ref,
+                     int *acked, lc_error *error);
+  int (*nack_message)(lc_pouch_store *self, const lc_pouch_queue_ref *ref,
+                      long delay_seconds, int count_failure,
+                      lc_pouch_queue_message_info *out, lc_error *error);
+  int (*extend_message)(lc_pouch_store *self, const lc_pouch_queue_ref *ref,
+                        long extend_by_seconds,
+                        lc_pouch_queue_message_info *out, lc_error *error);
+  int (*queue_stats)(lc_pouch_store *self, const char *namespace_name,
+                     const char *queue, lc_pouch_queue_stats *out,
+                     lc_error *error);
   int (*close)(lc_pouch_store *self, lc_error *error);
   int (*abort)(lc_pouch_store *self, lc_error *error);
 };
@@ -158,6 +229,10 @@ void lc_pouch_object_info_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_object_info *info);
 void lc_pouch_object_list_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_object_list *list);
+void lc_pouch_queue_message_info_cleanup(const lc_pouch_allocator *allocator,
+                                         lc_pouch_queue_message_info *info);
+void lc_pouch_queue_stats_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_queue_stats *stats);
 
 int lc_pouch_disk_open(const char *root_path,
                        const lc_pouch_allocator *allocator,

@@ -96,6 +96,41 @@ static void lc_pouch_lease_ref_from_handle(lc_lease_handle *lease,
   ref->fencing_token = lease->fencing_token;
 }
 
+static void lc_pouch_queue_ref_from_message(const lc_message_ref *src,
+                                            lc_pouch_queue_ref *dst) {
+  memset(dst, 0, sizeof(*dst));
+  if (src == NULL) {
+    return;
+  }
+  dst->namespace_name = src->namespace_name;
+  dst->queue = src->queue;
+  dst->message_id = src->message_id;
+  dst->lease_id = src->lease_id;
+  dst->txn_id = src->txn_id;
+  dst->fencing_token = src->fencing_token;
+  dst->meta_etag = src->meta_etag;
+}
+
+static void
+lc_pouch_queue_info_to_engine(const lc_pouch_queue_message_info *info,
+                              lc_engine_dequeue_response *out) {
+  memset(out, 0, sizeof(*out));
+  out->namespace_name = (char *)info->namespace_name;
+  out->queue = (char *)info->queue;
+  out->message_id = (char *)info->message_id;
+  out->attempts = info->attempts;
+  out->max_attempts = info->max_attempts;
+  out->failure_attempts = info->failure_attempts;
+  out->not_visible_until_unix = info->not_visible_until_unix;
+  out->visibility_timeout_seconds = info->visibility_timeout_seconds;
+  out->payload_content_type = (char *)info->payload_content_type;
+  out->lease_id = (char *)info->lease_id;
+  out->lease_expires_at_unix = info->lease_expires_at_unix;
+  out->fencing_token = info->fencing_token;
+  out->txn_id = (char *)info->txn_id;
+  out->meta_etag = (char *)info->meta_etag;
+}
+
 static int lc_pouch_lease_load_unsupported(lc_lease *self,
                                            const lonejson_map *map, void *dst,
                                            const lc_get_opts *opts,
@@ -903,6 +938,340 @@ int lc_pouch_client_delete_all_attachments_method(
   }
   lc_pouch_store_meta_res_cleanup(allocator, &stored);
   lc_pouch_meta_record_cleanup(allocator, &record);
+  return rc;
+}
+
+int lc_pouch_client_queue_stats_method(lc_client *self,
+                                       const lc_queue_stats_req *req,
+                                       lc_queue_stats_res *out,
+                                       lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_queue_stats stats;
+  const char *namespace_name;
+  int rc;
+
+  if (self == NULL || req == NULL || req->queue == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue_stats requires self, req, queue, and out",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  namespace_name = lc_pouch_default_namespace(client, req->namespace_name);
+  memset(out, 0, sizeof(*out));
+  memset(&stats, 0, sizeof(stats));
+  rc = client->pouch_store->queue_stats(client->pouch_store, namespace_name,
+                                        req->queue, &stats, error);
+  if (rc == LC_OK) {
+    if (lc_pouch_copy_public(&out->namespace_name, namespace_name, error,
+                             "failed to copy pouch namespace") != LC_OK ||
+        lc_pouch_copy_public(&out->queue, req->queue, error,
+                             "failed to copy pouch queue") != LC_OK ||
+        lc_pouch_copy_public(&out->head_message_id, stats.head_message_id,
+                             error,
+                             "failed to copy pouch queue head id") != LC_OK) {
+      lc_queue_stats_res_cleanup(out);
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    } else {
+      out->available = stats.available;
+      out->pending_candidates = stats.pending_candidates;
+      out->head_enqueued_at_unix = stats.head_enqueued_at_unix;
+      out->head_not_visible_until_unix = stats.head_not_visible_until_unix;
+      out->head_age_seconds =
+          stats.head_enqueued_at_unix > 0L
+              ? lc_pouch_now_unix() - stats.head_enqueued_at_unix
+              : 0L;
+    }
+  }
+  lc_pouch_queue_stats_cleanup(&client->pouch_allocator, &stats);
+  return rc;
+}
+
+int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
+                                   lc_source *src, lc_enqueue_res *out,
+                                   lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_enqueue_opts opts;
+  lc_pouch_queue_message_info info;
+  const char *namespace_name;
+  int rc;
+
+  if (self == NULL || req == NULL || src == NULL || req->queue == NULL ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch enqueue requires self, req, src, queue, and out",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  namespace_name = lc_pouch_default_namespace(client, req->namespace_name);
+  memset(out, 0, sizeof(*out));
+  memset(&opts, 0, sizeof(opts));
+  memset(&info, 0, sizeof(info));
+  opts.content_type = req->content_type;
+  opts.delay_seconds = req->delay_seconds;
+  opts.visibility_timeout_seconds = req->visibility_timeout_seconds;
+  opts.ttl_seconds = req->ttl_seconds;
+  opts.max_attempts = req->max_attempts;
+  rc = client->pouch_store->enqueue_message(client->pouch_store, namespace_name,
+                                            req->queue, src, &opts, &info,
+                                            error);
+  if (rc == LC_OK) {
+    if (lc_pouch_copy_public(&out->namespace_name, info.namespace_name, error,
+                             "failed to copy pouch namespace") != LC_OK ||
+        lc_pouch_copy_public(&out->queue, info.queue, error,
+                             "failed to copy pouch queue") != LC_OK ||
+        lc_pouch_copy_public(&out->message_id, info.message_id, error,
+                             "failed to copy pouch message id") != LC_OK) {
+      lc_enqueue_res_cleanup(out);
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    } else {
+      out->attempts = info.attempts;
+      out->max_attempts = info.max_attempts;
+      out->failure_attempts = info.failure_attempts;
+      out->not_visible_until_unix = info.not_visible_until_unix;
+      out->visibility_timeout_seconds = info.visibility_timeout_seconds;
+      out->payload_bytes = info.payload_bytes;
+    }
+  }
+  lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
+  return rc;
+}
+
+int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
+                                   lc_message **out, lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_dequeue_opts opts;
+  lc_pouch_queue_message_info info;
+  lc_engine_dequeue_response engine;
+  lc_source *body;
+  const char *namespace_name;
+  int rc;
+
+  if (self == NULL || req == NULL || req->queue == NULL || req->owner == NULL ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue requires self, req, queue, owner, and "
+                        "out",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  namespace_name = lc_pouch_default_namespace(client, req->namespace_name);
+  memset(&opts, 0, sizeof(opts));
+  memset(&info, 0, sizeof(info));
+  memset(&engine, 0, sizeof(engine));
+  body = NULL;
+  *out = NULL;
+  opts.owner = req->owner;
+  opts.txn_id = req->txn_id;
+  opts.visibility_timeout_seconds = req->visibility_timeout_seconds;
+  rc = client->pouch_store->dequeue_message(client->pouch_store, namespace_name,
+                                            req->queue, &opts, &body, &info,
+                                            error);
+  if (rc == LC_OK && body != NULL) {
+    lc_pouch_queue_info_to_engine(&info, &engine);
+    *out = lc_message_new(client, &engine, body, NULL);
+    if (*out == NULL) {
+      body->close(body);
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch message handle", NULL, NULL,
+                        NULL);
+    }
+  }
+  lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
+  return rc;
+}
+
+int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
+                                     lc_ack_res *out, lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_queue_ref ref;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue_ack requires self, req, and out", NULL,
+                        NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  lc_pouch_queue_ref_from_message(&req->message, &ref);
+  rc = client->pouch_store->ack_message(client->pouch_store, &ref, &out->acked,
+                                        error);
+  return rc;
+}
+
+int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
+                                      lc_nack_res *out, lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_queue_ref ref;
+  lc_pouch_queue_message_info info;
+  int count_failure;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue_nack requires self, req, and out", NULL,
+                        NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  memset(&info, 0, sizeof(info));
+  lc_pouch_queue_ref_from_message(&req->message, &ref);
+  count_failure = req->intent != LC_NACK_INTENT_DEFER;
+  rc = client->pouch_store->nack_message(client->pouch_store, &ref,
+                                         req->delay_seconds, count_failure,
+                                         &info, error);
+  if (rc == LC_OK) {
+    out->requeued = info.failure_attempts < info.max_attempts;
+    rc = lc_pouch_copy_public(&out->meta_etag, info.meta_etag, error,
+                              "failed to copy pouch queue etag");
+  }
+  lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
+  return rc;
+}
+
+int lc_pouch_client_queue_extend_method(lc_client *self,
+                                        const lc_extend_op *req,
+                                        lc_extend_res *out, lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_queue_ref ref;
+  lc_pouch_queue_message_info info;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue_extend requires self, req, and out", NULL,
+                        NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  memset(&info, 0, sizeof(info));
+  lc_pouch_queue_ref_from_message(&req->message, &ref);
+  rc = client->pouch_store->extend_message(
+      client->pouch_store, &ref, req->extend_by_seconds, &info, error);
+  if (rc == LC_OK) {
+    out->lease_expires_at_unix = info.lease_expires_at_unix;
+    out->visibility_timeout_seconds = info.visibility_timeout_seconds;
+    rc = lc_pouch_copy_public(&out->meta_etag, info.meta_etag, error,
+                              "failed to copy pouch queue etag");
+  }
+  lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
+  return rc;
+}
+
+int lc_pouch_message_ack_method(lc_message *self, lc_error *error) {
+  lc_message_handle *message;
+  lc_ack_op req;
+  lc_ack_res res;
+  int rc;
+
+  if (self == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch message ack requires self", NULL, NULL, NULL);
+  }
+  message = (lc_message_handle *)self;
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  req.message.namespace_name = message->namespace_name;
+  req.message.queue = message->queue;
+  req.message.message_id = message->message_id;
+  req.message.lease_id = message->lease_id;
+  req.message.txn_id = message->txn_id;
+  req.message.fencing_token = message->fencing_token;
+  req.message.meta_etag = message->meta_etag;
+  rc = lc_pouch_client_queue_ack_method(&message->client->pub, &req, &res,
+                                        error);
+  lc_ack_res_cleanup(&res);
+  if (rc == LC_OK) {
+    if (message->terminal_flag != NULL) {
+      *message->terminal_flag = 1;
+    }
+    lc_message_close_method(self);
+  }
+  return rc;
+}
+
+int lc_pouch_message_nack_method(lc_message *self, const lc_nack_req *opts,
+                                 lc_error *error) {
+  lc_message_handle *message;
+  lc_nack_op req;
+  lc_nack_res res;
+  int rc;
+
+  if (self == NULL || opts == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch message nack requires self and req", NULL, NULL,
+                        NULL);
+  }
+  message = (lc_message_handle *)self;
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  req.message.namespace_name = message->namespace_name;
+  req.message.queue = message->queue;
+  req.message.message_id = message->message_id;
+  req.message.lease_id = message->lease_id;
+  req.message.txn_id = message->txn_id;
+  req.message.fencing_token = message->fencing_token;
+  req.message.meta_etag = message->meta_etag;
+  req.delay_seconds = opts->delay_seconds;
+  req.intent = opts->intent;
+  req.last_error_json = opts->last_error_json;
+  rc = lc_pouch_client_queue_nack_method(&message->client->pub, &req, &res,
+                                         error);
+  lc_nack_res_cleanup(&res);
+  if (rc == LC_OK) {
+    if (message->terminal_flag != NULL) {
+      *message->terminal_flag = 1;
+    }
+    lc_message_close_method(self);
+  }
+  return rc;
+}
+
+int lc_pouch_message_extend_method(lc_message *self, const lc_extend_req *opts,
+                                   lc_error *error) {
+  lc_message_handle *message;
+  lc_extend_op req;
+  lc_extend_res res;
+  char *meta_etag;
+  int rc;
+
+  if (self == NULL || opts == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch message extend requires self and req", NULL,
+                        NULL, NULL);
+  }
+  message = (lc_message_handle *)self;
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  req.message.namespace_name = message->namespace_name;
+  req.message.queue = message->queue;
+  req.message.message_id = message->message_id;
+  req.message.lease_id = message->lease_id;
+  req.message.txn_id = message->txn_id;
+  req.message.fencing_token = message->fencing_token;
+  req.message.meta_etag = message->meta_etag;
+  req.extend_by_seconds = opts->extend_by_seconds;
+  rc = lc_pouch_client_queue_extend_method(&message->client->pub, &req, &res,
+                                           error);
+  if (rc == LC_OK) {
+    meta_etag = lc_client_strdup(message->client, res.meta_etag);
+    if (res.meta_etag != NULL && meta_etag == NULL) {
+      lc_extend_res_cleanup(&res);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy pouch queue etag", NULL, NULL, NULL);
+    }
+    lc_client_free(message->client, message->meta_etag);
+    message->meta_etag = meta_etag;
+    message->lease_expires_at_unix = res.lease_expires_at_unix;
+    message->visibility_timeout_seconds = res.visibility_timeout_seconds;
+    message->fencing_token += 1L;
+    message->pub.meta_etag = message->meta_etag;
+    message->pub.lease_expires_at_unix = message->lease_expires_at_unix;
+    message->pub.visibility_timeout_seconds =
+        message->visibility_timeout_seconds;
+    message->pub.fencing_token = message->fencing_token;
+  }
+  lc_extend_res_cleanup(&res);
   return rc;
 }
 

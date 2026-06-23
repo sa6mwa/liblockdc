@@ -221,6 +221,27 @@ int lc_pouch_client_delete_attachment_method(lc_client *self,
 int lc_pouch_client_delete_all_attachments_method(
     lc_client *self, const lc_attachment_delete_all_op *req, int *deleted_count,
     lc_error *error);
+int lc_pouch_client_queue_stats_method(lc_client *self,
+                                       const lc_queue_stats_req *req,
+                                       lc_queue_stats_res *out,
+                                       lc_error *error);
+int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
+                                     lc_ack_res *out, lc_error *error);
+int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
+                                      lc_nack_res *out, lc_error *error);
+int lc_pouch_client_queue_extend_method(lc_client *self,
+                                        const lc_extend_op *req,
+                                        lc_extend_res *out, lc_error *error);
+int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
+                                   lc_source *src, lc_enqueue_res *out,
+                                   lc_error *error);
+int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
+                                   lc_message **out, lc_error *error);
+int lc_pouch_message_ack_method(lc_message *self, lc_error *error);
+int lc_pouch_message_nack_method(lc_message *self, const lc_nack_req *req,
+                                 lc_error *error);
+int lc_pouch_message_extend_method(lc_message *self, const lc_extend_req *req,
+                                   lc_error *error);
 int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error);
 int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
                               const lc_get_opts *opts, lc_get_res *out,

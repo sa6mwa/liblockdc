@@ -856,6 +856,11 @@ lc_message *lc_message_new(lc_client_handle *client,
   message->pub.ack = lc_message_ack_method;
   message->pub.nack = lc_message_nack_method;
   message->pub.extend = lc_message_extend_method;
+  if (client->is_pouch) {
+    message->pub.ack = lc_pouch_message_ack_method;
+    message->pub.nack = lc_pouch_message_nack_method;
+    message->pub.extend = lc_pouch_message_extend_method;
+  }
   message->pub.state = lc_message_state_method;
   message->pub.payload_reader = lc_message_payload_reader_method;
   message->pub.rewind_payload = lc_message_rewind_payload_method;
@@ -1278,6 +1283,12 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.delete_attachment = lc_pouch_client_delete_attachment_method;
     client->pub.delete_all_attachments =
         lc_pouch_client_delete_all_attachments_method;
+    client->pub.queue_stats = lc_pouch_client_queue_stats_method;
+    client->pub.queue_ack = lc_pouch_client_queue_ack_method;
+    client->pub.queue_nack = lc_pouch_client_queue_nack_method;
+    client->pub.queue_extend = lc_pouch_client_queue_extend_method;
+    client->pub.enqueue = lc_pouch_client_enqueue_method;
+    client->pub.dequeue = lc_pouch_client_dequeue_method;
   }
   client->pub.default_namespace = client->default_namespace;
   *out = &client->pub;

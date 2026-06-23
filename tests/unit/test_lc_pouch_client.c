@@ -272,9 +272,123 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_queue_lifecycle(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *second_client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_extend_req extend_req;
+  lc_nack_req nack_req;
+  lc_message *message;
+  lc_sink *sink;
+  lc_source *source;
+  lc_error error;
+  char *text;
+  size_t written;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats_res, 0, sizeof(stats_res));
+  client = open_pouch_client(endpoint);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("queue-body");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(enqueue_res.namespace_name, "default");
+  assert_string_equal(enqueue_res.queue, "jobs");
+  assert_non_null(enqueue_res.message_id);
+  assert_int_equal(enqueue_res.payload_bytes, 10L);
+
+  second_client = open_pouch_client(endpoint);
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "jobs";
+  rc =
+      second_client->queue_stats(second_client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 1);
+  assert_string_equal(stats_res.head_message_id, enqueue_res.message_id);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  message = NULL;
+  rc = second_client->dequeue(second_client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_string_equal(message->payload_content_type, "text/plain");
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  written = 0U;
+  rc = message->write_payload(message, sink, &written, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(written, 10U);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "queue-body");
+  free(text);
+  lc_sink_close(sink);
+
+  lc_extend_req_init(&extend_req);
+  extend_req.extend_by_seconds = 45L;
+  rc = message->extend(message, &extend_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(message->visibility_timeout_seconds, 45L);
+
+  lc_nack_req_init(&nack_req);
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  nack_req.delay_seconds = 0L;
+  rc = message->nack(message, &nack_req, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+  second_client->close(second_client);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-b";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_int_equal(message->attempts, 2);
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+
+  memset(&stats_res, 0, sizeof(stats_res));
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+
+  lc_queue_stats_res_cleanup(&stats_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

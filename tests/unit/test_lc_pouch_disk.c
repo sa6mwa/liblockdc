@@ -520,6 +520,126 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_message_info updated;
+  lc_pouch_queue_ref ref;
+  lc_pouch_queue_stats stats;
+  lc_error error;
+  char *text;
+  int acked;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&updated, 0, sizeof(updated));
+  memset(&ref, 0, sizeof(ref));
+  memset(&stats, 0, sizeof(stats));
+  store = NULL;
+  payload = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queued-payload");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(enqueued.queue, "jobs");
+  assert_non_null(enqueued.message_id);
+  assert_int_equal(enqueued.payload_bytes, 14L);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 1);
+  assert_string_equal(stats.head_message_id, enqueued.message_id);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 45L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  assert_int_equal(dequeued.attempts, 1);
+  assert_non_null(dequeued.lease_id);
+  text = read_source_text(payload);
+  assert_string_equal(text, "queued-payload");
+  free(text);
+  lc_source_close(payload);
+
+  ref.namespace_name = dequeued.namespace_name;
+  ref.queue = dequeued.queue;
+  ref.message_id = dequeued.message_id;
+  ref.lease_id = dequeued.lease_id;
+  ref.txn_id = dequeued.txn_id;
+  ref.fencing_token = dequeued.fencing_token;
+  ref.meta_etag = dequeued.meta_etag;
+  rc = store->nack_message(store, &ref, 0L, 1, &updated, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(updated.failure_attempts, 1);
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+
+  dequeue_opts.owner = "worker-b";
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  assert_int_equal(dequeued.attempts, 2);
+  lc_source_close(payload);
+
+  ref.namespace_name = dequeued.namespace_name;
+  ref.queue = dequeued.queue;
+  ref.message_id = dequeued.message_id;
+  ref.lease_id = dequeued.lease_id;
+  ref.txn_id = dequeued.txn_id;
+  ref.fencing_token = dequeued.fencing_token;
+  ref.meta_etag = dequeued.meta_etag;
+  rc = store->ack_message(store, &ref, &acked, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acked);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 0);
+
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &updated);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -527,6 +647,7 @@ int main(void) {
       cmocka_unit_test(test_replay_truncates_trailing_partial_record),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
+      cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
