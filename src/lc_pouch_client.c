@@ -1080,6 +1080,54 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
   return rc;
 }
 
+int lc_pouch_client_dequeue_batch_method(lc_client *self,
+                                         const lc_dequeue_req *req,
+                                         lc_dequeue_batch_res *out,
+                                         lc_error *error) {
+  lc_dequeue_req single_req;
+  lc_message *message;
+  lc_message **grown;
+  int limit;
+  int index;
+  int rc;
+
+  if (self == NULL || req == NULL || req->queue == NULL || req->owner == NULL ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue_batch requires self, req, queue, owner, "
+                        "and out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  single_req = *req;
+  single_req.page_size = 1;
+  limit = req->page_size > 0 ? req->page_size : 1;
+  for (index = 0; index < limit; ++index) {
+    message = NULL;
+    rc = lc_pouch_client_dequeue_method(self, &single_req, &message, error);
+    if (rc != LC_OK) {
+      lc_dequeue_batch_cleanup(out);
+      return rc;
+    }
+    if (message == NULL) {
+      break;
+    }
+    grown = (lc_message **)realloc(out->messages, (out->count + 1U) *
+                                                      sizeof(out->messages[0]));
+    if (grown == NULL) {
+      message->close(message);
+      lc_dequeue_batch_cleanup(out);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to grow pouch dequeue batch", NULL, NULL,
+                          NULL);
+    }
+    out->messages = grown;
+    out->messages[out->count] = message;
+    out->count += 1U;
+  }
+  return LC_OK;
+}
+
 int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
                                      lc_ack_res *out, lc_error *error) {
   lc_client_handle *client;

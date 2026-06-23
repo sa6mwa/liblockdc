@@ -385,10 +385,113 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_dequeue_batch_lifecycle(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_dequeue_req dequeue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_batch_res batch;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  size_t written;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "batch");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&batch, 0, sizeof(batch));
+  client = open_pouch_client(endpoint);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+
+  source = source_from_text("first");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  source = source_from_text("second");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "batch-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.page_size = 2;
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(batch.count, 2U);
+  assert_string_equal(batch.messages[0]->queue, "jobs");
+  assert_string_equal(batch.messages[1]->queue, "jobs");
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  written = 0U;
+  rc = batch.messages[0]->write_payload(batch.messages[0], sink, &written,
+                                        &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(written, 5U);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "first");
+  free(text);
+  lc_sink_close(sink);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  written = 0U;
+  rc = batch.messages[1]->write_payload(batch.messages[1], sink, &written,
+                                        &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(written, 6U);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "second");
+  free(text);
+  lc_sink_close(sink);
+
+  rc = batch.messages[0]->ack(batch.messages[0], &error);
+  assert_int_equal(rc, LC_OK);
+  batch.messages[0] = NULL;
+  rc = batch.messages[1]->ack(batch.messages[1], &error);
+  assert_int_equal(rc, LC_OK);
+  batch.messages[1] = NULL;
+  lc_dequeue_batch_cleanup(&batch);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "batch-worker";
+  dequeue_req.page_size = 2;
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(batch.count, 0U);
+
+  lc_dequeue_batch_cleanup(&batch);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
