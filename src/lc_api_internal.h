@@ -203,6 +203,24 @@ int lc_pouch_client_keepalive_method(lc_client *self,
                                      lc_keepalive_res *out, lc_error *error);
 int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                                    lc_release_res *out, lc_error *error);
+int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
+                                  lc_source *src, lc_attach_res *out,
+                                  lc_error *error);
+int lc_pouch_client_list_attachments_method(lc_client *self,
+                                            const lc_attachment_list_req *req,
+                                            lc_attachment_list *out,
+                                            lc_error *error);
+int lc_pouch_client_get_attachment_method(lc_client *self,
+                                          const lc_attachment_get_op *req,
+                                          lc_sink *dst,
+                                          lc_attachment_get_res *out,
+                                          lc_error *error);
+int lc_pouch_client_delete_attachment_method(lc_client *self,
+                                             const lc_attachment_delete_op *req,
+                                             int *deleted, lc_error *error);
+int lc_pouch_client_delete_all_attachments_method(
+    lc_client *self, const lc_attachment_delete_all_op *req, int *deleted_count,
+    lc_error *error);
 int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error);
 int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
                               const lc_get_opts *opts, lc_get_res *out,
@@ -217,6 +235,23 @@ int lc_pouch_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
                                     lc_error *error);
 int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
                                   lc_error *error);
+int lc_pouch_lease_attach_method(lc_lease *self, const lc_attach_req *req,
+                                 lc_source *src, lc_attach_res *out,
+                                 lc_error *error);
+int lc_pouch_lease_list_attachments_method(lc_lease *self,
+                                           lc_attachment_list *out,
+                                           lc_error *error);
+int lc_pouch_lease_get_attachment_method(lc_lease *self,
+                                         const lc_attachment_get_req *req,
+                                         lc_sink *dst,
+                                         lc_attachment_get_res *out,
+                                         lc_error *error);
+int lc_pouch_lease_delete_attachment_method(
+    lc_lease *self, const lc_attachment_selector *selector, int *deleted,
+    lc_error *error);
+int lc_pouch_lease_delete_all_attachments_method(lc_lease *self,
+                                                 int *deleted_count,
+                                                 lc_error *error);
 int lc_client_acquire_for_update_method(
     lc_client *self, const lc_acquire_req *req,
     lc_acquire_for_update_handler_fn handler, void *handler_context,

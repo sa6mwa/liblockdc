@@ -168,3 +168,29 @@ void lc_pouch_store_meta_res_cleanup(const lc_pouch_allocator *allocator,
   lc_pouch_free(allocator, res->etag);
   memset(res, 0, sizeof(*res));
 }
+
+void lc_pouch_object_info_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_object_info *info) {
+  if (info == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, info->id);
+  lc_pouch_free(allocator, info->name);
+  lc_pouch_free(allocator, info->plaintext_sha256);
+  lc_pouch_free(allocator, info->content_type);
+  memset(info, 0, sizeof(*info));
+}
+
+void lc_pouch_object_list_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_object_list *list) {
+  size_t index;
+
+  if (list == NULL) {
+    return;
+  }
+  for (index = 0U; index < list->count; ++index) {
+    lc_pouch_object_info_cleanup(allocator, &list->items[index]);
+  }
+  lc_pouch_free(allocator, list->items);
+  memset(list, 0, sizeof(*list));
+}

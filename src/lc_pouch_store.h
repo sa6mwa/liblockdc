@@ -61,6 +61,34 @@ typedef struct lc_pouch_store_meta_res {
   long version;
 } lc_pouch_store_meta_res;
 
+typedef struct lc_pouch_object_info {
+  char *id;
+  char *name;
+  long size;
+  char *plaintext_sha256;
+  char *content_type;
+  long created_at_unix;
+  long updated_at_unix;
+} lc_pouch_object_info;
+
+typedef struct lc_pouch_object_list {
+  lc_pouch_object_info *items;
+  size_t count;
+} lc_pouch_object_list;
+
+typedef struct lc_pouch_put_object_opts {
+  const char *name;
+  const char *content_type;
+  long max_bytes;
+  int has_max_bytes;
+  int prevent_overwrite;
+} lc_pouch_put_object_opts;
+
+typedef struct lc_pouch_object_selector {
+  const char *id;
+  const char *name;
+} lc_pouch_object_selector;
+
 struct lc_pouch_store {
   void *impl;
   int (*load_meta)(lc_pouch_store *self, const char *namespace_name,
@@ -82,6 +110,24 @@ struct lc_pouch_store {
   int (*remove_state)(lc_pouch_store *self, const char *namespace_name,
                       const char *key, const char *expected_etag,
                       lc_error *error);
+  int (*put_object)(lc_pouch_store *self, const char *namespace_name,
+                    const char *key, lc_source *body,
+                    const lc_pouch_put_object_opts *opts,
+                    lc_pouch_object_info *out, lc_error *error);
+  int (*list_objects)(lc_pouch_store *self, const char *namespace_name,
+                      const char *key, lc_pouch_object_list *out,
+                      lc_error *error);
+  int (*get_object)(lc_pouch_store *self, const char *namespace_name,
+                    const char *key, const lc_pouch_object_selector *selector,
+                    lc_source **body, lc_pouch_object_info *out,
+                    lc_error *error);
+  int (*delete_object)(lc_pouch_store *self, const char *namespace_name,
+                       const char *key,
+                       const lc_pouch_object_selector *selector, int *deleted,
+                       lc_error *error);
+  int (*delete_all_objects)(lc_pouch_store *self, const char *namespace_name,
+                            const char *key, int *deleted_count,
+                            lc_error *error);
   int (*close)(lc_pouch_store *self, lc_error *error);
   int (*abort)(lc_pouch_store *self, lc_error *error);
 };
@@ -108,6 +154,10 @@ void lc_pouch_meta_record_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_meta_record *record);
 void lc_pouch_store_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                      lc_pouch_store_meta_res *res);
+void lc_pouch_object_info_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_object_info *info);
+void lc_pouch_object_list_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_object_list *list);
 
 int lc_pouch_disk_open(const char *root_path,
                        const lc_pouch_allocator *allocator,

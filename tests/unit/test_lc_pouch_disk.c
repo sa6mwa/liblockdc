@@ -406,12 +406,127 @@ static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_info first;
+  lc_pouch_object_info fetched;
+  lc_pouch_object_list list;
+  lc_pouch_object_selector selector;
+  lc_error error;
+  char *text;
+  int deleted;
+  int deleted_count;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "objects");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&first, 0, sizeof(first));
+  memset(&fetched, 0, sizeof(fetched));
+  memset(&list, 0, sizeof(list));
+  memset(&selector, 0, sizeof(selector));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.name = "result.txt";
+  opts.content_type = "text/plain";
+  opts.prevent_overwrite = 1;
+  opts.has_max_bytes = 1;
+  opts.max_bytes = 32L;
+  source = source_from_text("payload-one");
+  rc = store->put_object(store, "default", "lease-key", source, &opts, &first,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first.id);
+  assert_string_equal(first.name, "result.txt");
+  assert_string_equal(first.content_type, "text/plain");
+  assert_int_equal(first.size, 11L);
+
+  source = source_from_text("payload-two");
+  rc = store->put_object(store, "default", "lease-key", source, &opts, &fetched,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  lc_error_cleanup(&error);
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+
+  rc = store->list_objects(store, "default", "lease-key", &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_string_equal(list.items[0].id, first.id);
+  assert_string_equal(list.items[0].name, "result.txt");
+  lc_pouch_object_list_cleanup(&allocator, &list);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  selector.name = "result.txt";
+  rc = store->get_object(store, "default", "lease-key", &selector, &read_body,
+                         &fetched, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(fetched.id, first.id);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "payload-one");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+
+  rc = store->delete_object(store, "default", "lease-key", &selector, &deleted,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(deleted);
+  rc = store->delete_object(store, "default", "lease-key", &selector, &deleted,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(deleted);
+
+  rc = store->list_objects(store, "default", "lease-key", &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 0U);
+
+  opts.prevent_overwrite = 0;
+  source = source_from_text("payload-two");
+  rc = store->put_object(store, "default", "lease-key", source, &opts, &fetched,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+  rc = store->delete_all_objects(store, "default", "lease-key", &deleted_count,
+                                 &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted_count, 1);
+
+  lc_pouch_object_info_cleanup(&allocator, &first);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_replay_truncates_trailing_partial_record),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
+      cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

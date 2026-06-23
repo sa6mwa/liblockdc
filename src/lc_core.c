@@ -1272,6 +1272,12 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.remove = lc_pouch_client_remove_method;
     client->pub.keepalive = lc_pouch_client_keepalive_method;
     client->pub.release = lc_pouch_client_release_method;
+    client->pub.attach = lc_pouch_client_attach_method;
+    client->pub.list_attachments = lc_pouch_client_list_attachments_method;
+    client->pub.get_attachment = lc_pouch_client_get_attachment_method;
+    client->pub.delete_attachment = lc_pouch_client_delete_attachment_method;
+    client->pub.delete_all_attachments =
+        lc_pouch_client_delete_all_attachments_method;
   }
   client->pub.default_namespace = client->default_namespace;
   *out = &client->pub;

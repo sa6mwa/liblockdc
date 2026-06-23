@@ -98,12 +98,20 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   lc_describe_res describe_res;
   lc_keepalive_req keepalive_req;
   lc_metadata_req metadata_req;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list attachment_list;
+  lc_attachment_get_op get_attachment_req;
+  lc_attachment_get_res get_attachment_res;
+  lc_attachment_selector attachment_selector;
   lc_remove_req remove_req;
   lc_release_req release_req;
   lc_source *source;
   lc_sink *sink;
   lc_error error;
   char *text;
+  int deleted;
   int rc;
 
   (void)state;
@@ -113,6 +121,9 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   memset(&error, 0, sizeof(error));
   memset(&get_res, 0, sizeof(get_res));
   memset(&describe_res, 0, sizeof(describe_res));
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachment_list, 0, sizeof(attachment_list));
+  memset(&get_attachment_res, 0, sizeof(get_attachment_res));
   client = open_pouch_client(endpoint);
 
   lc_acquire_req_init(&acquire);
@@ -177,7 +188,55 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(lease->lease_expires_at_unix > 0L);
 
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "result.txt";
+  attach_req.content_type = "text/plain";
+  attach_req.prevent_overwrite = 1;
+  attach_req.has_max_bytes = 1;
+  attach_req.max_bytes = 64L;
+  source = source_from_text("attachment-body");
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 2L);
+  assert_int_equal(attach_res.version, lease->version);
+  assert_non_null(attach_res.attachment.id);
+  assert_string_equal(attach_res.attachment.name, "result.txt");
+  assert_string_equal(attach_res.attachment.content_type, "text/plain");
+  assert_int_equal(attach_res.attachment.size, 15L);
+
   second_client = open_pouch_client(endpoint);
+  lc_attachment_list_req_init(&list_req);
+  list_req.lease.namespace_name = lease->namespace_name;
+  list_req.lease.key = lease->key;
+  list_req.lease.lease_id = lease->lease_id;
+  list_req.lease.txn_id = lease->txn_id;
+  list_req.lease.fencing_token = lease->fencing_token;
+  rc = second_client->list_attachments(second_client, &list_req,
+                                       &attachment_list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(attachment_list.count, 1U);
+  assert_string_equal(attachment_list.items[0].id, attach_res.attachment.id);
+  assert_string_equal(attachment_list.items[0].name, "result.txt");
+  lc_attachment_list_cleanup(&attachment_list);
+
+  lc_attachment_get_op_init(&get_attachment_req);
+  get_attachment_req.lease = list_req.lease;
+  get_attachment_req.selector.name = "result.txt";
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = second_client->get_attachment(second_client, &get_attachment_req, sink,
+                                     &get_attachment_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(get_attachment_res.attachment.id,
+                      attach_res.attachment.id);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "attachment-body");
+  free(text);
+  lc_sink_close(sink);
+  lc_attachment_get_res_cleanup(&get_attachment_res);
+
   sink = NULL;
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -190,16 +249,25 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   lc_get_res_cleanup(&get_res);
   second_client->close(second_client);
 
+  lc_attachment_selector_init(&attachment_selector);
+  attachment_selector.name = "result.txt";
+  rc = lease->delete_attachment(lease, &attachment_selector, &deleted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(deleted);
+  assert_int_equal(lease->version, 3L);
+
   lc_remove_req_init(&remove_req);
   remove_req.if_state_etag = lease->state_etag;
   rc = lease->remove(lease, &remove_req, &error);
   assert_int_equal(rc, LC_OK);
   assert_null(lease->state_etag);
+  assert_int_equal(lease->version, 4L);
 
   lc_release_req_init(&release_req);
   rc = lease->release(lease, &release_req, &error);
   assert_int_equal(rc, LC_OK);
   client->close(client);
+  lc_attach_res_cleanup(&attach_res);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
