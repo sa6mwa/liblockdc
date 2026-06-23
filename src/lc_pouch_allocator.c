@@ -135,3 +135,36 @@ void lc_pouch_put_state_res_cleanup(const lc_pouch_allocator *allocator,
   lc_pouch_free(allocator, res->new_state_etag);
   memset(res, 0, sizeof(*res));
 }
+
+void lc_pouch_meta_cleanup(const lc_pouch_allocator *allocator,
+                           lc_pouch_meta *meta) {
+  if (meta == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, meta->owner);
+  lc_pouch_free(allocator, meta->lease_id);
+  lc_pouch_free(allocator, meta->txn_id);
+  lc_pouch_free(allocator, meta->state_etag);
+  memset(meta, 0, sizeof(*meta));
+}
+
+void lc_pouch_meta_record_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_meta_record *record) {
+  if (record == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, record->namespace_name);
+  lc_pouch_free(allocator, record->key);
+  lc_pouch_free(allocator, record->etag);
+  lc_pouch_meta_cleanup(allocator, &record->meta);
+  memset(record, 0, sizeof(*record));
+}
+
+void lc_pouch_store_meta_res_cleanup(const lc_pouch_allocator *allocator,
+                                     lc_pouch_store_meta_res *res) {
+  if (res == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, res->etag);
+  memset(res, 0, sizeof(*res));
+}

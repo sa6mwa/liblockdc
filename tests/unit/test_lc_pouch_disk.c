@@ -296,11 +296,122 @@ static void test_replay_truncates_trailing_partial_record(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_store_meta_res updated;
+  lc_pouch_meta_record loaded;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "meta");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&updated, 0, sizeof(updated));
+  memset(&loaded, 0, sizeof(loaded));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-a";
+  meta.txn_id = "txn-a";
+  meta.state_etag = "state-a";
+  meta.version = 7L;
+  meta.lease_expires_at_unix = 1234L;
+  meta.fencing_token = 77L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 1;
+  rc = store->store_meta(store, "default", "lease-key", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(stored.etag);
+  assert_int_equal(stored.version, 7L);
+
+  rc = store->load_meta(store, "default", "lease-key", &loaded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded.found);
+  assert_string_equal(loaded.namespace_name, "default");
+  assert_string_equal(loaded.key, "lease-key");
+  assert_string_equal(loaded.etag, stored.etag);
+  assert_string_equal(loaded.meta.owner, "owner-a");
+  assert_string_equal(loaded.meta.lease_id, "lease-a");
+  assert_string_equal(loaded.meta.txn_id, "txn-a");
+  assert_string_equal(loaded.meta.state_etag, "state-a");
+  assert_int_equal(loaded.meta.version, 7L);
+  assert_int_equal(loaded.meta.lease_expires_at_unix, 1234L);
+  assert_int_equal(loaded.meta.fencing_token, 77L);
+  assert_true(loaded.meta.has_query_hidden);
+  assert_true(loaded.meta.query_hidden);
+  lc_pouch_meta_record_cleanup(&allocator, &loaded);
+
+  meta.owner = "owner-b";
+  meta.lease_id = "lease-b";
+  meta.txn_id = NULL;
+  meta.state_etag = "state-b";
+  meta.version = 8L;
+  meta.lease_expires_at_unix = 2234L;
+  meta.fencing_token = 78L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 0;
+  rc = store->store_meta(store, "default", "lease-key", &meta, "wrong",
+                         &updated, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+
+  rc = store->store_meta(store, "default", "lease-key", &meta, stored.etag,
+                         &updated, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(updated.etag);
+  assert_string_not_equal(updated.etag, stored.etag);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->load_meta(store, "default", "lease-key", &loaded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded.found);
+  assert_string_equal(loaded.etag, updated.etag);
+  assert_string_equal(loaded.meta.owner, "owner-b");
+  assert_null(loaded.meta.txn_id);
+  assert_false(loaded.meta.query_hidden);
+  lc_pouch_meta_record_cleanup(&allocator, &loaded);
+
+  rc = store->delete_meta(store, "default", "lease-key", "wrong", &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  lc_error_cleanup(&error);
+  rc = store->delete_meta(store, "default", "lease-key", updated.etag, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->load_meta(store, "default", "lease-key", &loaded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(loaded.found);
+
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  lc_pouch_store_meta_res_cleanup(&allocator, &updated);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_replay_truncates_trailing_partial_record),
+      cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

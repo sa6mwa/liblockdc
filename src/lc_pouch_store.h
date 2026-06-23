@@ -36,8 +36,42 @@ typedef struct lc_pouch_put_state_res {
   long bytes;
 } lc_pouch_put_state_res;
 
+typedef struct lc_pouch_meta {
+  char *owner;
+  char *lease_id;
+  char *txn_id;
+  char *state_etag;
+  long version;
+  long lease_expires_at_unix;
+  long fencing_token;
+  int has_query_hidden;
+  int query_hidden;
+} lc_pouch_meta;
+
+typedef struct lc_pouch_meta_record {
+  int found;
+  char *namespace_name;
+  char *key;
+  char *etag;
+  lc_pouch_meta meta;
+} lc_pouch_meta_record;
+
+typedef struct lc_pouch_store_meta_res {
+  char *etag;
+  long version;
+} lc_pouch_store_meta_res;
+
 struct lc_pouch_store {
   void *impl;
+  int (*load_meta)(lc_pouch_store *self, const char *namespace_name,
+                   const char *key, lc_pouch_meta_record *out, lc_error *error);
+  int (*store_meta)(lc_pouch_store *self, const char *namespace_name,
+                    const char *key, const lc_pouch_meta *meta,
+                    const char *expected_etag, lc_pouch_store_meta_res *out,
+                    lc_error *error);
+  int (*delete_meta)(lc_pouch_store *self, const char *namespace_name,
+                     const char *key, const char *expected_etag,
+                     lc_error *error);
   int (*read_state)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, lc_source **body, lc_pouch_state_info *out,
                     lc_error *error);
@@ -68,6 +102,12 @@ void lc_pouch_state_info_cleanup(const lc_pouch_allocator *allocator,
                                  lc_pouch_state_info *info);
 void lc_pouch_put_state_res_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_put_state_res *res);
+void lc_pouch_meta_cleanup(const lc_pouch_allocator *allocator,
+                           lc_pouch_meta *meta);
+void lc_pouch_meta_record_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_meta_record *record);
+void lc_pouch_store_meta_res_cleanup(const lc_pouch_allocator *allocator,
+                                     lc_pouch_store_meta_res *res);
 
 int lc_pouch_disk_open(const char *root_path,
                        const lc_pouch_allocator *allocator,
