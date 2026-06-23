@@ -13,6 +13,27 @@ and compaction snapshots. The C implementation must be idiomatic C89 and must
 not copy runtime assumptions from the original implementation language, such as
 managed allocation, channels, or built-in maps.
 
+## Source Design Reading
+
+The server-side disk backend was designed as a storage contract first and a
+filesystem implementation second. The important shape to preserve is not the
+implementation language or goroutine structure; it is the separation between:
+
+- a backend contract for metadata, state, objects, staging, namespace listing,
+  queue wake capabilities, backend identity, close, and crash-style abort;
+- optional capabilities such as metadata-summary scans, queue change feeds,
+  single-writer controls, concurrent-write reporting, exclusive-writer probing,
+  and indexer flush defaults;
+- a disk-log namespace runtime that owns segment replay, marker refresh,
+  pending commit visibility, open-file caches, and compaction;
+- higher lockd semantics implemented above the backend by composing metadata,
+  state, object, staging, transaction, queue, and query primitives.
+
+Pouch should mimic that architecture, not the exact call graph. In C this means
+explicit vtables, explicit ownership, explicit allocator plumbing, and no hidden
+runtime scheduler assumptions. Any background work must have a synchronous test
+entry point so restart and crash windows can be verified without timing games.
+
 ## Goals
 
 - Provide lockd-compatible local storage for state, leases, attachments, queues,
@@ -156,10 +177,18 @@ The interface should also expose optional capability functions or flags:
 - queue change polling hints
 - exclusive writer probing
 - single-writer optimization mode
+- whether the backend is safe for concurrent writers to the same root
 - fsync statistics
 - compaction statistics and explicit compaction trigger
 - index flush/default tuning for LQL
 - retention/janitor sweep for expired metadata and state
+
+The disk implementation should report that it is not a general concurrent
+writer backend, even though it safely serializes same-root mutations with
+per-key advisory locks. That distinction matters for HA and embedded pouch:
+multiple client instances can coordinate through the same store, but the log is
+still append-serialized by key-level critical sections and commit ordering, not
+by a multi-writer database protocol.
 
 ## Performance Model
 
@@ -268,6 +297,11 @@ invalid. Keys should be cleaned to prevent absolute paths, parent traversal, and
 ambiguous separators. Path components used for lock files must be URL/path
 escaped or otherwise encoded so key bytes cannot affect the directory layout.
 
+Namespace listing must filter out files and blank directory names, sort results
+lexically, and treat reserved internal namespaces as implementation-owned.
+Queue/object scans and metadata scans must also return stable lexical order;
+pagination cursors are string keys, not byte offsets into mutable files.
+
 Reserved internal namespaces must be explicit. At minimum, transaction decision
 records need a reserved transaction namespace and backend identity needs a
 reserved backend namespace. Public acquire/update/query paths must reject user
@@ -303,6 +337,20 @@ The record header should stay compact: a 24-byte little-endian header with a
 magic, version, type, lengths, and CRC is sufficient for v1. The C
 implementation must define its own constants in the local pouch code and
 document them beside the encoder/decoder tests.
+
+Record metadata is intentionally type-specific and compact:
+
+- metadata put/delete records carry generation, modified time, and an opaque
+  metadata ETag for puts;
+- state put/link records carry generation, modified time, plaintext size,
+  cipher size, state ETag, and descriptor bytes;
+- state delete records carry generation and modified time;
+- object put records carry generation, modified time, payload size, object
+  ETag, content type, and descriptor bytes;
+- object delete records carry generation and modified time.
+
+The C encoder must reject malformed descriptor/content-type lengths before
+writing. The decoder must reject truncated metadata for every record type.
 
 Header lengths are 32-bit fields in the disk-log format. Pouch v1 should treat
 records whose key, metadata, or payload would overflow those fields as an
@@ -418,8 +466,20 @@ if no marker changed, a reader can often skip segment scanning. The marker
 mechanism must tolerate filesystems with coarse mtimes by also considering file
 size or periodic full scans.
 
+The marker payload should intentionally alternate or otherwise change size when
+mtime granularity is unreliable. Marker snapshots must ignore the current
+writer's own marker and compare other writers by name, size, and modification
+time. A full directory scan is required when the marker directory mtime advances
+or after a configured scan interval elapses.
+
 Single-writer mode may skip marker checks for the owning process, but shared
 roots must default to safe refresh behavior.
+
+On known NFS-style mounts, the backend should prefer close-after-commit or an
+equivalent conservative mode so readers on other clients see sealed data
+promptly. Queue filesystem watchers are an optional optimization and must be
+reported as disabled or polling-only on filesystems where watch correctness is
+unknown.
 
 Refresh must also handle history written by older store versions or interrupted
 processes:
@@ -565,6 +625,11 @@ Segment names must contain a writer id and monotonically increasing per-writer
 sequence so records from multiple writers sort deterministically. Snapshot names
 must be unique and must not collide with segment names.
 
+An opened segment should be recorded in the manifest when possible, but replay
+must not depend on that manifest entry to find valid history. A missing manifest
+or legacy manifest can be repaired by scanning segment files. The manifest is a
+compact lifecycle index, not the only source of truth for committed records.
+
 ## Compaction
 
 Compaction creates a snapshot segment containing the current live records from
@@ -702,6 +767,10 @@ slower resilient polling interval should be tunable. Filesystem notification, if
 enabled and supported, is only a wake optimization and must be disabled on
 filesystems where it is unreliable.
 
+The queue wake API must expose status, not just behavior. A caller should be
+able to learn whether queue wake mode is polling or filesystem notification and
+why. Pouch can initially expose this only internally for diagnostics and tests.
+
 Queue delivery invariants:
 
 - only one competing consumer may claim a visible message;
@@ -815,6 +884,7 @@ Unit tests:
 
 - record encode/decode round trips
 - truncated/corrupt record rejection
+- decode rejection for each metadata variant when payload bytes are truncated
 - payload CRC mismatch handling
 - metadata generation replay ordering
 - CAS success/failure
@@ -824,6 +894,16 @@ Unit tests:
 - marker snapshot change detection
 - sorted scan pagination
 - allocator failure paths
+- pending commit application order when commit groups complete out of append
+  order
+- pending maps track only the latest pending record per key and are cleared on
+  success or failure
+- marker snapshot change detection when directory mtime is unchanged but marker
+  size or marker mtime changes
+- read-file cache eviction does not close files with active readers
+- lock-file cache eviction does not unlock or close active locks
+- state-link payload resolution validates the referenced key and payload span
+- no-sync epoch prevents segment sealing before a later sync boundary catches up
 
 Integration tests:
 
@@ -842,16 +922,40 @@ Integration tests:
 - multi-key staging locks do not deadlock on lock-stripe collisions
 - transaction commit/rollback replays after restart and across namespaces
 - expired pending transactions roll back
+- transaction replay wakes queue and query observers after restart in both
+  polling and watcher modes
 - query-hidden metadata is excluded from scans
 - query pagination, namespace isolation, public-read results, and streamed
   document responses work against disk summaries
+- query flush-wait and refresh-wait contracts observe committed summary rows
+  without full payload reads
+- query index rebuild/upgrade handles existing disk state
+- large-namespace low-match queries do not require loading every payload
 - remove semantics: empty remove, remove version bump, keepalive after remove,
   stale remove/update CAS failures, remove then recreate
 - queue polling: ack removal, nack redelivery, visibility timeout handoff,
   multi-consumer contention, failover dequeue/ack, subscribe with state, and
   start-consumer auto-ack/state-save/failure paths
+- queue high fan-in/fan-out has no duplicate acked delivery
+- queue transaction decision commit/rollback, stateful commit/rollback, mixed
+  key commit/rollback, fanout across nodes, and replay after restart
+- queue idle enqueue wakes dispatch without a continuous polling loop
 - exclusive writer marker: close removes marker, abort preserves marker until
   TTL expiry, heartbeat payload overrides misleading future mtimes
+- HA mode expectations: single mode does not create HA lease metadata, auto mode
+  promotes to failover when a peer exists, single mode fences auto peers, and a
+  stale aborted single-writer marker eventually lets auto mode activate
+- compaction restart matrix: snapshot plus tail replay, sealed history after
+  graceful restart, sealed history after crash-style restart, manifestless
+  legacy history, and legacy open-only manifest upgrade
+- compaction generations: disabled compaction creates no snapshot,
+  below-threshold compaction skips, second-generation snapshots obsolete prior
+  snapshots only when no live link protects them, and background compaction
+  preserves foreground reads
+- staged promotion preserves small and large encrypted payloads and cleans the
+  staging key
+- lock-state multi-key acquisition cannot deadlock when two logical keys collide
+  on the same lock stripe
 
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a
