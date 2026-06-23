@@ -212,6 +212,24 @@ static void set_first_log_match_record_version(const char *root,
   close(fd);
 }
 
+static void truncate_log_after_first_record(const char *root) {
+  char log_path[512];
+  unsigned char header[TEST_POUCH_HEADER_SIZE];
+  unsigned long payload_len;
+  off_t truncate_at;
+  int fd;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  fd = open(log_path, O_RDWR);
+  assert_true(fd >= 0);
+  assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
+  assert_memory_equal(header, "LCP1", 4U);
+  payload_len = test_get_u64(header + 44);
+  truncate_at = (off_t)(TEST_POUCH_HEADER_SIZE + payload_len);
+  assert_int_equal(ftruncate(fd, truncate_at), 0);
+  close(fd);
+}
+
 typedef struct scan_capture {
   char keys[8][64];
   long versions[8];
@@ -752,6 +770,67 @@ static void test_replay_truncates_trailing_partial_record(void **state) {
   lc_source_close(read_body);
   lc_pouch_state_info_cleanup(&allocator, &info);
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_replay_rebuilds_indexes_after_external_truncation(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res first;
+  lc_pouch_put_state_res second;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "replay-reset");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("durable-head");
+  rc = store->write_state(store, "default", "reset-key", source, NULL, &first,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("truncated-head");
+  rc = store->write_state(store, "default", "reset-key", source, NULL, &second,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(second.new_version, first.new_version + 1L);
+
+  truncate_log_after_first_record(root);
+
+  rc = store->read_state(store, "default", "reset-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_int_equal(info.version, first.new_version);
+  assert_string_equal(info.etag, first.new_state_etag);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "durable-head");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+  lc_pouch_put_state_res_cleanup(&allocator, &first);
+  lc_pouch_put_state_res_cleanup(&allocator, &second);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -1503,6 +1582,7 @@ int main(void) {
       cmocka_unit_test(test_staged_state_promote_discard_and_reopen),
       cmocka_unit_test(test_staged_state_listing_orders_paginates_and_replays),
       cmocka_unit_test(test_replay_truncates_trailing_partial_record),
+      cmocka_unit_test(test_replay_rebuilds_indexes_after_external_truncation),
       cmocka_unit_test(
           test_replay_stops_at_corrupt_record_and_discards_later_records),
       cmocka_unit_test(test_replay_stops_at_unsupported_record_version),

@@ -917,6 +917,31 @@ lc_pouch_disk_queue_entry_cleanup(lc_pouch_disk_store *store,
   memset(entry, 0, sizeof(*entry));
 }
 
+static void lc_pouch_disk_reset_indexes(lc_pouch_disk_store *store) {
+  size_t index;
+
+  if (store == NULL) {
+    return;
+  }
+  for (index = 0U; index < store->state_entry_count; ++index) {
+    lc_pouch_disk_entry_cleanup(store, &store->state_entries[index]);
+  }
+  store->state_entry_count = 0U;
+  for (index = 0U; index < store->meta_entry_count; ++index) {
+    lc_pouch_disk_meta_entry_cleanup(store, &store->meta_entries[index]);
+  }
+  store->meta_entry_count = 0U;
+  for (index = 0U; index < store->object_entry_count; ++index) {
+    lc_pouch_disk_object_entry_cleanup(store, &store->object_entries[index]);
+  }
+  store->object_entry_count = 0U;
+  for (index = 0U; index < store->queue_entry_count; ++index) {
+    lc_pouch_disk_queue_entry_cleanup(store, &store->queue_entries[index]);
+  }
+  store->queue_entry_count = 0U;
+  store->next_version = 1L;
+}
+
 static int
 lc_pouch_queue_info_from_entry(const lc_pouch_allocator *allocator,
                                lc_pouch_queue_message_info *dst,
@@ -1675,6 +1700,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
   int short_read;
 
   offset = 0UL;
+  lc_pouch_disk_reset_indexes(store);
   if (lseek(store->log_fd, 0, SEEK_SET) < 0) {
     return lc_pouch_set_errno(error, "failed to rewind pouch log");
   }
