@@ -5071,7 +5071,8 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
   for (index = 0U; index < store->queue_entry_count; ++index) {
     entry = &store->queue_entries[index];
     if (!entry->deleted && strcmp(entry->namespace_name, namespace_name) == 0 &&
-        strcmp(entry->queue, queue) == 0 && entry->expires_at_unix > now_unix) {
+        strcmp(entry->queue, queue) == 0 && entry->expires_at_unix > now_unix &&
+        entry->failure_attempts < entry->max_attempts) {
       ++out->pending_candidates;
       if (entry->not_visible_until_unix <= now_unix) {
         out->available += 1;
