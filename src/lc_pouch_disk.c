@@ -4401,6 +4401,8 @@ static int lc_pouch_disk_delete_all_objects(lc_pouch_store *self,
 static int lc_pouch_disk_queue_ref_valid(lc_pouch_disk_queue_entry *entry,
                                          const lc_pouch_queue_ref *ref,
                                          lc_error *error) {
+  long now_unix;
+
   if (entry == NULL || entry->deleted || ref == NULL || ref->lease_id == NULL ||
       entry->lease_id == NULL || strcmp(entry->lease_id, ref->lease_id) != 0 ||
       entry->fencing_token != ref->fencing_token ||
@@ -4409,6 +4411,25 @@ static int lc_pouch_disk_queue_ref_valid(lc_pouch_disk_queue_entry *entry,
     return lc_error_set(error, LC_ERR_SERVER, 409L,
                         "pouch queue message lease is not active", NULL,
                         "queue_lease_not_active", NULL);
+  }
+  now_unix = (long)time(NULL);
+  if (entry->lease_expires_at_unix <= now_unix) {
+    return lc_error_set(error, LC_ERR_SERVER, 409L,
+                        "pouch queue message lease has expired", NULL,
+                        "queue_lease_expired", NULL);
+  }
+  if (entry->txn_id != NULL && ref->txn_id == NULL) {
+    return lc_error_set(error, LC_ERR_SERVER, 400L,
+                        "pouch queue operation requires transaction id for "
+                        "this message lease",
+                        NULL, "missing_txn", NULL);
+  }
+  if (entry->txn_id != NULL && ref->txn_id != NULL &&
+      strcmp(entry->txn_id, ref->txn_id) != 0) {
+    return lc_error_set(error, LC_ERR_SERVER, 409L,
+                        "pouch queue transaction id does not match active "
+                        "message lease",
+                        NULL, "txn_mismatch", NULL);
   }
   return LC_OK;
 }
