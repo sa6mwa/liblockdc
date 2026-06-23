@@ -15,6 +15,7 @@
 
 #define LC_POUCH_LOG_MAGIC "LCP1"
 #define LC_POUCH_HEADER_SIZE 64U
+#define LC_POUCH_RECORD_VERSION 1U
 #define LC_POUCH_RECORD_STATE_PUT 1U
 #define LC_POUCH_RECORD_STATE_REMOVE 2U
 #define LC_POUCH_RECORD_META_PUT 3U
@@ -1618,6 +1619,7 @@ static int lc_pouch_disk_append_record(
   lc_pouch_put_u64(header + 28, (unsigned long)body_length);
   lc_pouch_put_u64(header + 36, (unsigned long)version);
   lc_pouch_put_u64(header + 44, payload_len);
+  lc_pouch_put_u32(header + 56, LC_POUCH_RECORD_VERSION);
 
   crc = 0xffffffffUL;
   crc = lc_pouch_crc32_update(crc, (const unsigned char *)namespace_name,
@@ -1668,6 +1670,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
   unsigned long payload_len;
   unsigned long expected_crc;
   unsigned long actual_crc;
+  unsigned long record_version;
   unsigned long offset;
   int short_read;
 
@@ -1696,7 +1699,9 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
     version = lc_pouch_get_u64(header + 36);
     payload_len = lc_pouch_get_u64(header + 44);
     expected_crc = lc_pouch_get_u32(header + 52);
+    record_version = lc_pouch_get_u32(header + 56);
     if (header_size != LC_POUCH_HEADER_SIZE ||
+        (record_version != 0UL && record_version != LC_POUCH_RECORD_VERSION) ||
         payload_len != ns_len + key_len + ct_len + etag_len + body_len ||
         ns_len == 0UL || key_len == 0UL ||
         (type != LC_POUCH_RECORD_STATE_PUT &&
