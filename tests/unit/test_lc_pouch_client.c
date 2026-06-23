@@ -728,6 +728,110 @@ static void test_pouch_endpoint_remove_without_state_is_noop(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_release_preserves_state_for_reacquire(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *first_lease;
+  lc_lease *second_lease;
+  lc_acquire_req acquire_req;
+  lc_update_opts update_opts;
+  lc_metadata_req metadata_req;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  char *first_etag;
+  long first_version;
+  long first_fencing_token;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "release-reacquire");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client(endpoint);
+  first_lease = NULL;
+  second_lease = NULL;
+  first_etag = NULL;
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "persisted";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire_req, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first_lease);
+  assert_int_equal(first_lease->fencing_token, 1L);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"released\":true}");
+  rc = first_lease->update(first_lease, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(first_lease->version, 1L);
+  assert_non_null(first_lease->state_etag);
+
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  metadata_req.has_if_version = 1;
+  metadata_req.if_version = first_lease->version;
+  rc = first_lease->metadata(first_lease, &metadata_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(first_lease->query_hidden);
+
+  first_etag = strdup(first_lease->state_etag);
+  assert_non_null(first_etag);
+  first_version = first_lease->version;
+  first_fencing_token = first_lease->fencing_token;
+
+  lc_release_req_init(&release_req);
+  rc = first_lease->release(first_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  first_lease = NULL;
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "persisted";
+  acquire_req.owner = "owner-b";
+  acquire_req.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire_req, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_lease);
+  assert_string_equal(second_lease->state_etag, first_etag);
+  assert_int_equal(second_lease->version, first_version);
+  assert_int_equal(second_lease->fencing_token, first_fencing_token + 1L);
+  assert_true(second_lease->has_query_hidden);
+  assert_true(second_lease->query_hidden);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = second_lease->get(second_lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.etag, first_etag);
+  assert_int_equal(get_res.version, first_version);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "{\"released\":true}");
+  free(text);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+
+  rc = second_lease->release(second_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  free(first_etag);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_lease_load_respects_json_limit(void **state) {
   char root[256];
   char endpoint[320];
@@ -1468,6 +1572,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
       cmocka_unit_test(test_pouch_endpoint_remove_without_state_is_noop),
+      cmocka_unit_test(
+          test_pouch_endpoint_release_preserves_state_for_reacquire),
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(

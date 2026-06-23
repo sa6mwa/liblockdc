@@ -723,7 +723,11 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
   ((lc_lease_handle *)lease)->lease_expires_at_unix =
       meta.lease_expires_at_unix;
+  ((lc_lease_handle *)lease)->has_query_hidden = meta.has_query_hidden;
+  ((lc_lease_handle *)lease)->query_hidden = meta.query_hidden;
   lease->lease_expires_at_unix = meta.lease_expires_at_unix;
+  lease->has_query_hidden = meta.has_query_hidden;
+  lease->query_hidden = meta.query_hidden;
   lc_pouch_install_lease_methods(lease);
   *out = lease;
   lc_pouch_store_meta_res_cleanup(allocator, &stored);
@@ -1150,7 +1154,9 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                                    lc_release_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_meta_record record;
+  lc_pouch_store_meta_res stored;
   lc_pouch_allocator *allocator;
+  lc_pouch_meta next_meta;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -1162,16 +1168,23 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   allocator = &client->pouch_allocator;
   memset(out, 0, sizeof(*out));
   memset(&record, 0, sizeof(record));
+  memset(&stored, 0, sizeof(stored));
   rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = client->pouch_store->delete_meta(client->pouch_store,
-                                        record.namespace_name, req->lease.key,
-                                        record.etag, error);
+  next_meta = record.meta;
+  next_meta.owner = NULL;
+  next_meta.lease_id = NULL;
+  next_meta.txn_id = NULL;
+  next_meta.lease_expires_at_unix = 0L;
+  rc = client->pouch_store->store_meta(
+      client->pouch_store, record.namespace_name, req->lease.key, &next_meta,
+      record.etag, &stored, error);
   if (rc == LC_OK) {
     out->released = 1;
   }
+  lc_pouch_store_meta_res_cleanup(allocator, &stored);
   lc_pouch_meta_record_cleanup(allocator, &record);
   return rc;
 }
