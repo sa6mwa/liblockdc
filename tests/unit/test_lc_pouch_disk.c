@@ -28,6 +28,8 @@ typedef struct tracked_allocator {
   size_t malloc_calls;
   size_t realloc_calls;
   size_t free_calls;
+  size_t max_malloc_size;
+  size_t max_realloc_size;
 } tracked_allocator;
 
 typedef struct counting_source {
@@ -41,6 +43,9 @@ static void *tracked_malloc(void *context, size_t size) {
 
   tracked = (tracked_allocator *)context;
   tracked->malloc_calls++;
+  if (size > tracked->max_malloc_size) {
+    tracked->max_malloc_size = size;
+  }
   return malloc(size);
 }
 
@@ -49,6 +54,9 @@ static void *tracked_realloc(void *context, void *ptr, size_t size) {
 
   tracked = (tracked_allocator *)context;
   tracked->realloc_calls++;
+  if (size > tracked->max_realloc_size) {
+    tracked->max_realloc_size = size;
+  }
   return realloc(ptr, size);
 }
 
@@ -135,6 +143,30 @@ static void counting_source_init(counting_source *source, size_t length) {
   source->pub.reset = counting_source_reset;
   source->pub.close = counting_source_close;
   source->length = length;
+}
+
+static size_t read_source_count_x(lc_source *source) {
+  char buffer[4096];
+  size_t total;
+  size_t got;
+  size_t index;
+  lc_error error;
+
+  memset(&error, 0, sizeof(error));
+  total = 0U;
+  for (;;) {
+    got = source->read(source, buffer, sizeof(buffer), &error);
+    assert_int_equal(error.code, LC_OK);
+    if (got == 0U) {
+      break;
+    }
+    for (index = 0U; index < got; ++index) {
+      assert_int_equal(buffer[index], 'x');
+    }
+    total += got;
+  }
+  lc_error_cleanup(&error);
+  return total;
 }
 
 static char *read_source_text(lc_source *source) {
@@ -1763,6 +1795,82 @@ static void test_object_max_bytes_reads_only_limit_plus_one(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_object_copy_streams_existing_payload_without_large_alloc(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source source;
+  lc_source *read_body;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_copy_object_opts copy_opts;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info original;
+  lc_pouch_object_info copied;
+  lc_pouch_object_info fetched;
+  lc_error error;
+  size_t payload_length;
+  size_t copied_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-copy-stream");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&copy_opts, 0, sizeof(copy_opts));
+  memset(&selector, 0, sizeof(selector));
+  memset(&original, 0, sizeof(original));
+  memset(&copied, 0, sizeof(copied));
+  memset(&fetched, 0, sizeof(fetched));
+  store = NULL;
+  read_body = NULL;
+  payload_length = 128U * 1024U;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  counting_source_init(&source, payload_length);
+  opts.name = "large.bin";
+  opts.content_type = "application/octet-stream";
+  opts.prevent_overwrite = 1;
+  rc = store->put_object(store, "default", "source-key", &source.pub, &opts,
+                         &original, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(original.size, (long)payload_length);
+
+  tracked.max_malloc_size = 0U;
+  tracked.max_realloc_size = 0U;
+  copy_opts.source.name = "large.bin";
+  copy_opts.prevent_overwrite = 1;
+  rc = store->copy_object(store, "default", "source-key", "dest-key",
+                          &copy_opts, &copied, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(copied.id, original.id);
+  assert_int_equal(copied.size, (long)payload_length);
+  assert_true(tracked.max_malloc_size < payload_length);
+  assert_true(tracked.max_realloc_size < payload_length);
+
+  selector.name = "large.bin";
+  rc = store->get_object(store, "default", "dest-key", &selector, &read_body,
+                         &fetched, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(fetched.id, original.id);
+  copied_length = read_source_count_x(read_body);
+  assert_int_equal(copied_length, payload_length);
+  lc_source_close(read_body);
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+  lc_pouch_object_info_cleanup(&allocator, &copied);
+  lc_pouch_object_info_cleanup(&allocator, &original);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_empty_identifiers_are_rejected_before_append(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -2177,6 +2285,8 @@ int main(void) {
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),
+      cmocka_unit_test(
+          test_object_copy_streams_existing_payload_without_large_alloc),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(test_independent_handles_refresh_before_operations),
