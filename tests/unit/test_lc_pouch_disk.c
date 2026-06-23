@@ -564,12 +564,16 @@ static void test_state_read_skips_replay_after_same_handle_write(void **state) {
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
+  tracked.max_malloc_size = 0U;
+  tracked.max_realloc_size = 0U;
   counting_source_init(&source, payload_length);
   opts.content_type = "application/octet-stream";
   rc = store->write_state(store, "default", "large", &source.pub, &opts,
                           &put_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(put_res.bytes, (long)payload_length);
+  assert_true(tracked.max_malloc_size < payload_length);
+  assert_true(tracked.max_realloc_size < payload_length);
 
   tracked.max_malloc_size = 0U;
   tracked.max_realloc_size = 0U;

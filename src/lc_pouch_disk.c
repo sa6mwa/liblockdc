@@ -1220,14 +1220,20 @@ static char *lc_pouch_make_queue_lease_id(lc_pouch_disk_store *store,
   return lc_pouch_strdup(&store->allocator, stack);
 }
 
+static char *lc_pouch_make_etag_from_crc(lc_pouch_disk_store *store,
+                                         long version, unsigned long crc) {
+  char stack[64];
+
+  snprintf(stack, sizeof(stack), "pouch-%ld-%08lx", version, crc);
+  return lc_pouch_strdup(&store->allocator, stack);
+}
+
 static char *lc_pouch_make_etag(lc_pouch_disk_store *store, long version,
                                 const void *body, size_t body_length) {
   unsigned long crc;
-  char stack[64];
 
   crc = lc_pouch_crc32((const unsigned char *)body, body_length);
-  snprintf(stack, sizeof(stack), "pouch-%ld-%08lx", version, crc);
-  return lc_pouch_strdup(&store->allocator, stack);
+  return lc_pouch_make_etag_from_crc(store, version, crc);
 }
 
 static int lc_pouch_check_cas(lc_pouch_disk_state_entry *entry,
@@ -1916,11 +1922,100 @@ static int lc_pouch_disk_write_fd_span(int out_fd, int in_fd,
   return LC_OK;
 }
 
+static int lc_pouch_disk_append_fd_record(
+    lc_pouch_disk_store *store, unsigned long type, const char *namespace_name,
+    const char *key, const char *content_type, const char *etag, long version,
+    int body_fd, unsigned long body_offset, unsigned long body_length,
+    unsigned long *body_offset_out, lc_error *error) {
+  unsigned char header[LC_POUCH_HEADER_SIZE];
+  unsigned long ns_len;
+  unsigned long key_len;
+  unsigned long ct_len;
+  unsigned long etag_len;
+  unsigned long payload_len;
+  unsigned long crc;
+  off_t start;
+  int rc;
+
+  ns_len = (unsigned long)strlen(namespace_name);
+  key_len = (unsigned long)strlen(key);
+  ct_len = content_type != NULL ? (unsigned long)strlen(content_type) : 0UL;
+  etag_len = etag != NULL ? (unsigned long)strlen(etag) : 0UL;
+  if (lc_pouch_disk_add_overflows(ns_len, key_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, ct_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, etag_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, body_length, &payload_len) ||
+      !lc_pouch_disk_validate_record_lengths(ns_len, key_len, ct_len, etag_len,
+                                             body_length, payload_len)) {
+    return lc_pouch_set_invalid(error,
+                                "pouch log record exceeds inline limits");
+  }
+
+  crc = 0xffffffffUL;
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)namespace_name,
+                              (size_t)ns_len);
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)key, (size_t)key_len);
+  if (ct_len > 0UL) {
+    crc = lc_pouch_crc32_update(crc, (const unsigned char *)content_type,
+                                (size_t)ct_len);
+  }
+  if (etag_len > 0UL) {
+    crc = lc_pouch_crc32_update(crc, (const unsigned char *)etag,
+                                (size_t)etag_len);
+  }
+  rc = lc_pouch_disk_crc_fd_span(body_fd, body_offset, body_length, &crc,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  start = lseek(store->log_fd, 0, SEEK_END);
+  if (start < 0) {
+    return lc_pouch_set_errno(error, "failed to seek pouch log");
+  }
+
+  memset(header, 0, sizeof(header));
+  memcpy(header, LC_POUCH_LOG_MAGIC, 4U);
+  lc_pouch_put_u32(header + 4, LC_POUCH_HEADER_SIZE);
+  lc_pouch_put_u32(header + 8, type);
+  lc_pouch_put_u32(header + 12, ns_len);
+  lc_pouch_put_u32(header + 16, key_len);
+  lc_pouch_put_u32(header + 20, ct_len);
+  lc_pouch_put_u32(header + 24, etag_len);
+  lc_pouch_put_u64(header + 28, body_length);
+  lc_pouch_put_u64(header + 36, (unsigned long)version);
+  lc_pouch_put_u64(header + 44, payload_len);
+  lc_pouch_put_u32(header + 52, crc ^ 0xffffffffUL);
+  lc_pouch_put_u32(header + 56, LC_POUCH_RECORD_VERSION);
+
+  if (!lc_pouch_write_all(store->log_fd, header, sizeof(header)) ||
+      !lc_pouch_write_all(store->log_fd, namespace_name, (size_t)ns_len) ||
+      !lc_pouch_write_all(store->log_fd, key, (size_t)key_len) ||
+      (ct_len > 0UL &&
+       !lc_pouch_write_all(store->log_fd, content_type, (size_t)ct_len)) ||
+      (etag_len > 0UL &&
+       !lc_pouch_write_all(store->log_fd, etag, (size_t)etag_len))) {
+    return lc_pouch_set_errno(error, "failed to append pouch log record");
+  }
+  rc = lc_pouch_disk_write_fd_span(store->log_fd, body_fd, body_offset,
+                                   body_length, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (fsync(store->log_fd) != 0) {
+    return lc_pouch_set_errno(error, "failed to fsync pouch log");
+  }
+  *body_offset_out = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
+                     key_len + ct_len + etag_len;
+  store->replayed_log_size = (unsigned long)-1;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_spool_source_to_temp(
     lc_pouch_disk_store *store, lc_source *source, int has_max_bytes,
     size_t max_bytes, int *fd_out, unsigned long *length_out,
     unsigned long *crc_out, lc_error *error) {
-  const char suffix[] = "/put-object-XXXXXX";
+  const char suffix[] = "/payload-XXXXXX";
   unsigned char buffer[8192];
   char *template_path;
   size_t root_len;
@@ -1947,7 +2042,7 @@ static int lc_pouch_disk_spool_source_to_temp(
   fd = mkstemp(template_path);
   if (fd < 0) {
     lc_pouch_free(&store->allocator, template_path);
-    return lc_pouch_set_errno(error, "failed to create pouch temp object");
+    return lc_pouch_set_errno(error, "failed to create pouch temp payload");
   }
   (void)unlink(template_path);
   lc_pouch_free(&store->allocator, template_path);
@@ -1972,7 +2067,7 @@ static int lc_pouch_disk_spool_source_to_temp(
     }
     if ((unsigned long)got > ((unsigned long)-1) - length) {
       close(fd);
-      return lc_pouch_set_invalid(error, "pouch object payload is too large");
+      return lc_pouch_set_invalid(error, "pouch payload is too large");
     }
     if (length + (unsigned long)got > LC_POUCH_MAX_INLINE_BODY_BYTES) {
       close(fd);
@@ -1987,14 +2082,14 @@ static int lc_pouch_disk_spool_source_to_temp(
     }
     if (!lc_pouch_write_all(fd, buffer, got)) {
       close(fd);
-      return lc_pouch_set_errno(error, "failed to write pouch temp object");
+      return lc_pouch_set_errno(error, "failed to write pouch temp payload");
     }
     crc = lc_pouch_crc32_update(crc, buffer, got);
     length += (unsigned long)got;
   }
   if (lseek(fd, 0, SEEK_SET) < 0) {
     close(fd);
-    return lc_pouch_set_errno(error, "failed to rewind pouch temp object");
+    return lc_pouch_set_errno(error, "failed to rewind pouch temp payload");
   }
   *fd_out = fd;
   *length_out = length;
@@ -2628,13 +2723,14 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
                                      lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_state_entry *entry;
-  unsigned char *payload;
-  size_t payload_length;
+  unsigned long payload_length;
+  unsigned long payload_crc;
   char *etag;
   const char *content_type;
   unsigned long body_offset;
   long version;
   int index;
+  int temp_fd;
   int rc;
 
   if (self == NULL || namespace_name == NULL || key == NULL || body == NULL ||
@@ -2650,6 +2746,7 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
+  body_offset = 0UL;
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
     return rc;
@@ -2663,31 +2760,31 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
     lc_pouch_disk_unlock(store, error);
     return rc;
   }
-  payload = NULL;
-  payload_length = 0U;
-  rc = lc_pouch_read_source_all(&store->allocator, body, &payload,
-                                &payload_length, error);
+  temp_fd = -1;
+  rc = lc_pouch_disk_spool_source_to_temp(
+      store, body, 0, 0U, &temp_fd, &payload_length, &payload_crc, error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
     return rc;
   }
   version = store->next_version++;
-  etag = lc_pouch_make_etag(store, version, payload, payload_length);
+  etag = lc_pouch_make_etag_from_crc(store, version, payload_crc);
   if (etag == NULL) {
-    lc_pouch_free(&store->allocator, payload);
+    close(temp_fd);
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch state etag");
   }
   content_type = opts != NULL && opts->content_type != NULL
                      ? opts->content_type
                      : "application/json";
-  rc = lc_pouch_disk_append_record(
+  rc = lc_pouch_disk_append_fd_record(
       store, LC_POUCH_RECORD_STATE_PUT, namespace_name, key, content_type, etag,
-      version, payload, payload_length, &body_offset, error);
+      version, temp_fd, 0UL, payload_length, &body_offset, error);
+  close(temp_fd);
   if (rc == LC_OK &&
       !lc_pouch_disk_upsert_entry(store, namespace_name, key, content_type,
                                   etag, version, body_offset,
-                                  (unsigned long)payload_length, 0)) {
+                                  payload_length, 0)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch state index");
   }
   if (rc == LC_OK) {
@@ -2702,7 +2799,6 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   lc_pouch_free(&store->allocator, etag);
-  lc_pouch_free(&store->allocator, payload);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
