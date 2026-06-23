@@ -2038,6 +2038,8 @@ static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
+  tracked.max_malloc_size = 0U;
+  tracked.max_realloc_size = 0U;
   counting_source_init(&source, payload_length);
   enqueue_opts.content_type = "application/octet-stream";
   enqueue_opts.visibility_timeout_seconds = 30L;
@@ -2047,6 +2049,8 @@ static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
                               &enqueue_opts, &enqueued, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(enqueued.payload_bytes, (long)payload_length);
+  assert_true(tracked.max_malloc_size < payload_length);
+  assert_true(tracked.max_realloc_size < payload_length);
 
   tracked.max_malloc_size = 0U;
   tracked.max_realloc_size = 0U;

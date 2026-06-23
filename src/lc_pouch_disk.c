@@ -3966,6 +3966,167 @@ static int lc_pouch_disk_append_queue_entry(lc_pouch_disk_store *store,
   return rc;
 }
 
+static int lc_pouch_disk_append_queue_put_fd_entry(
+    lc_pouch_disk_store *store, lc_pouch_disk_queue_entry *entry,
+    int payload_fd, unsigned long payload_offset, unsigned long payload_length,
+    lc_error *error) {
+  unsigned char header[LC_POUCH_HEADER_SIZE];
+  unsigned char queue_meta[LC_POUCH_QUEUE_META_SIZE];
+  const char *content_type;
+  const char *lease_id;
+  const char *txn_id;
+  unsigned long ns_len;
+  unsigned long queue_len;
+  unsigned long message_id_len;
+  unsigned long meta_etag_len;
+  unsigned long content_type_len;
+  unsigned long lease_id_len;
+  unsigned long txn_id_len;
+  unsigned long body_length;
+  unsigned long payload_len;
+  unsigned long crc;
+  unsigned long body_offset;
+  off_t start;
+  int rc;
+
+  content_type = entry->payload_content_type != NULL
+                     ? entry->payload_content_type
+                     : "application/octet-stream";
+  lease_id = entry->lease_id != NULL ? entry->lease_id : "";
+  txn_id = entry->txn_id != NULL ? entry->txn_id : "";
+  ns_len = (unsigned long)strlen(entry->namespace_name);
+  queue_len = (unsigned long)strlen(entry->queue);
+  message_id_len = (unsigned long)strlen(entry->message_id);
+  meta_etag_len =
+      entry->meta_etag != NULL ? (unsigned long)strlen(entry->meta_etag) : 0UL;
+  content_type_len = (unsigned long)strlen(content_type);
+  lease_id_len = (unsigned long)strlen(lease_id);
+  txn_id_len = (unsigned long)strlen(txn_id);
+
+  if (lc_pouch_disk_add_overflows(LC_POUCH_QUEUE_META_SIZE, content_type_len,
+                                  &body_length) ||
+      lc_pouch_disk_add_overflows(body_length, lease_id_len, &body_length) ||
+      lc_pouch_disk_add_overflows(body_length, txn_id_len, &body_length) ||
+      lc_pouch_disk_add_overflows(body_length, payload_length, &body_length) ||
+      lc_pouch_disk_add_overflows(ns_len, queue_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, message_id_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, meta_etag_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, body_length, &payload_len) ||
+      !lc_pouch_disk_validate_record_lengths(ns_len, queue_len, message_id_len,
+                                             meta_etag_len, body_length,
+                                             payload_len)) {
+    return lc_pouch_set_invalid(error,
+                                "pouch log record exceeds inline limits");
+  }
+
+  lc_pouch_put_u32(queue_meta, entry->deleted ? 1UL : 0UL);
+  lc_pouch_put_u32(queue_meta + 4, (unsigned long)entry->attempts);
+  lc_pouch_put_u32(queue_meta + 8, (unsigned long)entry->max_attempts);
+  lc_pouch_put_u32(queue_meta + 12, (unsigned long)entry->failure_attempts);
+  lc_pouch_put_u64(queue_meta + 16, (unsigned long)entry->enqueued_at_unix);
+  lc_pouch_put_u64(queue_meta + 24,
+                   (unsigned long)entry->not_visible_until_unix);
+  lc_pouch_put_u64(queue_meta + 32,
+                   (unsigned long)entry->visibility_timeout_seconds);
+  lc_pouch_put_u64(queue_meta + 40, (unsigned long)entry->expires_at_unix);
+  lc_pouch_put_u64(queue_meta + 48,
+                   (unsigned long)entry->lease_expires_at_unix);
+  lc_pouch_put_u64(queue_meta + 56, payload_length);
+  lc_pouch_put_u64(queue_meta + 64, content_type_len);
+  lc_pouch_put_u64(queue_meta + 72, lease_id_len);
+  lc_pouch_put_u64(queue_meta + 80, txn_id_len);
+
+  crc = 0xffffffffUL;
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)entry->namespace_name,
+                              (size_t)ns_len);
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)entry->queue,
+                              (size_t)queue_len);
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)entry->message_id,
+                              (size_t)message_id_len);
+  if (meta_etag_len > 0UL) {
+    crc = lc_pouch_crc32_update(crc, (const unsigned char *)entry->meta_etag,
+                                (size_t)meta_etag_len);
+  }
+  crc = lc_pouch_crc32_update(crc, queue_meta, sizeof(queue_meta));
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)content_type,
+                              (size_t)content_type_len);
+  if (lease_id_len > 0UL) {
+    crc = lc_pouch_crc32_update(crc, (const unsigned char *)lease_id,
+                                (size_t)lease_id_len);
+  }
+  if (txn_id_len > 0UL) {
+    crc = lc_pouch_crc32_update(crc, (const unsigned char *)txn_id,
+                                (size_t)txn_id_len);
+  }
+  rc = lc_pouch_disk_crc_fd_span(payload_fd, payload_offset, payload_length,
+                                 &crc, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  start = lseek(store->log_fd, 0, SEEK_END);
+  if (start < 0) {
+    return lc_pouch_set_errno(error, "failed to seek pouch log");
+  }
+  memset(header, 0, sizeof(header));
+  memcpy(header, LC_POUCH_LOG_MAGIC, 4U);
+  lc_pouch_put_u32(header + 4, LC_POUCH_HEADER_SIZE);
+  lc_pouch_put_u32(header + 8, LC_POUCH_RECORD_QUEUE_PUT);
+  lc_pouch_put_u32(header + 12, ns_len);
+  lc_pouch_put_u32(header + 16, queue_len);
+  lc_pouch_put_u32(header + 20, message_id_len);
+  lc_pouch_put_u32(header + 24, meta_etag_len);
+  lc_pouch_put_u64(header + 28, body_length);
+  lc_pouch_put_u64(header + 36, (unsigned long)entry->fencing_token);
+  lc_pouch_put_u64(header + 44, payload_len);
+  lc_pouch_put_u32(header + 52, crc ^ 0xffffffffUL);
+  lc_pouch_put_u32(header + 56, LC_POUCH_RECORD_VERSION);
+
+  if (!lc_pouch_write_all(store->log_fd, header, sizeof(header)) ||
+      !lc_pouch_write_all(store->log_fd, entry->namespace_name,
+                          (size_t)ns_len) ||
+      !lc_pouch_write_all(store->log_fd, entry->queue, (size_t)queue_len) ||
+      !lc_pouch_write_all(store->log_fd, entry->message_id,
+                          (size_t)message_id_len) ||
+      (meta_etag_len > 0UL &&
+       !lc_pouch_write_all(store->log_fd, entry->meta_etag,
+                           (size_t)meta_etag_len)) ||
+      !lc_pouch_write_all(store->log_fd, queue_meta, sizeof(queue_meta)) ||
+      !lc_pouch_write_all(store->log_fd, content_type,
+                          (size_t)content_type_len) ||
+      (lease_id_len > 0UL &&
+       !lc_pouch_write_all(store->log_fd, lease_id, (size_t)lease_id_len)) ||
+      (txn_id_len > 0UL &&
+       !lc_pouch_write_all(store->log_fd, txn_id, (size_t)txn_id_len))) {
+    return lc_pouch_set_errno(error, "failed to append pouch queue record");
+  }
+  rc = lc_pouch_disk_write_fd_span(store->log_fd, payload_fd, payload_offset,
+                                   payload_length, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (fsync(store->log_fd) != 0) {
+    return lc_pouch_set_errno(error, "failed to fsync pouch log");
+  }
+  body_offset = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
+                queue_len + message_id_len + meta_etag_len;
+  if (!lc_pouch_disk_upsert_queue_entry(
+          store, entry->namespace_name, entry->queue, entry->message_id,
+          content_type, entry->lease_id, entry->txn_id,
+          entry->meta_etag, entry->attempts, entry->max_attempts,
+          entry->failure_attempts, entry->enqueued_at_unix,
+          entry->not_visible_until_unix, entry->visibility_timeout_seconds,
+          entry->expires_at_unix, entry->lease_expires_at_unix,
+          entry->fencing_token,
+          body_offset + LC_POUCH_QUEUE_META_SIZE + content_type_len +
+              lease_id_len + txn_id_len,
+          payload_length, 1, entry->deleted)) {
+    return lc_pouch_set_nomem(error, "failed to update pouch queue index");
+  }
+  store->replayed_log_size = (unsigned long)-1;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
                                          const char *namespace_name,
                                          const char *queue, lc_source *body,
@@ -3974,9 +4135,10 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
                                          lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_queue_entry entry;
-  unsigned char *payload;
-  size_t payload_length;
+  unsigned long payload_length;
+  unsigned long payload_crc;
   long now_unix;
+  int temp_fd;
   int rc;
 
   if (self == NULL || namespace_name == NULL || queue == NULL || body == NULL ||
@@ -3993,16 +4155,17 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   memset(&entry, 0, sizeof(entry));
-  payload = NULL;
-  payload_length = 0U;
-  rc = lc_pouch_read_source_all(&store->allocator, body, &payload,
-                                &payload_length, error);
+  temp_fd = -1;
+  payload_length = 0UL;
+  payload_crc = 0UL;
+  rc = lc_pouch_disk_spool_source_to_temp(store, body, 0, 0U, &temp_fd,
+                                          &payload_length, &payload_crc, error);
   if (rc != LC_OK) {
     return rc;
   }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
-    lc_pouch_free(&store->allocator, payload);
+    close(temp_fd);
     return rc;
   }
   now_unix = (long)time(NULL);
@@ -4029,18 +4192,17 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
   entry.lease_expires_at_unix = 0L;
   entry.fencing_token = store->next_version++;
   entry.meta_etag =
-      lc_pouch_make_etag(store, entry.fencing_token, payload, payload_length);
-  entry.body_length = (unsigned long)payload_length;
+      lc_pouch_make_etag_from_crc(store, entry.fencing_token, payload_crc);
+  entry.body_length = payload_length;
   if (entry.message_id == NULL || entry.meta_etag == NULL) {
     lc_pouch_free(&store->allocator, entry.message_id);
     lc_pouch_free(&store->allocator, entry.meta_etag);
-    lc_pouch_free(&store->allocator, payload);
+    close(temp_fd);
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch queue ids");
   }
-  rc =
-      lc_pouch_disk_append_queue_entry(store, LC_POUCH_RECORD_QUEUE_PUT, &entry,
-                                       payload, payload_length, 1, error);
+  rc = lc_pouch_disk_append_queue_put_fd_entry(store, &entry, temp_fd, 0UL,
+                                               payload_length, error);
   if (rc == LC_OK) {
     int index;
 
@@ -4057,7 +4219,7 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
   }
   lc_pouch_free(&store->allocator, entry.message_id);
   lc_pouch_free(&store->allocator, entry.meta_etag);
-  lc_pouch_free(&store->allocator, payload);
+  close(temp_fd);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
