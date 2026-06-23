@@ -2075,6 +2075,127 @@ static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
   test_cleanup_root(root);
 }
 
+static void test_replay_streams_large_bodies_without_large_alloc(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source source;
+  lc_source *body;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res state_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_put_object_opts object_opts;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info object_info;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info queue_info;
+  lc_error error;
+  size_t payload_length;
+  size_t read_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "large-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&state_res, 0, sizeof(state_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&object_opts, 0, sizeof(object_opts));
+  memset(&selector, 0, sizeof(selector));
+  memset(&object_info, 0, sizeof(object_info));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&queue_info, 0, sizeof(queue_info));
+  store = NULL;
+  body = NULL;
+  payload_length = 128U * 1024U;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  counting_source_init(&source, payload_length);
+  state_opts.content_type = "application/octet-stream";
+  rc = store->write_state(store, "default", "large-state", &source.pub,
+                          &state_opts, &state_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(state_res.bytes, (long)payload_length);
+
+  counting_source_init(&source, payload_length);
+  object_opts.name = "large.bin";
+  object_opts.content_type = "application/octet-stream";
+  rc = store->put_object(store, "default", "large-objects", &source.pub,
+                         &object_opts, &object_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(object_info.size, (long)payload_length);
+
+  counting_source_init(&source, payload_length);
+  enqueue_opts.content_type = "application/octet-stream";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  rc = store->enqueue_message(store, "default", "jobs", &source.pub,
+                              &enqueue_opts, &queue_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(queue_info.payload_bytes, (long)payload_length);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
+  lc_pouch_queue_message_info_cleanup(&allocator, &queue_info);
+
+  tracked.max_malloc_size = 0U;
+  tracked.max_realloc_size = 0U;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(tracked.max_malloc_size < payload_length);
+  assert_true(tracked.max_realloc_size < payload_length);
+
+  rc = store->read_state(store, "default", "large-state", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, payload_length);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  selector.name = "large.bin";
+  rc = store->get_object(store, "default", "large-objects", &selector, &body,
+                         &object_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(object_info.size, (long)payload_length);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, payload_length);
+  lc_source_close(body);
+  body = NULL;
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &body,
+                              &queue_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(queue_info.payload_bytes, (long)payload_length);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, payload_length);
+  lc_source_close(body);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &queue_info);
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_empty_identifiers_are_rejected_before_append(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -2583,6 +2704,7 @@ int main(void) {
           test_object_copy_streams_existing_payload_without_large_alloc),
       cmocka_unit_test(
           test_queue_dequeue_skips_replay_after_same_handle_enqueue),
+      cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(

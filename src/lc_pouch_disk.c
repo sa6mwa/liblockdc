@@ -2201,6 +2201,479 @@ static int lc_pouch_disk_append_object_copy_record(
   return LC_OK;
 }
 
+static int lc_pouch_disk_replay_read_crc(int fd, void *bytes, size_t count,
+                                         unsigned long *crc, int *short_read,
+                                         lc_error *error) {
+  if (!lc_pouch_read_all(fd, bytes, count, short_read)) {
+    return lc_pouch_set_errno(error, "failed to read pouch log payload");
+  }
+  if (*short_read) {
+    return LC_OK;
+  }
+  if (count > 0U) {
+    *crc = lc_pouch_crc32_update(*crc, (const unsigned char *)bytes, count);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_replay_skip_crc(int fd, unsigned long length,
+                                         unsigned long *crc, int *short_read,
+                                         lc_error *error) {
+  unsigned char buffer[8192];
+  unsigned long remaining;
+  size_t want;
+  int rc;
+
+  remaining = length;
+  while (remaining > 0UL) {
+    want = remaining < (unsigned long)sizeof(buffer) ? (size_t)remaining
+                                                     : sizeof(buffer);
+    rc = lc_pouch_disk_replay_read_crc(fd, buffer, want, crc, short_read,
+                                       error);
+    if (rc != LC_OK || *short_read) {
+      return rc;
+    }
+    remaining -= (unsigned long)want;
+  }
+  return LC_OK;
+}
+
+static char *lc_pouch_disk_replay_read_string(lc_pouch_disk_store *store,
+                                              unsigned long length,
+                                              unsigned long *crc,
+                                              int *short_read,
+                                              lc_error *error) {
+  char *copy;
+  int rc;
+
+  copy = (char *)lc_pouch_alloc(&store->allocator, (size_t)length + 1U);
+  if (copy == NULL) {
+    (void)lc_pouch_set_nomem(error, "failed to allocate replay field");
+    return NULL;
+  }
+  rc = lc_pouch_disk_replay_read_crc(store->log_fd, copy, (size_t)length, crc,
+                                     short_read, error);
+  if (rc != LC_OK || *short_read) {
+    lc_pouch_free(&store->allocator, copy);
+    return NULL;
+  }
+  copy[length] = '\0';
+  return copy;
+}
+
+static void lc_pouch_disk_replay_free_fields(lc_pouch_disk_store *store,
+                                             char *ns_copy, char *key_copy,
+                                             char *ct_copy, char *etag_copy) {
+  lc_pouch_free(&store->allocator, ns_copy);
+  lc_pouch_free(&store->allocator, key_copy);
+  lc_pouch_free(&store->allocator, ct_copy);
+  lc_pouch_free(&store->allocator, etag_copy);
+}
+
+static int lc_pouch_disk_replay_stream_index_record(
+    lc_pouch_disk_store *store, unsigned long type, unsigned long ns_len,
+    unsigned long key_len, unsigned long ct_len, unsigned long etag_len,
+    unsigned long body_len, unsigned long version, unsigned long expected_crc,
+    unsigned long offset, int *stop, lc_error *error) {
+  unsigned char link_body[16];
+  unsigned char object_meta[LC_POUCH_OBJECT_META_SIZE];
+  unsigned char queue_meta[LC_POUCH_QUEUE_META_SIZE];
+  char *ns_copy;
+  char *key_copy;
+  char *ct_copy;
+  char *etag_copy;
+  char *object_ct_copy;
+  char *queue_content_type;
+  char *queue_lease_id;
+  char *queue_txn_id;
+  unsigned long crc;
+  unsigned long indexed_body_offset;
+  unsigned long indexed_body_len;
+  unsigned long created_at;
+  unsigned long updated_at;
+  unsigned long object_ct_len;
+  unsigned long object_body_len;
+  unsigned long queue_payload_len;
+  unsigned long queue_content_type_len;
+  unsigned long queue_lease_id_len;
+  unsigned long queue_txn_id_len;
+  unsigned long queue_needed;
+  unsigned long queue_payload_offset;
+  int queue_deleted;
+  int queue_attempts;
+  int queue_max_attempts;
+  int queue_failure_attempts;
+  long queue_enqueued_at;
+  long queue_not_visible_until;
+  long queue_visibility_timeout;
+  long queue_expires_at;
+  long queue_lease_expires_at;
+  int object_index;
+  int short_read;
+  int rc;
+
+  *stop = 0;
+  ns_copy = NULL;
+  key_copy = NULL;
+  ct_copy = NULL;
+  etag_copy = NULL;
+  object_ct_copy = NULL;
+  queue_content_type = NULL;
+  queue_lease_id = NULL;
+  queue_txn_id = NULL;
+  crc = 0xffffffffUL;
+  short_read = 0;
+
+  ns_copy = lc_pouch_disk_replay_read_string(store, ns_len, &crc, &short_read,
+                                             error);
+  if (ns_copy == NULL) {
+    *stop = short_read;
+    return short_read ? LC_OK
+                      : (error != NULL && error->code != LC_OK ? error->code
+                                                               : LC_ERR_NOMEM);
+  }
+  key_copy = lc_pouch_disk_replay_read_string(store, key_len, &crc,
+                                              &short_read, error);
+  if (key_copy == NULL) {
+    lc_pouch_disk_replay_free_fields(store, ns_copy, NULL, NULL, NULL);
+    *stop = short_read;
+    return short_read ? LC_OK
+                      : (error != NULL && error->code != LC_OK ? error->code
+                                                               : LC_ERR_NOMEM);
+  }
+  if (ct_len > 0UL) {
+    ct_copy = lc_pouch_disk_replay_read_string(store, ct_len, &crc,
+                                               &short_read, error);
+    if (ct_copy == NULL) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, NULL, NULL);
+      *stop = short_read;
+      return short_read ? LC_OK
+                        : (error != NULL && error->code != LC_OK
+                               ? error->code
+                               : LC_ERR_NOMEM);
+    }
+  }
+  if (etag_len > 0UL) {
+    etag_copy = lc_pouch_disk_replay_read_string(store, etag_len, &crc,
+                                                 &short_read, error);
+    if (etag_copy == NULL) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy, NULL);
+      *stop = short_read;
+      return short_read ? LC_OK
+                        : (error != NULL && error->code != LC_OK
+                               ? error->code
+                               : LC_ERR_NOMEM);
+    }
+  }
+
+  indexed_body_offset =
+      offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len + etag_len;
+  indexed_body_len = body_len;
+  if (type == LC_POUCH_RECORD_STATE_PUT ||
+      type == LC_POUCH_RECORD_STATE_REMOVE) {
+    rc = lc_pouch_disk_replay_skip_crc(store->log_fd, body_len, &crc,
+                                       &short_read, error);
+    if (rc != LC_OK || short_read) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return rc;
+    }
+    if ((crc ^ 0xffffffffUL) != expected_crc) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    if (!lc_pouch_disk_upsert_entry(
+            store, ns_copy, key_copy, ct_copy, etag_copy, (long)version,
+            indexed_body_offset, indexed_body_len,
+            type == LC_POUCH_RECORD_STATE_REMOVE)) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      return lc_pouch_set_nomem(error, "failed to index pouch replay record");
+    }
+  } else if (type == LC_POUCH_RECORD_STATE_LINK) {
+    if (body_len != 16UL) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    rc = lc_pouch_disk_replay_read_crc(store->log_fd, link_body,
+                                       sizeof(link_body), &crc, &short_read,
+                                       error);
+    if (rc != LC_OK || short_read) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return rc;
+    }
+    if ((crc ^ 0xffffffffUL) != expected_crc) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    indexed_body_offset = lc_pouch_get_u64(link_body);
+    indexed_body_len = lc_pouch_get_u64(link_body + 8);
+    if (indexed_body_offset > offset ||
+        indexed_body_len > offset - indexed_body_offset) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    if (!lc_pouch_disk_upsert_entry(store, ns_copy, key_copy, ct_copy,
+                                    etag_copy, (long)version,
+                                    indexed_body_offset, indexed_body_len, 0)) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      return lc_pouch_set_nomem(error, "failed to index pouch replay record");
+    }
+  } else if (type == LC_POUCH_RECORD_OBJECT_PUT) {
+    if (ct_copy == NULL || etag_copy == NULL ||
+        body_len < LC_POUCH_OBJECT_META_SIZE) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    rc = lc_pouch_disk_replay_read_crc(store->log_fd, object_meta,
+                                       sizeof(object_meta), &crc, &short_read,
+                                       error);
+    if (rc != LC_OK || short_read) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return rc;
+    }
+    created_at = lc_pouch_get_u64(object_meta);
+    updated_at = lc_pouch_get_u64(object_meta + 8);
+    object_ct_len = lc_pouch_get_u32(object_meta + 16);
+    object_body_len = lc_pouch_get_u64(object_meta + 20);
+    if (object_ct_len > body_len - LC_POUCH_OBJECT_META_SIZE ||
+        object_body_len !=
+            body_len - LC_POUCH_OBJECT_META_SIZE - object_ct_len) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    object_ct_copy = lc_pouch_disk_replay_read_string(
+        store, object_ct_len, &crc, &short_read, error);
+    if (object_ct_copy == NULL) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return short_read ? LC_OK
+                        : (error != NULL && error->code != LC_OK
+                               ? error->code
+                               : LC_ERR_NOMEM);
+    }
+    rc = lc_pouch_disk_replay_skip_crc(store->log_fd, object_body_len, &crc,
+                                       &short_read, error);
+    if (rc != LC_OK || short_read) {
+      lc_pouch_free(&store->allocator, object_ct_copy);
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return rc;
+    }
+    if ((crc ^ 0xffffffffUL) != expected_crc) {
+      lc_pouch_free(&store->allocator, object_ct_copy);
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    if (!lc_pouch_disk_upsert_object_entry(
+            store, ns_copy, key_copy, etag_copy, ct_copy, object_ct_copy,
+            (long)object_body_len, (long)created_at, (long)updated_at,
+            offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
+                etag_len + LC_POUCH_OBJECT_META_SIZE + object_ct_len,
+            object_body_len, 0)) {
+      lc_pouch_free(&store->allocator, object_ct_copy);
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      return lc_pouch_set_nomem(error, "failed to index pouch object replay");
+    }
+    lc_pouch_free(&store->allocator, object_ct_copy);
+  } else if (type == LC_POUCH_RECORD_OBJECT_REMOVE) {
+    rc = lc_pouch_disk_replay_skip_crc(store->log_fd, body_len, &crc,
+                                       &short_read, error);
+    if (rc != LC_OK || short_read) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return rc;
+    }
+    if ((crc ^ 0xffffffffUL) != expected_crc ||
+        (ct_copy == NULL && etag_copy == NULL)) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    if (ct_copy != NULL) {
+      object_index =
+          lc_pouch_disk_find_object_by_name(store, ns_copy, key_copy, ct_copy);
+    } else {
+      lc_pouch_object_selector selector;
+
+      memset(&selector, 0, sizeof(selector));
+      selector.id = etag_copy;
+      object_index = lc_pouch_disk_find_object(store, ns_copy, key_copy,
+                                               &selector);
+    }
+    if (object_index >= 0) {
+      store->object_entries[object_index].deleted = 1;
+    }
+  } else if (type == LC_POUCH_RECORD_QUEUE_PUT ||
+             type == LC_POUCH_RECORD_QUEUE_UPDATE ||
+             type == LC_POUCH_RECORD_QUEUE_REMOVE) {
+    if (ct_copy == NULL || etag_copy == NULL ||
+        body_len < LC_POUCH_QUEUE_META_SIZE) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    rc = lc_pouch_disk_replay_read_crc(store->log_fd, queue_meta,
+                                       sizeof(queue_meta), &crc, &short_read,
+                                       error);
+    if (rc != LC_OK || short_read) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return rc;
+    }
+    queue_deleted = lc_pouch_get_u32(queue_meta) != 0UL;
+    queue_attempts = (int)lc_pouch_get_u32(queue_meta + 4);
+    queue_max_attempts = (int)lc_pouch_get_u32(queue_meta + 8);
+    queue_failure_attempts = (int)lc_pouch_get_u32(queue_meta + 12);
+    queue_enqueued_at = (long)lc_pouch_get_u64(queue_meta + 16);
+    queue_not_visible_until = (long)lc_pouch_get_u64(queue_meta + 24);
+    queue_visibility_timeout = (long)lc_pouch_get_u64(queue_meta + 32);
+    queue_expires_at = (long)lc_pouch_get_u64(queue_meta + 40);
+    queue_lease_expires_at = (long)lc_pouch_get_u64(queue_meta + 48);
+    queue_payload_len = lc_pouch_get_u64(queue_meta + 56);
+    queue_content_type_len = lc_pouch_get_u64(queue_meta + 64);
+    queue_lease_id_len = lc_pouch_get_u64(queue_meta + 72);
+    queue_txn_id_len = lc_pouch_get_u64(queue_meta + 80);
+    queue_needed = LC_POUCH_QUEUE_META_SIZE;
+    if (lc_pouch_disk_add_overflows(queue_needed, queue_content_type_len,
+                                    &queue_needed) ||
+        lc_pouch_disk_add_overflows(queue_needed, queue_lease_id_len,
+                                    &queue_needed) ||
+        lc_pouch_disk_add_overflows(queue_needed, queue_txn_id_len,
+                                    &queue_needed) ||
+        lc_pouch_disk_add_overflows(queue_needed, queue_payload_len,
+                                    &queue_needed) ||
+        queue_needed != body_len) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    queue_content_type = lc_pouch_disk_replay_read_string(
+        store, queue_content_type_len, &crc, &short_read, error);
+    if (queue_content_type == NULL) {
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return short_read ? LC_OK
+                        : (error != NULL && error->code != LC_OK
+                               ? error->code
+                               : LC_ERR_NOMEM);
+    }
+    if (queue_lease_id_len > 0UL) {
+      queue_lease_id = lc_pouch_disk_replay_read_string(
+          store, queue_lease_id_len, &crc, &short_read, error);
+      if (queue_lease_id == NULL) {
+        lc_pouch_free(&store->allocator, queue_content_type);
+        lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                         etag_copy);
+        *stop = short_read;
+        return short_read ? LC_OK
+                          : (error != NULL && error->code != LC_OK
+                                 ? error->code
+                                 : LC_ERR_NOMEM);
+      }
+    }
+    if (queue_txn_id_len > 0UL) {
+      queue_txn_id = lc_pouch_disk_replay_read_string(
+          store, queue_txn_id_len, &crc, &short_read, error);
+      if (queue_txn_id == NULL) {
+        lc_pouch_free(&store->allocator, queue_content_type);
+        lc_pouch_free(&store->allocator, queue_lease_id);
+        lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                         etag_copy);
+        *stop = short_read;
+        return short_read ? LC_OK
+                          : (error != NULL && error->code != LC_OK
+                                 ? error->code
+                                 : LC_ERR_NOMEM);
+      }
+    }
+    queue_payload_offset =
+        LC_POUCH_QUEUE_META_SIZE + queue_content_type_len +
+        queue_lease_id_len + queue_txn_id_len;
+    rc = lc_pouch_disk_replay_skip_crc(store->log_fd, queue_payload_len, &crc,
+                                       &short_read, error);
+    if (rc != LC_OK || short_read) {
+      lc_pouch_free(&store->allocator, queue_content_type);
+      lc_pouch_free(&store->allocator, queue_lease_id);
+      lc_pouch_free(&store->allocator, queue_txn_id);
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = short_read;
+      return rc;
+    }
+    if ((crc ^ 0xffffffffUL) != expected_crc) {
+      lc_pouch_free(&store->allocator, queue_content_type);
+      lc_pouch_free(&store->allocator, queue_lease_id);
+      lc_pouch_free(&store->allocator, queue_txn_id);
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      *stop = 1;
+      return LC_OK;
+    }
+    if (type == LC_POUCH_RECORD_QUEUE_REMOVE) {
+      queue_deleted = 1;
+    }
+    if (!lc_pouch_disk_upsert_queue_entry(
+            store, ns_copy, key_copy, ct_copy, queue_content_type,
+            queue_lease_id, queue_txn_id, etag_copy, queue_attempts,
+            queue_max_attempts, queue_failure_attempts, queue_enqueued_at,
+            queue_not_visible_until, queue_visibility_timeout,
+            queue_expires_at, queue_lease_expires_at, (long)version,
+            offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
+                etag_len + queue_payload_offset,
+            queue_payload_len, type == LC_POUCH_RECORD_QUEUE_PUT,
+            queue_deleted)) {
+      lc_pouch_free(&store->allocator, queue_content_type);
+      lc_pouch_free(&store->allocator, queue_lease_id);
+      lc_pouch_free(&store->allocator, queue_txn_id);
+      lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                       etag_copy);
+      return lc_pouch_set_nomem(error, "failed to index pouch queue replay");
+    }
+    lc_pouch_free(&store->allocator, queue_content_type);
+    lc_pouch_free(&store->allocator, queue_lease_id);
+    lc_pouch_free(&store->allocator, queue_txn_id);
+  } else {
+    lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                     etag_copy);
+    *stop = 1;
+    return LC_OK;
+  }
+
+  lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
+                                   etag_copy);
+  return LC_OK;
+}
+
 static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
   unsigned char header[LC_POUCH_HEADER_SIZE];
   unsigned char *payload;
@@ -2261,6 +2734,33 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
          type != LC_POUCH_RECORD_QUEUE_REMOVE &&
          type != LC_POUCH_RECORD_STATE_LINK)) {
       break;
+    }
+    if (type == LC_POUCH_RECORD_STATE_PUT ||
+        type == LC_POUCH_RECORD_STATE_REMOVE ||
+        type == LC_POUCH_RECORD_OBJECT_PUT ||
+        type == LC_POUCH_RECORD_OBJECT_REMOVE ||
+        type == LC_POUCH_RECORD_QUEUE_PUT ||
+        type == LC_POUCH_RECORD_QUEUE_UPDATE ||
+        type == LC_POUCH_RECORD_QUEUE_REMOVE ||
+        type == LC_POUCH_RECORD_STATE_LINK) {
+      int stop;
+      int rc;
+
+      stop = 0;
+      rc = lc_pouch_disk_replay_stream_index_record(
+          store, type, ns_len, key_len, ct_len, etag_len, body_len, version,
+          expected_crc, offset, &stop, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      if (stop) {
+        break;
+      }
+      if ((long)version >= store->next_version) {
+        store->next_version = (long)version + 1L;
+      }
+      offset += LC_POUCH_HEADER_SIZE + payload_len;
+      continue;
     }
     payload = (unsigned char *)lc_pouch_alloc(&store->allocator,
                                               (size_t)payload_len + 1U);
