@@ -1633,6 +1633,9 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
       rc = lc_pouch_set_nomem(error, "failed to copy pouch metadata etag");
     }
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, payload);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
@@ -1686,6 +1689,9 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
   if (rc == LC_OK && !lc_pouch_disk_upsert_meta_entry(store, namespace_name,
                                                       key, etag, NULL, 1)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch metadata index");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   lc_pouch_free(&store->allocator, etag);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
@@ -2688,6 +2694,9 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
       rc = lc_pouch_set_nomem(error, "failed to copy pouch state etag");
     }
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, payload);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
@@ -2743,6 +2752,9 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
       !lc_pouch_disk_upsert_entry(store, namespace_name, key, NULL, etag,
                                   version, body_offset, 0UL, 1)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch remove index");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   lc_pouch_free(&store->allocator, etag);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
@@ -3023,6 +3035,9 @@ static int lc_pouch_disk_promote_staged_state(
     rc = lc_pouch_disk_append_state_remove_locked(store, namespace_name,
                                                   staged_key, error);
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -3080,6 +3095,9 @@ static int lc_pouch_disk_discard_staged_state(
   if (rc == LC_OK) {
     rc = lc_pouch_disk_append_state_remove_locked(store, namespace_name,
                                                   staged_key, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
@@ -3741,6 +3759,9 @@ static int lc_pouch_disk_delete_object(lc_pouch_store *self,
       *deleted = 1;
     }
   }
+  if (rc == LC_OK && *deleted) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -3788,6 +3809,9 @@ static int lc_pouch_disk_delete_all_objects(lc_pouch_store *self,
       store->object_entries[index].deleted = 1;
       ++(*deleted_count);
     }
+  }
+  if (rc == LC_OK && *deleted_count > 0) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
@@ -3959,6 +3983,9 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
       rc = lc_pouch_set_nomem(error, "failed to copy pouch queue message");
     }
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
   lc_pouch_free(&store->allocator, entry.message_id);
   lc_pouch_free(&store->allocator, entry.meta_etag);
   lc_pouch_free(&store->allocator, payload);
@@ -4050,6 +4077,9 @@ static int lc_pouch_disk_dequeue_message(
   entry->lease_expires_at_unix = entry->not_visible_until_unix;
   rc = lc_pouch_disk_append_queue_entry(store, LC_POUCH_RECORD_QUEUE_UPDATE,
                                         entry, NULL, 0U, 0, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -4123,6 +4153,9 @@ static int lc_pouch_disk_ack_message(lc_pouch_store *self,
       *acked = 1;
     }
   }
+  if (rc == LC_OK && *acked) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -4181,6 +4214,9 @@ static int lc_pouch_disk_nack_message(lc_pouch_store *self,
       !lc_pouch_queue_info_from_entry(&store->allocator, out, entry)) {
     rc = lc_pouch_set_nomem(error, "failed to copy pouch queue message");
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -4236,6 +4272,9 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
   if (rc == LC_OK &&
       !lc_pouch_queue_info_from_entry(&store->allocator, out, entry)) {
     rc = lc_pouch_set_nomem(error, "failed to copy pouch queue message");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;

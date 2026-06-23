@@ -524,6 +524,64 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_state_read_skips_replay_after_same_handle_write(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source source;
+  lc_source *read_body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_error error;
+  size_t payload_length;
+  size_t read_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "state-no-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  read_body = NULL;
+  payload_length = 128U * 1024U;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  counting_source_init(&source, payload_length);
+  opts.content_type = "application/octet-stream";
+  rc = store->write_state(store, "default", "large", &source.pub, &opts,
+                          &put_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(put_res.bytes, (long)payload_length);
+
+  tracked.max_malloc_size = 0U;
+  tracked.max_realloc_size = 0U;
+  rc = store->read_state(store, "default", "large", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(read_body);
+  assert_false(info.no_content);
+  assert_int_equal(info.version, put_res.new_version);
+  assert_true(tracked.max_malloc_size < payload_length);
+  assert_true(tracked.max_realloc_size < payload_length);
+  read_length = read_source_count_x(read_body);
+  assert_int_equal(read_length, payload_length);
+
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_cas_and_remove_semantics(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -1871,6 +1929,72 @@ static void test_object_copy_streams_existing_payload_without_large_alloc(
   test_cleanup_root(root);
 }
 
+static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_error error;
+  size_t payload_length;
+  size_t read_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-no-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  store = NULL;
+  payload = NULL;
+  payload_length = 128U * 1024U;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  counting_source_init(&source, payload_length);
+  enqueue_opts.content_type = "application/octet-stream";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  rc = store->enqueue_message(store, "default", "jobs", &source.pub,
+                              &enqueue_opts, &enqueued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(enqueued.payload_bytes, (long)payload_length);
+
+  tracked.max_malloc_size = 0U;
+  tracked.max_realloc_size = 0U;
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  assert_int_equal(dequeued.payload_bytes, (long)payload_length);
+  assert_true(tracked.max_malloc_size < payload_length);
+  assert_true(tracked.max_realloc_size < payload_length);
+  read_length = read_source_count_x(payload);
+  assert_int_equal(read_length, payload_length);
+
+  lc_source_close(payload);
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_empty_identifiers_are_rejected_before_append(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -2270,6 +2394,7 @@ static void test_independent_handles_refresh_before_operations(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
+      cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_staged_state_promote_discard_and_reopen),
       cmocka_unit_test(test_staged_state_listing_orders_paginates_and_replays),
@@ -2287,6 +2412,8 @@ int main(void) {
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),
       cmocka_unit_test(
           test_object_copy_streams_existing_payload_without_large_alloc),
+      cmocka_unit_test(
+          test_queue_dequeue_skips_replay_after_same_handle_enqueue),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(test_independent_handles_refresh_before_operations),
