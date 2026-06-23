@@ -1659,12 +1659,15 @@ static int lc_pouch_client_dequeue_one(lc_client *self,
   long state_lease_expires_at_unix;
   int rc;
 
-  if (self == NULL || req == NULL || req->queue == NULL || req->owner == NULL ||
-      out == NULL) {
+  if (self == NULL || req == NULL || req->queue == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch dequeue requires self, req, queue, owner, and "
-                        "out",
+                        "pouch dequeue requires self, req, queue, and out",
                         NULL, NULL, NULL);
+  }
+  if (req->owner == NULL || req->owner[0] == '\0') {
+    return lc_error_set(error, LC_ERR_SERVER, 400L,
+                        "pouch dequeue requires owner", NULL, "missing_owner",
+                        NULL);
   }
   client = (lc_client_handle *)self;
   namespace_name = NULL;

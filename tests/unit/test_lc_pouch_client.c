@@ -1317,6 +1317,25 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
 
   lc_dequeue_req_init(&dequeue_req);
   dequeue_req.queue = "jobs";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  message = NULL;
+  rc = second_client->dequeue(second_client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  assert_null(message);
+  lc_error_cleanup(&error);
+
+  dequeue_req.owner = "";
+  rc = second_client->dequeue(second_client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  assert_null(message);
+  lc_error_cleanup(&error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
   dequeue_req.owner = "worker-a";
   dequeue_req.visibility_timeout_seconds = 30L;
   message = NULL;
