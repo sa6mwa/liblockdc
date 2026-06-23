@@ -1728,14 +1728,6 @@ static int lc_consumer_worker_run_pouch(lc_consumer_worker_state *worker,
   service = worker->service;
   attempt = 0;
   failures = 0;
-  if (worker->config.with_state) {
-    lc_error_set(error, LC_ERR_INVALID, 0L,
-                 "pouch consumer service with state is not implemented yet",
-                 NULL, NULL, NULL);
-    lc_consumer_set_fatal_error(service, error->code, error,
-                                "pouch stateful consumer unsupported");
-    return error->code;
-  }
   poll_delay_ms = worker->config.request.wait_seconds > 0L
                       ? worker->config.request.wait_seconds * 1000L
                       : 100L;
@@ -1751,7 +1743,12 @@ static int lc_consumer_worker_run_pouch(lc_consumer_worker_state *worker,
     lc_error_cleanup(error);
     lc_error_init(error);
     message = NULL;
-    rc = client->dequeue(client, &worker->config.request, &message, error);
+    if (worker->config.with_state) {
+      rc = client->dequeue_with_state(client, &worker->config.request, &message,
+                                      error);
+    } else {
+      rc = client->dequeue(client, &worker->config.request, &message, error);
+    }
     if (rc == LC_OK && message == NULL) {
       lc_consumer_log_subscribe_event(service, &worker->config,
                                       "client.queue.subscribe.complete");

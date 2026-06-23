@@ -96,6 +96,12 @@ typedef struct consumer_service_test_state {
   const char *expected[2];
 } consumer_service_test_state;
 
+typedef struct consumer_service_stateful_test_state {
+  lc_consumer_service *service;
+  size_t handled;
+  const char *expected;
+} consumer_service_stateful_test_state;
+
 static int subscribe_test_handle(void *context, lc_message *message,
                                  lc_error *error) {
   subscribe_test_state *state;
@@ -152,6 +158,48 @@ static int consumer_service_test_handle(void *context,
     rc = lc_consumer_service_stop(state->service);
     assert_int_equal(rc, LC_OK);
   }
+  return LC_OK;
+}
+
+static int consumer_service_stateful_test_handle(void *context,
+                                                 lc_consumer_message *message,
+                                                 lc_error *error) {
+  consumer_service_stateful_test_state *state;
+  lc_source *source;
+  lc_update_opts opts;
+  lc_sink *sink;
+  char *text;
+  size_t written;
+  int rc;
+
+  state = (consumer_service_stateful_test_state *)context;
+  assert_non_null(message);
+  assert_non_null(message->message);
+  assert_true(message->with_state);
+  assert_non_null(message->state);
+  assert_int_equal(state->handled, 0U);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_int_equal(rc, LC_OK);
+  written = 0U;
+  rc = message->message->write_payload(message->message, sink, &written, error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, state->expected);
+  free(text);
+  lc_sink_close(sink);
+
+  lc_update_opts_init(&opts);
+  opts.content_type = "application/json";
+  source = source_from_text("{\"managed\":true}");
+  rc = message->state->update(message->state, source, &opts, error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  state->handled += 1U;
+  rc = lc_consumer_service_stop(state->service);
+  assert_int_equal(rc, LC_OK);
   return LC_OK;
 }
 
@@ -455,6 +503,88 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_dequeue_with_state_lifecycle(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_update_opts update_opts;
+  lc_get_res get_res;
+  lc_message *message;
+  lc_lease *queue_state;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-state");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client(endpoint);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  source = source_from_text("stateful-body");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(enqueue_res.message_id);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "state-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  message = NULL;
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  queue_state = message->state(message);
+  assert_non_null(queue_state);
+  assert_string_equal(queue_state->namespace_name, "default");
+  assert_non_null(queue_state->lease_id);
+  assert_true(queue_state->fencing_token > 0L);
+  assert_true(queue_state->lease_expires_at_unix > 0L);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"status\":\"ok\"}");
+  rc = queue_state->update(queue_state, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_true(queue_state->version > 0L);
+  assert_non_null(queue_state->state_etag);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = queue_state->get(queue_state, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "{\"status\":\"ok\"}");
+  free(text);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_dequeue_batch_lifecycle(void **state) {
   char root[256];
   char endpoint[320];
@@ -702,13 +832,87 @@ static void test_pouch_endpoint_consumer_service_auto_ack(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_consumer_service_with_state(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  consumer_service_stateful_test_state service_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "consumer-service-state");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats_res, 0, sizeof(stats_res));
+  memset(&service_state, 0, sizeof(service_state));
+  service_state.expected = "stateful";
+  client = open_pouch_client(endpoint);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("stateful");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.request.queue = "jobs";
+  consumer_config.request.owner = "managed-state-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.with_state = 1;
+  consumer_config.handle = consumer_service_stateful_test_handle;
+  consumer_config.context = &service_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+  service = NULL;
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(service);
+  service_state.service = service;
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(service_state.handled, 1U);
+  service->close(service);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+
+  lc_queue_stats_res_cleanup(&stats_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_dequeue_with_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_auto_ack),
+      cmocka_unit_test(test_pouch_endpoint_consumer_service_with_state),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

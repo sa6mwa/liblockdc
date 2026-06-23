@@ -237,6 +237,10 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
                                    lc_error *error);
 int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
                                    lc_message **out, lc_error *error);
+int lc_pouch_client_dequeue_with_state_method(lc_client *self,
+                                              const lc_dequeue_req *req,
+                                              lc_message **out,
+                                              lc_error *error);
 int lc_pouch_client_dequeue_batch_method(lc_client *self,
                                          const lc_dequeue_req *req,
                                          lc_dequeue_batch_res *out,
@@ -244,6 +248,10 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
 int lc_pouch_client_subscribe_method(lc_client *self, const lc_dequeue_req *req,
                                      const lc_consumer *consumer,
                                      lc_error *error);
+int lc_pouch_client_subscribe_with_state_method(lc_client *self,
+                                                const lc_dequeue_req *req,
+                                                const lc_consumer *consumer,
+                                                lc_error *error);
 int lc_pouch_message_ack_method(lc_message *self, lc_error *error);
 int lc_pouch_message_nack_method(lc_message *self, const lc_nack_req *req,
                                  lc_error *error);

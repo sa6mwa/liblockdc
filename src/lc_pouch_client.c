@@ -27,6 +27,28 @@ static char *lc_pouch_new_lease_id(lc_client_handle *client, const char *key,
   return lc_client_strdup(client, stack);
 }
 
+static char *lc_pouch_queue_state_key(lc_client_handle *client,
+                                      const char *queue,
+                                      const char *message_id) {
+  size_t queue_len;
+  size_t message_len;
+  size_t total;
+  char *key;
+
+  if (client == NULL || queue == NULL || message_id == NULL) {
+    return NULL;
+  }
+  queue_len = strlen(queue);
+  message_len = strlen(message_id);
+  total = 2U + queue_len + 7U + message_len + 1U;
+  key = (char *)lc_client_alloc(client, total);
+  if (key == NULL) {
+    return NULL;
+  }
+  snprintf(key, total, "q/%s/state/%s", queue, message_id);
+  return key;
+}
+
 static int lc_pouch_copy_public(char **dst, const char *src, lc_error *error,
                                 const char *message) {
   *dst = lc_strdup_local(src);
@@ -129,6 +151,126 @@ lc_pouch_queue_info_to_engine(const lc_pouch_queue_message_info *info,
   out->fencing_token = info->fencing_token;
   out->txn_id = (char *)info->txn_id;
   out->meta_etag = (char *)info->meta_etag;
+}
+
+static int lc_pouch_prepare_queue_state_lease(
+    lc_client_handle *client, const char *namespace_name,
+    const lc_dequeue_req *req, const lc_pouch_queue_message_info *info,
+    char **state_lease_id, char **state_txn_id, char **state_etag,
+    long *state_fencing_token, long *state_lease_expires_at_unix,
+    lc_error *error) {
+  lc_pouch_meta_record existing;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_meta meta;
+  char *state_key;
+  char *lease_id;
+  char *txn_id;
+  char *etag;
+  long now_unix;
+  long ttl_seconds;
+  int rc;
+
+  if (client == NULL || req == NULL || info == NULL || state_lease_id == NULL ||
+      state_txn_id == NULL || state_etag == NULL ||
+      state_fencing_token == NULL || state_lease_expires_at_unix == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch stateful dequeue requires state outputs", NULL,
+                        NULL, NULL);
+  }
+  memset(&existing, 0, sizeof(existing));
+  memset(&stored, 0, sizeof(stored));
+  memset(&meta, 0, sizeof(meta));
+  state_key = NULL;
+  lease_id = NULL;
+  txn_id = NULL;
+  etag = NULL;
+  *state_lease_id = NULL;
+  *state_txn_id = NULL;
+  *state_etag = NULL;
+  *state_fencing_token = 0L;
+  *state_lease_expires_at_unix = 0L;
+
+  state_key = lc_pouch_queue_state_key(client, req->queue, info->message_id);
+  if (state_key == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch queue state key", NULL, NULL,
+                        NULL);
+  }
+  rc = client->pouch_store->load_meta(client->pouch_store, namespace_name,
+                                      state_key, &existing, error);
+  if (rc != LC_OK) {
+    lc_client_free(client, state_key);
+    return rc;
+  }
+
+  now_unix = lc_pouch_now_unix();
+  ttl_seconds = req->visibility_timeout_seconds > 0L
+                    ? req->visibility_timeout_seconds
+                    : 30L;
+  meta.version = existing.found ? existing.meta.version : 0L;
+  meta.state_etag = existing.meta.state_etag;
+  meta.fencing_token = existing.found ? existing.meta.fencing_token + 1L : 1L;
+  meta.lease_expires_at_unix = info->lease_expires_at_unix > now_unix
+                                   ? info->lease_expires_at_unix
+                                   : now_unix + ttl_seconds;
+  meta.owner = (char *)req->owner;
+  meta.txn_id = (char *)req->txn_id;
+  meta.has_query_hidden = existing.meta.has_query_hidden;
+  meta.query_hidden = existing.meta.query_hidden;
+
+  lease_id = lc_pouch_new_lease_id(client, state_key, meta.fencing_token);
+  if (lease_id == NULL) {
+    lc_pouch_meta_record_cleanup(&client->pouch_allocator, &existing);
+    lc_client_free(client, state_key);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch queue state lease id", NULL,
+                        NULL, NULL);
+  }
+  meta.lease_id = lease_id;
+  rc = client->pouch_store->store_meta(client->pouch_store, namespace_name,
+                                       state_key, &meta, existing.etag, &stored,
+                                       error);
+  if (rc != LC_OK) {
+    lc_client_free(client, lease_id);
+    lc_pouch_meta_record_cleanup(&client->pouch_allocator, &existing);
+    lc_client_free(client, state_key);
+    return rc;
+  }
+
+  if (req->txn_id != NULL) {
+    txn_id = lc_client_strdup(client, req->txn_id);
+    if (txn_id == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch queue state transaction id", NULL,
+                        NULL, NULL);
+    }
+  }
+  if (rc == LC_OK && existing.meta.state_etag != NULL) {
+    etag = lc_client_strdup(client, existing.meta.state_etag);
+    if (etag == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch queue state etag", NULL, NULL,
+                        NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    *state_lease_id = lease_id;
+    *state_txn_id = txn_id;
+    *state_etag = etag;
+    *state_fencing_token = meta.fencing_token;
+    *state_lease_expires_at_unix = meta.lease_expires_at_unix;
+    lease_id = NULL;
+    txn_id = NULL;
+    etag = NULL;
+  }
+
+  lc_client_free(client, etag);
+  lc_client_free(client, txn_id);
+  lc_client_free(client, lease_id);
+  lc_pouch_store_meta_res_cleanup(&client->pouch_allocator, &stored);
+  lc_pouch_meta_record_cleanup(&client->pouch_allocator, &existing);
+  lc_client_free(client, state_key);
+  return rc;
 }
 
 static int lc_pouch_lease_load_unsupported(lc_lease *self,
@@ -1038,14 +1180,21 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
 
 static int lc_pouch_client_dequeue_one(lc_client *self,
                                        const lc_dequeue_req *req,
-                                       lc_message **out, int *terminal_flag,
-                                       lc_error *error) {
+                                       int with_state, lc_message **out,
+                                       int *terminal_flag, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_dequeue_opts opts;
   lc_pouch_queue_message_info info;
   lc_engine_dequeue_response engine;
+  lc_message_handle *message_handle;
+  lc_lease_handle *state_handle;
   lc_source *body;
   const char *namespace_name;
+  char *state_lease_id;
+  char *state_txn_id;
+  char *state_etag;
+  long state_fencing_token;
+  long state_lease_expires_at_unix;
   int rc;
 
   if (self == NULL || req == NULL || req->queue == NULL || req->owner == NULL ||
@@ -1061,6 +1210,11 @@ static int lc_pouch_client_dequeue_one(lc_client *self,
   memset(&info, 0, sizeof(info));
   memset(&engine, 0, sizeof(engine));
   body = NULL;
+  state_lease_id = NULL;
+  state_txn_id = NULL;
+  state_etag = NULL;
+  state_fencing_token = 0L;
+  state_lease_expires_at_unix = 0L;
   *out = NULL;
   opts.owner = req->owner;
   opts.txn_id = req->txn_id;
@@ -1070,21 +1224,55 @@ static int lc_pouch_client_dequeue_one(lc_client *self,
                                             error);
   if (rc == LC_OK && body != NULL) {
     lc_pouch_queue_info_to_engine(&info, &engine);
+    if (with_state) {
+      rc = lc_pouch_prepare_queue_state_lease(
+          client, namespace_name, req, &info, &state_lease_id, &state_txn_id,
+          &state_etag, &state_fencing_token, &state_lease_expires_at_unix,
+          error);
+      if (rc != LC_OK) {
+        body->close(body);
+        lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
+        return rc;
+      }
+      engine.state_lease_id = state_lease_id;
+      engine.state_txn_id = state_txn_id;
+      engine.state_etag = state_etag;
+      engine.state_fencing_token = state_fencing_token;
+      engine.state_lease_expires_at_unix = state_lease_expires_at_unix;
+    }
     *out = lc_message_new(client, &engine, body, terminal_flag);
     if (*out == NULL) {
       body->close(body);
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch message handle", NULL, NULL,
                         NULL);
+    } else if (with_state) {
+      message_handle = (lc_message_handle *)(*out);
+      if (message_handle->state_lease != NULL) {
+        lc_pouch_install_lease_methods(message_handle->state_lease);
+        state_handle = (lc_lease_handle *)message_handle->state_lease;
+        state_handle->lease_expires_at_unix = state_lease_expires_at_unix;
+        state_handle->pub.lease_expires_at_unix = state_lease_expires_at_unix;
+      }
     }
   }
+  lc_client_free(client, state_etag);
+  lc_client_free(client, state_txn_id);
+  lc_client_free(client, state_lease_id);
   lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
   return rc;
 }
 
 int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
                                    lc_message **out, lc_error *error) {
-  return lc_pouch_client_dequeue_one(self, req, out, NULL, error);
+  return lc_pouch_client_dequeue_one(self, req, 0, out, NULL, error);
+}
+
+int lc_pouch_client_dequeue_with_state_method(lc_client *self,
+                                              const lc_dequeue_req *req,
+                                              lc_message **out,
+                                              lc_error *error) {
+  return lc_pouch_client_dequeue_one(self, req, 1, out, NULL, error);
 }
 
 int lc_pouch_client_dequeue_batch_method(lc_client *self,
@@ -1111,7 +1299,8 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
   limit = req->page_size > 0 ? req->page_size : 1;
   for (index = 0; index < limit; ++index) {
     message = NULL;
-    rc = lc_pouch_client_dequeue_method(self, &single_req, &message, error);
+    rc = lc_pouch_client_dequeue_one(self, &single_req, 0, &message, NULL,
+                                     error);
     if (rc != LC_OK) {
       lc_dequeue_batch_cleanup(out);
       return rc;
@@ -1135,9 +1324,10 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
   return LC_OK;
 }
 
-int lc_pouch_client_subscribe_method(lc_client *self, const lc_dequeue_req *req,
-                                     const lc_consumer *consumer,
-                                     lc_error *error) {
+static int lc_pouch_client_subscribe_common(lc_client *self,
+                                            const lc_dequeue_req *req,
+                                            const lc_consumer *consumer,
+                                            int with_state, lc_error *error) {
   lc_dequeue_req single_req;
   lc_message *message;
   lc_nack_req nack_req;
@@ -1160,8 +1350,8 @@ int lc_pouch_client_subscribe_method(lc_client *self, const lc_dequeue_req *req,
   for (index = 0; index < limit; ++index) {
     terminal = 0;
     message = NULL;
-    rc = lc_pouch_client_dequeue_one(self, &single_req, &message, &terminal,
-                                     error);
+    rc = lc_pouch_client_dequeue_one(self, &single_req, with_state, &message,
+                                     &terminal, error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -1198,6 +1388,19 @@ int lc_pouch_client_subscribe_method(lc_client *self, const lc_dequeue_req *req,
     }
   }
   return LC_OK;
+}
+
+int lc_pouch_client_subscribe_method(lc_client *self, const lc_dequeue_req *req,
+                                     const lc_consumer *consumer,
+                                     lc_error *error) {
+  return lc_pouch_client_subscribe_common(self, req, consumer, 0, error);
+}
+
+int lc_pouch_client_subscribe_with_state_method(lc_client *self,
+                                                const lc_dequeue_req *req,
+                                                const lc_consumer *consumer,
+                                                lc_error *error) {
+  return lc_pouch_client_subscribe_common(self, req, consumer, 1, error);
 }
 
 int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,

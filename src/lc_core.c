@@ -1290,7 +1290,10 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.enqueue = lc_pouch_client_enqueue_method;
     client->pub.dequeue = lc_pouch_client_dequeue_method;
     client->pub.dequeue_batch = lc_pouch_client_dequeue_batch_method;
+    client->pub.dequeue_with_state = lc_pouch_client_dequeue_with_state_method;
     client->pub.subscribe = lc_pouch_client_subscribe_method;
+    client->pub.subscribe_with_state =
+        lc_pouch_client_subscribe_with_state_method;
   }
   client->pub.default_namespace = client->default_namespace;
   *out = &client->pub;
