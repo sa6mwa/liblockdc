@@ -121,6 +121,63 @@ static void assert_client_state_text(lc_client *client, const char *key,
   lc_sink_close(sink);
 }
 
+typedef struct pouch_consumer_state_test {
+  lc_consumer_service *service;
+  size_t handled;
+  char queue[64];
+  char message_id[128];
+  char state_key[256];
+} pouch_consumer_state_test;
+
+static int pouch_consumer_state_handle(void *context,
+                                       lc_consumer_message *message,
+                                       lc_error *error) {
+  pouch_consumer_state_test *state;
+  lc_update_opts update_opts;
+  lc_source *source;
+  lc_sink *sink;
+  size_t written;
+  int rc;
+
+  state = (pouch_consumer_state_test *)context;
+  assert_non_null(state);
+  assert_non_null(message);
+  assert_non_null(message->message);
+  assert_true(message->with_state);
+  assert_non_null(message->state);
+  assert_int_equal(state->handled, 0U);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  written = 0U;
+  rc = message->message->write_payload(message->message, sink, &written,
+                                       error);
+  assert_lc_ok(rc, error);
+  assert_int_equal(written, strlen("stateful-work"));
+  assert_sink_text(sink, "stateful-work", error);
+  lc_sink_close(sink);
+
+  snprintf(state->queue, sizeof(state->queue), "%s", message->queue);
+  snprintf(state->message_id, sizeof(state->message_id), "%s",
+           message->message->message_id);
+  snprintf(state->state_key, sizeof(state->state_key), "q/%s/state/%s",
+           state->queue, state->message_id);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"consumer\":\"stateful\",\"saved\":true}",
+                            error);
+  rc = message->state->update(message->state, source, &update_opts, error);
+  lc_source_close(source);
+  assert_lc_ok(rc, error);
+
+  state->handled += 1U;
+  rc = lc_consumer_service_stop(state->service);
+  assert_int_equal(rc, LC_OK);
+  return LC_OK;
+}
+
 static void lease_ref_from_lease(lc_lease *lease, lc_lease_ref *ref) {
   lc_lease_ref_init(ref);
   ref->namespace_name = lease->namespace_name;
@@ -578,6 +635,94 @@ static void test_pouch_public_queue_visibility_redelivery(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_consumer_service_with_state(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *verifier;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  pouch_consumer_state_test consumer_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "consumer-state");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  verifier = NULL;
+  source = NULL;
+  service = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&consumer_state, 0, sizeof(consumer_state));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &producer, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "managed-state";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("stateful-work", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.request.queue = "managed-state";
+  consumer_config.request.owner = "managed-state-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.with_state = 1;
+  consumer_config.handle = pouch_consumer_state_handle;
+  consumer_config.context = &consumer_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+  rc = producer->new_consumer_service(producer, &service_config, &service,
+                                      &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(service);
+  consumer_state.service = service;
+  rc = service->run(service, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(consumer_state.handled, 1U);
+  service->close(service);
+  service = NULL;
+  assert_string_equal(consumer_state.queue, "managed-state");
+  assert_string_equal(consumer_state.message_id, enqueue_res.message_id);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "managed-state";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats);
+
+  open_pouch_client(endpoint, &verifier, &error);
+  assert_client_state_text(
+      verifier, consumer_state.state_key,
+      "{\"consumer\":\"stateful\",\"saved\":true}", &error);
+  verifier->close(verifier);
+  verifier = NULL;
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  producer->close(producer);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_cas_across_clients(void **state) {
   char root[256];
   char endpoint[320];
@@ -798,6 +943,7 @@ int main(void) {
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
+      cmocka_unit_test(test_pouch_public_consumer_service_with_state),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
   };
