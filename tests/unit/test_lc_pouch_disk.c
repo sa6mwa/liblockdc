@@ -2764,6 +2764,93 @@ static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_queue_ref_requires_current_meta_etag(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_ref ref;
+  lc_error error;
+  int acked;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-ref-etag");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&ref, 0, sizeof(ref));
+  store = NULL;
+  payload = NULL;
+  acked = 0;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queued-payload");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  lc_source_close(payload);
+
+  ref.namespace_name = dequeued.namespace_name;
+  ref.queue = dequeued.queue;
+  ref.message_id = dequeued.message_id;
+  ref.lease_id = dequeued.lease_id;
+  ref.txn_id = dequeued.txn_id;
+  ref.fencing_token = dequeued.fencing_token;
+  ref.meta_etag = NULL;
+  rc = store->ack_message(store, &ref, &acked, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_false(acked);
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  ref.meta_etag = "stale-meta-etag";
+  rc = store->ack_message(store, &ref, &acked, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "queue_lease_not_active");
+  assert_false(acked);
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  ref.meta_etag = dequeued.meta_etag;
+  rc = store->ack_message(store, &ref, &acked, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acked);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_delay_hides_until_visible(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -3738,6 +3825,7 @@ int main(void) {
       cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
+      cmocka_unit_test(test_queue_ref_requires_current_meta_etag),
       cmocka_unit_test(test_queue_delay_hides_until_visible),
       cmocka_unit_test(
           test_queue_ttl_expiry_removes_pending_candidate_after_replay),

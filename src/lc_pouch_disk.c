@@ -4717,7 +4717,8 @@ static int lc_pouch_disk_validate_queue_ref(lc_error *error,
   int rc;
 
   if (ref == NULL || ref->namespace_name == NULL || ref->queue == NULL ||
-      ref->message_id == NULL) {
+      ref->message_id == NULL || ref->lease_id == NULL ||
+      ref->fencing_token <= 0L || ref->meta_etag == NULL) {
     return lc_pouch_set_invalid(error, operation);
   }
   rc = lc_pouch_disk_validate_namespace_queue(error, operation,
