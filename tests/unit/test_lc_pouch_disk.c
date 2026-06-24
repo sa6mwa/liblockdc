@@ -18,6 +18,8 @@
 #define TEST_POUCH_HEADER_BODY_LENGTH_OFFSET 28U
 #define TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET 44U
 #define TEST_POUCH_HEADER_RECORD_VERSION_OFFSET 56U
+#define TEST_POUCH_QUERY_INDEX_HEADER_SIZE 64U
+#define TEST_POUCH_QUERY_INDEX_RECORD_META 1U
 #define TEST_POUCH_RECORD_STATE_PUT 1U
 #define TEST_POUCH_RECORD_STATE_REMOVE 2U
 #define TEST_POUCH_RECORD_META_PUT 3U
@@ -102,6 +104,8 @@ static void test_cleanup_root(const char *root) {
   snprintf(path, sizeof(path), "%s/store.log", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/query.index", root);
   unlink(path);
   rmdir(root);
 }
@@ -229,6 +233,44 @@ static size_t count_log_records_of_type(const char *root, unsigned long type) {
       break;
     }
     if (memcmp(header, "LCP1", 4U) != 0) {
+      break;
+    }
+    record_type = test_get_u32(header + 8);
+    payload_len = test_get_u64(header + 44);
+    if (record_type == type) {
+      count++;
+    }
+    if (lseek(fd, (off_t)payload_len, SEEK_CUR) < 0) {
+      break;
+    }
+  }
+  close(fd);
+  return count;
+}
+
+static size_t count_query_index_records_of_type(const char *root,
+                                                unsigned long type) {
+  char index_path[512];
+  unsigned char header[TEST_POUCH_QUERY_INDEX_HEADER_SIZE];
+  unsigned long payload_len;
+  unsigned long record_type;
+  size_t count;
+  ssize_t got;
+  int fd;
+
+  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  fd = open(index_path, O_RDONLY);
+  assert_true(fd >= 0);
+  count = 0U;
+  for (;;) {
+    got = read(fd, header, sizeof(header));
+    if (got == 0) {
+      break;
+    }
+    if (got != (ssize_t)sizeof(header)) {
+      break;
+    }
+    if (memcmp(header, "LCQI", 4U) != 0) {
       break;
     }
     record_type = test_get_u32(header + 8);
@@ -2396,6 +2438,57 @@ static void test_index_flush_reports_current_projection(void **state) {
                       "pouch index flush mode must be wait or now");
   lc_error_cleanup(&error);
 
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_index_sidecar_appends_metadata_records(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-sidecar");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(count_query_index_records_of_type(
+                       root, TEST_POUCH_QUERY_INDEX_RECORD_META),
+                   0U);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease";
+  meta.state_etag = "state";
+  meta.version = 1L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 0;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(count_query_index_records_of_type(
+                       root, TEST_POUCH_QUERY_INDEX_RECORD_META),
+                   1U);
+
+  rc = store->delete_meta(store, "default", "alpha", stored.etag, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(count_query_index_records_of_type(
+                       root, TEST_POUCH_QUERY_INDEX_RECORD_META),
+                   2U);
+
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -4826,6 +4919,7 @@ int main(void) {
       cmocka_unit_test(
           test_metadata_update_allocation_failure_preserves_indexes),
       cmocka_unit_test(test_index_flush_reports_current_projection),
+      cmocka_unit_test(test_query_index_sidecar_appends_metadata_records),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),

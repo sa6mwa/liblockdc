@@ -50,6 +50,8 @@ static void cleanup_pouch_root(const char *root) {
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
   unlink(path);
+  snprintf(path, sizeof(path), "%s/query.index", root);
+  unlink(path);
   rmdir(root);
 }
 

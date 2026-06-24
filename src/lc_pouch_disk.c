@@ -14,8 +14,11 @@
 #include <unistd.h>
 
 #define LC_POUCH_LOG_MAGIC "LCP1"
+#define LC_POUCH_QUERY_INDEX_MAGIC "LCQI"
 #define LC_POUCH_HEADER_SIZE 64U
+#define LC_POUCH_QUERY_INDEX_HEADER_SIZE 64U
 #define LC_POUCH_RECORD_VERSION 1U
+#define LC_POUCH_QUERY_INDEX_RECORD_VERSION 1U
 #define LC_POUCH_RECORD_STATE_PUT 1U
 #define LC_POUCH_RECORD_STATE_REMOVE 2U
 #define LC_POUCH_RECORD_META_PUT 3U
@@ -32,6 +35,10 @@
 #define LC_POUCH_BACKEND_CONTENT_TYPE "text/plain"
 #define LC_POUCH_META_FLAG_QUERY_HIDDEN_SET 1UL
 #define LC_POUCH_META_FLAG_QUERY_HIDDEN 2UL
+#define LC_POUCH_QUERY_INDEX_RECORD_META 1UL
+#define LC_POUCH_QUERY_INDEX_FLAG_DELETED 1UL
+#define LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN_SET 2UL
+#define LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN 4UL
 #define LC_POUCH_OBJECT_META_SIZE 28U
 #define LC_POUCH_QUEUE_META_SIZE 88U
 #define LC_POUCH_MAX_NAME_BYTES 4096UL
@@ -108,10 +115,12 @@ typedef struct lc_pouch_disk_store {
   char *root_path;
   char *log_path;
   char *lock_path;
+  char *query_index_path;
   char *query_engine;
   char *query_fallback_engine;
   int log_fd;
   int lock_fd;
+  int query_index_fd;
   lc_pouch_disk_state_entry *state_entries;
   size_t state_entry_count;
   size_t state_entry_capacity;
@@ -209,6 +218,10 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
 static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
                                                   long version,
                                                   lc_error *error);
+static int lc_pouch_disk_append_query_index_record(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
+    const char *etag, long version, const lc_pouch_meta *meta, int deleted,
+    lc_error *error);
 static int lc_pouch_disk_query_index_reserve(lc_pouch_disk_store *store);
 static int lc_pouch_disk_query_index_insert(lc_pouch_disk_store *store,
                                             size_t meta_index);
@@ -1036,6 +1049,76 @@ static unsigned long lc_pouch_disk_index_sequence(
   return version_seq > store->replayed_record_count
              ? version_seq
              : store->replayed_record_count;
+}
+
+static int lc_pouch_disk_append_query_index_record(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
+    const char *etag, long version, const lc_pouch_meta *meta, int deleted,
+    lc_error *error) {
+  unsigned char header[LC_POUCH_QUERY_INDEX_HEADER_SIZE];
+  unsigned long ns_len;
+  unsigned long key_len;
+  unsigned long etag_len;
+  unsigned long payload_len;
+  unsigned long flags;
+  unsigned long crc;
+
+  ns_len = (unsigned long)strlen(namespace_name);
+  key_len = (unsigned long)strlen(key);
+  etag_len = etag != NULL ? (unsigned long)strlen(etag) : 0UL;
+  if (lc_pouch_disk_add_overflows(ns_len, key_len, &payload_len) ||
+      lc_pouch_disk_add_overflows(payload_len, etag_len, &payload_len) ||
+      !lc_pouch_disk_validate_record_lengths(ns_len, key_len, 0UL, etag_len,
+                                             0UL, payload_len)) {
+    return lc_pouch_set_invalid(error,
+                                "pouch query index record exceeds limits");
+  }
+
+  flags = deleted ? LC_POUCH_QUERY_INDEX_FLAG_DELETED : 0UL;
+  if (meta != NULL && meta->has_query_hidden) {
+    flags |= LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN_SET;
+  }
+  if (meta != NULL && meta->query_hidden) {
+    flags |= LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN;
+  }
+
+  memset(header, 0, sizeof(header));
+  memcpy(header, LC_POUCH_QUERY_INDEX_MAGIC, 4U);
+  lc_pouch_put_u32(header + 4, LC_POUCH_QUERY_INDEX_HEADER_SIZE);
+  lc_pouch_put_u32(header + 8, LC_POUCH_QUERY_INDEX_RECORD_META);
+  lc_pouch_put_u32(header + 12, ns_len);
+  lc_pouch_put_u32(header + 16, key_len);
+  lc_pouch_put_u32(header + 24, etag_len);
+  lc_pouch_put_u64(header + 36, (unsigned long)version);
+  lc_pouch_put_u64(header + 44, payload_len);
+  lc_pouch_put_u32(header + 56, LC_POUCH_QUERY_INDEX_RECORD_VERSION);
+  lc_pouch_put_u32(header + 60, flags);
+
+  crc = 0xffffffffUL;
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)namespace_name,
+                              (size_t)ns_len);
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)key, (size_t)key_len);
+  if (etag_len > 0UL) {
+    crc = lc_pouch_crc32_update(crc, (const unsigned char *)etag,
+                                (size_t)etag_len);
+  }
+  lc_pouch_put_u32(header + 52, crc ^ 0xffffffffUL);
+
+  if (lseek(store->query_index_fd, 0, SEEK_END) < 0) {
+    return lc_pouch_set_errno(error, "failed to seek pouch query index");
+  }
+  if (!lc_pouch_write_all(store->query_index_fd, header, sizeof(header)) ||
+      !lc_pouch_write_all(store->query_index_fd, namespace_name, ns_len) ||
+      !lc_pouch_write_all(store->query_index_fd, key, key_len) ||
+      (etag_len > 0UL &&
+       !lc_pouch_write_all(store->query_index_fd, etag, etag_len))) {
+    return lc_pouch_set_errno(error,
+                              "failed to append pouch query index record");
+  }
+  if (fsync(store->query_index_fd) != 0) {
+    return lc_pouch_set_errno(error, "failed to fsync pouch query index");
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_disk_object_entry_ptr_compare(const void *left,
@@ -1900,9 +1983,13 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to update pouch metadata index");
   }
-  rc = lc_pouch_disk_append_record(
-      store, LC_POUCH_RECORD_META_PUT, namespace_name, key, NULL, etag,
-      meta->version, payload, payload_length, &body_offset, error);
+  rc = lc_pouch_disk_append_query_index_record(
+      store, namespace_name, key, etag, meta->version, meta, 0, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_append_record(
+        store, LC_POUCH_RECORD_META_PUT, namespace_name, key, NULL, etag,
+        meta->version, payload, payload_length, &body_offset, error);
+  }
   if (rc == LC_OK && !lc_pouch_disk_commit_meta_upsert(store, &upsert)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch metadata index");
   }
@@ -1967,9 +2054,13 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch metadata etag");
   }
-  rc = lc_pouch_disk_append_record(store, LC_POUCH_RECORD_META_REMOVE,
-                                   namespace_name, key, NULL, etag, version,
-                                   NULL, 0U, &body_offset, error);
+  rc = lc_pouch_disk_append_query_index_record(store, namespace_name, key, etag,
+                                              version, NULL, 1, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_append_record(store, LC_POUCH_RECORD_META_REMOVE,
+                                     namespace_name, key, NULL, etag, version,
+                                     NULL, 0U, &body_offset, error);
+  }
   if (rc == LC_OK && !lc_pouch_disk_upsert_meta_entry(store, namespace_name,
                                                       key, etag, NULL, 1)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch metadata index");
@@ -6323,6 +6414,10 @@ static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
     close(store->lock_fd);
     store->lock_fd = -1;
   }
+  if (store->query_index_fd >= 0) {
+    close(store->query_index_fd);
+    store->query_index_fd = -1;
+  }
   for (index = 0U; index < store->state_entry_count; ++index) {
     lc_pouch_disk_entry_cleanup(store, &store->state_entries[index]);
   }
@@ -6343,6 +6438,7 @@ static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
   lc_pouch_free(&allocator, store->root_path);
   lc_pouch_free(&allocator, store->log_path);
   lc_pouch_free(&allocator, store->lock_path);
+  lc_pouch_free(&allocator, store->query_index_path);
   lc_pouch_free(&allocator, store->query_engine);
   lc_pouch_free(&allocator, store->query_fallback_engine);
   lc_pouch_free(&allocator, store);
@@ -6399,6 +6495,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   }
   store->log_fd = -1;
   store->lock_fd = -1;
+  store->query_index_fd = -1;
   store->next_version = 1L;
   store->pub.impl = store;
   store->root_path = lc_pouch_strdup(&store->allocator, root_path);
@@ -6406,12 +6503,14 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       lc_pouch_join_path(&store->allocator, root_path, "store.log");
   store->lock_path =
       lc_pouch_join_path(&store->allocator, root_path, "writer.lock");
+  store->query_index_path =
+      lc_pouch_join_path(&store->allocator, root_path, "query.index");
   store->query_engine = lc_pouch_strdup(&store->allocator, query_engine);
   store->query_fallback_engine =
       lc_pouch_strdup(&store->allocator, query_fallback_engine);
   if (store->root_path == NULL || store->log_path == NULL ||
-      store->lock_path == NULL || store->query_engine == NULL ||
-      store->query_fallback_engine == NULL) {
+      store->lock_path == NULL || store->query_index_path == NULL ||
+      store->query_engine == NULL || store->query_fallback_engine == NULL) {
     lc_pouch_disk_close(&store->pub, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch disk options");
   }
@@ -6424,6 +6523,11 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   if (store->log_fd < 0) {
     lc_pouch_disk_close(&store->pub, error);
     return lc_pouch_set_errno(error, "failed to open pouch log");
+  }
+  store->query_index_fd = open(store->query_index_path, O_RDWR | O_CREAT, 0666);
+  if (store->query_index_fd < 0) {
+    lc_pouch_disk_close(&store->pub, error);
+    return lc_pouch_set_errno(error, "failed to open pouch query index");
   }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
