@@ -343,7 +343,11 @@ static void bench_pouch_cleanup_root(const char *root) {
 
   snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
   unlink(path);
+  snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
+  unlink(path);
   snprintf(path, sizeof(path), "%s/store.log", root);
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/query.index", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
   unlink(path);
@@ -487,6 +491,17 @@ static int bench_scan_count_visit(void *context,
   bench_scan_count *count;
 
   (void)row;
+  (void)error;
+  count = (bench_scan_count *)context;
+  count->rows += 1L;
+  return LC_OK;
+}
+
+static int bench_key_count_visit(void *context, const char *key,
+                                 lc_error *error) {
+  bench_scan_count *count;
+
+  (void)key;
   (void)error;
   count = (bench_scan_count *)context;
   count->rows += 1L;
@@ -953,6 +968,49 @@ static int bench_pouch_index_scan(long iterations) {
   return rc == LC_OK && count.rows == iterations ? 0 : 1;
 }
 
+static int bench_pouch_index_keys(long iterations) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res res;
+  bench_scan_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "index-keys");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  bench_pouch_allocator(&allocator);
+  if (bench_pouch_seed_query_rows_with_allocator(root, iterations, &allocator,
+                                                 &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  bench_alloc_metrics_reset();
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&count, 0, sizeof(count));
+  req.namespace_name = "bench";
+  req.limit = (size_t)iterations;
+  rc = store->query_index_keys_scan(store, &req, bench_key_count_visit, &count,
+                                    &res, &error);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &res);
+  store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK && count.rows == iterations ? 0 : 1;
+}
+
 static int bench_pouch_scan_query(long iterations) {
   char root[256];
   char endpoint[320];
@@ -1109,7 +1167,7 @@ static void print_usage(const char *argv0) {
       "[all|streams|json|mutate-parse|mutate-apply|pouch-state|"
       "pouch-staged|pouch-object|pouch-queue|pouch-compaction|"
       "pouch-scan-meta|pouch-open-rebuild|pouch-index-scan|"
-      "pouch-scan-query|pouch-index-query]\n",
+      "pouch-index-keys|pouch-scan-query|pouch-index-query]\n",
       argv0);
 }
 
@@ -1127,6 +1185,7 @@ int main(int argc, char **argv) {
       {"pouch-scan-meta", 1000L, bench_pouch_scan_meta},
       {"pouch-open-rebuild", 1000L, bench_pouch_open_rebuild},
       {"pouch-index-scan", 1000L, bench_pouch_index_scan},
+      {"pouch-index-keys", 1000L, bench_pouch_index_keys},
       {"pouch-scan-query", 1000L, bench_pouch_scan_query},
       {"pouch-index-query", 1000L, bench_pouch_index_query}};
   const char *scenario;
