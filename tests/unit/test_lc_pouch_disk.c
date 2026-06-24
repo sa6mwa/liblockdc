@@ -8265,6 +8265,107 @@ static void test_lock_key_path_escapes_namespace_and_key(void **state) {
   test_cleanup_root(root);
 }
 
+static void child_process_hold_key_lock(const char *root, int ready_fd,
+                                        int release_fd) {
+  lc_pouch_store *store;
+  lc_pouch_key_lock *lock;
+  lc_error error;
+  char release;
+  int acquired;
+  int rc;
+
+  store = NULL;
+  lock = NULL;
+  memset(&error, 0, sizeof(error));
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(60);
+  }
+  rc = store->try_lock_key(store, "default", "alpha/beta", &lock, &acquired,
+                           &error);
+  if (rc != LC_OK || !acquired || lock == NULL) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(61);
+  }
+  if (write(ready_fd, "r", 1U) != 1) {
+    store->unlock_key(store, lock, NULL);
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(62);
+  }
+  close(ready_fd);
+  if (read(release_fd, &release, 1U) != 1) {
+    store->unlock_key(store, lock, NULL);
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(63);
+  }
+  close(release_fd);
+  rc = store->unlock_key(store, lock, &error);
+  if (rc != LC_OK) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(64);
+  }
+  rc = store->close(store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(65);
+  }
+  lc_error_cleanup(&error);
+  _exit(0);
+}
+
+static void child_process_probe_key_locks(const char *root) {
+  lc_pouch_store *store;
+  lc_pouch_key_lock *lock;
+  lc_error error;
+  int acquired;
+  int rc;
+
+  store = NULL;
+  lock = NULL;
+  memset(&error, 0, sizeof(error));
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(70);
+  }
+  acquired = 1;
+  rc = store->try_lock_key(store, "default", "alpha/beta", &lock, &acquired,
+                           &error);
+  if (rc != LC_OK || acquired || lock != NULL) {
+    if (lock != NULL) {
+      store->unlock_key(store, lock, NULL);
+    }
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(71);
+  }
+  rc = store->try_lock_key(store, "default", "alpha/gamma", &lock, &acquired,
+                           &error);
+  if (rc != LC_OK || !acquired || lock == NULL) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(72);
+  }
+  rc = store->unlock_key(store, lock, &error);
+  if (rc != LC_OK) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(73);
+  }
+  rc = store->close(store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(74);
+  }
+  lc_error_cleanup(&error);
+  _exit(0);
+}
+
 static void test_try_lock_key_serializes_same_process_handles(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -8344,6 +8445,63 @@ static void test_try_lock_key_serializes_same_process_handles(void **state) {
   rc = first->close(first, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_try_lock_key_serializes_cross_process_handles(void **state) {
+  char root[256];
+  int ready_pipe[2];
+  int release_pipe[2];
+  char ready;
+  int holder_code;
+  int probe_code;
+  int rc;
+  pid_t holder_pid;
+  pid_t probe_pid;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "key-lock-process-contention");
+  test_cleanup_root(root);
+  ready_pipe[0] = -1;
+  ready_pipe[1] = -1;
+  release_pipe[0] = -1;
+  release_pipe[1] = -1;
+
+  rc = pipe(ready_pipe);
+  assert_int_equal(rc, 0);
+  rc = pipe(release_pipe);
+  assert_int_equal(rc, 0);
+
+  holder_pid = fork();
+  assert_true(holder_pid >= 0);
+  if (holder_pid == 0) {
+    close(ready_pipe[0]);
+    close(release_pipe[1]);
+    child_process_hold_key_lock(root, ready_pipe[1], release_pipe[0]);
+  }
+  close(ready_pipe[1]);
+  ready_pipe[1] = -1;
+  close(release_pipe[0]);
+  release_pipe[0] = -1;
+  assert_int_equal(read(ready_pipe[0], &ready, 1U), 1);
+  close(ready_pipe[0]);
+  ready_pipe[0] = -1;
+
+  probe_pid = fork();
+  assert_true(probe_pid >= 0);
+  if (probe_pid == 0) {
+    close(release_pipe[1]);
+    child_process_probe_key_locks(root);
+  }
+  probe_code = child_exit_code(probe_pid);
+  assert_int_equal(probe_code, 0);
+
+  assert_int_equal(write(release_pipe[1], "x", 1U), 1);
+  close(release_pipe[1]);
+  release_pipe[1] = -1;
+  holder_code = child_exit_code(holder_pid);
+  assert_int_equal(holder_code, 0);
+
   test_cleanup_root(root);
 }
 
@@ -8586,6 +8744,7 @@ int main(void) {
       cmocka_unit_test(test_lock_status_reports_global_writer_lock_counters),
       cmocka_unit_test(test_lock_key_path_escapes_namespace_and_key),
       cmocka_unit_test(test_try_lock_key_serializes_same_process_handles),
+      cmocka_unit_test(test_try_lock_key_serializes_cross_process_handles),
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),
