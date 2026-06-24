@@ -2402,7 +2402,10 @@ int lc_pouch_client_queue_stats_method(lc_client *self,
                              "failed to copy pouch queue") != LC_OK ||
         lc_pouch_copy_public(&out->head_message_id, stats.head_message_id,
                              error,
-                             "failed to copy pouch queue head id") != LC_OK) {
+                             "failed to copy pouch queue head id") != LC_OK ||
+        lc_pouch_copy_public(&out->correlation_id, stats.correlation_id, error,
+                             "failed to copy pouch queue stats correlation "
+                             "id") != LC_OK) {
       lc_queue_stats_res_cleanup(out);
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {

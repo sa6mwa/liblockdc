@@ -346,5 +346,6 @@ void lc_pouch_queue_stats_cleanup(const lc_pouch_allocator *allocator,
     return;
   }
   lc_pouch_free(allocator, stats->head_message_id);
+  lc_pouch_free(allocator, stats->correlation_id);
   memset(stats, 0, sizeof(*stats));
 }

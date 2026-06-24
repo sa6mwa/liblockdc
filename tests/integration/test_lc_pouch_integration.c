@@ -2704,6 +2704,7 @@ static void test_pouch_public_queue_shared_handles(void **state) {
   assert_lc_ok(rc, &error);
   assert_true(stats.available);
   assert_string_equal(stats.head_message_id, enqueue_res.message_id);
+  assert_string_equal(stats.correlation_id, "pouch-queue-stats");
   lc_queue_stats_res_cleanup(&stats);
 
   lc_dequeue_req_init(&dequeue_req);

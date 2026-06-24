@@ -9120,8 +9120,15 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
+  out->correlation_id = lc_pouch_strdup(&store->allocator, "pouch-queue-stats");
+  if (out->correlation_id == NULL) {
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch queue stats "
+                              "correlation id");
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_queue_stats_cleanup(&store->allocator, out);
     return rc;
   }
   head_entry = NULL;

@@ -2162,6 +2162,7 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(stats_res.available, 1);
   assert_string_equal(stats_res.head_message_id, enqueue_res.message_id);
+  assert_string_equal(stats_res.correlation_id, "pouch-queue-stats");
   lc_queue_stats_res_cleanup(&stats_res);
 
   lc_dequeue_req_init(&dequeue_req);

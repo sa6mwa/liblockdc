@@ -268,6 +268,7 @@ typedef struct lc_pouch_queue_stats {
   char *head_message_id;
   long head_enqueued_at_unix;
   long head_not_visible_until_unix;
+  char *correlation_id;
 } lc_pouch_queue_stats;
 
 typedef struct lc_pouch_queue_wake_status {

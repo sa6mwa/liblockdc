@@ -6472,6 +6472,7 @@ static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(stats.available, 1);
   assert_string_equal(stats.head_message_id, enqueued.message_id);
+  assert_string_equal(stats.correlation_id, "pouch-queue-stats");
   lc_pouch_queue_stats_cleanup(&allocator, &stats);
 
   dequeue_opts.owner = "worker-a";
