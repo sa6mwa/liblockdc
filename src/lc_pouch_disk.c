@@ -2848,6 +2848,11 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_disk_replay_query_index(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
+    return rc;
+  }
   out->namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
   out->mode = lc_pouch_strdup(&store->allocator, effective_mode);
   out->flush_id = lc_pouch_strdup(&store->allocator, "local");

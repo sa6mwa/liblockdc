@@ -2912,6 +2912,101 @@ static void test_index_flush_reports_current_projection(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_index_flush_recovers_from_corrupt_sidecar_tail(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_index_flush_res flushed;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture capture;
+  lc_error error;
+  off_t original_query_index_size;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "index-flush-corrupt-sidecar-tail");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&flushed, 0, sizeof(flushed));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-corrupt";
+  meta.state_etag = "state-corrupt";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "corrupt", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-later";
+  meta.state_etag = "state-later";
+  meta.version = 3L;
+  rc = store->store_meta(store, "default", "later", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  original_query_index_size = test_query_index_size(root);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  corrupt_first_query_index_match(root, "corrupt");
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->flush_index(store, "default", "wait", &flushed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flushed.namespace_name, "default");
+  assert_string_equal(flushed.mode, "wait");
+  assert_string_equal(flushed.flush_id, "local");
+  assert_true(flushed.accepted);
+  assert_true(flushed.flushed);
+  assert_false(flushed.pending);
+  assert_true(flushed.index_seq >= 3UL);
+  assert_true(test_query_index_size(root) < original_query_index_size);
+  lc_pouch_index_flush_res_cleanup(&allocator, &flushed);
+
+  req.namespace_name = "default";
+  req.limit = 8U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 3U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "corrupt");
+  assert_string_equal(capture.keys[2], "later");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_query_index_sidecar_appends_metadata_records(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -6367,6 +6462,7 @@ int main(void) {
       cmocka_unit_test(
           test_metadata_update_allocation_failure_preserves_indexes),
       cmocka_unit_test(test_index_flush_reports_current_projection),
+      cmocka_unit_test(test_index_flush_recovers_from_corrupt_sidecar_tail),
       cmocka_unit_test(test_query_index_sidecar_appends_metadata_records),
       cmocka_unit_test(
           test_query_index_keys_ignores_sidecar_without_metadata_log),
