@@ -778,6 +778,82 @@ static void test_pouch_endpoint_lease_save_uses_mapped_lonejson(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_lease_mutate_local_updates_state(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_mutate_local_req mutate_req;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_sink *sink;
+  lc_error error;
+  const char *mutations[2];
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "mutate-local");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client(endpoint);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "mutable";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  assert_int_equal(lease->version, 0L);
+  assert_null(lease->state_etag);
+
+  mutations[0] = "/name=\"pouch\"";
+  mutations[1] = "/counter=1";
+  lc_mutate_local_req_init(&mutate_req);
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 2U;
+  rc = lease->mutate_local(lease, &mutate_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_non_null(lease->state_etag);
+
+  mutations[0] = "/counter=2";
+  lc_mutate_local_req_init(&mutate_req);
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 1U;
+  rc = lc_lease_mutate_local(lease, &mutate_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 2L);
+  assert_non_null(lease->state_etag);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_int_equal(get_res.version, 2L);
+  assert_string_equal(get_res.etag, lease->state_etag);
+  text = memory_sink_text(sink);
+  assert_true(strstr(text, "\"name\":\"pouch\"") != NULL);
+  assert_true(strstr(text, "\"counter\":3") != NULL);
+  free(text);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_rejects_missing_acquire_owner(void **state) {
   char root[256];
   char endpoint[320];
@@ -3815,6 +3891,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
+      cmocka_unit_test(test_pouch_endpoint_lease_mutate_local_updates_state),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_acquire_owner),
       cmocka_unit_test(test_pouch_endpoint_generates_implicit_txn_id),
       cmocka_unit_test(

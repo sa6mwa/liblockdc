@@ -2737,6 +2737,83 @@ static void test_pouch_public_remove_recreate_semantics(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_mutate_local_shared_state(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_mutate_local_req mutate_req;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_sink *sink;
+  lc_error error;
+  const char *mutations[2];
+  char *text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "mutate-local");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  lease = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_pouch_client(endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/mutate-local";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  rc = writer->acquire(writer, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  mutations[0] = "/owner=\"writer\"";
+  mutations[1] = "/attempts=1";
+  lc_mutate_local_req_init(&mutate_req);
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 2U;
+  rc = lease->mutate_local(lease, &mutate_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, 1L);
+  assert_non_null(lease->state_etag);
+
+  open_pouch_client(endpoint, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = reader->get(reader, "integration/mutate-local", NULL, sink, &get_res,
+                   &error);
+  assert_lc_ok(rc, &error);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_int_equal(get_res.version, 1L);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"owner\":\"writer\""));
+  assert_non_null(strstr(text, "\"attempts\":1"));
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  reader->close(reader);
+  reader = NULL;
+  writer->close(writer);
+  writer = NULL;
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_public_state_attachment_shared_handles),
@@ -2764,6 +2841,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_acquire_for_update_stages_state),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
+      cmocka_unit_test(test_pouch_public_mutate_local_shared_state),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

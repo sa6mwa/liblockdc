@@ -1,5 +1,6 @@
 #include "lc_api_internal.h"
 #include "lc_internal.h"
+#include "lc_mutate_stream.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -44,6 +45,9 @@ static long lc_pouch_now_unix(void) { return (long)time(NULL); }
 
 int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
                                  const lc_update_opts *opts, lc_error *error);
+int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
+                              const lc_get_opts *opts, lc_get_res *out,
+                              lc_error *error);
 static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
                                                const lc_update_opts *opts,
                                                lc_error *error);
@@ -53,6 +57,40 @@ static int lc_pouch_refresh_lease(lc_lease_handle *lease,
 typedef struct lc_pouch_acquire_for_update_file_sink {
   FILE *fp;
 } lc_pouch_acquire_for_update_file_sink;
+
+typedef struct lc_pouch_file_sink {
+  FILE *fp;
+  const char *label;
+} lc_pouch_file_sink;
+
+static int lc_pouch_file_sink_write(lc_sink *self, const void *bytes,
+                                    size_t count, lc_error *error) {
+  lc_pouch_file_sink *sink;
+  const char *label;
+
+  sink = self != NULL ? (lc_pouch_file_sink *)self->impl : NULL;
+  label = sink != NULL && sink->label != NULL ? sink->label : "pouch file";
+  if (sink == NULL || sink->fp == NULL) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L, "pouch file sink is closed",
+                        label, NULL, NULL);
+  }
+  if (count > 0U && fwrite(bytes, 1U, count, sink->fp) != count) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to write pouch file sink", label, NULL, NULL);
+  }
+  return 1;
+}
+
+static void lc_pouch_file_sink_close(lc_sink *self) { (void)self; }
+
+static void lc_pouch_file_sink_init(lc_sink *sink, lc_pouch_file_sink *impl,
+                                    FILE *fp, const char *label) {
+  impl->fp = fp;
+  impl->label = label;
+  sink->write = lc_pouch_file_sink_write;
+  sink->close = lc_pouch_file_sink_close;
+  sink->impl = impl;
+}
 
 static int lc_pouch_acquire_for_update_sink_write(lc_sink *self,
                                                   const void *bytes,
@@ -562,13 +600,136 @@ static int lc_pouch_lease_mutate_unsupported(lc_lease *self,
                       NULL, NULL);
 }
 
-static int lc_pouch_lease_mutate_local_unsupported(
+static int lc_pouch_mutate_write_empty_object(FILE *fp, lc_error *error) {
+  if (fp == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutate_local requires scratch file", NULL, NULL,
+                        NULL);
+  }
+  if (fwrite("{}", 1U, 2U, fp) != 2U) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to seed pouch local mutate document",
+                        strerror(errno), NULL, NULL);
+  }
+  if (fflush(fp) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to flush pouch local mutate document",
+                        strerror(errno), NULL, NULL);
+  }
+  rewind(fp);
+  return LC_OK;
+}
+
+static int lc_pouch_lease_mutate_local_method(
     lc_lease *self, const lc_mutate_local_req *req, lc_error *error) {
-  (void)self;
-  (void)req;
-  return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch lease local mutate requires the LQL/mutate slice",
-                      NULL, NULL, NULL);
+  lc_mutation_parse_options parse_options;
+  lc_mutation_plan *plan;
+  lc_update_opts update_opts;
+  lc_get_res get_res;
+  lc_source *source;
+  lc_sink sink;
+  lc_pouch_file_sink sink_impl;
+  FILE *input_fp;
+  FILE *final_fp;
+  int rc;
+
+  if (self == NULL || req == NULL || req->mutations == NULL ||
+      req->mutation_count == 0U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease mutate_local requires self and mutations",
+                        NULL, NULL, NULL);
+  }
+
+  memset(&parse_options, 0, sizeof(parse_options));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_update_opts_init(&update_opts);
+  parse_options.file_value_base_dir = req->file_value_base_dir;
+  parse_options.file_value_resolver = req->file_value_resolver;
+  if (clock_gettime(CLOCK_REALTIME, &parse_options.now) == 0) {
+    parse_options.has_now = 1;
+  }
+  plan = NULL;
+  source = NULL;
+  input_fp = NULL;
+  final_fp = NULL;
+
+  rc = lc_mutation_plan_build(req->mutations, req->mutation_count,
+                              &parse_options, &plan, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  input_fp = tmpfile();
+  if (input_fp == NULL) {
+    lc_mutation_plan_close(plan);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create pouch local mutate input file",
+                        strerror(errno), NULL, NULL);
+  }
+  lc_pouch_file_sink_init(&sink, &sink_impl, input_fp, "local_mutate_input");
+  rc = lc_pouch_lease_get_method(self, &sink, NULL, &get_res, error);
+  if (rc != LC_OK) {
+    fclose(input_fp);
+    lc_mutation_plan_close(plan);
+    return rc;
+  }
+  if (fflush(input_fp) != 0) {
+    fclose(input_fp);
+    lc_get_res_cleanup(&get_res);
+    lc_mutation_plan_close(plan);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to flush pouch local mutate input file",
+                        strerror(errno), NULL, NULL);
+  }
+  rewind(input_fp);
+
+  if (get_res.no_content) {
+    rc = lc_pouch_mutate_write_empty_object(input_fp, error);
+    if (rc != LC_OK) {
+      fclose(input_fp);
+      lc_get_res_cleanup(&get_res);
+      lc_mutation_plan_close(plan);
+      return rc;
+    }
+  }
+
+  rc = lc_mutation_plan_apply(plan, input_fp, &final_fp, error);
+  fclose(input_fp);
+  lc_mutation_plan_close(plan);
+  if (rc != LC_OK) {
+    lc_get_res_cleanup(&get_res);
+    return rc;
+  }
+
+  update_opts = req->update;
+  if (update_opts.content_type == NULL || update_opts.content_type[0] == '\0') {
+    update_opts.content_type = "application/json";
+  }
+  if (!req->disable_fetched_cas) {
+    if ((update_opts.if_state_etag == NULL ||
+         update_opts.if_state_etag[0] == '\0') &&
+        get_res.etag != NULL && get_res.etag[0] != '\0') {
+      update_opts.if_state_etag = get_res.etag;
+    }
+    if (!update_opts.has_if_version && get_res.version > 0L) {
+      update_opts.if_version = get_res.version;
+      update_opts.has_if_version = 1;
+    }
+  }
+
+  source = lc_source_from_open_file(final_fp, 0);
+  if (source == NULL) {
+    fclose(final_fp);
+    lc_get_res_cleanup(&get_res);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to wrap pouch local mutate output stream", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_lease_update_method(self, source, &update_opts, error);
+  lc_source_close(source);
+  fclose(final_fp);
+  lc_get_res_cleanup(&get_res);
+  return rc;
 }
 
 static int lc_pouch_validate_active_lease(lc_client_handle *client,
@@ -714,7 +875,7 @@ static void lc_pouch_install_lease_methods(lc_lease *lease) {
   lease->save = lc_pouch_lease_save_method;
   lease->update = lc_pouch_lease_update_method;
   lease->mutate = lc_pouch_lease_mutate_unsupported;
-  lease->mutate_local = lc_pouch_lease_mutate_local_unsupported;
+  lease->mutate_local = lc_pouch_lease_mutate_local_method;
   lease->metadata = lc_pouch_lease_metadata_method;
   lease->remove = lc_pouch_lease_remove_method;
   lease->keepalive = lc_pouch_lease_keepalive_method;
