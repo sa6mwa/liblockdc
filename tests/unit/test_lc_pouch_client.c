@@ -2979,6 +2979,63 @@ static void test_pouch_endpoint_default_index_query_keys_pages(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_flush_index_reports_current_sequence(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_index_flush_req req;
+  lc_index_flush_res res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "index-flush");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+  lease = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(lease, "{\"value\":1}", &error);
+
+  lc_index_flush_req_init(&req);
+  req.namespace_name = "default";
+  rc = client->flush_index(client, &req, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(res.namespace_name, "default");
+  assert_string_equal(res.mode, "wait");
+  assert_string_equal(res.flush_id, "local");
+  assert_true(res.accepted);
+  assert_true(res.flushed);
+  assert_false(res.pending);
+  assert_true(res.index_seq > 0UL);
+  lc_index_flush_res_cleanup(&res);
+
+  lc_index_flush_req_init(&req);
+  req.mode = "now";
+  rc = client->flush_index(client, &req, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(res.namespace_name, "default");
+  assert_string_equal(res.mode, "now");
+  assert_true(res.index_seq > 0UL);
+  lc_index_flush_res_cleanup(&res);
+
+  lc_index_flush_req_init(&req);
+  req.mode = "later";
+  rc = client->flush_index(client, &req, &res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch index flush mode must be wait or now");
+  lc_error_cleanup(&error);
+
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_configured_scan_query_without_hint(
     void **state) {
   char root[256];
@@ -3416,8 +3473,13 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   flush_req.namespace_name = "default";
   flush_req.mode = "wait";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
-  assert_pouch_unsupported(rc, &error,
-                           "pouch index flush requires the LQL slice");
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.namespace_name, "default");
+  assert_string_equal(flush_res.mode, "wait");
+  assert_true(flush_res.accepted);
+  assert_true(flush_res.flushed);
+  assert_false(flush_res.pending);
+  lc_index_flush_res_cleanup(&flush_res);
 
   lc_txn_replay_req_init(&replay_req);
   replay_req.txn_id = "txn-1";
@@ -3493,6 +3555,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_streams_documents),
       cmocka_unit_test(test_pouch_endpoint_default_index_query_keys_pages),
+      cmocka_unit_test(
+          test_pouch_endpoint_flush_index_reports_current_sequence),
       cmocka_unit_test(test_pouch_endpoint_configured_scan_query_without_hint),
       cmocka_unit_test(test_pouch_endpoint_configured_scan_fallback_query),
       cmocka_unit_test(test_pouch_endpoint_scan_query_rejects_lql_selector),

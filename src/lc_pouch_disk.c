@@ -168,6 +168,11 @@ static int lc_pouch_disk_query_index_scan(
     lc_pouch_store *self, const lc_pouch_query_index_scan_req *req,
     lc_pouch_scan_meta_visit_fn visit, void *visit_context,
     lc_pouch_query_index_scan_res *out, lc_error *error);
+static int lc_pouch_disk_flush_index(lc_pouch_store *self,
+                                     const char *namespace_name,
+                                     const char *mode,
+                                     lc_pouch_index_flush_res *out,
+                                     lc_error *error);
 static int lc_pouch_disk_append_record(
     lc_pouch_disk_store *store, unsigned long type, const char *namespace_name,
     const char *key, const char *content_type, const char *etag, long version,
@@ -1889,6 +1894,58 @@ static int lc_pouch_disk_query_index_scan(
   scan_res.next_start_after = NULL;
   out->index_seq = store->replayed_record_count;
   lc_pouch_scan_meta_res_cleanup(&store->allocator, &scan_res);
+  return LC_OK;
+}
+
+static int lc_pouch_disk_flush_index(lc_pouch_store *self,
+                                     const char *namespace_name,
+                                     const char *mode,
+                                     lc_pouch_index_flush_res *out,
+                                     lc_error *error) {
+  lc_pouch_disk_store *store;
+  const char *effective_mode;
+  int rc;
+
+  if (self == NULL || namespace_name == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "flush_index requires store, namespace, "
+                                "and output");
+  }
+  rc = lc_pouch_disk_validate_name(error, "flush_index", "namespace",
+                                   namespace_name);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  effective_mode = mode != NULL && mode[0] != '\0' ? mode : "wait";
+  if (strcmp(effective_mode, "wait") != 0 &&
+      strcmp(effective_mode, "now") != 0) {
+    return lc_pouch_set_invalid(error,
+                                "pouch index flush mode must be wait or now");
+  }
+
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  rc = lc_pouch_disk_lock(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  out->namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
+  out->mode = lc_pouch_strdup(&store->allocator, effective_mode);
+  out->flush_id = lc_pouch_strdup(&store->allocator, "local");
+  out->accepted = 1;
+  out->flushed = 1;
+  out->pending = 0;
+  out->index_seq = store->replayed_record_count;
+  if (out->namespace_name == NULL || out->mode == NULL ||
+      out->flush_id == NULL) {
+    lc_pouch_index_flush_res_cleanup(&store->allocator, out);
+    lc_pouch_disk_unlock(store, error);
+    return lc_pouch_set_nomem(error, "failed to allocate pouch index flush");
+  }
+  if (lc_pouch_disk_unlock(store, error) != LC_OK) {
+    lc_pouch_index_flush_res_cleanup(&store->allocator, out);
+    return LC_ERR_TRANSPORT;
+  }
   return LC_OK;
 }
 
@@ -5828,6 +5885,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.delete_meta = lc_pouch_disk_delete_meta;
   store->pub.scan_meta = lc_pouch_disk_scan_meta;
   store->pub.query_index_scan = lc_pouch_disk_query_index_scan;
+  store->pub.flush_index = lc_pouch_disk_flush_index;
   store->pub.read_state = lc_pouch_disk_read_state;
   store->pub.write_state = lc_pouch_disk_write_state;
   store->pub.remove_state = lc_pouch_disk_remove_state;

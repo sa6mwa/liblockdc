@@ -1796,6 +1796,69 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   test_cleanup_root(root);
 }
 
+static void test_index_flush_reports_current_projection(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_index_flush_res flushed;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "index-flush");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&flushed, 0, sizeof(flushed));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->flush_index);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease";
+  meta.state_etag = "state";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  rc = store->flush_index(store, "default", NULL, &flushed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flushed.namespace_name, "default");
+  assert_string_equal(flushed.mode, "wait");
+  assert_string_equal(flushed.flush_id, "local");
+  assert_true(flushed.accepted);
+  assert_true(flushed.flushed);
+  assert_false(flushed.pending);
+  assert_true(flushed.index_seq > 0UL);
+  lc_pouch_index_flush_res_cleanup(&allocator, &flushed);
+
+  rc = store->flush_index(store, "default", "now", &flushed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flushed.mode, "now");
+  assert_true(flushed.index_seq > 0UL);
+  lc_pouch_index_flush_res_cleanup(&allocator, &flushed);
+
+  rc = store->flush_index(store, "default", "later", &flushed, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch index flush mode must be wait or now");
+  lc_error_cleanup(&error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -3988,6 +4051,7 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(
           test_query_index_scan_orders_paginates_and_reports_seq),
+      cmocka_unit_test(test_index_flush_reports_current_projection),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),

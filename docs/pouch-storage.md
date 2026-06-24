@@ -498,16 +498,20 @@ early deployments before a particular index feature exists. It must still use
 the backend summary scan path and stable key ordering; it must not materialize
 payloads or silently replay the entire append log on every query.
 
-The first public scan-mode surfaces are `query_keys` and `query` with the
-match-all selector `{}`. `query_keys` streams keys from ordered metadata
-summaries, excludes `query_hidden=true` metadata, uses `cursor` as
-`start_after`, returns `keys` as the return mode, and emits no index sequence
-because no durable query index is consulted. `query` streams NDJSON document
-rows in the same ordered page, embeds JSON state payloads as `document`, emits
-`null` for non-JSON or empty state payloads, returns `documents`, and reports
-local metadata such as `query_candidates`. Non-empty field selection, refresh
-hints, non-document scan return modes, and nontrivial LQL selectors remain
-unsupported until the indexed/LQL query slice lands.
+The first public query surfaces are `query_keys` and `query` with the match-all
+selector `{}`. In indexed mode these calls route through a storage-owned index
+scan primitive and return the current `index_seq`. In explicit scan mode they
+route through ordered metadata summaries and emit no index sequence because no
+durable query index is consulted. `query_keys` streams keys, excludes
+`query_hidden=true` metadata, uses `cursor` as `start_after`, and returns `keys`
+as the return mode. `query` streams NDJSON document rows in the same ordered
+page, embeds JSON state payloads as `document`, emits `null` for non-JSON or
+empty state payloads, returns `documents`, and reports local metadata such as
+`query_candidates`. Pouch `flush_index` is synchronous for the current local
+projection: it returns accepted/flushed/not-pending and the latest index
+sequence. Non-empty field selection, refresh hints, non-document scan return
+modes, and nontrivial LQL selectors remain unsupported until the indexed/LQL
+query slice lands.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a

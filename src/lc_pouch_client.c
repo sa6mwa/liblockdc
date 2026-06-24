@@ -2791,11 +2791,53 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                                        const lc_index_flush_req *req,
                                        lc_index_flush_res *out,
                                        lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_unsupported(
-      error, "pouch index flush requires the LQL slice");
+  lc_client_handle *client;
+  lc_pouch_index_flush_res store_res;
+  const char *namespace_name;
+  int rc;
+
+  if (self == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "flush_index requires self and out", NULL, NULL,
+                        NULL);
+  }
+  client = (lc_client_handle *)self;
+  if (client->pouch_store == NULL || client->pouch_store->flush_index == NULL) {
+    return lc_pouch_client_unsupported(error,
+                                       "pouch index flush is not available");
+  }
+  rc = lc_pouch_public_namespace(client, req != NULL ? req->namespace_name : NULL,
+                                 &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  memset(out, 0, sizeof(*out));
+  memset(&store_res, 0, sizeof(store_res));
+  rc = client->pouch_store->flush_index(
+      client->pouch_store, namespace_name, req != NULL ? req->mode : NULL,
+      &store_res, error);
+  if (rc != LC_OK) {
+    lc_pouch_index_flush_res_cleanup(&client->pouch_allocator, &store_res);
+    return rc;
+  }
+
+  out->namespace_name = lc_strdup_local(store_res.namespace_name);
+  out->mode = lc_strdup_local(store_res.mode);
+  out->flush_id = lc_strdup_local(store_res.flush_id);
+  out->accepted = store_res.accepted;
+  out->flushed = store_res.flushed;
+  out->pending = store_res.pending;
+  out->index_seq = store_res.index_seq;
+  lc_pouch_index_flush_res_cleanup(&client->pouch_allocator, &store_res);
+  if (out->namespace_name == NULL || out->mode == NULL ||
+      out->flush_id == NULL) {
+    lc_index_flush_res_cleanup(out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index flush result", NULL,
+                        NULL, NULL);
+  }
+  return LC_OK;
 }
 
 int lc_pouch_client_txn_replay_method(lc_client *self,

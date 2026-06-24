@@ -187,6 +187,17 @@ void lc_pouch_query_index_scan_res_cleanup(
   memset(res, 0, sizeof(*res));
 }
 
+void lc_pouch_index_flush_res_cleanup(const lc_pouch_allocator *allocator,
+                                      lc_pouch_index_flush_res *res) {
+  if (res == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, res->namespace_name);
+  lc_pouch_free(allocator, res->mode);
+  lc_pouch_free(allocator, res->flush_id);
+  memset(res, 0, sizeof(*res));
+}
+
 void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
                                    lc_pouch_query_config *config) {
   if (config == NULL) {
