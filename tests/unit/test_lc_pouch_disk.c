@@ -1605,6 +1605,194 @@ static void test_replay_stops_at_oversized_record_without_allocating_payload(
   test_cleanup_root(root);
 }
 
+static void test_replay_stops_at_truncated_object_metadata(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res first;
+  lc_pouch_put_state_res later;
+  lc_pouch_put_object_opts object_opts;
+  lc_pouch_object_info object_info;
+  lc_pouch_object_list list;
+  lc_pouch_state_info state_info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-truncated-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&first, 0, sizeof(first));
+  memset(&later, 0, sizeof(later));
+  memset(&object_opts, 0, sizeof(object_opts));
+  memset(&object_info, 0, sizeof(object_info));
+  memset(&list, 0, sizeof(list));
+  memset(&state_info, 0, sizeof(state_info));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("object-prefix");
+  rc = store->write_state(store, "default", "good", source, NULL, &first,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  object_opts.name = "artifact.txt";
+  object_opts.content_type = "text/plain";
+  source = source_from_text("object-truncated");
+  rc = store->put_object(store, "default", "object-key", source, &object_opts,
+                         &object_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("object-later");
+  rc = store->write_state(store, "default", "later", source, NULL, &later,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  set_first_log_match_body_length(root, "object-truncated", 8UL);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "good", &read_body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "object-prefix");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->list_objects(store, "default", "object-key", &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 0U);
+  lc_pouch_object_list_cleanup(&allocator, &list);
+
+  rc = store->read_state(store, "default", "later", &read_body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
+  lc_pouch_put_state_res_cleanup(&allocator, &first);
+  lc_pouch_put_state_res_cleanup(&allocator, &later);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_replay_stops_at_truncated_queue_metadata(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res first;
+  lc_pouch_put_state_res later;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_stats stats;
+  lc_pouch_state_info state_info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-truncated-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&first, 0, sizeof(first));
+  memset(&later, 0, sizeof(later));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&stats, 0, sizeof(stats));
+  memset(&state_info, 0, sizeof(state_info));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("queue-prefix");
+  rc = store->write_state(store, "default", "good", source, NULL, &first,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queue-truncated");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("queue-later");
+  rc = store->write_state(store, "default", "later", source, NULL, &later,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  set_first_log_match_body_length(root, "queue-truncated", 8UL);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "good", &read_body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "queue-prefix");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  assert_null(stats.head_message_id);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  rc = store->read_state(store, "default", "later", &read_body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  lc_pouch_put_state_res_cleanup(&allocator, &first);
+  lc_pouch_put_state_res_cleanup(&allocator, &later);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -5872,6 +6060,8 @@ int main(void) {
       cmocka_unit_test(test_replay_stops_at_unsupported_record_version),
       cmocka_unit_test(
           test_replay_stops_at_oversized_record_without_allocating_payload),
+      cmocka_unit_test(test_replay_stops_at_truncated_object_metadata),
+      cmocka_unit_test(test_replay_stops_at_truncated_queue_metadata),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_metadata_scan_forces_full_log_replay),
