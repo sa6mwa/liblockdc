@@ -498,11 +498,19 @@ can set this through `lc_client_config.pouch_query_engine` and
 with `pouch:///path?query_engine=scan&query_fallback_engine=index`. Endpoint
 settings override the client defaults for that opened store. Scan mode is
 useful for tiny stores, diagnostics, index rebuild validation, and early
-deployments before a particular index feature exists. It is the explicit
-full-scan route: the disk backend must rebuild the scan projection from the
-authoritative log before serving the scan page, preserve stable key ordering,
-and avoid payload materialization until a surviving query row needs its document
-body.
+deployments before a particular index feature exists.
+
+Scan mode is a real full-log/full-summary route, not a synonym for the indexed
+path with fewer predicates. Before serving a scan page, the disk backend must
+refresh from the authoritative log state, including the equivalent of a forced
+segment/log scan when marker state, open-file replacement, or configured refresh
+intervals make cached projections uncertain. It may then serve the page from a
+rebuilt in-memory summary projection so long as the projection was derived from
+that authoritative refresh. The scan result must preserve stable lexical key
+ordering, honor `start_after` and `limit`, skip query-hidden rows, and avoid
+payload materialization until a surviving query row needs its document body.
+This keeps Go-style scan correctness available for pouch instances that request
+it while keeping indexed search as the default and preferred performance path.
 Fallback policy applies only to configured default routing, not to explicit
 per-request engine hints. For example, a store configured with
 `query_engine=scan&query_fallback_engine=index` should route `refresh=wait_for`
@@ -533,10 +541,10 @@ the storage high-water mark, not a physical log record count, so compaction and
 reopen cannot make query tokens move backwards. Indexed match-all queries accept
 `refresh=wait_for` by performing the same synchronous local index flush before
 scanning the indexed projection. Explicit scan mode remains available for
-full-log/full-summary scanning but does not accept refresh hints because no
-durable query index is consulted. Non-empty field selection, non-document scan
-return modes, and nontrivial LQL selectors remain unsupported until the
-indexed/LQL query slice lands.
+full-log/full-summary scanning through the ordered metadata summary API, but it
+does not accept refresh hints because no durable query index is consulted.
+Non-empty field selection, non-document scan return modes, and nontrivial LQL
+selectors remain unsupported until the indexed/LQL query slice lands.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
@@ -815,11 +823,12 @@ LQL integration should consume storage query APIs, not raw log scans. Until
 `liblql` is available, pouch should expose a narrow internal predicate/query
 boundary over indexed summaries, term/range postings, stable ordering, limits,
 and cursors. That same boundary must also support explicit scan mode over
-ordered metadata summaries. Indexed mode is the preferred default; scan mode is
-a configured backend mode or configured fallback. The persistent format should
-not encode LQL-specific query plans. Pre-LQL scan support is intentionally
-limited to match-all `query_keys` and match-all document `query`; predicate
-evaluation requires the later query/index integration.
+ordered metadata summaries that were refreshed from authoritative log state.
+Indexed mode is the preferred default; scan mode is a configured backend mode
+or configured fallback. The persistent format should not encode LQL-specific
+query plans. Pre-LQL scan support is intentionally limited to match-all
+`query_keys` and match-all document `query`; predicate evaluation requires the
+later query/index integration.
 
 Query refresh contracts are storage-visible. A query that waits for a flush or
 refresh target must observe committed summary records without requiring a full
@@ -1585,9 +1594,9 @@ Integration tests:
 - query-hidden metadata is excluded from scans
 - query backend mode configuration selects indexed mode by default, explicit
   scan mode when requested, and only falls back according to configured policy
-- scan-mode `query_keys` and `query` use ordered metadata summaries with stable
-  pagination, stream results, exclude query-hidden metadata, and load state
-  payloads only for document rows
+- scan-mode `query_keys` and `query` force authoritative log refresh before
+  using ordered metadata summaries with stable pagination, stream results,
+  exclude query-hidden metadata, and load state payloads only for document rows
 - query pagination, namespace isolation, public-read results, and streamed
   document responses work against disk summaries
 - query flush-wait and refresh-wait contracts observe committed summary rows
