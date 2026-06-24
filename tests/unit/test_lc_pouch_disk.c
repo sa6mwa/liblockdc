@@ -4301,6 +4301,109 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_compaction_preserves_promoted_staged_state_link(void **state) {
+  char root[256];
+  char payload[4096];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source staged_source;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res staged;
+  lc_pouch_put_state_res promoted;
+  lc_pouch_put_state_res churned;
+  lc_pouch_state_info info;
+  lc_error error;
+  size_t index;
+  size_t read_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "staged-link-compact");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&staged, 0, sizeof(staged));
+  memset(&promoted, 0, sizeof(promoted));
+  memset(&churned, 0, sizeof(churned));
+  memset(&info, 0, sizeof(info));
+  memset(payload, 'x', sizeof(payload));
+  store = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  state_opts.content_type = "application/octet-stream";
+  counting_source_init(&staged_source, 128U * 1024U);
+  rc = store->stage_state(store, "default", "linked-key", "txn-compact",
+                          &staged_source.pub, &state_opts, &staged, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->promote_staged_state(store, "default", "linked-key",
+                                   "txn-compact", NULL, &promoted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(promoted.new_state_etag, staged.new_state_etag);
+  assert_int_equal(promoted.bytes, 128L * 1024L);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_LINK),
+                   1U);
+
+  for (index = 0U; index < 80U; ++index) {
+    source = NULL;
+    rc = lc_source_from_memory(payload, sizeof(payload), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = store->write_state(store, "default", "hot-key", source, &state_opts,
+                            &churned, &error);
+    lc_source_close(source);
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_put_state_res_cleanup(&allocator, &churned);
+    memset(&churned, 0, sizeof(churned));
+  }
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_LINK),
+                   0U);
+
+  rc = store->read_state(store, "default", "linked-key", &body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, promoted.new_state_etag);
+  assert_int_equal(info.version, promoted.new_version);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, 128U * 1024U);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "linked-key", &body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, promoted.new_state_etag);
+  assert_int_equal(info.version, promoted.new_version);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, 128U * 1024U);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &staged);
+  lc_pouch_put_state_res_cleanup(&allocator, &promoted);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_independent_handle_refreshes_after_log_replacement(
     void **state) {
   char root[256];
@@ -6283,6 +6386,8 @@ int main(void) {
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
       cmocka_unit_test(
           test_auto_compaction_preserves_live_heads_and_tokens),
+      cmocka_unit_test(
+          test_compaction_preserves_promoted_staged_state_link),
       cmocka_unit_test(
           test_independent_handle_refreshes_after_log_replacement),
       cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
