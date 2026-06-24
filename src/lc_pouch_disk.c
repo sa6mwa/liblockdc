@@ -5051,6 +5051,7 @@ static int lc_pouch_disk_dequeue_message(
   lc_source *source_pub;
   lc_pouch_file_source *source;
   char *lease_id;
+  char *message_id;
   char *meta_etag;
   char *txn_id;
   long now_unix;
@@ -5096,11 +5097,17 @@ static int lc_pouch_disk_dequeue_message(
     return LC_OK;
   }
   entry = &store->queue_entries[found];
+  message_id = lc_pouch_strdup(&store->allocator, entry->message_id);
+  if (message_id == NULL) {
+    lc_pouch_disk_unlock(store, error);
+    return lc_pouch_set_nomem(error, "failed to copy pouch queue message id");
+  }
   lease_id = lc_pouch_make_queue_lease_id(store, entry->message_id,
                                           entry->fencing_token + 1L);
   meta_etag = lc_pouch_make_etag(store, entry->fencing_token + 1L,
                                  entry->message_id, strlen(entry->message_id));
   if (lease_id == NULL || meta_etag == NULL) {
+    lc_pouch_free(&store->allocator, message_id);
     lc_pouch_free(&store->allocator, lease_id);
     lc_pouch_free(&store->allocator, meta_etag);
     lc_pouch_disk_unlock(store, error);
@@ -5108,6 +5115,7 @@ static int lc_pouch_disk_dequeue_message(
   }
   txn_id = lc_pouch_strdup(&store->allocator, opts->txn_id);
   if (opts->txn_id != NULL && txn_id == NULL) {
+    lc_pouch_free(&store->allocator, message_id);
     lc_pouch_free(&store->allocator, lease_id);
     lc_pouch_free(&store->allocator, meta_etag);
     lc_pouch_disk_unlock(store, error);
@@ -5132,6 +5140,18 @@ static int lc_pouch_disk_dequeue_message(
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
+  if (rc == LC_OK) {
+    found = lc_pouch_disk_find_queue_entry(store, namespace_name, queue,
+                                           message_id);
+    if (found < 0) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to refresh pouch queue lease after compaction",
+                        NULL, NULL, NULL);
+    } else {
+      entry = &store->queue_entries[found];
+    }
+  }
+  lc_pouch_free(&store->allocator, message_id);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }

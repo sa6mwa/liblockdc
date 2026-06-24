@@ -2474,6 +2474,88 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_queue_dequeue_survives_compaction_refresh(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_ref ref;
+  lc_error error;
+  char *text;
+  size_t index;
+  int acked;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-dequeue-compact");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  store = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+
+  for (index = 0U; index < 120U; ++index) {
+    memset(&enqueued, 0, sizeof(enqueued));
+    memset(&dequeued, 0, sizeof(dequeued));
+    memset(&ref, 0, sizeof(ref));
+    source = source_from_text("queue-payload");
+    rc = store->enqueue_message(store, "default", "jobs", source,
+                                &enqueue_opts, &enqueued, &error);
+    lc_source_close(source);
+    assert_int_equal(rc, LC_OK);
+
+    rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                                &body, &dequeued, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_non_null(body);
+    assert_string_equal(dequeued.message_id, enqueued.message_id);
+    text = read_source_text(body);
+    assert_string_equal(text, "queue-payload");
+    free(text);
+    lc_source_close(body);
+    body = NULL;
+
+    ref.namespace_name = dequeued.namespace_name;
+    ref.queue = dequeued.queue;
+    ref.message_id = dequeued.message_id;
+    ref.lease_id = dequeued.lease_id;
+    ref.txn_id = dequeued.txn_id;
+    ref.fencing_token = dequeued.fencing_token;
+    ref.meta_etag = dequeued.meta_etag;
+    acked = 0;
+    rc = store->ack_message(store, &ref, &acked, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(acked);
+
+    lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+    lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  }
+
+  assert_true(test_log_size(root) < (off_t)(120U * 256U));
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_empty_identifiers_are_rejected_before_append(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -3273,6 +3355,7 @@ int main(void) {
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
       cmocka_unit_test(
           test_auto_compaction_preserves_live_heads_and_tokens),
+      cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(test_queue_delay_hides_until_visible),

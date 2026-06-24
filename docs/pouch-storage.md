@@ -1234,6 +1234,12 @@ Benchmarks are required alongside implementation. Initial benchmark targets:
 - NFS-like mode with marker polling and advisory locks enabled
 - allocator counts, peak bytes, pool hit ratio, and allocation failures
 
+Current native benchmark coverage in `bench/lockdc_bench` includes pouch
+state roundtrip, staged promotion, attachment put/get, enqueue/dequeue/ack, and
+hot-key compaction churn. These are smoke-sized local benchmarks rather than
+performance gates; the larger matrix above remains the target coverage for
+regression thresholds.
+
 Benchmarks should report:
 
 - operations per second

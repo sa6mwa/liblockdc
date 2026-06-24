@@ -104,6 +104,9 @@ make fuzz
 make benchmarks
 ```
 
+`make benchmarks` uses tuned per-case defaults; set `BENCH_ITERS=<n>` to force
+the same iteration count across all benchmark cases.
+
 All significant Make targets print total elapsed time on completion.
 
 `make format` runs `clang-format` over the C source/header tree and is also

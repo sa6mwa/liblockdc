@@ -227,6 +227,8 @@ static void bench_pouch_root_path(char *buffer, size_t buffer_size,
 static void bench_pouch_cleanup_root(const char *root) {
   char path[512];
 
+  snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
+  unlink(path);
   snprintf(path, sizeof(path), "%s/store.log", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
@@ -239,6 +241,17 @@ static lc_source *bench_source_from_text(const char *text, lc_error *error) {
 
   source = NULL;
   if (lc_source_from_memory(text, strlen(text), &source, error) != LC_OK) {
+    return NULL;
+  }
+  return source;
+}
+
+static lc_source *bench_source_from_bytes(const void *bytes, size_t length,
+                                          lc_error *error) {
+  lc_source *source;
+
+  source = NULL;
+  if (lc_source_from_memory(bytes, length, &source, error) != LC_OK) {
     return NULL;
   }
   return source;
@@ -390,6 +403,226 @@ static int bench_pouch_staged_promote(long iterations) {
   return rc == LC_OK ? 0 : 1;
 }
 
+static int bench_pouch_object_roundtrip(long iterations) {
+  char root[256];
+  char key[80];
+  char name[80];
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info info;
+  lc_error error;
+  long i;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "object");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
+
+  for (i = 0; i < iterations; ++i) {
+    snprintf(key, sizeof(key), "bench/object/%ld", i);
+    snprintf(name, sizeof(name), "payload-%ld.txt", i);
+    memset(&opts, 0, sizeof(opts));
+    memset(&selector, 0, sizeof(selector));
+    memset(&info, 0, sizeof(info));
+    opts.name = name;
+    opts.content_type = "text/plain";
+    selector.name = name;
+    read_body = NULL;
+    source = bench_source_from_text("object-payload", &error);
+    if (source == NULL) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    rc = store->put_object(store, "bench", key, source, &opts, &info, &error);
+    lc_source_close(source);
+    lc_pouch_object_info_cleanup(NULL, &info);
+    if (rc == LC_OK) {
+      rc = store->get_object(store, "bench", key, &selector, &read_body, &info,
+                             &error);
+    }
+    if (rc != LC_OK || read_body == NULL ||
+        bench_pouch_read_and_check(read_body, "object-payload", &error) != 0) {
+      if (read_body != NULL) {
+        lc_source_close(read_body);
+      }
+      lc_pouch_object_info_cleanup(NULL, &info);
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    lc_source_close(read_body);
+    lc_pouch_object_info_cleanup(NULL, &info);
+  }
+
+  rc = store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_queue_roundtrip(long iterations) {
+  char root[256];
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_ref ref;
+  lc_error error;
+  long i;
+  int acked;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "queue");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  dequeue_opts.owner = "bench-worker";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+
+  for (i = 0; i < iterations; ++i) {
+    memset(&enqueued, 0, sizeof(enqueued));
+    memset(&dequeued, 0, sizeof(dequeued));
+    memset(&ref, 0, sizeof(ref));
+    read_body = NULL;
+    source = bench_source_from_text("queue-payload", &error);
+    if (source == NULL) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    rc = store->enqueue_message(store, "bench", "jobs", source, &enqueue_opts,
+                                &enqueued, &error);
+    lc_source_close(source);
+    if (rc == LC_OK) {
+      rc = store->dequeue_message(store, "bench", "jobs", &dequeue_opts,
+                                  &read_body, &dequeued, &error);
+    }
+    if (rc != LC_OK || read_body == NULL ||
+        bench_pouch_read_and_check(read_body, "queue-payload", &error) != 0) {
+      fprintf(stderr,
+              "pouch-queue failed during dequeue/read at iteration %ld "
+              "rc=%d error=%d message=%s\n",
+              i, rc, error.code,
+              error.message != NULL ? error.message : "(none)");
+      if (read_body != NULL) {
+        lc_source_close(read_body);
+      }
+      lc_pouch_queue_message_info_cleanup(NULL, &enqueued);
+      lc_pouch_queue_message_info_cleanup(NULL, &dequeued);
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    lc_source_close(read_body);
+    ref.namespace_name = dequeued.namespace_name;
+    ref.queue = dequeued.queue;
+    ref.message_id = dequeued.message_id;
+    ref.lease_id = dequeued.lease_id;
+    ref.txn_id = dequeued.txn_id;
+    ref.fencing_token = dequeued.fencing_token;
+    ref.meta_etag = dequeued.meta_etag;
+    acked = 0;
+    rc = store->ack_message(store, &ref, &acked, &error);
+    lc_pouch_queue_message_info_cleanup(NULL, &enqueued);
+    lc_pouch_queue_message_info_cleanup(NULL, &dequeued);
+    if (rc != LC_OK || !acked) {
+      fprintf(stderr,
+              "pouch-queue failed during ack at iteration %ld rc=%d acked=%d "
+              "error=%d message=%s\n",
+              i, rc, acked, error.code,
+              error.message != NULL ? error.message : "(none)");
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+  }
+
+  rc = store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_compaction(long iterations) {
+  char root[256];
+  unsigned char payload[4096];
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_error error;
+  long i;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "compact");
+  bench_pouch_cleanup_root(root);
+  memset(payload, 'x', sizeof(payload));
+  lc_error_init(&error);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
+  memset(&opts, 0, sizeof(opts));
+  opts.content_type = "application/octet-stream";
+
+  for (i = 0; i < iterations; ++i) {
+    memset(&put_res, 0, sizeof(put_res));
+    source = bench_source_from_bytes(payload, sizeof(payload), &error);
+    if (source == NULL) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    rc = store->write_state(store, "bench", "compact-hot-key", source, &opts,
+                            &put_res, &error);
+    lc_source_close(source);
+    lc_pouch_put_state_res_cleanup(NULL, &put_res);
+    if (rc != LC_OK) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+  }
+
+  rc = store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int run_case(const bench_case *test_case, long iterations) {
   double start_seconds;
   double end_seconds;
@@ -423,7 +656,8 @@ static void print_usage(const char *argv0) {
   fprintf(
       stderr,
       "usage: %s [iterations] "
-      "[all|streams|json|mutate-parse|mutate-apply|pouch-state|pouch-staged]\n",
+      "[all|streams|json|mutate-parse|mutate-apply|pouch-state|"
+      "pouch-staged|pouch-object|pouch-queue|pouch-compaction]\n",
       argv0);
 }
 
@@ -434,7 +668,10 @@ int main(int argc, char **argv) {
       {"mutate-parse", 200000L, bench_mutate_parse},
       {"mutate-apply", 200000L, bench_mutate_apply},
       {"pouch-state", 1000L, bench_pouch_state_roundtrip},
-      {"pouch-staged", 1000L, bench_pouch_staged_promote}};
+      {"pouch-staged", 1000L, bench_pouch_staged_promote},
+      {"pouch-object", 1000L, bench_pouch_object_roundtrip},
+      {"pouch-queue", 1000L, bench_pouch_queue_roundtrip},
+      {"pouch-compaction", 120L, bench_pouch_compaction}};
   const char *scenario;
   long iterations;
   size_t i;
