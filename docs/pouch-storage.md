@@ -23,7 +23,7 @@ implementation language or goroutine structure; it is the separation between:
   queue wake capabilities, backend identity, close, and crash-style abort;
 - optional capabilities such as metadata-summary scans, queue change feeds,
   single-writer controls, concurrent-write reporting, exclusive-writer probing,
-  and indexer flush defaults;
+  query backend mode, and indexer flush defaults;
 - a disk-log namespace runtime that owns segment replay, marker refresh,
   pending commit visibility, open-file caches, and compaction;
 - higher lockd semantics implemented above the backend by composing metadata,
@@ -435,6 +435,8 @@ The interface should also expose optional capability functions or flags:
 - fsync statistics
 - compaction statistics and explicit compaction trigger
 - index flush/default tuning for the storage indexer and later LQL integration
+- query backend mode/defaults: indexed is preferred, full metadata-summary scan
+  is supported when explicitly configured, and fallback policy is explicit
 - retention/janitor sweep for expired metadata and state
 
 The disk implementation should report that it is not a general concurrent
@@ -477,14 +479,22 @@ stay serialized, corrupt tails remain replay-truncated, and monotonic tokens
 survive compaction through a private high-water record.
 
 The single-log milestone is not the v1 search-performance shape. A searchable
-pouch store must not answer indexed queries by replaying or scanning one large
-append log. Before public query/LQL support ships, the disk backend must grow
+pouch store must not use full-log scanning as the preferred indexed-query path.
+Before public query/LQL support ships, the disk backend must grow
 append-friendly index storage: compactable index segments or equivalent
 Lucene-style sidecar files with term/range postings, per-field summary columns,
 deleted/live filters, and stable key ordering. The authoritative object state
-still comes from the log, but query planning should touch index data first and
-load full metadata or payload bytes only for candidate rows that survive the
-index predicates.
+still comes from the log, but the preferred query path should touch index data
+first and load full metadata or payload bytes only for candidate rows that
+survive the index predicates.
+
+Full ordered metadata-summary scanning remains a supported backend mode, just
+not the preferred default. Pouch configuration must be able to select indexed
+mode, scan mode, and fallback policy when a store/client instance is opened.
+Scan mode is useful for tiny stores, diagnostics, index rebuild validation, and
+early deployments before a particular index feature exists. It must still use
+the backend summary scan path and stable key ordering; it must not materialize
+payloads or silently replay the entire append log on every query.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
@@ -759,12 +769,13 @@ durable performance artifacts. They may be rebuilt after corruption or version
 upgrade, yet normal indexed query execution must use them rather than falling
 back to a full log scan.
 
-LQL integration should consume storage index APIs, not raw log scans. Until
+LQL integration should consume storage query APIs, not raw log scans. Until
 `liblql` is available, pouch should expose a narrow internal predicate/query
 boundary over indexed summaries, term/range postings, stable ordering, limits,
-and cursors. A full ordered scan may exist for diagnostics and rebuilds, but it
-must not be the only implementation path for indexed query behavior. The
-persistent format should not encode LQL-specific query plans.
+and cursors. That same boundary must also support explicit scan mode over
+ordered metadata summaries. Indexed mode is the preferred default; scan mode is
+a configured backend mode or configured fallback. The persistent format should
+not encode LQL-specific query plans.
 
 Query refresh contracts are storage-visible. A query that waits for a flush or
 refresh target must observe committed summary records without requiring a full
@@ -1519,6 +1530,10 @@ Integration tests:
 - transaction replay wakes queue and query observers after restart in both
   polling and watcher modes
 - query-hidden metadata is excluded from scans
+- query backend mode configuration selects indexed mode by default, explicit
+  scan mode when requested, and only falls back according to configured policy
+- scan mode uses ordered metadata summaries with stable pagination and does not
+  read state payloads for rows that do not need them
 - query pagination, namespace isolation, public-read results, and streamed
   document responses work against disk summaries
 - query flush-wait and refresh-wait contracts observe committed summary rows
@@ -1593,9 +1608,10 @@ state after writes.
 6. Metadata and state operations with CAS and fsync.
 7. Object operations for attachments and queues.
 8. Segment sealing, manifest, and reopen recovery tests.
-9. Durable summary/posting index segments with rebuild and compaction tests.
-10. Compaction snapshots and cleanup.
-11. Queue semantics and consumer-service adapter.
-12. Storage indexed-query boundary, then `liblql` integration when ready.
-13. `pouch://` endpoint selection in the client engine.
-14. Benchmarks, diagnostics, packaging, and final ABI bump.
+9. Query backend mode configuration with indexed default and explicit scan mode.
+10. Durable summary/posting index segments with rebuild and compaction tests.
+11. Compaction snapshots and cleanup.
+12. Queue semantics and consumer-service adapter.
+13. Storage indexed-query boundary, then `liblql` integration when ready.
+14. `pouch://` endpoint selection in the client engine.
+15. Benchmarks, diagnostics, packaging, and final ABI bump.
