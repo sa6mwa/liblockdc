@@ -503,6 +503,11 @@ full-scan route: the disk backend must rebuild the scan projection from the
 authoritative log before serving the scan page, preserve stable key ordering,
 and avoid payload materialization until a surviving query row needs its document
 body.
+Fallback policy applies only to configured default routing, not to explicit
+per-request engine hints. For example, a store configured with
+`query_engine=scan&query_fallback_engine=index` should route `refresh=wait_for`
+match-all queries through the indexed path because scan mode does not consult a
+durable index and therefore cannot honor refresh hints.
 
 The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index

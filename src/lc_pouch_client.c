@@ -2103,6 +2103,11 @@ static const char *lc_pouch_effective_query_engine(lc_client_handle *client,
   }
   if (client != NULL && client->pouch_query_engine != NULL &&
       strcmp(client->pouch_query_engine, "scan") == 0) {
+    if (client->pouch_query_fallback_engine != NULL &&
+        strcmp(client->pouch_query_fallback_engine, "index") == 0 &&
+        req != NULL && lc_pouch_index_refresh_is_wait_for(req->refresh)) {
+      return "index";
+    }
     return "scan";
   }
   return "index";
