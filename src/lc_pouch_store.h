@@ -111,6 +111,11 @@ typedef struct lc_pouch_scan_meta_res {
   char *next_start_after;
 } lc_pouch_scan_meta_res;
 
+typedef struct lc_pouch_namespace_list {
+  char **names;
+  size_t count;
+} lc_pouch_namespace_list;
+
 typedef int (*lc_pouch_scan_meta_visit_fn)(
     void *context, const lc_pouch_scan_meta_row *row, lc_error *error);
 
@@ -264,6 +269,8 @@ struct lc_pouch_store {
   int (*delete_meta)(lc_pouch_store *self, const char *namespace_name,
                      const char *key, const char *expected_etag,
                      lc_error *error);
+  int (*list_namespaces)(lc_pouch_store *self, lc_pouch_namespace_list *out,
+                         lc_error *error);
   int (*scan_meta)(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
                    lc_pouch_scan_meta_visit_fn visit, void *visit_context,
                    lc_pouch_scan_meta_res *out, lc_error *error);
@@ -389,6 +396,8 @@ void lc_pouch_store_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                      lc_pouch_store_meta_res *res);
 void lc_pouch_scan_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_scan_meta_res *res);
+void lc_pouch_namespace_list_cleanup(const lc_pouch_allocator *allocator,
+                                     lc_pouch_namespace_list *list);
 void lc_pouch_query_index_scan_res_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_query_index_scan_res *res);
 void lc_pouch_index_flush_res_cleanup(const lc_pouch_allocator *allocator,

@@ -196,6 +196,9 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
                                      const char *namespace_name,
                                      const char *key, const char *expected_etag,
                                      lc_error *error);
+static int lc_pouch_disk_list_namespaces(lc_pouch_store *self,
+                                         lc_pouch_namespace_list *out,
+                                         lc_error *error);
 static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
                                    const lc_pouch_scan_meta_req *req,
                                    lc_pouch_scan_meta_visit_fn visit,
@@ -1225,6 +1228,52 @@ static int lc_pouch_disk_meta_entry_ptr_compare(const void *left,
   left_entry = (const lc_pouch_disk_meta_entry *const *)left;
   right_entry = (const lc_pouch_disk_meta_entry *const *)right;
   return strcmp((*left_entry)->key, (*right_entry)->key);
+}
+
+static int lc_pouch_disk_namespace_ptr_compare(const void *left,
+                                               const void *right) {
+  const char *const *left_name;
+  const char *const *right_name;
+
+  left_name = (const char *const *)left;
+  right_name = (const char *const *)right;
+  return strcmp(*left_name, *right_name);
+}
+
+static int lc_pouch_namespace_list_contains(const lc_pouch_namespace_list *list,
+                                            const char *namespace_name) {
+  size_t index;
+
+  for (index = 0U; index < list->count; ++index) {
+    if (strcmp(list->names[index], namespace_name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_namespace_list_add(const lc_pouch_allocator *allocator,
+                                       lc_pouch_namespace_list *list,
+                                       const char *namespace_name) {
+  char **new_names;
+  char *copy;
+
+  if (namespace_name == NULL ||
+      lc_pouch_namespace_list_contains(list, namespace_name)) {
+    return 1;
+  }
+  new_names = (char **)lc_pouch_realloc(
+      allocator, list->names, (list->count + 1U) * sizeof(list->names[0]));
+  if (new_names == NULL) {
+    return 0;
+  }
+  list->names = new_names;
+  copy = lc_pouch_strdup(allocator, namespace_name);
+  if (copy == NULL) {
+    return 0;
+  }
+  list->names[list->count++] = copy;
+  return 1;
 }
 
 static int lc_pouch_disk_meta_entry_compare_namespace_key(
@@ -2515,6 +2564,79 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
+}
+
+static int lc_pouch_disk_list_namespaces(lc_pouch_store *self,
+                                         lc_pouch_namespace_list *out,
+                                         lc_error *error) {
+  lc_pouch_disk_store *store;
+  const char *namespace_name;
+  size_t index;
+  int rc;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "list_namespaces requires store and output");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+
+  rc = lc_pouch_disk_lock(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_force_replay_locked(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
+    return rc;
+  }
+
+  for (index = 0U; index < store->state_entry_count; ++index) {
+    namespace_name = store->state_entries[index].namespace_name;
+    if (!store->state_entries[index].deleted &&
+        !lc_pouch_namespace_list_add(&store->allocator, out, namespace_name)) {
+      lc_pouch_namespace_list_cleanup(&store->allocator, out);
+      lc_pouch_disk_unlock(store, error);
+      return lc_pouch_set_nomem(error, "failed to copy pouch namespace list");
+    }
+  }
+  for (index = 0U; index < store->meta_entry_count; ++index) {
+    namespace_name = store->meta_entries[index].namespace_name;
+    if (!store->meta_entries[index].deleted &&
+        !lc_pouch_namespace_list_add(&store->allocator, out, namespace_name)) {
+      lc_pouch_namespace_list_cleanup(&store->allocator, out);
+      lc_pouch_disk_unlock(store, error);
+      return lc_pouch_set_nomem(error, "failed to copy pouch namespace list");
+    }
+  }
+  for (index = 0U; index < store->object_entry_count; ++index) {
+    namespace_name = store->object_entries[index].namespace_name;
+    if (!store->object_entries[index].deleted &&
+        !lc_pouch_namespace_list_add(&store->allocator, out, namespace_name)) {
+      lc_pouch_namespace_list_cleanup(&store->allocator, out);
+      lc_pouch_disk_unlock(store, error);
+      return lc_pouch_set_nomem(error, "failed to copy pouch namespace list");
+    }
+  }
+  for (index = 0U; index < store->queue_entry_count; ++index) {
+    namespace_name = store->queue_entries[index].namespace_name;
+    if (!store->queue_entries[index].deleted &&
+        !lc_pouch_namespace_list_add(&store->allocator, out, namespace_name)) {
+      lc_pouch_namespace_list_cleanup(&store->allocator, out);
+      lc_pouch_disk_unlock(store, error);
+      return lc_pouch_set_nomem(error, "failed to copy pouch namespace list");
+    }
+  }
+  if (out->count > 1U) {
+    qsort(out->names, out->count, sizeof(out->names[0]),
+          lc_pouch_disk_namespace_ptr_compare);
+  }
+
+  if (lc_pouch_disk_unlock(store, error) != LC_OK) {
+    lc_pouch_namespace_list_cleanup(&store->allocator, out);
+    return LC_ERR_TRANSPORT;
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
@@ -7435,6 +7557,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.load_meta = lc_pouch_disk_load_meta;
   store->pub.store_meta = lc_pouch_disk_store_meta;
   store->pub.delete_meta = lc_pouch_disk_delete_meta;
+  store->pub.list_namespaces = lc_pouch_disk_list_namespaces;
   store->pub.scan_meta = lc_pouch_disk_scan_meta;
   store->pub.query_index_scan = lc_pouch_disk_query_index_scan;
   store->pub.query_index_keys_scan = lc_pouch_disk_query_index_keys_scan;

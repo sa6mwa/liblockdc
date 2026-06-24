@@ -178,6 +178,20 @@ void lc_pouch_scan_meta_res_cleanup(const lc_pouch_allocator *allocator,
   memset(res, 0, sizeof(*res));
 }
 
+void lc_pouch_namespace_list_cleanup(const lc_pouch_allocator *allocator,
+                                     lc_pouch_namespace_list *list) {
+  size_t index;
+
+  if (list == NULL) {
+    return;
+  }
+  for (index = 0U; index < list->count; ++index) {
+    lc_pouch_free(allocator, list->names[index]);
+  }
+  lc_pouch_free(allocator, list->names);
+  memset(list, 0, sizeof(*list));
+}
+
 void lc_pouch_query_index_scan_res_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_query_index_scan_res *res) {
   if (res == NULL) {

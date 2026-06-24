@@ -6401,6 +6401,132 @@ static void test_backend_hash_persists_across_handles(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_list_namespaces_reports_live_projection_names(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_source *source;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res state_res;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_put_object_opts object_opts;
+  lc_pouch_object_info object_info;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_namespace_list namespaces;
+  lc_error error;
+  int removed;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "namespaces");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&state_res, 0, sizeof(state_res));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&object_opts, 0, sizeof(object_opts));
+  memset(&object_info, 0, sizeof(object_info));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&namespaces, 0, sizeof(namespaces));
+  first = NULL;
+  second = NULL;
+  removed = 0;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first->list_namespaces);
+
+  state_opts.content_type = "application/json";
+  source = source_from_text("{\"ns\":\"zeta\"}");
+  rc = first->write_state(first, "zeta", "state-key", source, &state_opts,
+                          &state_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_res);
+
+  source = source_from_text("{\"ns\":\"alpha\"}");
+  rc = first->write_state(first, "alpha", "duplicate-state", source,
+                          &state_opts, &state_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_res);
+
+  source = source_from_text("{\"removed\":true}");
+  rc = first->write_state(first, "removed", "removed-state", source,
+                          &state_opts, &state_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = first->remove_state(first, "removed", "removed-state",
+                           state_res.new_state_etag, &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(removed);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_res);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease";
+  meta.version = 100L;
+  meta.fencing_token = 100L;
+  rc = first->store_meta(first, "alpha", "meta-key", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  object_opts.name = "blob";
+  object_opts.content_type = "text/plain";
+  source = source_from_text("object-body");
+  rc = first->put_object(first, "gamma", "object-key", source, &object_opts,
+                         &object_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.ttl_seconds = 60L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queue-body");
+  rc = first->enqueue_message(first, "beta", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = second->list_namespaces(second, &namespaces, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(namespaces.count, 4U);
+  assert_string_equal(namespaces.names[0], "alpha");
+  assert_string_equal(namespaces.names[1], "beta");
+  assert_string_equal(namespaces.names[2], "gamma");
+  assert_string_equal(namespaces.names[3], "zeta");
+  lc_pouch_namespace_list_cleanup(&allocator, &namespaces);
+
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  second = NULL;
+
+  tracked.fail_realloc_size = sizeof(char *);
+  rc = first->list_namespaces(first, &namespaces, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to copy pouch namespace list");
+  assert_null(namespaces.names);
+  assert_int_equal(namespaces.count, 0U);
+  tracked.fail_realloc_size = 0U;
+  lc_error_cleanup(&error);
+
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_backend_capabilities_report_disk_writer_model(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -7570,6 +7696,7 @@ int main(void) {
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),
+      cmocka_unit_test(test_list_namespaces_reports_live_projection_names),
       cmocka_unit_test(test_backend_capabilities_report_disk_writer_model),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
       cmocka_unit_test(

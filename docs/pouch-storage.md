@@ -452,6 +452,9 @@ Current disk backend milestone: the private backend capability hook reports a
 `disk-log` backend, advisory file-lock write coordination, same-root writer
 serialization support, crash-abort marker support, backend identity support,
 and explicitly reports that it is not a general concurrent-writer database.
+The private storage vtable also exposes namespace listing over the disk
+backend's live projections; it reports unique sorted namespaces with active
+state, metadata, object, or queue entries after an authoritative replay refresh.
 
 ## Performance Model
 
