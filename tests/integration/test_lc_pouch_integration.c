@@ -89,6 +89,23 @@ static void open_pouch_client(const char *endpoint, lc_client **out,
   assert_non_null(*out);
 }
 
+static void open_pouch_scan_client(const char *endpoint, lc_client **out,
+                                   lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  int rc;
+
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "default";
+  config.pouch_query_engine = "scan";
+  rc = lc_client_open(&config, out, error);
+  assert_lc_ok(rc, error);
+  assert_non_null(*out);
+}
+
 static void assert_sink_text(lc_sink *sink, const char *expected,
                              lc_error *error) {
   const void *bytes;
@@ -101,6 +118,23 @@ static void assert_sink_text(lc_sink *sink, const char *expected,
   assert_lc_ok(rc, error);
   assert_int_equal(length, strlen(expected));
   assert_memory_equal(bytes, expected, length);
+}
+
+static char *sink_text(lc_sink *sink, lc_error *error) {
+  const void *bytes;
+  size_t length;
+  char *text;
+  int rc;
+
+  bytes = NULL;
+  length = 0U;
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  assert_lc_ok(rc, error);
+  text = (char *)malloc(length + 1U);
+  assert_non_null(text);
+  memcpy(text, bytes, length);
+  text[length] = '\0';
+  return text;
 }
 
 static void assert_client_state_text(lc_client *client, const char *key,
@@ -670,6 +704,116 @@ static void test_pouch_public_metadata_query_hidden_persists(void **state) {
   free(state_etag);
   lc_describe_res_cleanup(&describe_res);
   lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_scan_query_documents_replays_after_reopen(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "scan-query-reopen");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  alpha = NULL;
+  bravo = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+
+  open_pouch_client(endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "scan-writer";
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+
+  acquire.key = "integration/query/alpha";
+  rc = writer->acquire(writer, &acquire, &alpha, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"kind\":\"scan\",\"ordinal\":1}", &error);
+  rc = alpha->update(alpha, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/query/bravo";
+  rc = writer->acquire(writer, &acquire, &bravo, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"kind\":\"scan\",\"ordinal\":2}", &error);
+  rc = bravo->update(bravo, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = alpha->release(alpha, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  alpha = NULL;
+  rc = bravo->release(bravo, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  bravo = NULL;
+  writer->close(writer);
+  writer = NULL;
+
+  open_pouch_scan_client(endpoint, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 1L;
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/query/alpha\""));
+  assert_non_null(strstr(text, "\"document\":{\"kind\":\"scan\",\"ordinal\":1}"));
+  assert_null(strstr(text, "integration/query/bravo"));
+  assert_string_equal(query_res.cursor, "integration/query/alpha");
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  query_req.cursor = "integration/query/alpha";
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/query/bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"kind\":\"scan\",\"ordinal\":2}"));
+  assert_null(strstr(text, "integration/query/alpha"));
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  free(text);
+  text = NULL;
+
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  reader->close(reader);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
 }
@@ -2597,6 +2741,8 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_public_state_attachment_shared_handles),
       cmocka_unit_test(test_pouch_public_metadata_query_hidden_persists),
+      cmocka_unit_test(
+          test_pouch_public_scan_query_documents_replays_after_reopen),
       cmocka_unit_test(
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),

@@ -498,12 +498,16 @@ early deployments before a particular index feature exists. It must still use
 the backend summary scan path and stable key ordering; it must not materialize
 payloads or silently replay the entire append log on every query.
 
-The first public scan-mode surface is `query_keys` with the match-all selector
-`{}`. It streams keys from ordered metadata summaries, excludes
-`query_hidden=true` metadata, uses `cursor` as `start_after`, returns `keys` as
-the return mode, and emits no index sequence because no durable query index is
-consulted. Non-empty field selection, refresh hints, and nontrivial LQL
-selectors remain unsupported until the indexed/LQL query slice lands.
+The first public scan-mode surfaces are `query_keys` and `query` with the
+match-all selector `{}`. `query_keys` streams keys from ordered metadata
+summaries, excludes `query_hidden=true` metadata, uses `cursor` as
+`start_after`, returns `keys` as the return mode, and emits no index sequence
+because no durable query index is consulted. `query` streams NDJSON document
+rows in the same ordered page, embeds JSON state payloads as `document`, emits
+`null` for non-JSON or empty state payloads, returns `documents`, and reports
+local metadata such as `query_candidates`. Non-empty field selection, refresh
+hints, non-document scan return modes, and nontrivial LQL selectors remain
+unsupported until the indexed/LQL query slice lands.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
@@ -785,8 +789,8 @@ and cursors. That same boundary must also support explicit scan mode over
 ordered metadata summaries. Indexed mode is the preferred default; scan mode is
 a configured backend mode or configured fallback. The persistent format should
 not encode LQL-specific query plans. Pre-LQL scan support is intentionally
-limited to match-all `query_keys`; document query results and predicate
-evaluation require the later query/index integration.
+limited to match-all `query_keys` and match-all document `query`; predicate
+evaluation requires the later query/index integration.
 
 Query refresh contracts are storage-visible. A query that waits for a flush or
 refresh target must observe committed summary records without requiring a full
@@ -1543,9 +1547,9 @@ Integration tests:
 - query-hidden metadata is excluded from scans
 - query backend mode configuration selects indexed mode by default, explicit
   scan mode when requested, and only falls back according to configured policy
-- scan-mode `query_keys` uses ordered metadata summaries with stable
-  pagination, streams keys, excludes query-hidden metadata, and does not read
-  state payloads
+- scan-mode `query_keys` and `query` use ordered metadata summaries with stable
+  pagination, stream results, exclude query-hidden metadata, and load state
+  payloads only for document rows
 - query pagination, namespace isolation, public-read results, and streamed
   document responses work against disk summaries
 - query flush-wait and refresh-wait contracts observe committed summary rows

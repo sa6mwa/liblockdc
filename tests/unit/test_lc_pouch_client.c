@@ -2524,6 +2524,20 @@ static lc_lease *pouch_acquire_query_key(lc_client *client, const char *key,
   return lease;
 }
 
+static void pouch_save_query_json(lc_lease *lease, const char *json,
+                                  lc_error *error) {
+  lc_update_opts opts;
+  lc_source *source;
+  int rc;
+
+  source = source_from_text(json);
+  lc_update_opts_init(&opts);
+  opts.content_type = "application/json";
+  rc = lease->update(lease, source, &opts, error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+}
+
 static void pouch_hide_query_key(lc_lease *lease, lc_error *error) {
   lc_metadata_req metadata_req;
   int rc;
@@ -2692,6 +2706,213 @@ static void test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys(
   bravo->close(bravo);
   charlie->close(charlie);
   delta->close(delta);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_scan_query_streams_documents_with_paging(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_lease *delta;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-scan-docs-pages");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+
+  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  pouch_save_query_json(charlie, "{\"value\":3}", &error);
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha, "{\"value\":1}", &error);
+  delta = pouch_acquire_query_key(client, "delta", &error);
+  pouch_save_query_json(delta, "{\"value\":4}", &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo, "{\"value\":2}", &error);
+  pouch_hide_query_key(delta, &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  req.engine = "scan";
+  req.limit = 2L;
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":1}"));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
+  assert_null(strstr(text, "charlie"));
+  assert_null(strstr(text, "delta"));
+  assert_string_equal(res.cursor, "bravo");
+  assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  req.cursor = "bravo";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":3}"));
+  assert_null(strstr(text, "alpha"));
+  assert_null(strstr(text, "bravo"));
+  assert_null(strstr(text, "delta"));
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  delta->close(delta);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_configured_scan_query_without_hint(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-configured-scan");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client_with_query_config(endpoint, "scan", NULL);
+  lease = pouch_acquire_query_key(client, "configured-doc", &error);
+  pouch_save_query_json(lease, "{\"configured\":true}", &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "configured-doc"));
+  assert_non_null(strstr(text, "\"document\":{\"configured\":true}"));
+  assert_string_equal(res.return_mode, "documents");
+
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_configured_scan_fallback_query(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-configured-fallback");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client_with_query_config(endpoint, "index", "scan");
+  lease = pouch_acquire_query_key(client, "fallback-doc", &error);
+  pouch_save_query_json(lease, "{\"fallback\":true}", &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "fallback-doc"));
+  assert_non_null(strstr(text, "\"document\":{\"fallback\":true}"));
+  assert_string_equal(res.return_mode, "documents");
+
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_scan_query_rejects_lql_selector(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-scan-selector");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"alpha\"}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_pouch_unsupported(rc, &error,
+                           "pouch scan query supports only match-all selector");
+
+  lc_sink_close(sink);
   client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -3081,6 +3302,11 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_fallback),
       cmocka_unit_test(
           test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys),
+      cmocka_unit_test(
+          test_pouch_endpoint_scan_query_streams_documents_with_paging),
+      cmocka_unit_test(test_pouch_endpoint_configured_scan_query_without_hint),
+      cmocka_unit_test(test_pouch_endpoint_configured_scan_fallback_query),
+      cmocka_unit_test(test_pouch_endpoint_scan_query_rejects_lql_selector),
       cmocka_unit_test(
           test_pouch_endpoint_configured_scan_query_keys_without_hint),
       cmocka_unit_test(
