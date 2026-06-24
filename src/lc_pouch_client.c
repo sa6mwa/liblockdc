@@ -59,6 +59,9 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
 static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
                                                const lc_update_opts *opts,
                                                lc_error *error);
+static int lc_pouch_lease_mutate_staged_method(lc_lease *self,
+                                               const lc_mutate_req *req,
+                                               lc_error *error);
 static int lc_pouch_refresh_lease(lc_lease_handle *lease,
                                   const lc_pouch_meta *meta, lc_error *error);
 static int lc_pouch_repair_meta_state_gap(lc_client_handle *client,
@@ -1808,6 +1811,9 @@ static int lc_pouch_lease_mutate_method(lc_lease *self,
                         NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  if (lease->pouch_stage_active || lease->pouch_txn_explicit) {
+    return lc_pouch_lease_mutate_staged_method(self, req, error);
+  }
   memset(&ref, 0, sizeof(ref));
   memset(&update_res, 0, sizeof(update_res));
   ref.namespace_name = lease->namespace_name;
@@ -1826,6 +1832,146 @@ static int lc_pouch_lease_mutate_method(lc_lease *self,
   rc = lc_pouch_set_lease_state(lease, update_res.new_state_etag,
                                 update_res.new_version, error);
   lc_update_res_cleanup(&update_res);
+  return rc;
+}
+
+static int lc_pouch_lease_mutate_staged_method(lc_lease *self,
+                                               const lc_mutate_req *req,
+                                               lc_error *error) {
+  lc_lease_handle *lease;
+  lc_mutation_parse_options parse_options;
+  lc_mutation_plan *plan;
+  lc_pouch_state_info state_info;
+  lc_source *body;
+  lc_source *source;
+  lc_update_opts update_opts;
+  const char *namespace_name;
+  FILE *input_fp;
+  FILE *final_fp;
+  size_t limit;
+  int rc;
+
+  if (self == NULL || req == NULL || req->mutations == NULL ||
+      req->mutation_count == 0U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease mutate requires self, request, and "
+                        "mutations",
+                        NULL, NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  memset(&parse_options, 0, sizeof(parse_options));
+  memset(&state_info, 0, sizeof(state_info));
+  lc_update_opts_init(&update_opts);
+  plan = NULL;
+  body = NULL;
+  source = NULL;
+  namespace_name = NULL;
+  input_fp = NULL;
+  final_fp = NULL;
+
+  if (clock_gettime(CLOCK_REALTIME, &parse_options.now) == 0) {
+    parse_options.has_now = 1;
+  }
+  rc = lc_mutation_plan_build(req->mutations, req->mutation_count,
+                              &parse_options, &plan, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_public_namespace(lease->client, lease->namespace_name,
+                                 &namespace_name, error);
+  if (rc != LC_OK) {
+    lc_mutation_plan_close(plan);
+    return rc;
+  }
+
+  input_fp = tmpfile();
+  if (input_fp == NULL) {
+    lc_mutation_plan_close(plan);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create pouch staged mutate input file",
+                        strerror(errno), NULL, NULL);
+  }
+
+  if (lease->pouch_stage_dirty) {
+    rc = lease->client->pouch_store->load_staged_state(
+        lease->client->pouch_store, namespace_name, lease->key, lease->txn_id,
+        &body, &state_info, error);
+  } else {
+    rc = lease->client->pouch_store->read_state(
+        lease->client->pouch_store, namespace_name, lease->key, &body,
+        &state_info, error);
+  }
+  if (rc != LC_OK) {
+    fclose(input_fp);
+    lc_mutation_plan_close(plan);
+    return rc;
+  }
+  if (!state_info.no_content && body != NULL) {
+    limit = lease->client->http_json_response_limit_bytes > 0U
+                ? lease->client->http_json_response_limit_bytes
+                : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
+    rc = lc_pouch_copy_source_to_file_limited(body, input_fp, limit, error);
+    body->close(body);
+    body = NULL;
+    if (rc != LC_OK) {
+      fclose(input_fp);
+      lc_pouch_state_info_cleanup(&lease->client->pouch_allocator,
+                                  &state_info);
+      lc_mutation_plan_close(plan);
+      return rc;
+    }
+  } else if (body != NULL) {
+    body->close(body);
+    body = NULL;
+  }
+  if (fflush(input_fp) != 0) {
+    fclose(input_fp);
+    lc_pouch_state_info_cleanup(&lease->client->pouch_allocator, &state_info);
+    lc_mutation_plan_close(plan);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to flush pouch staged mutate input file",
+                        strerror(errno), NULL, NULL);
+  }
+  rewind(input_fp);
+
+  if (state_info.no_content) {
+    rc = lc_pouch_mutate_write_empty_object(input_fp, error);
+    if (rc != LC_OK) {
+      fclose(input_fp);
+      lc_pouch_state_info_cleanup(&lease->client->pouch_allocator,
+                                  &state_info);
+      lc_mutation_plan_close(plan);
+      return rc;
+    }
+  }
+
+  rc = lc_mutation_plan_apply(plan, input_fp, &final_fp, error);
+  fclose(input_fp);
+  lc_mutation_plan_close(plan);
+  lc_pouch_state_info_cleanup(&lease->client->pouch_allocator, &state_info);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  update_opts.content_type = "application/json";
+  update_opts.if_state_etag = req->if_state_etag;
+  update_opts.if_version = req->if_version;
+  update_opts.has_if_version = req->has_if_version;
+  if (!update_opts.has_if_version && lease->version > 0L) {
+    update_opts.if_version = lease->version;
+    update_opts.has_if_version = 1;
+  }
+
+  source = lc_source_from_open_file(final_fp, 0);
+  if (source == NULL) {
+    fclose(final_fp);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to wrap pouch staged mutate output stream",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_lease_staged_update_method(self, source, &update_opts, error);
+  lc_source_close(source);
+  fclose(final_fp);
   return rc;
 }
 
