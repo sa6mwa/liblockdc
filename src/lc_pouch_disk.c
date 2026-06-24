@@ -108,6 +108,11 @@ typedef struct lc_pouch_disk_object_entry {
   int deleted;
 } lc_pouch_disk_object_entry;
 
+typedef struct lc_pouch_disk_key_lock_set {
+  lc_pouch_key_lock *locks[2];
+  size_t count;
+} lc_pouch_disk_key_lock_set;
+
 typedef struct lc_pouch_disk_queue_entry {
   char *namespace_name;
   char *queue;
@@ -427,6 +432,12 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
                                        const char *key,
                                        lc_pouch_key_lock **lock,
                                        lc_error *error);
+static int lc_pouch_disk_lock_key_pair_wait(
+    lc_pouch_store *self, const char *namespace_name, const char *first_key,
+    const char *second_key, lc_pouch_disk_key_lock_set *out, lc_error *error);
+static int lc_pouch_disk_unlock_key_set(lc_pouch_store *self,
+                                        lc_pouch_disk_key_lock_set *set,
+                                        lc_error *error);
 static int lc_pouch_disk_unlock_key(lc_pouch_store *self,
                                     lc_pouch_key_lock *lock, lc_error *error);
 static int lc_pouch_disk_query_config(lc_pouch_store *self,
@@ -6742,6 +6753,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                                      lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_object_entry *src_entry;
+  lc_pouch_disk_key_lock_set key_locks;
   char *id;
   char *src_content_type;
   const char *name;
@@ -6784,20 +6796,28 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     }
   }
   memset(out, 0, sizeof(*out));
+  memset(&key_locks, 0, sizeof(key_locks));
   store = (lc_pouch_disk_store *)self->impl;
   id = NULL;
   src_content_type = NULL;
   payload_offset = 0UL;
   read_fd = -1;
 
+  rc = lc_pouch_disk_lock_key_pair_wait(self, namespace_name, src_key, dst_key,
+                                        &key_locks, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     return rc;
   }
   existing = lc_pouch_disk_find_object(store, namespace_name, src_key,
                                        &opts->source);
   if (existing < 0) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     return lc_error_set(error, LC_ERR_SERVER, 404L,
                         "pouch attachment was not found", NULL, "not_found",
                         NULL);
@@ -6808,6 +6828,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                                      src_entry->content_type);
   if (src_content_type == NULL) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     return lc_pouch_set_nomem(error,
                               "failed to copy pouch object content type");
   }
@@ -6818,6 +6839,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   if (read_fd < 0) {
     lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     return lc_pouch_set_errno(error,
                               "failed to open pouch log for object copy");
   }
@@ -6828,6 +6850,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     close(read_fd);
     lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     return rc;
   }
   payload_crc ^= 0xffffffffUL;
@@ -6837,6 +6860,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     close(read_fd);
     lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     return lc_error_set(error, LC_ERR_SERVER, 409L,
                         "pouch attachment already exists", NULL,
                         "attachment_exists", NULL);
@@ -6846,6 +6870,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     close(read_fd);
     lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch object id");
   }
   now_unix = (long)time(NULL);
@@ -6875,6 +6900,10 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   lc_pouch_free(&store->allocator, id);
   lc_pouch_free(&store->allocator, src_content_type);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (lc_pouch_disk_unlock_key_set(self, &key_locks, error) != LC_OK &&
+      rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
@@ -8240,6 +8269,84 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
   store->lock_acquisitions++;
   *lock = key_lock;
   return LC_OK;
+}
+
+static int lc_pouch_disk_lock_key_pair_wait(
+    lc_pouch_store *self, const char *namespace_name, const char *first_key,
+    const char *second_key, lc_pouch_disk_key_lock_set *out, lc_error *error) {
+  const char *ordered_first;
+  const char *ordered_second;
+  int cmp;
+  int rc;
+
+  if (out != NULL) {
+    memset(out, 0, sizeof(*out));
+  }
+  if (self == NULL || namespace_name == NULL || first_key == NULL ||
+      second_key == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "lock_key_pair_wait requires store, namespace, "
+                                "two keys, and lock output");
+  }
+  cmp = strcmp(first_key, second_key);
+  if (cmp == 0) {
+    rc = lc_pouch_disk_lock_key_wait(self, namespace_name, first_key,
+                                     &out->locks[0], error);
+    if (rc == LC_OK) {
+      out->count = 1U;
+    }
+    return rc;
+  }
+  if (cmp < 0) {
+    ordered_first = first_key;
+    ordered_second = second_key;
+  } else {
+    ordered_first = second_key;
+    ordered_second = first_key;
+  }
+  rc = lc_pouch_disk_lock_key_wait(self, namespace_name, ordered_first,
+                                   &out->locks[0], error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  out->count = 1U;
+  rc = lc_pouch_disk_lock_key_wait(self, namespace_name, ordered_second,
+                                   &out->locks[1], error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key(self, out->locks[0], error);
+    out->locks[0] = NULL;
+    out->count = 0U;
+    return rc;
+  }
+  out->count = 2U;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_unlock_key_set(lc_pouch_store *self,
+                                        lc_pouch_disk_key_lock_set *set,
+                                        lc_error *error) {
+  size_t index;
+  int rc;
+  int unlock_rc;
+
+  if (self == NULL || set == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "unlock_key_set requires store and locks");
+  }
+  rc = LC_OK;
+  index = set->count;
+  while (index > 0U) {
+    index--;
+    if (set->locks[index] != NULL) {
+      unlock_rc = lc_pouch_disk_unlock_key(self, set->locks[index], error);
+      set->locks[index] = NULL;
+      if (unlock_rc != LC_OK && rc == LC_OK) {
+        rc = unlock_rc;
+      }
+    }
+  }
+  set->count = 0U;
+  return rc;
 }
 
 static int lc_pouch_disk_unlock_key(lc_pouch_store *self,

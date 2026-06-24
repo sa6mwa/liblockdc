@@ -445,8 +445,8 @@ The interface should also expose optional capability functions or flags:
   live-record count, and a skip reason such as `below-min-log-size` or
   `below-obsolete-threshold`
 - index flush/default tuning for the storage indexer and later LQL integration
-- query backend mode/defaults: indexed is preferred, full metadata-summary scan
-  is supported when explicitly configured, and fallback policy is explicit
+- query backend mode/defaults: indexed is preferred, full log-backed ordered
+  scan is supported when explicitly configured, and fallback policy is explicit
 - retention/janitor sweep for expired metadata and state; the current private
   disk hook accepts an `updated_before_unix` cutoff and reports scanned,
   expired, deleted metadata, deleted state, and failed-key counts
@@ -484,8 +484,10 @@ cross-process contention, and adds a process-local held-lock registry so two
 store handles in the same process contend before the full striped lock cache
 lands. State write/remove, metadata store/delete, and single-key object
 put/delete paths now acquire the per-key guard before the global append-log
-lock; multi-key object copy and queue mutation families still use the global
-writer lock until the cutover is completed and diagnostics are updated.
+lock. Multi-key object copy acquires source and destination key guards in
+lexicographic order before the global append-log lock; queue mutation families
+still use the global writer lock until the cutover is completed and diagnostics
+are updated.
 
 ## Performance Model
 
@@ -539,9 +541,9 @@ still comes from the log, but the preferred query path should touch index data
 first and load full metadata or payload bytes only for candidate rows that
 survive the index predicates.
 
-Full ordered scanning remains a supported backend mode, just not the preferred
-default. Pouch configuration must be able to select indexed mode, scan mode,
-and fallback policy when a store/client instance is opened. This is an
+Full log-backed ordered scanning remains a supported backend mode, just not the
+preferred default. Pouch configuration must be able to select indexed mode, scan
+mode, and fallback policy when a store/client instance is opened. This is an
 instance-level choice with the same operational role as the server disk store's
 query backend mode: a caller can intentionally run a pouch instance in scan
 mode even though indexed mode is the normal production route. The public client
