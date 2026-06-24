@@ -164,6 +164,10 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
                                    void *visit_context,
                                    lc_pouch_scan_meta_res *out,
                                    lc_error *error);
+static int lc_pouch_disk_query_index_scan(
+    lc_pouch_store *self, const lc_pouch_query_index_scan_req *req,
+    lc_pouch_scan_meta_visit_fn visit, void *visit_context,
+    lc_pouch_query_index_scan_res *out, lc_error *error);
 static int lc_pouch_disk_append_record(
     lc_pouch_disk_store *store, unsigned long type, const char *namespace_name,
     const char *key, const char *content_type, const char *etag, long version,
@@ -1847,6 +1851,44 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
     lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
   }
   lc_pouch_free(&store->allocator, rows);
+  return LC_OK;
+}
+
+static int lc_pouch_disk_query_index_scan(
+    lc_pouch_store *self, const lc_pouch_query_index_scan_req *req,
+    lc_pouch_scan_meta_visit_fn visit, void *visit_context,
+    lc_pouch_query_index_scan_res *out, lc_error *error) {
+  lc_pouch_disk_store *store;
+  lc_pouch_scan_meta_req scan_req;
+  lc_pouch_scan_meta_res scan_res;
+  int rc;
+
+  if (self == NULL || req == NULL || req->namespace_name == NULL ||
+      visit == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "query_index_scan requires store, request, "
+                                "namespace, visitor, and output");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  memset(&scan_req, 0, sizeof(scan_req));
+  memset(&scan_res, 0, sizeof(scan_res));
+  scan_req.namespace_name = req->namespace_name;
+  scan_req.start_after = req->start_after;
+  scan_req.limit = req->limit;
+
+  rc = lc_pouch_disk_scan_meta(self, &scan_req, visit, visit_context,
+                               &scan_res, error);
+  if (rc != LC_OK) {
+    lc_pouch_scan_meta_res_cleanup(&store->allocator, &scan_res);
+    return rc;
+  }
+  out->visited = scan_res.visited;
+  out->truncated = scan_res.truncated;
+  out->next_start_after = scan_res.next_start_after;
+  scan_res.next_start_after = NULL;
+  out->index_seq = store->replayed_record_count;
+  lc_pouch_scan_meta_res_cleanup(&store->allocator, &scan_res);
   return LC_OK;
 }
 
@@ -5785,6 +5827,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.store_meta = lc_pouch_disk_store_meta;
   store->pub.delete_meta = lc_pouch_disk_delete_meta;
   store->pub.scan_meta = lc_pouch_disk_scan_meta;
+  store->pub.query_index_scan = lc_pouch_disk_query_index_scan;
   store->pub.read_state = lc_pouch_disk_read_state;
   store->pub.write_state = lc_pouch_disk_write_state;
   store->pub.remove_state = lc_pouch_disk_remove_state;

@@ -114,6 +114,19 @@ typedef struct lc_pouch_scan_meta_res {
 typedef int (*lc_pouch_scan_meta_visit_fn)(
     void *context, const lc_pouch_scan_meta_row *row, lc_error *error);
 
+typedef struct lc_pouch_query_index_scan_req {
+  const char *namespace_name;
+  const char *start_after;
+  size_t limit;
+} lc_pouch_query_index_scan_req;
+
+typedef struct lc_pouch_query_index_scan_res {
+  size_t visited;
+  int truncated;
+  char *next_start_after;
+  unsigned long index_seq;
+} lc_pouch_query_index_scan_res;
+
 typedef struct lc_pouch_query_config {
   char *preferred_engine;
   char *fallback_engine;
@@ -224,6 +237,12 @@ struct lc_pouch_store {
   int (*scan_meta)(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
                    lc_pouch_scan_meta_visit_fn visit, void *visit_context,
                    lc_pouch_scan_meta_res *out, lc_error *error);
+  int (*query_index_scan)(lc_pouch_store *self,
+                          const lc_pouch_query_index_scan_req *req,
+                          lc_pouch_scan_meta_visit_fn visit,
+                          void *visit_context,
+                          lc_pouch_query_index_scan_res *out,
+                          lc_error *error);
   int (*read_state)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, lc_source **body, lc_pouch_state_info *out,
                     lc_error *error);
@@ -325,6 +344,8 @@ void lc_pouch_store_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                      lc_pouch_store_meta_res *res);
 void lc_pouch_scan_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_scan_meta_res *res);
+void lc_pouch_query_index_scan_res_cleanup(
+    const lc_pouch_allocator *allocator, lc_pouch_query_index_scan_res *res);
 void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
                                    lc_pouch_query_config *config);
 void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
