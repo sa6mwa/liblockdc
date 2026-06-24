@@ -52,6 +52,24 @@ specified and tested at that level, because otherwise it will pass simple
 get/update cases while failing the workflows that depend on lockd's ordering
 model.
 
+Additional parity details from the storage contract:
+
+- Backend identity is a storage primitive. A backend hash must be stable for a
+  store root, survive reopen, tolerate create races, and preserve the identity
+  value if a later encrypted rewrite is needed.
+- Namespace listing, when supported, returns sorted namespace roots and filters
+  non-directories. Reserved internal namespaces remain usable by storage
+  recovery but unavailable to public lock operations.
+- The disk-log backend must report that it does not support unrestricted
+  concurrent writers. Per-key locks make same-root mutation safe, but the store
+  is still append-serialized storage, not a consensus or multi-primary
+  database.
+- `Abort` is not `Close`: it intentionally leaves crash-detectable writer
+  presence behind while stopping in-process background loops.
+- Metadata summary loading and scanning are optional fast paths, but the
+  fallback contract matters: scans are lexical, support `start_after` and
+  `limit`, and may skip rows that disappear or become transient while scanning.
+
 ## Design Invariants From The Existing Disk Store
 
 The existing disk store is best understood as a durable projection system:
@@ -96,6 +114,10 @@ Required invariants:
   computing CRC and content hash, then rewrite the prefix with final lengths,
   CRC, and ETag. A crash before the prefix rewrite must leave a trailing invalid
   record that replay ignores.
+- Metadata ETags are opaque UUID-style tokens. State and object ETags are
+  content-derived SHA-256 hex strings over the plaintext bytes used for lockd
+  CAS and attachment/object validation. Replaying a record must not regenerate a
+  different ETag.
 - Segment `read_offset` advances only after a complete record has passed
   header, metadata, payload, and CRC validation. Any malformed or partial record
   stops replay for that segment.
@@ -741,6 +763,12 @@ multi-writer database. It can safely serialize same-root mutations with locks,
 but higher HA logic must know it is append-serialized and not a consensus
 backend.
 
+NFS-style mounts need conservative defaults. Detection is necessarily
+platform-specific, so it must be isolated from core storage logic. When a root
+is known or configured as NFS-like, the backend should favor close-after-commit
+or an equivalent mode that seals history promptly for remote readers, while
+still relying on advisory byte-range locks and refresh scans for correctness.
+
 ## Commit and Fsync
 
 Durability must be explicit. The default should be safe: a successful mutation
@@ -1055,8 +1083,14 @@ why. Pouch can initially expose this only internally for diagnostics and tests.
 Queue delivery invariants:
 
 - only one competing consumer may claim a visible message;
+- message TTL expiry removes an unclaimed or in-flight candidate from available
+  and pending views after refresh/replay;
+- retry exhaustion makes a message terminal rather than immediately visible
+  again, and restart/replay must preserve that terminal state;
 - nack with a delay must hide the message until that delay expires and then
   redeliver it with an incremented attempt count;
+- nack without a delay must make the message immediately eligible for
+  redelivery with a fresh delivery token;
 - visibility timeout handoff must reject a stale ack from the old owner after a
   different owner successfully claims and acks the message;
 - ack removes the message from available and in-flight views;
@@ -1172,6 +1206,9 @@ observable client behavior:
   tail: replay stops at the incomplete record and preserves all prior records;
 - bad magic, unsupported record version, metadata decode failure, or CRC
   mismatch: replay stops at that record and applies nothing after it;
+- unsupported future record versions are corruption boundaries for the current
+  reader. They must stop replay rather than being skipped, because later records
+  may depend on semantics the current implementation does not understand;
 - append write failure before pending registration: no index changes and the
   caller receives the write error;
 - fsync failure after pending registration: all pending refs in the group are
@@ -1205,6 +1242,8 @@ observable client behavior:
   back and staging objects are removed;
 - queue ack after visibility handoff: stale owner ack is rejected after another
   owner claims and acks;
+- queue TTL expiry, delayed nack, immediate nack, retry exhaustion, and replay
+  after each of those transitions preserve available/pending/failed counts;
 - idle queue enqueue: dispatcher wakes through polling/watch hints without a
   tight busy loop.
 
@@ -1299,6 +1338,7 @@ Integration tests:
 - compaction abandoned on validation drift
 - obsolete files deleted only after grace period
 - queue dequeue visibility and ack/nack/extend semantics
+- queue TTL expiry and retry exhaustion across reopen/replay
 - consumer service runs against `pouch://`
 - attachments survive reopen and compaction
 - staged promotion preserves small and large payloads
@@ -1318,8 +1358,9 @@ Integration tests:
 - remove semantics: empty remove, remove version bump, keepalive after remove,
   stale remove/update CAS failures, remove then recreate
 - queue polling: ack removal, nack redelivery, visibility timeout handoff,
-  multi-consumer contention, failover dequeue/ack, subscribe with state, and
-  start-consumer auto-ack/state-save/failure paths
+  delayed nack hiding, retry exhaustion, TTL expiry, multi-consumer contention,
+  failover dequeue/ack, subscribe with state, and start-consumer
+  auto-ack/state-save/failure paths
 - queue high fan-in/fan-out has no duplicate acked delivery
 - queue transaction decision commit/rollback, stateful commit/rollback, mixed
   key commit/rollback, fanout across nodes, and replay after restart
@@ -1354,8 +1395,9 @@ consumer state-save, managed failure redelivery, and cross-client CAS. The
 optional e2e shard still covers broader consumer-service behavior.
 
 Current disk unit coverage includes queue nack and extend allocator-failure
-paths that prove failed redelivery-control mutations leave the active lease
-ackable.
+paths, TTL expiry, and retry-exhaustion replay paths that prove failed
+redelivery-control mutations leave the active lease ackable and terminal queue
+states remain terminal after reopen.
 
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a
