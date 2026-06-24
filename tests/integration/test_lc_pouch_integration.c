@@ -146,6 +146,14 @@ typedef struct pouch_subscribe_state_test {
   char state_key[256];
 } pouch_subscribe_state_test;
 
+typedef struct pouch_watch_state {
+  size_t handled;
+  int available;
+  char queue[64];
+  char head_message_id[128];
+  char correlation_id[64];
+} pouch_watch_state;
+
 static int pouch_consumer_state_handle(void *context,
                                        lc_consumer_message *message,
                                        lc_error *error) {
@@ -303,6 +311,33 @@ static int pouch_subscribe_state_handle(void *context, lc_message *message,
   state->handled += 1U;
   rc = message->ack(message, error);
   assert_lc_ok(rc, error);
+  return LC_OK;
+}
+
+static int pouch_watch_handle(void *context, const lc_watch_event *event,
+                              lc_error *error) {
+  pouch_watch_state *state;
+
+  (void)error;
+  state = (pouch_watch_state *)context;
+  assert_non_null(state);
+  assert_non_null(event);
+  state->handled += 1U;
+  state->available = event->available;
+  if (event->queue != NULL) {
+    snprintf(state->queue, sizeof(state->queue), "%s", event->queue);
+  }
+  if (event->head_message_id != NULL) {
+    snprintf(state->head_message_id, sizeof(state->head_message_id), "%s",
+             event->head_message_id);
+  } else {
+    state->head_message_id[0] = '\0';
+  }
+  if (event->correlation_id != NULL) {
+    snprintf(state->correlation_id, sizeof(state->correlation_id), "%s",
+             event->correlation_id);
+  }
+  assert_true(event->changed_at_unix > 0L);
   return LC_OK;
 }
 
@@ -759,6 +794,100 @@ static void test_pouch_public_queue_visibility_redelivery(void **state) {
   producer->close(producer);
   worker_a->close(worker_a);
   worker_b->close(worker_b);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_watch_queue_snapshots(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *watcher;
+  lc_client *worker;
+  lc_source *source;
+  lc_message *message;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_watch_queue_req watch_req;
+  lc_watch_handler handler;
+  lc_dequeue_req dequeue_req;
+  pouch_watch_state watch_state;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "watch-queue");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  watcher = NULL;
+  worker = NULL;
+  source = NULL;
+  message = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&watch_state, 0, sizeof(watch_state));
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &watcher, &error);
+  open_pouch_client(endpoint, &worker, &error);
+
+  lc_watch_queue_req_init(&watch_req);
+  watch_req.queue = "watch-jobs";
+  handler.handle = pouch_watch_handle;
+  handler.context = &watch_state;
+  rc = watcher->watch_queue(watcher, &watch_req, &handler, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(watch_state.handled, 1U);
+  assert_false(watch_state.available);
+  assert_string_equal(watch_state.queue, "watch-jobs");
+  assert_string_equal(watch_state.head_message_id, "");
+  assert_string_equal(watch_state.correlation_id, "pouch-watch");
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "watch-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("watch-work", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  memset(&watch_state, 0, sizeof(watch_state));
+  rc = watcher->watch_queue(watcher, &watch_req, &handler, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(watch_state.handled, 1U);
+  assert_true(watch_state.available);
+  assert_string_equal(watch_state.queue, "watch-jobs");
+  assert_string_equal(watch_state.head_message_id, enqueue_res.message_id);
+  assert_string_equal(watch_state.correlation_id, "pouch-watch");
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "watch-jobs";
+  dequeue_req.owner = "watch-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = worker->dequeue(worker, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  memset(&watch_state, 0, sizeof(watch_state));
+  rc = watcher->watch_queue(watcher, &watch_req, &handler, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(watch_state.handled, 1U);
+  assert_false(watch_state.available);
+  assert_string_equal(watch_state.queue, "watch-jobs");
+  assert_string_equal(watch_state.head_message_id, "");
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  producer->close(producer);
+  watcher->close(watcher);
+  worker->close(worker);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
 }
@@ -1234,6 +1363,7 @@ int main(void) {
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
+      cmocka_unit_test(test_pouch_public_watch_queue_snapshots),
       cmocka_unit_test(test_pouch_public_subscribe_with_state),
       cmocka_unit_test(test_pouch_public_consumer_service_with_state),
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
