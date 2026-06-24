@@ -1204,6 +1204,169 @@ static void test_pouch_endpoint_reports_lockd_lease_validation_errors(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_attachment_rejects_stale_lease_refs(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_lease *fresh_lease;
+  lc_acquire_req acquire;
+  lc_attach_req lease_attach_req;
+  lc_attach_res lease_attach_res;
+  lc_release_req release_req;
+  lc_lease_ref stale_ref;
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list attachment_list;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_attachment_delete_op delete_op;
+  lc_attachment_delete_all_op delete_all_op;
+  lc_attachment_selector selector;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  int deleted;
+  int deleted_count;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "attachment-stale-lease");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&lease_attach_res, 0, sizeof(lease_attach_res));
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachment_list, 0, sizeof(attachment_list));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&stale_ref, 0, sizeof(stale_ref));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+  fresh_lease = NULL;
+  sink = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "attachment-stale";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  stale_ref.namespace_name = strdup(lease->namespace_name);
+  stale_ref.key = strdup(lease->key);
+  stale_ref.lease_id = strdup(lease->lease_id);
+  stale_ref.txn_id = strdup(lease->txn_id);
+  stale_ref.fencing_token = lease->fencing_token;
+  assert_non_null(stale_ref.namespace_name);
+  assert_non_null(stale_ref.key);
+  assert_non_null(stale_ref.lease_id);
+  assert_non_null(stale_ref.txn_id);
+
+  lc_attach_req_init(&lease_attach_req);
+  lease_attach_req.name = "existing.txt";
+  lease_attach_req.content_type = "text/plain";
+  lease_attach_req.prevent_overwrite = 1;
+  source = source_from_text("existing-attachment");
+  rc = lease->attach(lease, &lease_attach_req, source, &lease_attach_res,
+                     &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  acquire.owner = "owner-b";
+  rc = client->acquire(client, &acquire, &fresh_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(fresh_lease);
+  assert_string_not_equal(fresh_lease->lease_id, stale_ref.lease_id);
+
+  memset(&attach_op, 0, sizeof(attach_op));
+  attach_op.lease = stale_ref;
+  attach_op.name = "stale.txt";
+  attach_op.content_type = "text/plain";
+  source = source_from_text("stale-attachment");
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 403L);
+  assert_string_equal(error.server_code, "lease_required");
+  lc_attach_res_cleanup(&attach_res);
+  lc_error_cleanup(&error);
+
+  lc_attachment_list_req_init(&list_req);
+  list_req.lease = stale_ref;
+  rc = client->list_attachments(client, &list_req, &attachment_list, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 403L);
+  assert_string_equal(error.server_code, "lease_required");
+  lc_attachment_list_cleanup(&attachment_list);
+  lc_error_cleanup(&error);
+
+  lc_attachment_get_op_init(&get_op);
+  get_op.lease = stale_ref;
+  get_op.selector.name = "existing.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 403L);
+  assert_string_equal(error.server_code, "lease_required");
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_error_cleanup(&error);
+
+  lc_attachment_selector_init(&selector);
+  selector.name = "existing.txt";
+  lc_attachment_delete_op_init(&delete_op);
+  delete_op.lease = stale_ref;
+  delete_op.selector = selector;
+  deleted = 1;
+  rc = client->delete_attachment(client, &delete_op, &deleted, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 403L);
+  assert_string_equal(error.server_code, "lease_required");
+  assert_false(deleted);
+  lc_error_cleanup(&error);
+
+  lc_attachment_delete_all_op_init(&delete_all_op);
+  delete_all_op.lease = stale_ref;
+  deleted_count = 1;
+  rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
+                                      &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 403L);
+  assert_string_equal(error.server_code, "lease_required");
+  assert_int_equal(deleted_count, 0);
+  lc_error_cleanup(&error);
+
+  rc = fresh_lease->list_attachments(fresh_lease, &attachment_list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(attachment_list.count, 1U);
+  assert_string_equal(attachment_list.items[0].name, "existing.txt");
+  lc_attachment_list_cleanup(&attachment_list);
+
+  rc = fresh_lease->release(fresh_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  fresh_lease = NULL;
+
+  client->close(client);
+  free((char *)stale_ref.namespace_name);
+  free((char *)stale_ref.key);
+  free((char *)stale_ref.lease_id);
+  free((char *)stale_ref.txn_id);
+  lc_attach_res_cleanup(&lease_attach_res);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_rejects_missing_or_wrong_txn_id(void **state) {
   char root[256];
   char endpoint[320];
@@ -4526,6 +4689,8 @@ int main(void) {
           test_pouch_endpoint_release_is_idempotent_for_stale_refs),
       cmocka_unit_test(
           test_pouch_endpoint_reports_lockd_lease_validation_errors),
+      cmocka_unit_test(
+          test_pouch_endpoint_attachment_rejects_stale_lease_refs),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_or_wrong_txn_id),
       cmocka_unit_test(test_pouch_endpoint_remove_without_state_is_noop),
       cmocka_unit_test(
