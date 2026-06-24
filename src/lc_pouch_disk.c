@@ -1656,17 +1656,37 @@ static int lc_pouch_disk_upsert_object_entry(
     unsigned long body_length, int deleted) {
   lc_pouch_disk_object_entry *entry;
   lc_pouch_disk_object_entry *grown;
+  lc_pouch_disk_object_entry staged;
+  char *new_id;
+  char *new_content_type;
   int existing;
 
   existing =
       lc_pouch_disk_find_object_by_name(store, namespace_name, key, name);
+  memset(&staged, 0, sizeof(staged));
+  new_id = lc_pouch_strdup(&store->allocator, id);
+  new_content_type = lc_pouch_strdup(&store->allocator, content_type);
+  if ((id != NULL && new_id == NULL) ||
+      (content_type != NULL && new_content_type == NULL)) {
+    lc_pouch_free(&store->allocator, new_id);
+    lc_pouch_free(&store->allocator, new_content_type);
+    return 0;
+  }
   if (existing >= 0) {
     entry = &store->object_entries[existing];
     lc_pouch_free(&store->allocator, entry->id);
     lc_pouch_free(&store->allocator, entry->content_type);
-    entry->id = NULL;
-    entry->content_type = NULL;
   } else {
+    staged.namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
+    staged.key = lc_pouch_strdup(&store->allocator, key);
+    staged.name = lc_pouch_strdup(&store->allocator, name);
+    if (staged.namespace_name == NULL || staged.key == NULL ||
+        staged.name == NULL) {
+      lc_pouch_free(&store->allocator, new_id);
+      lc_pouch_free(&store->allocator, new_content_type);
+      lc_pouch_disk_object_entry_cleanup(store, &staged);
+      return 0;
+    }
     if (store->object_entry_count == store->object_entry_capacity) {
       size_t new_capacity;
 
@@ -1677,6 +1697,9 @@ static int lc_pouch_disk_upsert_object_entry(
           &store->allocator, store->object_entries,
           new_capacity * sizeof(store->object_entries[0]));
       if (grown == NULL) {
+        lc_pouch_free(&store->allocator, new_id);
+        lc_pouch_free(&store->allocator, new_content_type);
+        lc_pouch_disk_object_entry_cleanup(store, &staged);
         return 0;
       }
       memset(grown + store->object_entry_capacity, 0,
@@ -1685,20 +1708,15 @@ static int lc_pouch_disk_upsert_object_entry(
       store->object_entry_capacity = new_capacity;
     }
     entry = &store->object_entries[store->object_entry_count++];
-    entry->namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
-    entry->key = lc_pouch_strdup(&store->allocator, key);
-    entry->name = lc_pouch_strdup(&store->allocator, name);
-    if (entry->namespace_name == NULL || entry->key == NULL ||
-        entry->name == NULL) {
-      return 0;
-    }
+    entry->namespace_name = staged.namespace_name;
+    entry->key = staged.key;
+    entry->name = staged.name;
+    staged.namespace_name = NULL;
+    staged.key = NULL;
+    staged.name = NULL;
   }
-  entry->id = lc_pouch_strdup(&store->allocator, id);
-  entry->content_type = lc_pouch_strdup(&store->allocator, content_type);
-  if ((id != NULL && entry->id == NULL) ||
-      (content_type != NULL && entry->content_type == NULL)) {
-    return 0;
-  }
+  entry->id = new_id;
+  entry->content_type = new_content_type;
   entry->size = size;
   entry->created_at_unix = created_at_unix;
   entry->updated_at_unix = updated_at_unix;

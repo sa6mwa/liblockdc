@@ -3668,6 +3668,81 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_object_overwrite_allocation_failure_replays_cleanly(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info first;
+  lc_pouch_object_info overwritten;
+  lc_pouch_object_info fetched;
+  lc_error error;
+  char *text;
+  const char *replacement_type;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-overwrite-nomem");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&selector, 0, sizeof(selector));
+  memset(&first, 0, sizeof(first));
+  memset(&overwritten, 0, sizeof(overwritten));
+  memset(&fetched, 0, sizeof(fetched));
+  store = NULL;
+  read_body = NULL;
+  replacement_type = "application/x-pouch-overwrite-unique";
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.name = "same.txt";
+  opts.content_type = "text/plain";
+  source = source_from_text("payload-one");
+  rc = store->put_object(store, "default", "lease-key", source, &opts, &first,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = replacement_type;
+  tracked.fail_malloc_size = strlen(replacement_type) + 1U;
+  source = source_from_text("payload-two");
+  rc = store->put_object(store, "default", "lease-key", source, &opts,
+                         &overwritten, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  selector.name = "same.txt";
+  rc = store->get_object(store, "default", "lease-key", &selector, &read_body,
+                         &fetched, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_not_equal(fetched.id, first.id);
+  assert_string_equal(fetched.name, "same.txt");
+  assert_string_equal(fetched.content_type, replacement_type);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "payload-two");
+  free(text);
+  lc_source_close(read_body);
+
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+  lc_pouch_object_info_cleanup(&allocator, &overwritten);
+  lc_pouch_object_info_cleanup(&allocator, &first);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_object_listing_orders_by_name_after_replay(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -6561,6 +6636,8 @@ int main(void) {
       cmocka_unit_test(test_scan_meta_ignores_corrupt_query_sidecar),
       cmocka_unit_test(test_query_index_sidecar_compacts_with_store_log),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
+      cmocka_unit_test(
+          test_object_overwrite_allocation_failure_replays_cleanly),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),
       cmocka_unit_test(test_object_put_streams_payload_without_large_alloc),
