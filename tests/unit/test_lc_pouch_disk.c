@@ -4526,6 +4526,76 @@ static void test_backend_hash_persists_across_handles(void **state) {
   test_cleanup_root(root);
 }
 
+static int child_exit_code(pid_t pid);
+static void child_process_backend_hash(const char *root, int start_fd);
+
+static void test_backend_hash_create_race_publishes_single_identity(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_error error;
+  char *hash;
+  int start_pipe[2];
+  int first_code;
+  int second_code;
+  int rc;
+  pid_t first_pid;
+  pid_t second_pid;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "backend-hash-race");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  hash = NULL;
+  start_pipe[0] = -1;
+  start_pipe[1] = -1;
+
+  assert_int_equal(mkdir(root, 0777), 0);
+  rc = pipe(start_pipe);
+  assert_int_equal(rc, 0);
+  first_pid = fork();
+  assert_true(first_pid >= 0);
+  if (first_pid == 0) {
+    close(start_pipe[1]);
+    child_process_backend_hash(root, start_pipe[0]);
+  }
+  second_pid = fork();
+  assert_true(second_pid >= 0);
+  if (second_pid == 0) {
+    close(start_pipe[1]);
+    child_process_backend_hash(root, start_pipe[0]);
+  }
+  close(start_pipe[0]);
+  start_pipe[0] = -1;
+  assert_int_equal(write(start_pipe[1], "xx", 2U), 2);
+  close(start_pipe[1]);
+  start_pipe[1] = -1;
+
+  first_code = child_exit_code(first_pid);
+  second_code = child_exit_code(second_pid);
+  assert_int_equal(first_code, 0);
+  assert_int_equal(second_code, 0);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
+                   1U);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->backend_hash(store, &hash, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(hash);
+  assert_true(strncmp(hash, "pouch-", 6U) == 0);
+
+  lc_pouch_free(&allocator, hash);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_independent_handles_refresh_before_operations(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -4889,6 +4959,45 @@ static int child_exit_code(pid_t pid) {
   assert_int_equal(rc, pid);
   assert_true(WIFEXITED(status));
   return WEXITSTATUS(status);
+}
+
+static void child_process_backend_hash(const char *root, int start_fd) {
+  lc_pouch_store *store;
+  lc_error error;
+  char *hash;
+  char ready;
+  int rc;
+
+  store = NULL;
+  hash = NULL;
+  memset(&error, 0, sizeof(error));
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(40);
+  }
+  if (read(start_fd, &ready, 1U) != 1) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(41);
+  }
+  close(start_fd);
+  rc = store->backend_hash(store, &hash, &error);
+  if (rc != LC_OK) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(42);
+  }
+  if (hash == NULL || strncmp(hash, "pouch-", 6U) != 0) {
+    lc_pouch_free(NULL, hash);
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(43);
+  }
+  lc_pouch_free(NULL, hash);
+  store->close(store, NULL);
+  lc_error_cleanup(&error);
+  _exit(0);
 }
 
 static void child_process_dequeue_one(const char *root, int start_fd) {
@@ -5315,6 +5424,8 @@ int main(void) {
       cmocka_unit_test(test_query_config_rejects_invalid_options),
       cmocka_unit_test(test_open_removes_stale_compaction_temps),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
+      cmocka_unit_test(
+          test_backend_hash_create_race_publishes_single_identity),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
