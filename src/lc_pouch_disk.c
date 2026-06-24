@@ -1276,6 +1276,7 @@ static int lc_pouch_disk_take_cached_read_fd(lc_pouch_disk_store *store,
     (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
     lc_pouch_free(&entry->allocator, entry->path);
     lc_pouch_free(&entry->allocator, entry);
+    return 0;
   }
 }
 

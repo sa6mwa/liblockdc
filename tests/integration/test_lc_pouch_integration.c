@@ -3395,6 +3395,104 @@ static void test_pouch_public_queue_batch_no_duplicate_acked_delivery(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_queue_batch_honors_start_after_cursor(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *worker;
+  lc_client *observer;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res[3];
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_batch_res batch;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  const char *payloads[3];
+  size_t index;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "queue-batch-start-after");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  worker = NULL;
+  observer = NULL;
+  source = NULL;
+  memset(enqueue_res, 0, sizeof(enqueue_res));
+  memset(&batch, 0, sizeof(batch));
+  memset(&stats, 0, sizeof(stats));
+  payloads[0] = "cursor-one";
+  payloads[1] = "cursor-two";
+  payloads[2] = "cursor-three";
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &worker, &error);
+  open_pouch_client(endpoint, &observer, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "cursor-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  for (index = 0U; index < 3U; ++index) {
+    source = source_from_text(payloads[index], &error);
+    rc = producer->enqueue(producer, &enqueue_req, source,
+                           &enqueue_res[index], &error);
+    lc_source_close(source);
+    assert_lc_ok(rc, &error);
+  }
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "cursor-jobs";
+  dequeue_req.owner = "cursor-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.page_size = 2;
+  dequeue_req.start_after = enqueue_res[0].message_id;
+  rc = worker->dequeue_batch(worker, &dequeue_req, &batch, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(batch.count, 2U);
+  assert_string_equal(batch.messages[0]->message_id,
+                      enqueue_res[1].message_id);
+  assert_string_equal(batch.messages[0]->next_cursor,
+                      enqueue_res[1].message_id);
+  assert_string_equal(batch.messages[1]->message_id,
+                      enqueue_res[2].message_id);
+  assert_string_equal(batch.messages[1]->next_cursor,
+                      enqueue_res[2].message_id);
+
+  rc = batch.messages[0]->ack(batch.messages[0], &error);
+  assert_lc_ok(rc, &error);
+  batch.messages[0] = NULL;
+  rc = batch.messages[1]->ack(batch.messages[1], &error);
+  assert_lc_ok(rc, &error);
+  batch.messages[1] = NULL;
+  lc_dequeue_batch_cleanup(&batch);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "cursor-jobs";
+  rc = observer->queue_stats(observer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(stats.available);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_string_equal(stats.head_message_id, enqueue_res[0].message_id);
+
+  lc_queue_stats_res_cleanup(&stats);
+  for (index = 0U; index < 3U; ++index) {
+    lc_enqueue_res_cleanup(&enqueue_res[index]);
+  }
+  producer->close(producer);
+  worker->close(worker);
+  observer->close(observer);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_watch_queue_snapshots(void **state) {
   char root[256];
   char endpoint[320];
@@ -4667,6 +4765,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_queue_stats_is_read_only),
       cmocka_unit_test(
           test_pouch_public_queue_batch_no_duplicate_acked_delivery),
+      cmocka_unit_test(
+          test_pouch_public_queue_batch_honors_start_after_cursor),
       cmocka_unit_test(test_pouch_public_watch_queue_snapshots),
       cmocka_unit_test(test_pouch_public_subscribe_with_state),
       cmocka_unit_test(test_pouch_public_dequeue_waits_for_later_enqueue),
