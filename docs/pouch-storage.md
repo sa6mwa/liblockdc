@@ -500,21 +500,27 @@ payloads or silently replay the entire append log on every query.
 
 The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index
-scan primitive and return the current `index_seq`. In explicit scan mode they
-route through ordered metadata summaries and emit no index sequence because no
-durable query index is consulted. `query_keys` streams keys, excludes
-`query_hidden=true` metadata, uses `cursor` as `start_after`, and returns `keys`
-as the return mode. `query` streams NDJSON document rows in the same ordered
-page, embeds JSON state payloads as `document`, emits `null` for non-JSON or
-empty state payloads, returns `documents`, and reports local metadata such as
-`query_candidates`. Pouch `flush_index` is synchronous for the current local
-projection: it returns accepted/flushed/not-pending and the latest index
-sequence. Indexed match-all queries accept `refresh=wait_for` by performing the
-same synchronous local index flush before scanning the indexed projection.
-Explicit scan mode remains available for full-log scanning but does not accept
-refresh hints because no durable query index is consulted. Non-empty field
-selection, non-document scan return modes, and nontrivial LQL selectors remain
-unsupported until the indexed/LQL query slice lands.
+scan primitive and return the current `index_seq`. The current disk backend
+maintains a separate sorted query-summary projection for that primitive so
+indexed match-all scans do not allocate and sort the general metadata table on
+every request. This projection is rebuilt from the authoritative log on open and
+updated on metadata put/delete; later field postings and `liblql` predicates
+must extend this boundary rather than falling back to a single full-log scan.
+In explicit scan mode, calls route through ordered metadata summaries and emit
+no index sequence because no durable query index is consulted. `query_keys`
+streams keys, excludes `query_hidden=true` metadata, uses `cursor` as
+`start_after`, and returns `keys` as the return mode. `query` streams NDJSON
+document rows in the same ordered page, embeds JSON state payloads as
+`document`, emits `null` for non-JSON or empty state payloads, returns
+`documents`, and reports local metadata such as `query_candidates`. Pouch
+`flush_index` is synchronous for the current local projection: it returns
+accepted/flushed/not-pending and the latest index sequence. Indexed match-all
+queries accept `refresh=wait_for` by performing the same synchronous local
+index flush before scanning the indexed projection. Explicit scan mode remains
+available for full-log scanning but does not accept refresh hints because no
+durable query index is consulted. Non-empty field selection, non-document scan
+return modes, and nontrivial LQL selectors remain unsupported until the
+indexed/LQL query slice lands.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a

@@ -1796,6 +1796,97 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   test_cleanup_root(root);
 }
 
+static void test_query_index_projection_replays_updates_and_deletes(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_store_meta_res updated;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-projection-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&updated, 0, sizeof(updated));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-c";
+  meta.state_etag = "state-c";
+  meta.version = 3L;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-a";
+  meta.state_etag = "state-a";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.lease_id = "lease-b";
+  meta.state_etag = "state-b";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &updated,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->delete_meta(store, "default", "bravo", updated.etag, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &updated);
+
+  meta.lease_id = "lease-a2";
+  meta.state_etag = "state-a2";
+  meta.version = 4L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 1;
+  rc = store->store_meta(store, "default", "alpha", &meta, stored.etag,
+                         &updated, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  lc_pouch_store_meta_res_cleanup(&allocator, &updated);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  req.namespace_name = "default";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "charlie");
+  assert_int_equal(capture.versions[0], 3L);
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_index_flush_reports_current_projection(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -4051,6 +4142,8 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(
           test_query_index_scan_orders_paginates_and_reports_seq),
+      cmocka_unit_test(
+          test_query_index_projection_replays_updates_and_deletes),
       cmocka_unit_test(test_index_flush_reports_current_projection),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
