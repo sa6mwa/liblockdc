@@ -1585,6 +1585,73 @@ int lc_pouch_client_queue_stats_method(lc_client *self,
   return rc;
 }
 
+int lc_pouch_client_watch_queue_method(lc_client *self,
+                                       const lc_watch_queue_req *req,
+                                       const lc_watch_handler *handler,
+                                       lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_queue_stats stats;
+  lc_watch_event event;
+  lc_error handler_error;
+  const char *namespace_name;
+  int handler_rc;
+  int rc;
+
+  if (self == NULL || req == NULL || req->queue == NULL || handler == NULL ||
+      handler->handle == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch watch_queue requires self, req, queue, and "
+                        "handler",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&stats, 0, sizeof(stats));
+  memset(&event, 0, sizeof(event));
+  rc = client->pouch_store->queue_stats(client->pouch_store, namespace_name,
+                                        req->queue, &stats, error);
+  if (rc != LC_OK) {
+    lc_pouch_queue_stats_cleanup(&client->pouch_allocator, &stats);
+    return rc;
+  }
+  if (lc_pouch_copy_public(&event.namespace_name, namespace_name, error,
+                           "failed to copy pouch watch namespace") != LC_OK ||
+      lc_pouch_copy_public(&event.queue, req->queue, error,
+                           "failed to copy pouch watch queue") != LC_OK ||
+      lc_pouch_copy_public(&event.head_message_id, stats.head_message_id,
+                           error,
+                           "failed to copy pouch watch head id") != LC_OK ||
+      lc_pouch_copy_public(&event.correlation_id, "pouch-watch", error,
+                           "failed to copy pouch watch correlation id") !=
+          LC_OK) {
+    lc_watch_event_cleanup(&event);
+    lc_pouch_queue_stats_cleanup(&client->pouch_allocator, &stats);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  event.available = stats.available > 0;
+  event.changed_at_unix = lc_pouch_now_unix();
+  lc_error_init(&handler_error);
+  handler_rc = handler->handle(handler->context, &event, &handler_error);
+  lc_watch_event_cleanup(&event);
+  lc_pouch_queue_stats_cleanup(&client->pouch_allocator, &stats);
+  if (handler_error.code != LC_OK) {
+    rc = lc_error_set(error, handler_error.code, handler_error.http_status,
+                      handler_error.message, handler_error.detail,
+                      handler_error.server_code,
+                      handler_error.correlation_id);
+    lc_error_cleanup(&handler_error);
+    return rc;
+  }
+  lc_error_cleanup(&handler_error);
+  (void)handler_rc;
+  return LC_OK;
+}
+
 int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
                                    lc_source *src, lc_enqueue_res *out,
                                    lc_error *error) {

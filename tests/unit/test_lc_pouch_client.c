@@ -126,6 +126,15 @@ typedef struct subscribe_test_state {
   const char *expected[2];
 } subscribe_test_state;
 
+typedef struct watch_test_state {
+  size_t handled;
+  int available;
+  char queue[64];
+  char head_message_id[128];
+  char correlation_id[64];
+  int fail;
+} watch_test_state;
+
 typedef struct consumer_service_test_state {
   lc_consumer_service *service;
   size_t handled;
@@ -161,6 +170,35 @@ static int subscribe_test_handle(void *context, lc_message *message,
   ++state->handled;
   rc = message->ack(message, error);
   assert_int_equal(rc, LC_OK);
+  return LC_OK;
+}
+
+static int watch_test_handle(void *context, const lc_watch_event *event,
+                             lc_error *error) {
+  watch_test_state *state;
+
+  state = (watch_test_state *)context;
+  state->handled += 1U;
+  state->available = event->available;
+  if (event->queue != NULL) {
+    snprintf(state->queue, sizeof(state->queue), "%s", event->queue);
+  }
+  if (event->head_message_id != NULL) {
+    snprintf(state->head_message_id, sizeof(state->head_message_id), "%s",
+             event->head_message_id);
+  }
+  if (event->correlation_id != NULL) {
+    snprintf(state->correlation_id, sizeof(state->correlation_id), "%s",
+             event->correlation_id);
+  }
+  if (state->fail) {
+    error->code = LC_ERR_TRANSPORT;
+    error->message =
+        (char *)malloc(strlen("watch callback stopped") + 1U);
+    assert_non_null(error->message);
+    strcpy(error->message, "watch callback stopped");
+    return LC_ERR_TRANSPORT;
+  }
   return LC_OK;
 }
 
@@ -1393,6 +1431,75 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_watch_queue_snapshots(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_watch_queue_req watch_req;
+  lc_watch_handler handler;
+  watch_test_state watch_state;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "watch-queue");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&watch_state, 0, sizeof(watch_state));
+  client = open_pouch_client(endpoint);
+
+  lc_watch_queue_req_init(&watch_req);
+  watch_req.queue = "jobs";
+  handler.handle = watch_test_handle;
+  handler.context = &watch_state;
+  rc = client->watch_queue(client, &watch_req, &handler, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(watch_state.handled, 1U);
+  assert_false(watch_state.available);
+  assert_string_equal(watch_state.queue, "jobs");
+  assert_true(watch_state.head_message_id[0] == '\0');
+  assert_string_equal(watch_state.correlation_id, "pouch-watch");
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("body");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  memset(&watch_state, 0, sizeof(watch_state));
+  rc = client->watch_queue(client, &watch_req, &handler, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(watch_state.handled, 1U);
+  assert_true(watch_state.available);
+  assert_string_equal(watch_state.queue, "jobs");
+  assert_string_equal(watch_state.head_message_id, enqueue_res.message_id);
+  assert_string_equal(watch_state.correlation_id, "pouch-watch");
+
+  memset(&watch_state, 0, sizeof(watch_state));
+  watch_state.fail = 1;
+  rc = client->watch_queue(client, &watch_req, &handler, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "watch callback stopped");
+  assert_int_equal(watch_state.handled, 1U);
+  lc_error_cleanup(&error);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_queue_variants_reject_missing_owner(
     void **state) {
   char root[256];
@@ -2201,6 +2308,7 @@ int main(void) {
           test_pouch_endpoint_release_preserves_state_for_reacquire),
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_watch_queue_snapshots),
       cmocka_unit_test(
           test_pouch_endpoint_queue_variants_reject_missing_owner),
       cmocka_unit_test(

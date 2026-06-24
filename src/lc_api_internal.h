@@ -256,6 +256,10 @@ int lc_pouch_client_subscribe_with_state_method(lc_client *self,
                                                 const lc_dequeue_req *req,
                                                 const lc_consumer *consumer,
                                                 lc_error *error);
+int lc_pouch_client_watch_queue_method(lc_client *self,
+                                       const lc_watch_queue_req *req,
+                                       const lc_watch_handler *handler,
+                                       lc_error *error);
 int lc_pouch_message_ack_method(lc_message *self, lc_error *error);
 int lc_pouch_message_nack_method(lc_message *self, const lc_nack_req *req,
                                  lc_error *error);

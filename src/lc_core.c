@@ -1295,6 +1295,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.subscribe = lc_pouch_client_subscribe_method;
     client->pub.subscribe_with_state =
         lc_pouch_client_subscribe_with_state_method;
+    client->pub.watch_queue = lc_pouch_client_watch_queue_method;
   }
   client->pub.default_namespace = client->default_namespace;
   *out = &client->pub;
