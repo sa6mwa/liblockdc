@@ -237,6 +237,13 @@ typedef struct lc_pouch_queue_stats {
   long head_not_visible_until_unix;
 } lc_pouch_queue_stats;
 
+typedef struct lc_pouch_queue_wake_status {
+  char *mode;
+  char *reason;
+  int uses_marker_hints;
+  int uses_filesystem_notifications;
+} lc_pouch_queue_wake_status;
+
 struct lc_pouch_store {
   void *impl;
   int (*load_meta)(lc_pouch_store *self, const char *namespace_name,
@@ -336,6 +343,9 @@ struct lc_pouch_store {
   int (*queue_stats)(lc_pouch_store *self, const char *namespace_name,
                      const char *queue, lc_pouch_queue_stats *out,
                      lc_error *error);
+  int (*queue_wake_status)(lc_pouch_store *self, const char *namespace_name,
+                           const char *queue,
+                           lc_pouch_queue_wake_status *out, lc_error *error);
   int (*query_config)(lc_pouch_store *self, const char *namespace_name,
                       lc_pouch_query_config *out, lc_error *error);
   int (*backend_hash)(lc_pouch_store *self, char **out, lc_error *error);
@@ -373,6 +383,8 @@ void lc_pouch_index_flush_res_cleanup(const lc_pouch_allocator *allocator,
                                       lc_pouch_index_flush_res *res);
 void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
                                    lc_pouch_query_config *config);
+void lc_pouch_queue_wake_status_cleanup(
+    const lc_pouch_allocator *allocator, lc_pouch_queue_wake_status *status);
 void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
                                         lc_pouch_staged_state_info *info);
 void lc_pouch_staged_state_list_cleanup(const lc_pouch_allocator *allocator,

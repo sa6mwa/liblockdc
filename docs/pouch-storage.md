@@ -1305,6 +1305,11 @@ notification touch after a committed queue mutation must not roll back the
 mutation, and a missing notification file must not prevent pollers from
 discovering committed queue objects during their next refresh.
 
+Current disk backend milestone: the private storage interface exposes queue
+wake status. The disk backend reports `polling`, marks queue marker files as
+best-effort hints, and reports filesystem notifications disabled. This is an
+internal diagnostic/capability surface, not a durability contract.
+
 The consumer service should be able to run against pouch without special public
 API changes. Internally, its wait loop should use the pouch queue polling
 strategy when the client backend is pouch.

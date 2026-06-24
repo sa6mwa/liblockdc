@@ -5446,6 +5446,61 @@ static void test_queue_wake_marker_failure_does_not_rollback_enqueue(
   test_cleanup_root(root);
 }
 
+static void test_queue_wake_status_reports_polling_marker_mode(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_queue_wake_status status;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-wake-status");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&status, 0, sizeof(status));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->queue_wake_status);
+
+  rc = store->queue_wake_status(store, "default", "jobs/high", &status,
+                                &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(status.mode, "polling");
+  assert_string_equal(status.reason,
+                      "disk pouch uses polling with best-effort queue marker "
+                      "hints");
+  assert_true(status.uses_marker_hints);
+  assert_false(status.uses_filesystem_notifications);
+  lc_pouch_queue_wake_status_cleanup(&allocator, &status);
+
+  rc = store->queue_wake_status(store, "bad/ns", "jobs", &status, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "queue_wake_status namespace must not contain '/'");
+  lc_error_cleanup(&error);
+
+  tracked.fail_malloc_size = strlen("polling") + 1U;
+  rc = store->queue_wake_status(store, "default", "jobs", &status, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to copy pouch queue wake status");
+  assert_null(status.mode);
+  assert_null(status.reason);
+  assert_false(status.uses_marker_hints);
+  assert_false(status.uses_filesystem_notifications);
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -7204,7 +7259,7 @@ static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
   meta.owner = "owner";
   meta.lease_id = "lease";
   meta.state_etag = state_res.new_state_etag;
-  meta.version = state_res.version;
+  meta.version = state_res.new_version;
   rc = store->store_meta(store, "default", "heartbeat-key", &meta, NULL,
                          &meta_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -7354,6 +7409,7 @@ int main(void) {
       cmocka_unit_test(test_queue_mutations_touch_wake_marker),
       cmocka_unit_test(
           test_queue_wake_marker_failure_does_not_rollback_enqueue),
+      cmocka_unit_test(test_queue_wake_status_reports_polling_marker_mode),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(
           test_pathlike_identifiers_are_rejected_before_append),

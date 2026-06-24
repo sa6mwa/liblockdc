@@ -357,6 +357,9 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
                                      const char *queue,
                                      lc_pouch_queue_stats *out,
                                      lc_error *error);
+static int lc_pouch_disk_queue_wake_status(
+    lc_pouch_store *self, const char *namespace_name, const char *queue,
+    lc_pouch_queue_wake_status *out, lc_error *error);
 static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       const char *namespace_name,
                                       lc_pouch_query_config *out,
@@ -7053,6 +7056,37 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_queue_wake_status(
+    lc_pouch_store *self, const char *namespace_name, const char *queue,
+    lc_pouch_queue_wake_status *out, lc_error *error) {
+  lc_pouch_disk_store *store;
+  int rc;
+
+  if (self == NULL || namespace_name == NULL || queue == NULL || out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "queue_wake_status requires store, namespace, queue, and out");
+  }
+  rc = lc_pouch_disk_validate_namespace_queue(error, "queue_wake_status",
+                                              namespace_name, queue);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  out->mode = lc_pouch_strdup(&store->allocator, "polling");
+  out->reason = lc_pouch_strdup(
+      &store->allocator,
+      "disk pouch uses polling with best-effort queue marker hints");
+  if (out->mode == NULL || out->reason == NULL) {
+    lc_pouch_queue_wake_status_cleanup(&store->allocator, out);
+    return lc_pouch_set_nomem(error,
+                              "failed to copy pouch queue wake status");
+  }
+  out->uses_marker_hints = 1;
+  out->uses_filesystem_notifications = 0;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       const char *namespace_name,
                                       lc_pouch_query_config *out,
@@ -7396,6 +7430,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.nack_message = lc_pouch_disk_nack_message;
   store->pub.extend_message = lc_pouch_disk_extend_message;
   store->pub.queue_stats = lc_pouch_disk_queue_stats;
+  store->pub.queue_wake_status = lc_pouch_disk_queue_wake_status;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;
   store->pub.close = lc_pouch_disk_close;
