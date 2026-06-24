@@ -620,6 +620,25 @@ per-request engine hints. For example, a store configured with
 match-all queries through the indexed path because scan mode does not consult a
 durable index and therefore cannot honor refresh hints.
 
+Scan mode acceptance criteria:
+
+- Store-open configuration must select scan mode without requiring every query
+  request to set `engine=scan`.
+- Endpoint query options must override client defaults for the opened pouch
+  instance.
+- A scan-mode instance must serve match-all document and key queries from the
+  authoritative log projection when the query sidecar is corrupt, obsolete,
+  absent, or unopened.
+- A long-lived scan-mode reader must see records committed by another client
+  instance after forcing a log refresh; correctness must not depend on
+  filesystem notifications.
+- Explicit request-level `engine=scan` must bypass configured fallback policy.
+- Configured fallback may route an implicit scan-preferred request to indexed
+  mode only when the requested semantics require index machinery, such as
+  `refresh=wait_for`.
+- Scan mode must report no index sequence for results served by the scan route;
+  indexed mode must report the durable query-index sequence.
+
 The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index
 scan primitive and return the current `index_seq`. The current disk backend
