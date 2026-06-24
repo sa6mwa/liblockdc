@@ -2188,6 +2188,7 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   assert_string_equal(enqueue_res.queue, "jobs");
   assert_non_null(enqueue_res.message_id);
   assert_int_equal(enqueue_res.payload_bytes, 10L);
+  assert_string_equal(enqueue_res.correlation_id, "pouch-enqueue");
 
   second_client = open_pouch_client(endpoint);
   lc_queue_stats_req_init(&stats_req);
@@ -2229,6 +2230,7 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   assert_non_null(message);
   assert_string_equal(message->message_id, enqueue_res.message_id);
   assert_string_equal(message->payload_content_type, "text/plain");
+  assert_string_equal(message->correlation_id, "pouch-dequeue");
   sink = NULL;
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -2263,6 +2265,7 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
   assert_int_equal(message->attempts, 2);
+  assert_string_equal(message->correlation_id, "pouch-dequeue");
   rc = message->ack(message, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -3023,10 +3026,75 @@ static void test_pouch_endpoint_queue_rejects_missing_or_stale_meta_etag(
   rc = client->queue_ack(client, &ack_req, &ack_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(ack_res.acked);
+  assert_string_equal(ack_res.correlation_id, "pouch-ack");
   lc_ack_res_cleanup(&ack_res);
   message->close(message);
   message = NULL;
 
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_queue_extend_reports_correlation(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_extend_op extend_req;
+  lc_extend_res extend_res;
+  lc_message *message;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-extend-correlation");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&extend_res, 0, sizeof(extend_res));
+  client = open_pouch_client(endpoint);
+  message = NULL;
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 60L;
+  source = source_from_text("extend-message");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+
+  lc_extend_op_init(&extend_req);
+  extend_req.message.namespace_name = message->namespace_name;
+  extend_req.message.queue = message->queue;
+  extend_req.message.message_id = message->message_id;
+  extend_req.message.lease_id = message->lease_id;
+  extend_req.message.fencing_token = message->fencing_token;
+  extend_req.message.meta_etag = message->meta_etag;
+  extend_req.extend_by_seconds = 45L;
+  rc = client->queue_extend(client, &extend_req, &extend_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(extend_res.visibility_timeout_seconds, 45L);
+  assert_non_null(extend_res.meta_etag);
+  assert_string_equal(extend_res.correlation_id, "pouch-extend");
+
+  lc_extend_res_cleanup(&extend_res);
+  message->close(message);
   lc_enqueue_res_cleanup(&enqueue_res);
   client->close(client);
   lc_error_cleanup(&error);
@@ -5423,6 +5491,8 @@ int main(void) {
           test_pouch_endpoint_queue_rejects_missing_or_wrong_txn_id),
       cmocka_unit_test(
           test_pouch_endpoint_queue_rejects_missing_or_stale_meta_etag),
+      cmocka_unit_test(
+          test_pouch_endpoint_queue_extend_reports_correlation),
       cmocka_unit_test(test_pouch_endpoint_rejects_reserved_namespace),
       cmocka_unit_test(
           test_pouch_endpoint_rejects_non_normalized_identifiers),

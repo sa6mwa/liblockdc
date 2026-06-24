@@ -3571,7 +3571,9 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
         lc_pouch_copy_public(&out->queue, info.queue, error,
                              "failed to copy pouch queue") != LC_OK ||
         lc_pouch_copy_public(&out->message_id, info.message_id, error,
-                             "failed to copy pouch message id") != LC_OK) {
+                             "failed to copy pouch message id") != LC_OK ||
+        lc_pouch_copy_public(&out->correlation_id, "pouch-enqueue", error,
+                             "failed to copy pouch correlation id") != LC_OK) {
       lc_enqueue_res_cleanup(out);
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {
@@ -3641,6 +3643,7 @@ static int lc_pouch_client_dequeue_once(lc_client *self,
                                             error);
   if (rc == LC_OK && body != NULL) {
     lc_pouch_queue_info_to_engine(&info, &engine);
+    engine.correlation_id = "pouch-dequeue";
     if (with_state) {
       rc = lc_pouch_prepare_queue_state_lease(
           client, namespace_name, req, &info, &state_lease_id, &state_txn_id,
@@ -3929,6 +3932,12 @@ int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
   ref.namespace_name = namespace_name;
   rc = client->pouch_store->ack_message(client->pouch_store, &ref, &out->acked,
                                         error);
+  if (rc == LC_OK &&
+      lc_pouch_copy_public(&out->correlation_id, "pouch-ack", error,
+                           "failed to copy pouch correlation id") != LC_OK) {
+    lc_ack_res_cleanup(out);
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
   return rc;
 }
 
@@ -3963,8 +3972,13 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
                                          &info, error);
   if (rc == LC_OK) {
     out->requeued = info.failure_attempts < info.max_attempts;
-    rc = lc_pouch_copy_public(&out->meta_etag, info.meta_etag, error,
-                              "failed to copy pouch queue etag");
+    if (lc_pouch_copy_public(&out->meta_etag, info.meta_etag, error,
+                             "failed to copy pouch queue etag") != LC_OK ||
+        lc_pouch_copy_public(&out->correlation_id, "pouch-nack", error,
+                             "failed to copy pouch correlation id") != LC_OK) {
+      lc_nack_res_cleanup(out);
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
   }
   lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
   return rc;
@@ -4000,8 +4014,13 @@ int lc_pouch_client_queue_extend_method(lc_client *self,
   if (rc == LC_OK) {
     out->lease_expires_at_unix = info.lease_expires_at_unix;
     out->visibility_timeout_seconds = info.visibility_timeout_seconds;
-    rc = lc_pouch_copy_public(&out->meta_etag, info.meta_etag, error,
-                              "failed to copy pouch queue etag");
+    if (lc_pouch_copy_public(&out->meta_etag, info.meta_etag, error,
+                             "failed to copy pouch queue etag") != LC_OK ||
+        lc_pouch_copy_public(&out->correlation_id, "pouch-extend", error,
+                             "failed to copy pouch correlation id") != LC_OK) {
+      lc_extend_res_cleanup(out);
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
   }
   lc_pouch_queue_message_info_cleanup(&client->pouch_allocator, &info);
   return rc;

@@ -2736,6 +2736,7 @@ static void test_pouch_public_queue_shared_handles(void **state) {
   lc_source_close(source);
   assert_lc_ok(rc, &error);
   assert_string_equal(enqueue_res.queue, "integration-jobs");
+  assert_string_equal(enqueue_res.correlation_id, "pouch-enqueue");
 
   lc_queue_stats_req_init(&stats_req);
   stats_req.queue = "integration-jobs";
@@ -2753,6 +2754,7 @@ static void test_pouch_public_queue_shared_handles(void **state) {
   rc = consumer->dequeue(consumer, &dequeue_req, &message, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(message);
+  assert_string_equal(message->correlation_id, "pouch-dequeue");
   assert_string_equal(message->message_id, enqueue_res.message_id);
   assert_string_equal(message->payload_content_type, "text/plain");
 
@@ -3112,6 +3114,7 @@ static void test_pouch_public_queue_retry_exhaustion_terminal(void **state) {
   assert_lc_ok(rc, &error);
   assert_true(first_nack.requeued);
   assert_non_null(first_nack.meta_etag);
+  assert_string_equal(first_nack.correlation_id, "pouch-nack");
   first_delivery->close(first_delivery);
   first_delivery = NULL;
 
@@ -3130,6 +3133,7 @@ static void test_pouch_public_queue_retry_exhaustion_terminal(void **state) {
   assert_lc_ok(rc, &error);
   assert_false(final_nack.requeued);
   assert_non_null(final_nack.meta_etag);
+  assert_string_equal(final_nack.correlation_id, "pouch-nack");
   second_delivery->close(second_delivery);
   second_delivery = NULL;
 
