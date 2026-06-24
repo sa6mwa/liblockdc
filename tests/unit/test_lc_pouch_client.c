@@ -3111,10 +3111,19 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   lc_enqueue_res enqueue_res;
   lc_ack_op ack_req;
   lc_ack_res ack_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler key_handler;
   lc_namespace_config_req namespace_req;
   lc_namespace_config_res namespace_res;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_dequeue_req dequeue_req;
   lc_get_res get_res;
   lc_lease *lease;
+  lc_message *message;
   lc_source *source;
   lc_sink *sink;
   lc_error error;
@@ -3128,7 +3137,11 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   memset(&get_res, 0, sizeof(get_res));
   memset(&enqueue_res, 0, sizeof(enqueue_res));
   memset(&ack_res, 0, sizeof(ack_res));
+  memset(&query_res, 0, sizeof(query_res));
   memset(&namespace_res, 0, sizeof(namespace_res));
+  memset(&flush_res, 0, sizeof(flush_res));
+  memset(&stats_res, 0, sizeof(stats_res));
+  message = NULL;
   client = open_pouch_client(endpoint);
 
   lc_acquire_req_init(&acquire_req);
@@ -3160,12 +3173,65 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   lc_ack_res_cleanup(&ack_res);
   lc_error_cleanup(&error);
 
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&query_req);
+  query_req.namespace_name = ".lockd";
+  query_req.selector_json = "{}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.server_code, "reserved_namespace");
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&query_res);
+  lc_error_cleanup(&error);
+
+  memset(&key_handler, 0, sizeof(key_handler));
+  key_handler.begin = query_key_begin_unexpected;
+  key_handler.chunk = query_key_chunk_unexpected;
+  key_handler.end = query_key_end_unexpected;
+  rc = client->query_keys(client, &query_req, &key_handler, NULL, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.server_code, "reserved_namespace");
+  lc_query_res_cleanup(&query_res);
+  lc_error_cleanup(&error);
+
   lc_namespace_config_req_init(&namespace_req);
   namespace_req.namespace_name = ".lockd";
   rc = client->get_namespace_config(client, &namespace_req, &namespace_res,
                                     &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_namespace_config_res_cleanup(&namespace_res);
+  lc_error_cleanup(&error);
+
+  lc_index_flush_req_init(&flush_req);
+  flush_req.namespace_name = ".lockd";
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.server_code, "reserved_namespace");
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_error_cleanup(&error);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.namespace_name = ".lockd";
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.server_code, "reserved_namespace");
+  lc_queue_stats_res_cleanup(&stats_res);
+  lc_error_cleanup(&error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.namespace_name = ".lockd";
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.server_code, "reserved_namespace");
+  assert_null(message);
   lc_error_cleanup(&error);
   client->close(client);
 
