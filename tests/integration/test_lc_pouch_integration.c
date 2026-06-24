@@ -430,6 +430,154 @@ static void test_pouch_public_queue_shared_handles(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_queue_visibility_redelivery(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *worker_a;
+  lc_client *worker_b;
+  lc_source *source;
+  lc_message *first_delivery;
+  lc_message *second_delivery;
+  lc_message *redelivery;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_extend_req extend_req;
+  lc_nack_req nack_req;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "queue-redelivery");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  worker_a = NULL;
+  worker_b = NULL;
+  source = NULL;
+  first_delivery = NULL;
+  second_delivery = NULL;
+  redelivery = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &worker_a, &error);
+  open_pouch_client(endpoint, &worker_b, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "visibility-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 1L;
+  enqueue_req.ttl_seconds = 60L;
+  enqueue_req.max_attempts = 4;
+  source = source_from_text("handoff-work", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "visibility-jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 1L;
+  rc = worker_a->dequeue(worker_a, &dequeue_req, &first_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(first_delivery);
+  assert_string_equal(first_delivery->message_id, enqueue_res.message_id);
+  assert_int_equal(first_delivery->attempts, 1);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "visibility-jobs";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_false(stats.available);
+  assert_null(stats.head_message_id);
+  lc_queue_stats_res_cleanup(&stats);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "visibility-jobs";
+  dequeue_req.owner = "worker-b";
+  dequeue_req.visibility_timeout_seconds = 1L;
+  rc = worker_b->dequeue(worker_b, &dequeue_req, &second_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(second_delivery);
+
+  lc_extend_req_init(&extend_req);
+  extend_req.extend_by_seconds = 2L;
+  rc = first_delivery->extend(first_delivery, &extend_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(first_delivery->visibility_timeout_seconds, 2L);
+
+  sleep(1U);
+  rc = worker_b->dequeue(worker_b, &dequeue_req, &second_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(second_delivery);
+
+  sleep(2U);
+  rc = worker_b->dequeue(worker_b, &dequeue_req, &second_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(second_delivery);
+  assert_string_equal(second_delivery->message_id, enqueue_res.message_id);
+  assert_int_equal(second_delivery->attempts, 2);
+  assert_true(second_delivery->fencing_token > first_delivery->fencing_token);
+
+  rc = first_delivery->ack(first_delivery, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  first_delivery->close(first_delivery);
+  first_delivery = NULL;
+
+  lc_nack_req_init(&nack_req);
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  nack_req.delay_seconds = 0L;
+  rc = second_delivery->nack(second_delivery, &nack_req, &error);
+  assert_lc_ok(rc, &error);
+  second_delivery = NULL;
+
+  memset(&stats, 0, sizeof(stats));
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(stats.available);
+  assert_string_equal(stats.head_message_id, enqueue_res.message_id);
+  lc_queue_stats_res_cleanup(&stats);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "visibility-jobs";
+  dequeue_req.owner = "worker-c";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = producer->dequeue(producer, &dequeue_req, &redelivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(redelivery);
+  assert_string_equal(redelivery->message_id, enqueue_res.message_id);
+  assert_int_equal(redelivery->attempts, 3);
+  assert_int_equal(redelivery->failure_attempts, 0);
+
+  rc = redelivery->ack(redelivery, &error);
+  assert_lc_ok(rc, &error);
+  redelivery = NULL;
+
+  memset(&stats, 0, sizeof(stats));
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+
+  lc_queue_stats_res_cleanup(&stats);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  producer->close(producer);
+  worker_a->close(worker_a);
+  worker_b->close(worker_b);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_cas_across_clients(void **state) {
   char root[256];
   char endpoint[320];
@@ -649,6 +797,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
+      cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
   };
