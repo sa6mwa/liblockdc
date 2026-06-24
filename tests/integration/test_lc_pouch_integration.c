@@ -129,6 +129,16 @@ typedef struct pouch_consumer_state_test {
   char state_key[256];
 } pouch_consumer_state_test;
 
+typedef struct pouch_consumer_failure_test {
+  lc_consumer_service *service;
+  size_t handled;
+  size_t errors;
+  long first_attempts;
+  long redelivery_attempts;
+  long redelivery_failures;
+  int saw_delivery_error;
+} pouch_consumer_failure_test;
+
 static int pouch_consumer_state_handle(void *context,
                                        lc_consumer_message *message,
                                        lc_error *error) {
@@ -175,6 +185,69 @@ static int pouch_consumer_state_handle(void *context,
   state->handled += 1U;
   rc = lc_consumer_service_stop(state->service);
   assert_int_equal(rc, LC_OK);
+  return LC_OK;
+}
+
+static int pouch_consumer_failure_handle(void *context,
+                                         lc_consumer_message *message,
+                                         lc_error *error) {
+  pouch_consumer_failure_test *state;
+  lc_sink *sink;
+  size_t written;
+  int rc;
+
+  (void)error;
+  state = (pouch_consumer_failure_test *)context;
+  assert_non_null(state);
+  assert_non_null(message);
+  assert_non_null(message->message);
+  assert_false(message->with_state);
+  assert_null(message->state);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  written = 0U;
+  rc = message->message->write_payload(message->message, sink, &written,
+                                       error);
+  assert_lc_ok(rc, error);
+  assert_int_equal(written, strlen("retry-work"));
+  assert_sink_text(sink, "retry-work", error);
+  lc_sink_close(sink);
+
+  state->handled += 1U;
+  if (state->handled == 1U) {
+    state->first_attempts = message->message->attempts;
+    assert_int_equal(message->message->attempts, 1);
+    assert_int_equal(message->message->failure_attempts, 0);
+    return LC_ERR_TRANSPORT;
+  }
+
+  state->redelivery_attempts = message->message->attempts;
+  state->redelivery_failures = message->message->failure_attempts;
+  assert_int_equal(message->message->attempts, 2);
+  assert_int_equal(message->message->failure_attempts, 1);
+  rc = lc_consumer_service_stop(state->service);
+  assert_int_equal(rc, LC_OK);
+  return LC_OK;
+}
+
+static int pouch_consumer_failure_on_error(
+    void *context, const lc_consumer_error *event, lc_error *error) {
+  pouch_consumer_failure_test *state;
+
+  (void)error;
+  state = (pouch_consumer_failure_test *)context;
+  assert_non_null(state);
+  assert_non_null(event);
+  assert_string_equal(event->queue, "managed-retry");
+  assert_int_equal(event->with_state, 0);
+  assert_int_equal(event->attempt, 0);
+  assert_int_equal(event->restart_in_ms, 0L);
+  assert_non_null(event->cause);
+  assert_int_equal(event->cause->code, LC_ERR_TRANSPORT);
+  state->errors += 1U;
+  state->saw_delivery_error = 1;
   return LC_OK;
 }
 
@@ -723,6 +796,89 @@ static void test_pouch_public_consumer_service_with_state(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_consumer_service_failure_redelivery(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  pouch_consumer_failure_test consumer_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "consumer-failure");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  source = NULL;
+  service = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&consumer_state, 0, sizeof(consumer_state));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "managed-retry";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("retry-work", &error);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.request.queue = "managed-retry";
+  consumer_config.request.owner = "managed-retry-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.handle = pouch_consumer_failure_handle;
+  consumer_config.on_error = pouch_consumer_failure_on_error;
+  consumer_config.context = &consumer_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(service);
+  consumer_state.service = service;
+  rc = service->run(service, &error);
+  assert_lc_ok(rc, &error);
+  service->close(service);
+  service = NULL;
+
+  assert_int_equal(consumer_state.handled, 2U);
+  assert_int_equal(consumer_state.errors, 1U);
+  assert_true(consumer_state.saw_delivery_error);
+  assert_int_equal(consumer_state.first_attempts, 1L);
+  assert_int_equal(consumer_state.redelivery_attempts, 2L);
+  assert_int_equal(consumer_state.redelivery_failures, 1L);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "managed-retry";
+  rc = client->queue_stats(client, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+
+  lc_queue_stats_res_cleanup(&stats);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_cas_across_clients(void **state) {
   char root[256];
   char endpoint[320];
@@ -944,6 +1100,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(test_pouch_public_consumer_service_with_state),
+      cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
   };
