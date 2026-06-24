@@ -9440,6 +9440,8 @@ static int lc_pouch_disk_apply_queue_txn(lc_pouch_store *self,
     if (rc != LC_OK) {
       break;
     }
+    lc_pouch_disk_touch_queue_wake(store, updated.namespace_name,
+                                   updated.queue);
     touched = 1;
   }
   if (rc == LC_OK && touched) {

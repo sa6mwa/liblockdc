@@ -6978,6 +6978,109 @@ static void test_queue_mutations_touch_wake_marker(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_queue_transaction_apply_touches_wake_marker(void **state) {
+  char root[256];
+  char marker_path[512];
+  char marker_text[512];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_message_info redelivered;
+  lc_pouch_queue_ref ref;
+  lc_error error;
+  int acked;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-txn-wake-marker");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&redelivered, 0, sizeof(redelivered));
+  memset(&ref, 0, sizeof(ref));
+  store = NULL;
+  payload = NULL;
+
+  test_queue_wake_marker_path(root, "default", "jobs", marker_path,
+                              sizeof(marker_path));
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->apply_queue_txn);
+  assert_int_equal(test_count_queue_wake_markers(root), 0U);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("transactional-wake-payload");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "sequence=1\n"));
+
+  dequeue_opts.owner = "worker";
+  dequeue_opts.txn_id = "txn-queue-wake";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  lc_source_close(payload);
+  payload = NULL;
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "sequence=2\n"));
+
+  ref.namespace_name = dequeued.namespace_name;
+  ref.queue = dequeued.queue;
+  ref.message_id = dequeued.message_id;
+  ref.lease_id = dequeued.lease_id;
+  ref.txn_id = dequeued.txn_id;
+  ref.fencing_token = dequeued.fencing_token;
+  ref.meta_etag = dequeued.meta_etag;
+  acked = 0;
+  rc = store->ack_message(store, &ref, &acked, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acked);
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "sequence=3\n"));
+
+  rc = store->apply_queue_txn(store, "txn-queue-wake", 0, &error);
+  assert_int_equal(rc, LC_OK);
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "sequence=4\n"));
+
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  dequeue_opts.owner = "worker-2";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &redelivered, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  lc_source_close(payload);
+  payload = NULL;
+  assert_string_equal(redelivered.message_id, enqueued.message_id);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &redelivered);
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_wake_marker_failure_does_not_rollback_enqueue(
     void **state) {
   char root[256];
@@ -11715,6 +11818,7 @@ int main(void) {
           test_independent_handle_refreshes_after_log_replacement),
       cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
       cmocka_unit_test(test_queue_mutations_touch_wake_marker),
+      cmocka_unit_test(test_queue_transaction_apply_touches_wake_marker),
       cmocka_unit_test(
           test_queue_wake_marker_failure_does_not_rollback_enqueue),
       cmocka_unit_test(test_queue_wake_status_reports_polling_marker_mode),
