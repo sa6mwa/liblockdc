@@ -200,6 +200,19 @@ typedef struct lc_pouch_object_list {
   size_t count;
 } lc_pouch_object_list;
 
+typedef struct lc_pouch_scan_object_keys_req {
+  const char *namespace_name;
+  const char *name;
+  const char *start_after;
+  size_t limit;
+} lc_pouch_scan_object_keys_req;
+
+typedef struct lc_pouch_scan_object_keys_res {
+  char *next_start_after;
+  size_t visited;
+  int truncated;
+} lc_pouch_scan_object_keys_res;
+
 typedef struct lc_pouch_put_object_opts {
   const char *name;
   const char *content_type;
@@ -419,6 +432,12 @@ struct lc_pouch_store {
   int (*list_objects)(lc_pouch_store *self, const char *namespace_name,
                       const char *key, lc_pouch_object_list *out,
                       lc_error *error);
+  int (*scan_object_keys)(lc_pouch_store *self,
+                          const lc_pouch_scan_object_keys_req *req,
+                          lc_pouch_query_index_key_visit_fn visit,
+                          void *visit_context,
+                          lc_pouch_scan_object_keys_res *out,
+                          lc_error *error);
   int (*get_object)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, const lc_pouch_object_selector *selector,
                     lc_source **body, lc_pouch_object_info *out,
@@ -535,6 +554,8 @@ void lc_pouch_object_info_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_object_info *info);
 void lc_pouch_object_list_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_object_list *list);
+void lc_pouch_scan_object_keys_res_cleanup(
+    const lc_pouch_allocator *allocator, lc_pouch_scan_object_keys_res *res);
 void lc_pouch_queue_message_info_cleanup(const lc_pouch_allocator *allocator,
                                          lc_pouch_queue_message_info *info);
 void lc_pouch_queue_stats_cleanup(const lc_pouch_allocator *allocator,

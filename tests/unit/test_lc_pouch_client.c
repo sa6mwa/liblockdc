@@ -6587,6 +6587,88 @@ test_pouch_endpoint_txn_recovery_continues_after_partial_rollback(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_txn_recovery_scans_decision_objects(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "txn-recovery-object-scan");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "txn/object-scan-key";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":1}");
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "txn-object-scan-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, lease, "{\"value\":2}", &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "txn/object-scan-key";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "txn-object-scan-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  decision_req.expires_at_unix = 1L;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "prepared");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  partial_pouch_rollback_participant(client, "default", "txn/object-scan-key",
+                                     "txn-object-scan-1", &error);
+  lc_lease_close(lease);
+  lease = NULL;
+  client->close(client);
+
+  client = open_pouch_client(endpoint);
+  assert_pouch_client_state_text(client, "txn/object-scan-key", "{\"value\":1}",
+                                 &error);
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "txn-object-scan-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 404L);
+  lc_error_cleanup(&error);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
@@ -6711,6 +6793,8 @@ int main(void) {
           test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen),
       cmocka_unit_test(
           test_pouch_endpoint_txn_recovery_continues_after_partial_rollback),
+      cmocka_unit_test(
+          test_pouch_endpoint_txn_recovery_scans_decision_objects),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

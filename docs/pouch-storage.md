@@ -306,8 +306,9 @@ of rewritten JSON files.
   errors. Pouch may report the locally configured query engine defaults through
   namespace configuration reads. Public transaction prepare/commit/rollback and
   explicit replay are local pouch operations backed by durable decision objects;
-  open-time recovery scans pending transactional metadata and replays matching
-  durable decisions. A `pouch://` client must never fall through to HTTP
+  open-time recovery scans durable decision objects directly and also scans
+  pending transactional metadata as a compatibility fallback before replaying
+  matching decisions. A `pouch://` client must never fall through to HTTP
   transport for an unimplemented server-side surface. Internal indexed metadata
   scans are not optional: they are part of the storage engine even before the
   public LQL surface is enabled.

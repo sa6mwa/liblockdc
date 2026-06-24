@@ -4876,6 +4876,109 @@ static void test_object_listing_orders_by_name_after_replay(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_object_key_scan_orders_pages_and_filters_name(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_info info;
+  lc_pouch_scan_object_keys_req req;
+  lc_pouch_scan_object_keys_res scan;
+  key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-key-scan");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&info, 0, sizeof(info));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->scan_object_keys);
+
+  opts.content_type = "text/plain";
+  opts.name = "decision";
+  source = source_from_text("bravo-decision");
+  rc = store->put_object(store, "default", "bravo", source, &opts, &info,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &info);
+
+  source = source_from_text("alpha-decision");
+  rc = store->put_object(store, "default", "alpha", source, &opts, &info,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &info);
+
+  opts.name = "other";
+  source = source_from_text("alpha-other");
+  rc = store->put_object(store, "default", "alpha", source, &opts, &info,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &info);
+
+  opts.name = "decision";
+  source = source_from_text("other-namespace");
+  rc = store->put_object(store, "other", "aardvark", source, &opts, &info,
+                         &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &info);
+
+  req.namespace_name = "default";
+  req.name = "decision";
+  req.limit = 1U;
+  rc = store->scan_object_keys(store, &req, capture_query_key, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "alpha");
+  lc_pouch_scan_object_keys_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = "alpha";
+  rc = store->scan_object_keys(store, &req, capture_query_key, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_scan_object_keys_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.name = "other";
+  req.start_after = NULL;
+  req.limit = 0U;
+  rc = store->scan_object_keys(store, &req, capture_query_key, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_false(scan.truncated);
+  lc_pouch_scan_object_keys_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_object_max_bytes_reads_only_limit_plus_one(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -11459,6 +11562,7 @@ int main(void) {
       cmocka_unit_test(
           test_object_overwrite_allocation_failure_replays_cleanly),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
+      cmocka_unit_test(test_object_key_scan_orders_pages_and_filters_name),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),
       cmocka_unit_test(test_object_put_streams_payload_without_large_alloc),
       cmocka_unit_test(

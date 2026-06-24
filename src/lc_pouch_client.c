@@ -926,6 +926,60 @@ static int lc_pouch_txn_recovery_visit(void *context,
   return LC_OK;
 }
 
+static int lc_pouch_txn_recovery_key_visit(void *context, const char *key,
+                                           lc_error *error) {
+  lc_pouch_txn_recovery_list *list;
+
+  list = (lc_pouch_txn_recovery_list *)context;
+  return lc_pouch_txn_recovery_list_add(list, key, error);
+}
+
+static int lc_pouch_txn_collect_decision_objects(
+    lc_client_handle *client, lc_pouch_txn_recovery_list *list,
+    lc_error *error) {
+  lc_pouch_scan_object_keys_req req;
+  lc_pouch_scan_object_keys_res scan;
+  char *cursor;
+  char *next_cursor;
+  int rc;
+
+  if (client->pouch_store->scan_object_keys == NULL) {
+    return LC_OK;
+  }
+
+  cursor = NULL;
+  do {
+    memset(&req, 0, sizeof(req));
+    memset(&scan, 0, sizeof(scan));
+    req.namespace_name = LC_POUCH_RESERVED_TRANSACTION_NAMESPACE;
+    req.name = "decision";
+    req.start_after = cursor;
+    req.limit = 128U;
+    next_cursor = NULL;
+    rc = client->pouch_store->scan_object_keys(
+        client->pouch_store, &req, lc_pouch_txn_recovery_key_visit, list,
+        &scan, error);
+    if (rc != LC_OK) {
+      lc_client_free(client, cursor);
+      return rc;
+    }
+    if (scan.truncated && scan.next_start_after != NULL) {
+      next_cursor = lc_client_strdup(client, scan.next_start_after);
+      if (next_cursor == NULL) {
+        lc_pouch_scan_object_keys_res_cleanup(&client->pouch_allocator, &scan);
+        lc_client_free(client, cursor);
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to copy pouch transaction object cursor",
+                            NULL, NULL, NULL);
+      }
+    }
+    lc_pouch_scan_object_keys_res_cleanup(&client->pouch_allocator, &scan);
+    lc_client_free(client, cursor);
+    cursor = next_cursor;
+  } while (cursor != NULL);
+  return LC_OK;
+}
+
 static int lc_pouch_txn_collect_namespace(lc_client_handle *client,
                                           const char *namespace_name,
                                           lc_pouch_txn_recovery_list *list,
@@ -987,6 +1041,11 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
   memset(&namespaces, 0, sizeof(namespaces));
   memset(&list, 0, sizeof(list));
   list.client = client;
+  rc = lc_pouch_txn_collect_decision_objects(client, &list, error);
+  if (rc != LC_OK) {
+    lc_pouch_txn_recovery_list_cleanup(&list);
+    return rc;
+  }
   rc = client->pouch_store->list_namespaces(client->pouch_store, &namespaces,
                                             error);
   if (rc != LC_OK) {
