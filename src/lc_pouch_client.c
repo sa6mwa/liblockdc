@@ -1860,9 +1860,12 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   lc_pouch_meta_record record;
   lc_pouch_store_meta_res stored;
   lc_pouch_put_object_opts opts;
+  lc_pouch_object_selector rollback_selector;
   lc_pouch_object_info object;
   lc_pouch_meta next_meta;
   lc_pouch_allocator *allocator;
+  lc_error rollback_error;
+  int deleted;
   int rc;
 
   if (self == NULL || req == NULL || src == NULL || out == NULL ||
@@ -1877,7 +1880,9 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   memset(&record, 0, sizeof(record));
   memset(&stored, 0, sizeof(stored));
   memset(&opts, 0, sizeof(opts));
+  memset(&rollback_selector, 0, sizeof(rollback_selector));
   memset(&object, 0, sizeof(object));
+  memset(&rollback_error, 0, sizeof(rollback_error));
   rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
   if (rc != LC_OK) {
     return rc;
@@ -1896,6 +1901,14 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
     rc = client->pouch_store->store_meta(
         client->pouch_store, record.namespace_name, req->lease.key, &next_meta,
         record.etag, &stored, error);
+    if (rc == LC_ERR_SERVER && object.id != NULL) {
+      rollback_selector.id = object.id;
+      deleted = 0;
+      (void)client->pouch_store->delete_object(
+          client->pouch_store, record.namespace_name, req->lease.key,
+          &rollback_selector, &deleted, &rollback_error);
+      lc_error_cleanup(&rollback_error);
+    }
   }
   if (rc == LC_OK) {
     out->version = next_meta.version;

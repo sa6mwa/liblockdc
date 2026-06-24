@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "lc/lc.h"
+#include "lc_api_internal.h"
 
 typedef struct pouch_value_doc {
   lonejson_int64 value;
@@ -178,6 +179,153 @@ typedef struct consumer_service_test_state {
   size_t handled;
   const char *expected[2];
 } consumer_service_test_state;
+
+typedef struct attach_reject_store {
+  lc_pouch_store pub;
+  int load_meta_called;
+  int put_object_called;
+  int store_meta_called;
+  int delete_object_called;
+  char deleted_id[32];
+} attach_reject_store;
+
+static int attach_reject_load_meta(lc_pouch_store *self,
+                                   const char *namespace_name,
+                                   const char *key,
+                                   lc_pouch_meta_record *out,
+                                   lc_error *error) {
+  attach_reject_store *store;
+  (void)error;
+  store = (attach_reject_store *)self->impl;
+  store->load_meta_called = 1;
+  out->found = 1;
+  out->namespace_name = strdup(namespace_name);
+  out->key = strdup(key);
+  out->etag = strdup("meta-etag-1");
+  out->meta.owner = strdup("owner-a");
+  out->meta.lease_id = strdup("lease-a");
+  out->meta.txn_id = strdup("txn-a");
+  out->meta.version = 7L;
+  out->meta.lease_expires_at_unix = 4102444800L;
+  out->meta.fencing_token = 11L;
+  assert_non_null(out->namespace_name);
+  assert_non_null(out->key);
+  assert_non_null(out->etag);
+  assert_non_null(out->meta.owner);
+  assert_non_null(out->meta.lease_id);
+  assert_non_null(out->meta.txn_id);
+  return LC_OK;
+}
+
+static int attach_reject_store_meta(lc_pouch_store *self,
+                                    const char *namespace_name,
+                                    const char *key,
+                                    const lc_pouch_meta *meta,
+                                    const char *expected_etag,
+                                    lc_pouch_store_meta_res *out,
+                                    lc_error *error) {
+  attach_reject_store *store;
+  (void)namespace_name;
+  (void)key;
+  (void)out;
+  store = (attach_reject_store *)self->impl;
+  store->store_meta_called = 1;
+  assert_int_equal(meta->version, 8L);
+  assert_string_equal(expected_etag, "meta-etag-1");
+  return lc_error_set(error, LC_ERR_SERVER, 412L,
+                      "metadata precondition failed", NULL,
+                      "etag_mismatch", NULL);
+}
+
+static int attach_reject_put_object(lc_pouch_store *self,
+                                    const char *namespace_name,
+                                    const char *key, lc_source *body,
+                                    const lc_pouch_put_object_opts *opts,
+                                    lc_pouch_object_info *out,
+                                    lc_error *error) {
+  attach_reject_store *store;
+  (void)namespace_name;
+  (void)key;
+  (void)body;
+  (void)error;
+  store = (attach_reject_store *)self->impl;
+  store->put_object_called = 1;
+  assert_string_equal(opts->name, "payload.txt");
+  assert_string_equal(opts->content_type, "text/plain");
+  out->id = strdup("object-1");
+  out->name = strdup("payload.txt");
+  out->content_type = strdup("text/plain");
+  out->size = 7L;
+  assert_non_null(out->id);
+  assert_non_null(out->name);
+  assert_non_null(out->content_type);
+  return LC_OK;
+}
+
+static int attach_reject_delete_object(lc_pouch_store *self,
+                                       const char *namespace_name,
+                                       const char *key,
+                                       const lc_pouch_object_selector *selector,
+                                       int *deleted, lc_error *error) {
+  attach_reject_store *store;
+  (void)namespace_name;
+  (void)key;
+  (void)error;
+  store = (attach_reject_store *)self->impl;
+  store->delete_object_called = 1;
+  snprintf(store->deleted_id, sizeof(store->deleted_id), "%s", selector->id);
+  assert_string_equal(selector->id, "object-1");
+  assert_null(selector->name);
+  *deleted = 1;
+  return LC_OK;
+}
+
+static void test_pouch_endpoint_attach_rolls_back_object_on_meta_reject(
+    void **state) {
+  attach_reject_store store;
+  lc_client_handle client;
+  lc_attach_op op;
+  lc_attach_res res;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&store, 0, sizeof(store));
+  memset(&client, 0, sizeof(client));
+  memset(&op, 0, sizeof(op));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  store.pub.impl = &store;
+  store.pub.load_meta = attach_reject_load_meta;
+  store.pub.store_meta = attach_reject_store_meta;
+  store.pub.put_object = attach_reject_put_object;
+  store.pub.delete_object = attach_reject_delete_object;
+  client.pouch_store = &store.pub;
+  lc_pouch_allocator_from_lc(NULL, &client.pouch_allocator);
+  op.lease.namespace_name = "default";
+  op.lease.key = "key-a";
+  op.lease.lease_id = "lease-a";
+  op.lease.txn_id = "txn-a";
+  op.lease.fencing_token = 11L;
+  op.name = "payload.txt";
+  op.content_type = "text/plain";
+  source = source_from_text("payload");
+
+  rc = lc_pouch_client_attach_method(&client.pub, &op, source, &res, &error);
+
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  assert_string_equal(error.server_code, "etag_mismatch");
+  assert_true(store.load_meta_called);
+  assert_true(store.put_object_called);
+  assert_true(store.store_meta_called);
+  assert_true(store.delete_object_called);
+  assert_string_equal(store.deleted_id, "object-1");
+  lc_source_close(source);
+  lc_attach_res_cleanup(&res);
+  lc_error_cleanup(&error);
+}
 
 typedef struct consumer_service_stateful_test_state {
   lc_consumer_service *service;
@@ -4701,6 +4849,8 @@ int main(void) {
           test_pouch_endpoint_release_is_idempotent_for_stale_refs),
       cmocka_unit_test(
           test_pouch_endpoint_reports_lockd_lease_validation_errors),
+      cmocka_unit_test(
+          test_pouch_endpoint_attach_rolls_back_object_on_meta_reject),
       cmocka_unit_test(
           test_pouch_endpoint_attachment_rejects_stale_lease_refs),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_or_wrong_txn_id),
