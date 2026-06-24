@@ -2688,6 +2688,7 @@ static void test_query_index_keys_recovers_from_corrupt_sidecar_tail(
   lc_pouch_store_meta_res stored;
   lc_pouch_query_index_scan_req req;
   lc_pouch_query_index_scan_res scan;
+  scan_capture row_capture;
   key_capture capture;
   lc_error error;
   off_t original_query_index_size;
@@ -2702,6 +2703,7 @@ static void test_query_index_keys_recovers_from_corrupt_sidecar_tail(
   memset(&stored, 0, sizeof(stored));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
+  memset(&row_capture, 0, sizeof(row_capture));
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
@@ -2744,6 +2746,20 @@ static void test_query_index_keys_recovers_from_corrupt_sidecar_tail(
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   req.limit = 8U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
+                               &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(row_capture.count, 3U);
+  assert_string_equal(row_capture.keys[0], "alpha");
+  assert_int_equal(row_capture.versions[0], 1L);
+  assert_string_equal(row_capture.keys[1], "corrupt");
+  assert_int_equal(row_capture.versions[1], 2L);
+  assert_string_equal(row_capture.keys[2], "later");
+  assert_int_equal(row_capture.versions[2], 3L);
+  assert_false(scan.truncated);
+  assert_true(test_query_index_size(root) < original_query_index_size);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
@@ -2752,7 +2768,6 @@ static void test_query_index_keys_recovers_from_corrupt_sidecar_tail(
   assert_string_equal(capture.keys[1], "corrupt");
   assert_string_equal(capture.keys[2], "later");
   assert_false(scan.truncated);
-  assert_true(test_query_index_size(root) < original_query_index_size);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   meta.lease_id = "lease-bravo";
