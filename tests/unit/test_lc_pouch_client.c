@@ -1468,6 +1468,110 @@ static void test_pouch_endpoint_attachment_selector_requires_matching_id_and_nam
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_public_attachment_read_after_release(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list attachment_list;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_release_req release_req;
+  lc_lease_ref ref;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "attachment-public-read");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachment_list, 0, sizeof(attachment_list));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&ref, 0, sizeof(ref));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+  sink = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "attachment-public";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "public.txt";
+  attach_req.content_type = "text/plain";
+  attach_req.prevent_overwrite = 1;
+  source = source_from_text("public-body");
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(attach_res.attachment.id);
+
+  ref.namespace_name = strdup(lease->namespace_name);
+  ref.key = strdup(lease->key);
+  ref.lease_id = strdup(lease->lease_id);
+  ref.txn_id = strdup(lease->txn_id);
+  ref.fencing_token = lease->fencing_token;
+  assert_non_null(ref.namespace_name);
+  assert_non_null(ref.key);
+  assert_non_null(ref.lease_id);
+  assert_non_null(ref.txn_id);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  lc_attachment_list_req_init(&list_req);
+  list_req.lease = ref;
+  list_req.public_read = 1;
+  rc = client->list_attachments(client, &list_req, &attachment_list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(attachment_list.count, 1U);
+  assert_string_equal(attachment_list.items[0].name, "public.txt");
+  assert_string_equal(attachment_list.items[0].id, attach_res.attachment.id);
+  lc_attachment_list_cleanup(&attachment_list);
+
+  lc_attachment_get_op_init(&get_op);
+  get_op.lease = ref;
+  get_op.selector.name = "public.txt";
+  get_op.public_read = 1;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(get_res.attachment.id, attach_res.attachment.id);
+  assert_string_equal(get_res.attachment.content_type, "text/plain");
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "public-body");
+  free(text);
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_attachment_get_res_cleanup(&get_res);
+
+  client->close(client);
+  free((char *)ref.namespace_name);
+  free((char *)ref.key);
+  free((char *)ref.lease_id);
+  free((char *)ref.txn_id);
+  lc_attach_res_cleanup(&attach_res);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_attachment_rejects_stale_lease_refs(
     void **state) {
   char root[256];
@@ -4965,6 +5069,8 @@ int main(void) {
           test_pouch_endpoint_attach_rolls_back_object_on_meta_reject),
       cmocka_unit_test(
           test_pouch_endpoint_attachment_selector_requires_matching_id_and_name),
+      cmocka_unit_test(
+          test_pouch_endpoint_public_attachment_read_after_release),
       cmocka_unit_test(
           test_pouch_endpoint_attachment_rejects_stale_lease_refs),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_or_wrong_txn_id),

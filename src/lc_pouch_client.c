@@ -1928,6 +1928,7 @@ int lc_pouch_client_list_attachments_method(lc_client *self,
   lc_pouch_meta_record record;
   lc_pouch_object_list objects;
   lc_pouch_allocator *allocator;
+  const char *namespace_name;
   size_t index;
   int rc;
 
@@ -1941,12 +1942,27 @@ int lc_pouch_client_list_attachments_method(lc_client *self,
   memset(out, 0, sizeof(*out));
   memset(&record, 0, sizeof(record));
   memset(&objects, 0, sizeof(objects));
-  rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
-  if (rc != LC_OK) {
-    return rc;
+  namespace_name = NULL;
+  if (req->public_read) {
+    if (req->lease.key == NULL) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch public list_attachments requires lease key",
+                          NULL, NULL, NULL);
+    }
+    rc = lc_pouch_public_namespace(client, req->lease.namespace_name,
+                                   &namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  } else {
+    rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    namespace_name = record.namespace_name;
   }
-  rc = client->pouch_store->list_objects(client->pouch_store,
-                                         record.namespace_name, req->lease.key,
+  rc = client->pouch_store->list_objects(client->pouch_store, namespace_name,
+                                         req->lease.key,
                                          &objects, error);
   if (rc == LC_OK && objects.count > 0U) {
     out->items = (lc_attachment_info *)lc_calloc_local(objects.count,
@@ -1983,6 +1999,7 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
   lc_pouch_object_info object;
   lc_source *body;
   lc_pouch_allocator *allocator;
+  const char *namespace_name;
   int rc;
 
   if (self == NULL || req == NULL || dst == NULL || out == NULL ||
@@ -1999,14 +2016,29 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
   memset(&selector, 0, sizeof(selector));
   memset(&object, 0, sizeof(object));
   body = NULL;
-  rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
-  if (rc != LC_OK) {
-    return rc;
+  namespace_name = NULL;
+  if (req->public_read) {
+    if (req->lease.key == NULL) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch public get_attachment requires lease key",
+                          NULL, NULL, NULL);
+    }
+    rc = lc_pouch_public_namespace(client, req->lease.namespace_name,
+                                   &namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  } else {
+    rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    namespace_name = record.namespace_name;
   }
   selector.id = req->selector.id;
   selector.name = req->selector.name;
-  rc = client->pouch_store->get_object(client->pouch_store,
-                                       record.namespace_name, req->lease.key,
+  rc = client->pouch_store->get_object(client->pouch_store, namespace_name,
+                                       req->lease.key,
                                        &selector, &body, &object, error);
   if (rc == LC_OK) {
     rc = lc_pouch_copy_source_to_sink(body, dst, error);
