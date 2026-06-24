@@ -292,6 +292,7 @@ lc_pouch_queue_info_to_engine(const lc_pouch_queue_message_info *info,
   out->fencing_token = info->fencing_token;
   out->txn_id = (char *)info->txn_id;
   out->meta_etag = (char *)info->meta_etag;
+  out->next_cursor = (char *)info->message_id;
 }
 
 static int lc_pouch_prepare_queue_state_lease(
@@ -3637,6 +3638,7 @@ static int lc_pouch_client_dequeue_once(lc_client *self,
   *out = NULL;
   opts.owner = req->owner;
   opts.txn_id = req->txn_id;
+  opts.start_after = req->start_after;
   opts.visibility_timeout_seconds = req->visibility_timeout_seconds;
   rc = client->pouch_store->dequeue_message(client->pouch_store, namespace_name,
                                             req->queue, &opts, &body, &info,

@@ -249,6 +249,7 @@ typedef struct lc_pouch_enqueue_opts {
 typedef struct lc_pouch_dequeue_opts {
   const char *owner;
   const char *txn_id;
+  const char *start_after;
   long visibility_timeout_seconds;
 } lc_pouch_dequeue_opts;
 

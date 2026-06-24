@@ -8750,6 +8750,8 @@ static int lc_pouch_disk_dequeue_message(
     entry = &store->queue_entries[index];
     if (!entry->deleted && strcmp(entry->namespace_name, namespace_name) == 0 &&
         strcmp(entry->queue, queue) == 0 &&
+        (opts->start_after == NULL || opts->start_after[0] == '\0' ||
+         strcmp(entry->message_id, opts->start_after) > 0) &&
         entry->not_visible_until_unix <= now_unix &&
         entry->expires_at_unix > now_unix &&
         entry->failure_attempts < entry->max_attempts &&

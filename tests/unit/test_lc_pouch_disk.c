@@ -5068,6 +5068,78 @@ static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
   test_cleanup_root(root);
 }
 
+static void test_queue_dequeue_honors_start_after_cursor(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued[3];
+  lc_pouch_queue_message_info dequeued;
+  lc_source *source;
+  lc_source *payload;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-start-after");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  store = NULL;
+  source = NULL;
+  payload = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+
+  source = source_from_text("first");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued[0], &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("second");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued[1], &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("third");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued[2], &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  dequeue_opts.start_after = enqueued[0].message_id;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  assert_string_equal(dequeued.message_id, enqueued[1].message_id);
+
+  lc_source_close(payload);
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued[0]);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued[1]);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued[2]);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_rejects_negative_timing_options(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -10877,6 +10949,7 @@ int main(void) {
           test_object_copy_source_open_failure_leaves_destination_unchanged),
       cmocka_unit_test(
           test_queue_dequeue_skips_replay_after_same_handle_enqueue),
+      cmocka_unit_test(test_queue_dequeue_honors_start_after_cursor),
       cmocka_unit_test(test_queue_rejects_negative_timing_options),
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
       cmocka_unit_test(
