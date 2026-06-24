@@ -523,14 +523,16 @@ durable index and therefore cannot honor refresh hints.
 The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index
 scan primitive and return the current `index_seq`. The current disk backend
-maintains a separate sorted query-summary projection for that primitive so
-indexed match-all scans do not allocate and sort the general metadata table on
-every request. This projection is rebuilt from the authoritative log on open and
-updated on metadata put/delete; later field postings and `liblql` predicates
-must extend this boundary rather than falling back to a single full-log scan.
-Key-only indexed scans have their own storage primitive and copy only visible
-keys before invoking callbacks, so `query_keys` does not pay for metadata row
-copies that only document scans need.
+keeps the sorted metadata projection as the authoritative in-memory index for
+match-all scans, while `query.index` remains a durable sidecar accelerator that
+can be validated against the store log and truncated at the last verified
+record. Indexed scans must never trust sidecar rows that do not match current
+metadata, and key-only scans must agree with document scans even after a sidecar
+tail fault. Later field postings and `liblql` predicates must extend this
+boundary rather than falling back to a single full-log scan. Key-only indexed
+scans have their own storage primitive and copy only visible keys before
+invoking callbacks, so `query_keys` does not pay for metadata row copies that
+only document scans need.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
