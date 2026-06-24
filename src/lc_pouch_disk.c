@@ -33,6 +33,7 @@
 #define LC_POUCH_RECORD_STATE_LINK 10U
 #define LC_POUCH_RECORD_HIGH_WATER 11U
 #define LC_POUCH_BACKEND_NAMESPACE ".lockd"
+#define LC_POUCH_TRANSACTION_NAMESPACE ".lockd-txn"
 #define LC_POUCH_BACKEND_KEY "backend-id"
 #define LC_POUCH_BACKEND_CONTENT_TYPE "text/plain"
 #define LC_POUCH_META_FLAG_QUERY_HIDDEN_SET 1UL
@@ -2543,6 +2544,12 @@ static int lc_pouch_namespace_list_contains(const lc_pouch_namespace_list *list,
   return 0;
 }
 
+static int lc_pouch_disk_namespace_is_reserved(const char *namespace_name) {
+  return namespace_name != NULL &&
+         (strcmp(namespace_name, LC_POUCH_BACKEND_NAMESPACE) == 0 ||
+          strcmp(namespace_name, LC_POUCH_TRANSACTION_NAMESPACE) == 0);
+}
+
 static int lc_pouch_namespace_list_add(const lc_pouch_allocator *allocator,
                                        lc_pouch_namespace_list *list,
                                        const char *namespace_name) {
@@ -2550,6 +2557,7 @@ static int lc_pouch_namespace_list_add(const lc_pouch_allocator *allocator,
   char *copy;
 
   if (namespace_name == NULL ||
+      lc_pouch_disk_namespace_is_reserved(namespace_name) ||
       lc_pouch_namespace_list_contains(list, namespace_name)) {
     return 1;
   }

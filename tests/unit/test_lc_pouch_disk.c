@@ -7823,6 +7823,7 @@ static void test_list_namespaces_reports_live_projection_names(void **state) {
   lc_pouch_enqueue_opts enqueue_opts;
   lc_pouch_queue_message_info enqueued;
   lc_pouch_namespace_list namespaces;
+  char *backend_hash;
   lc_error error;
   int removed;
   int rc;
@@ -7841,6 +7842,7 @@ static void test_list_namespaces_reports_live_projection_names(void **state) {
   memset(&enqueue_opts, 0, sizeof(enqueue_opts));
   memset(&enqueued, 0, sizeof(enqueued));
   memset(&namespaces, 0, sizeof(namespaces));
+  backend_hash = NULL;
   first = NULL;
   second = NULL;
   removed = 0;
@@ -7902,6 +7904,21 @@ static void test_list_namespaces_reports_live_projection_names(void **state) {
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+
+  rc = first->backend_hash(first, &backend_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(backend_hash);
+  lc_pouch_free(&allocator, backend_hash);
+  backend_hash = NULL;
+
+  object_opts.name = "decision";
+  object_opts.content_type = "application/octet-stream";
+  source = source_from_text("transaction-decision");
+  rc = first->put_object(first, ".lockd-txn", "txn-key", source, &object_opts,
+                         &object_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
 
   rc = lc_pouch_disk_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
