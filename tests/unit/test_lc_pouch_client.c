@@ -4049,6 +4049,52 @@ static void test_pouch_endpoint_query_options_configure_scan_mode(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_query_options_override_client_config(
+    void **state) {
+  char root[256];
+  char endpoint[384];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-url-overrides-config");
+  test_cleanup_root(root);
+  test_endpoint_with_query(endpoint, sizeof(endpoint), root,
+                           "query_engine=index");
+  memset(&error, 0, sizeof(error));
+  memset(&query_res, 0, sizeof(query_res));
+  client = open_pouch_client_with_query_config(endpoint, "scan", NULL);
+  lease = pouch_acquire_query_key(client, "endpoint-index-doc", &error);
+  pouch_save_query_json(lease, "{\"endpoint_index\":true}", &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "\"key\":\"endpoint-index-doc\""));
+  assert_non_null(strstr(text, "\"document\":{\"endpoint_index\":true}"));
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_true(query_res.index_seq > 0UL);
+
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&query_res);
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_decodes_percent_encoded_path_and_options(
     void **state) {
   char root[256];
@@ -5684,6 +5730,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_fallback),
       cmocka_unit_test(
           test_pouch_endpoint_query_options_configure_scan_mode),
+      cmocka_unit_test(
+          test_pouch_endpoint_query_options_override_client_config),
       cmocka_unit_test(
           test_pouch_endpoint_decodes_percent_encoded_path_and_options),
       cmocka_unit_test(test_pouch_endpoint_rejects_invalid_query_options),
