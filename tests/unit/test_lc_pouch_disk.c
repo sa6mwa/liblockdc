@@ -4928,6 +4928,91 @@ static void test_object_copy_streams_existing_payload_without_large_alloc(
   test_cleanup_root(root);
 }
 
+static void test_object_copy_rename_preserves_payload_metadata(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_object_opts put_opts;
+  lc_pouch_copy_object_opts copy_opts;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info original;
+  lc_pouch_object_info copied;
+  lc_pouch_object_info fetched;
+  lc_error error;
+  char *text;
+  const char *payload_sha256;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-copy-rename");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&copy_opts, 0, sizeof(copy_opts));
+  memset(&selector, 0, sizeof(selector));
+  memset(&original, 0, sizeof(original));
+  memset(&copied, 0, sizeof(copied));
+  memset(&fetched, 0, sizeof(fetched));
+  store = NULL;
+  read_body = NULL;
+  payload_sha256 =
+      "3b13ff1f1f217911e505d690692c4c533d6bb10349c9b08f405764657cbc6793";
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  put_opts.name = "source.bin";
+  put_opts.content_type = "application/x-pouch-test";
+  put_opts.prevent_overwrite = 1;
+  source = source_from_text("copy-rename-payload");
+  rc = store->put_object(store, "default", "source-key", source, &put_opts,
+                         &original, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(original.name, "source.bin");
+  assert_string_equal(original.content_type, "application/x-pouch-test");
+  assert_string_equal(original.plaintext_sha256, payload_sha256);
+
+  copy_opts.source.name = "source.bin";
+  copy_opts.name = "renamed.bin";
+  copy_opts.prevent_overwrite = 1;
+  rc = store->copy_object(store, "default", "source-key", "dest-key",
+                          &copy_opts, &copied, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(copied.name, "renamed.bin");
+  assert_string_equal(copied.content_type, "application/x-pouch-test");
+  assert_string_equal(copied.plaintext_sha256, payload_sha256);
+  assert_int_equal(copied.size, original.size);
+  assert_non_null(strstr(copied.id, payload_sha256));
+  assert_non_null(strstr(copied.id, "-renamed.bin"));
+  assert_null(strstr(copied.id, "-source.bin"));
+
+  selector.name = "renamed.bin";
+  rc = store->get_object(store, "default", "dest-key", &selector, &read_body,
+                         &fetched, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(fetched.id, copied.id);
+  assert_string_equal(fetched.name, "renamed.bin");
+  assert_string_equal(fetched.content_type, "application/x-pouch-test");
+  assert_string_equal(fetched.plaintext_sha256, payload_sha256);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "copy-rename-payload");
+  free(text);
+  lc_source_close(read_body);
+
+  lc_pouch_object_info_cleanup(&allocator, &fetched);
+  lc_pouch_object_info_cleanup(&allocator, &copied);
+  lc_pouch_object_info_cleanup(&allocator, &original);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_object_copy_source_open_failure_leaves_destination_unchanged(
     void **state) {
   char root[256];
@@ -11052,6 +11137,7 @@ int main(void) {
       cmocka_unit_test(test_object_put_streams_payload_without_large_alloc),
       cmocka_unit_test(
           test_object_copy_streams_existing_payload_without_large_alloc),
+      cmocka_unit_test(test_object_copy_rename_preserves_payload_metadata),
       cmocka_unit_test(
           test_object_copy_source_open_failure_leaves_destination_unchanged),
       cmocka_unit_test(
