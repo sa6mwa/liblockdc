@@ -163,6 +163,8 @@ void *lc_client_calloc(lc_client_handle *client, size_t count, size_t size);
 void *lc_client_realloc(lc_client_handle *client, void *ptr, size_t size);
 void lc_client_free(lc_client_handle *client, void *ptr);
 char *lc_client_strdup(lc_client_handle *client, const char *value);
+void *lc_calloc_local(size_t count, size_t size);
+void *lc_realloc_local(void *ptr, size_t size);
 char *lc_strdup_local(const char *value);
 char *lc_dup_bytes_as_text(const void *bytes, size_t length);
 void lc_attachment_info_copy(lc_attachment_info *dst,

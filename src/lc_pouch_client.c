@@ -1936,8 +1936,8 @@ int lc_pouch_client_list_attachments_method(lc_client *self,
                                          record.namespace_name, req->lease.key,
                                          &objects, error);
   if (rc == LC_OK && objects.count > 0U) {
-    out->items =
-        (lc_attachment_info *)calloc(objects.count, sizeof(out->items[0]));
+    out->items = (lc_attachment_info *)lc_calloc_local(objects.count,
+                                                       sizeof(out->items[0]));
     if (out->items == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch attachment list", NULL, NULL,
@@ -3436,8 +3436,8 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
     if (message == NULL) {
       break;
     }
-    grown = (lc_message **)realloc(out->messages, (out->count + 1U) *
-                                                      sizeof(out->messages[0]));
+    grown = (lc_message **)lc_realloc_local(
+        out->messages, (out->count + 1U) * sizeof(out->messages[0]));
     if (grown == NULL) {
       message->close(message);
       lc_dequeue_batch_cleanup(out);

@@ -284,6 +284,10 @@ int lc_error_from_engine(lc_error *error, lc_engine_error *engine) {
                       engine->correlation_id);
 }
 
+void *lc_calloc_local(size_t count, size_t size) { return calloc(count, size); }
+
+void *lc_realloc_local(void *ptr, size_t size) { return realloc(ptr, size); }
+
 char *lc_strdup_local(const char *value) {
   size_t length;
   char *copy;
