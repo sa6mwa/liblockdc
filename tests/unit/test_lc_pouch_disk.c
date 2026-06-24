@@ -52,6 +52,7 @@ typedef struct tracked_allocator {
   size_t max_malloc_size;
   size_t max_realloc_size;
   size_t fail_malloc_size;
+  size_t fail_malloc_after_calls;
   size_t fail_realloc_size;
 } tracked_allocator;
 
@@ -69,8 +70,9 @@ static void *tracked_malloc(void *context, size_t size) {
   if (size > tracked->max_malloc_size) {
     tracked->max_malloc_size = size;
   }
-  if (tracked->fail_malloc_size != 0U &&
-      size == tracked->fail_malloc_size) {
+  if (tracked->fail_malloc_size != 0U && size == tracked->fail_malloc_size &&
+      (tracked->fail_malloc_after_calls == 0U ||
+       tracked->malloc_calls > tracked->fail_malloc_after_calls)) {
     return NULL;
   }
   return malloc(size);
@@ -3636,6 +3638,140 @@ static void test_retention_sweep_deletes_expired_metadata_and_state(
   assert_int_equal(sweep.deleted_metadata, 0UL);
   assert_int_equal(sweep.deleted_state, 0UL);
   assert_int_equal(sweep.failed_keys, 0UL);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_put_state_res state_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_meta_record loaded;
+  lc_pouch_retention_sweep_req req;
+  lc_pouch_retention_sweep_res sweep;
+  lc_error error;
+  char *text;
+  size_t dry_run_malloc_calls;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "retention-sweep-state-failure");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&state_res, 0, sizeof(state_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&loaded, 0, sizeof(loaded));
+  memset(&req, 0, sizeof(req));
+  memset(&sweep, 0, sizeof(sweep));
+  store = NULL;
+  read_body = NULL;
+  text = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "retention-owner";
+  meta.lease_id = "lease-expired";
+  meta.state_etag = "state-expired";
+  meta.version = 10L;
+  meta.updated_at_unix = 100L;
+  rc = store->store_meta(store, "default", "expired", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  source = source_from_text("expired-state");
+  rc = store->write_state(store, "default", "expired", source, NULL,
+                          &state_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_res);
+
+  req.updated_before_unix = 50L;
+  dry_run_malloc_calls = tracked.malloc_calls;
+  rc = store->retention_sweep(store, &req, &sweep, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(sweep.scanned_metadata, 1UL);
+  assert_int_equal(sweep.expired_metadata, 0UL);
+  assert_int_equal(sweep.deleted_metadata, 0UL);
+  assert_int_equal(sweep.deleted_state, 0UL);
+  assert_int_equal(sweep.failed_keys, 0UL);
+  dry_run_malloc_calls = tracked.malloc_calls - dry_run_malloc_calls;
+  memset(&sweep, 0, sizeof(sweep));
+
+  req.updated_before_unix = 1000L;
+  tracked.fail_malloc_size = strlen(
+                                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e"
+                                 "4649b934ca495991b7852b855") +
+                             1U;
+  tracked.fail_malloc_after_calls = tracked.malloc_calls + dry_run_malloc_calls;
+  rc = store->retention_sweep(store, &req, &sweep, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(sweep.scanned_metadata, 1UL);
+  assert_int_equal(sweep.expired_metadata, 1UL);
+  assert_int_equal(sweep.deleted_metadata, 0UL);
+  assert_int_equal(sweep.deleted_state, 0UL);
+  assert_int_equal(sweep.failed_keys, 1UL);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_REMOVE),
+                   0U);
+  assert_int_equal(
+      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 0U);
+  tracked.fail_malloc_size = 0U;
+  tracked.fail_malloc_after_calls = 0U;
+
+  rc = store->load_meta(store, "default", "expired", &loaded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded.found);
+  lc_pouch_meta_record_cleanup(&allocator, &loaded);
+  rc = store->read_state(store, "default", "expired", &read_body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  assert_non_null(read_body);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "expired-state");
+  free(text);
+  text = NULL;
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  memset(&sweep, 0, sizeof(sweep));
+  rc = store->retention_sweep(store, &req, &sweep, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(sweep.scanned_metadata, 1UL);
+  assert_int_equal(sweep.expired_metadata, 1UL);
+  assert_int_equal(sweep.deleted_metadata, 1UL);
+  assert_int_equal(sweep.deleted_state, 1UL);
+  assert_int_equal(sweep.failed_keys, 0UL);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_REMOVE),
+                   1U);
+  assert_int_equal(
+      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 1U);
+
+  rc = store->load_meta(store, "default", "expired", &loaded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(loaded.found);
+  rc = store->read_state(store, "default", "expired", &read_body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
 
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
@@ -11188,6 +11324,8 @@ int main(void) {
       cmocka_unit_test(
           test_metadata_update_allocation_failure_preserves_indexes),
       cmocka_unit_test(test_retention_sweep_deletes_expired_metadata_and_state),
+      cmocka_unit_test(
+          test_retention_sweep_keeps_metadata_when_state_delete_fails),
       cmocka_unit_test(test_index_flush_reports_current_projection),
       cmocka_unit_test(test_index_flush_recovers_from_corrupt_sidecar_tail),
       cmocka_unit_test(test_query_index_sidecar_appends_metadata_records),

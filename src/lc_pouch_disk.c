@@ -4941,16 +4941,6 @@ static int lc_pouch_disk_retention_sweep(
     state_entry = state_index >= 0 ? &store->state_entries[state_index] : NULL;
     state_live = state_entry != NULL && !state_entry->deleted;
 
-    memset(&item_error, 0, sizeof(item_error));
-    rc = lc_pouch_disk_append_meta_remove_locked(
-        store, meta_entry->namespace_name, meta_entry->key, &item_error);
-    if (rc != LC_OK) {
-      out->failed_keys++;
-      lc_error_cleanup(&item_error);
-      continue;
-    }
-    out->deleted_metadata++;
-
     if (state_live) {
       memset(&item_error, 0, sizeof(item_error));
       rc = lc_pouch_disk_append_state_remove_locked(
@@ -4962,6 +4952,16 @@ static int lc_pouch_disk_retention_sweep(
       }
       out->deleted_state++;
     }
+
+    memset(&item_error, 0, sizeof(item_error));
+    rc = lc_pouch_disk_append_meta_remove_locked(
+        store, meta_entry->namespace_name, meta_entry->key, &item_error);
+    if (rc != LC_OK) {
+      out->failed_keys++;
+      lc_error_cleanup(&item_error);
+      continue;
+    }
+    out->deleted_metadata++;
   }
 
   rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
