@@ -24,6 +24,7 @@
 #define TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET 44U
 #define TEST_POUCH_HEADER_RECORD_VERSION_OFFSET 56U
 #define TEST_POUCH_QUERY_INDEX_HEADER_SIZE 64U
+#define TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET 56U
 #define TEST_POUCH_QUERY_INDEX_RECORD_META 1U
 #define TEST_POUCH_RECORD_STATE_PUT 1U
 #define TEST_POUCH_RECORD_STATE_REMOVE 2U
@@ -708,6 +709,68 @@ static void corrupt_first_query_index_match(const char *root,
   free(bytes);
   close(fd);
   assert_true(found);
+}
+
+static void set_first_query_index_match_record_version(const char *root,
+                                                       const char *needle,
+                                                       unsigned long version) {
+  char index_path[512];
+  unsigned char header[TEST_POUCH_QUERY_INDEX_HEADER_SIZE];
+  unsigned char *payload;
+  size_t needle_len;
+  unsigned long payload_len;
+  off_t record_offset;
+  int fd;
+  int found;
+
+  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  fd = open(index_path, O_RDWR);
+  assert_true(fd >= 0);
+  assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
+  needle_len = strlen(needle);
+  found = 0;
+  while (!found) {
+    record_offset = lseek(fd, 0, SEEK_CUR);
+    assert_true(record_offset >= 0);
+    assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
+    assert_memory_equal(header, "LCQI", 4U);
+    payload_len = test_get_u64(header + 44);
+    payload = (unsigned char *)malloc((size_t)payload_len);
+    assert_non_null(payload);
+    assert_int_equal(read(fd, payload, (size_t)payload_len), payload_len);
+    if (payload_len >= needle_len) {
+      size_t index;
+
+      for (index = 0U; index + needle_len <= payload_len; ++index) {
+        if (memcmp(payload + index, needle, needle_len) == 0) {
+          test_put_u32(header + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
+                       version);
+          assert_int_equal(
+              lseek(fd, record_offset +
+                            TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
+                    SEEK_SET),
+              record_offset + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET);
+          assert_int_equal(
+              write(fd,
+                    header + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
+                    4U),
+              4);
+          found = 1;
+          break;
+        }
+      }
+    }
+    free(payload);
+    if (!found) {
+      assert_int_equal(lseek(fd, record_offset +
+                                     TEST_POUCH_QUERY_INDEX_HEADER_SIZE +
+                                     (off_t)payload_len,
+                              SEEK_SET),
+                       record_offset + TEST_POUCH_QUERY_INDEX_HEADER_SIZE +
+                           (off_t)payload_len);
+    }
+  }
+  close(fd);
 }
 
 static void set_first_log_match_record_version(const char *root,
@@ -3967,6 +4030,79 @@ static void test_query_index_keys_recreates_missing_sidecar(void **state) {
   assert_string_equal(capture.keys[0], "alpha");
   assert_false(scan.truncated);
   assert_true(test_query_index_size(root) > 0);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_index_keys_rebuilds_future_sidecar_version(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture capture;
+  lc_error error;
+  off_t original_query_index_size;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-sidecar-future-version");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  original_query_index_size = test_query_index_size(root);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  set_first_query_index_match_record_version(root, "bravo", 99UL);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  req.namespace_name = "default";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_false(scan.truncated);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   rc = store->close(store, &error);
@@ -10590,6 +10726,8 @@ int main(void) {
       cmocka_unit_test(
           test_query_index_keys_recovers_from_corrupt_sidecar_tail),
       cmocka_unit_test(test_query_index_keys_recreates_missing_sidecar),
+      cmocka_unit_test(
+          test_query_index_keys_rebuilds_future_sidecar_version),
       cmocka_unit_test(
           test_query_index_keys_truncates_partial_sidecar_field),
       cmocka_unit_test(test_scan_meta_ignores_corrupt_query_sidecar),
