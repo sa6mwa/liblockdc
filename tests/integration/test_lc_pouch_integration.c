@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cmocka.h>
@@ -47,15 +48,29 @@ static void cleanup_pouch_root(const char *root) {
   rmdir(root);
 }
 
-static lc_source *source_from_text(const char *text, lc_error *error) {
+static lc_source *source_from_bytes(const void *bytes, size_t length,
+                                    lc_error *error) {
   lc_source *source;
   int rc;
 
   source = NULL;
-  rc = lc_source_from_memory(text, strlen(text), &source, error);
+  rc = lc_source_from_memory(bytes, length, &source, error);
   assert_lc_ok(rc, error);
   assert_non_null(source);
   return source;
+}
+
+static lc_source *source_from_text(const char *text, lc_error *error) {
+  return source_from_bytes(text, strlen(text), error);
+}
+
+static off_t pouch_log_size(const char *root) {
+  char path[512];
+  struct stat st;
+
+  snprintf(path, sizeof(path), "%s/store.log", root);
+  assert_int_equal(stat(path, &st), 0);
+  return st.st_size;
 }
 
 static void open_pouch_client(const char *endpoint, lc_client **out,
@@ -198,6 +213,112 @@ static void test_pouch_public_state_attachment_shared_handles(void **state) {
   assert_lc_ok(rc, &error);
   assert_string_equal(get_attachment_res.attachment.name, "note.txt");
   assert_sink_text(sink, "attachment-body", &error);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  reader->close(reader);
+  reader = NULL;
+
+  lc_attach_res_cleanup(&attach_res);
+  lc_attachment_list_cleanup(&attachments);
+  lc_attachment_get_res_cleanup(&get_attachment_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_attachment_survives_compaction_reopen(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  char payload[4096];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list attachments;
+  lc_attachment_get_req get_attachment_req;
+  lc_attachment_get_res get_attachment_res;
+  lc_error error;
+  size_t index;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "attachment-compact");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachments, 0, sizeof(attachments));
+  memset(&get_attachment_res, 0, sizeof(get_attachment_res));
+  memset(payload, 'x', sizeof(payload));
+
+  open_pouch_client(endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/compact-attachment";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  rc = writer->acquire(writer, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "artifact.txt";
+  attach_req.content_type = "text/plain";
+  source = source_from_text("attachment-after-compaction", &error);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(attach_res.attachment.name, "artifact.txt");
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/octet-stream";
+  for (index = 0U; index < 80U; ++index) {
+    source = source_from_bytes(payload, sizeof(payload), &error);
+    rc = lease->update(lease, source, &update_opts, &error);
+    lc_source_close(source);
+    assert_lc_ok(rc, &error);
+  }
+  assert_true(pouch_log_size(root) < (off_t)(80U * (sizeof(payload) + 1024U)));
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  writer->close(writer);
+  writer = NULL;
+
+  open_pouch_client(endpoint, &reader, &error);
+  acquire.owner = "reader";
+  rc = reader->acquire(reader, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  rc = lease->list_attachments(lease, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 1U);
+  assert_string_equal(attachments.items[0].name, "artifact.txt");
+
+  lc_attachment_get_req_init(&get_attachment_req);
+  get_attachment_req.selector.name = "artifact.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->get_attachment(lease, &get_attachment_req, sink,
+                             &get_attachment_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(get_attachment_res.attachment.name, "artifact.txt");
+  assert_sink_text(sink, "attachment-after-compaction", &error);
   lc_sink_close(sink);
   sink = NULL;
 
@@ -383,6 +504,8 @@ static void test_pouch_public_cas_across_clients(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_public_state_attachment_shared_handles),
+      cmocka_unit_test(
+          test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
   };
