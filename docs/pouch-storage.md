@@ -313,6 +313,17 @@ moved out of the foreground path whenever correctness allows it:
 - all hot allocations use pouch-owned buffers, pools, or slabs so allocation
   behavior is measurable and controllable.
 
+Current implementation milestone: the first C disk backend uses a single
+`store.log` plus `writer.lock`. It auto-compacts under the writer lock by
+copying the current live heads into `store.compact.tmp`, fsyncing the temporary
+log, atomically renaming it over `store.log`, reopening the visible log, and
+replaying it to refresh in-memory offsets. This is deliberately simpler than
+the final segmented manifest/snapshot design, but it proves the critical
+append-log invariants: payload spans are copied with bounded buffers, existing
+read sources keep their old file descriptor alive across rename, foreground
+writers stay serialized, corrupt tails remain replay-truncated, and monotonic
+tokens survive compaction through a private high-water record.
+
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
 benchmark can prove how many allocations each operation performs and a
@@ -852,6 +863,17 @@ compact lifecycle index, not the only source of truth for committed records.
 Compaction creates a snapshot segment containing the current live records from
 candidate sealed segments and the installed prior snapshot. It never mutates
 existing segment contents.
+
+The current single-log backend implements the same logical reclaim rule without
+segments: when the durable log is large enough and the replayed record count is
+more than twice the compacted live-head count, the writer rewrites the log to a
+temporary replacement. The compacted log contains a private high-water record
+for `next_version`, the latest non-deleted state heads, live metadata, live
+attachments, and live queue messages. Superseded records and deletion
+tombstones are omitted because observable state, CAS failures on deleted heads,
+and queue/attachment absence are preserved without them. If temporary snapshot
+construction or rename fails, the original log remains the source of truth and
+indexes are rebuilt from it before returning.
 
 Compaction flow:
 

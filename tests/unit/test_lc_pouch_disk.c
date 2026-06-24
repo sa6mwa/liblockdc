@@ -242,6 +242,15 @@ static size_t count_log_records_of_type(const char *root, unsigned long type) {
   return count;
 }
 
+static off_t test_log_size(const char *root) {
+  char log_path[512];
+  struct stat st;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  assert_int_equal(stat(log_path, &st), 0);
+  return st.st_size;
+}
+
 static void test_put_u32(unsigned char *dst, unsigned long value) {
   dst[0] = (unsigned char)(value & 255UL);
   dst[1] = (unsigned char)((value >> 8) & 255UL);
@@ -2295,6 +2304,176 @@ static void test_replay_streams_large_bodies_without_large_alloc(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
+  char root[256];
+  char payload[4096];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_put_state_res after_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_meta_record loaded_meta;
+  lc_pouch_put_object_opts object_opts;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info object_info;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_error error;
+  char *text;
+  long last_version;
+  size_t index;
+  size_t read_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "auto-compact");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&after_res, 0, sizeof(after_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&loaded_meta, 0, sizeof(loaded_meta));
+  memset(&object_opts, 0, sizeof(object_opts));
+  memset(&selector, 0, sizeof(selector));
+  memset(&object_info, 0, sizeof(object_info));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(payload, 'x', sizeof(payload));
+  store = NULL;
+  body = NULL;
+  last_version = 0L;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-a";
+  meta.txn_id = "txn-a";
+  meta.state_etag = "state-a";
+  meta.version = 10L;
+  meta.fencing_token = 11L;
+  rc = store->store_meta(store, "default", "lease-key", &meta, NULL,
+                         &meta_res, &error);
+  assert_int_equal(rc, LC_OK);
+
+  object_opts.name = "live.txt";
+  object_opts.content_type = "text/plain";
+  source = source_from_text("object-live");
+  rc = store->put_object(store, "default", "object-key", source, &object_opts,
+                         &object_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queue-live");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  state_opts.content_type = "application/octet-stream";
+  for (index = 0U; index < 80U; ++index) {
+    source = NULL;
+    rc = lc_source_from_memory(payload, sizeof(payload), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = store->write_state(store, "default", "hot-key", source, &state_opts,
+                            &put_res, &error);
+    lc_source_close(source);
+    assert_int_equal(rc, LC_OK);
+    last_version = put_res.new_version;
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+    memset(&put_res, 0, sizeof(put_res));
+  }
+
+  assert_true(test_log_size(root) < (off_t)(80U * (sizeof(payload) + 128U)));
+  assert_true(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT) <
+              25U);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->read_state(store, "default", "hot-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(state_info.version, last_version);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, sizeof(payload));
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->load_meta(store, "default", "lease-key", &loaded_meta, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded_meta.found);
+  assert_string_equal(loaded_meta.etag, meta_res.etag);
+  assert_string_equal(loaded_meta.meta.owner, "owner-a");
+  lc_pouch_meta_record_cleanup(&allocator, &loaded_meta);
+
+  selector.name = "live.txt";
+  rc = store->get_object(store, "default", "object-key", &selector, &body,
+                         &object_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  text = read_source_text(body);
+  assert_string_equal(text, "object-live");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &body,
+                              &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_string_equal(dequeued.message_id, enqueued.message_id);
+  text = read_source_text(body);
+  assert_string_equal(text, "queue-live");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+
+  source = source_from_text("after-compact");
+  rc = store->write_state(store, "default", "after-key", source, NULL,
+                          &after_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_true(after_res.new_version > last_version);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &after_res);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_empty_identifiers_are_rejected_before_append(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -3092,6 +3271,8 @@ int main(void) {
       cmocka_unit_test(
           test_queue_dequeue_skips_replay_after_same_handle_enqueue),
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
+      cmocka_unit_test(
+          test_auto_compaction_preserves_live_heads_and_tokens),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(test_queue_delay_hides_until_visible),

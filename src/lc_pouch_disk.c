@@ -26,6 +26,7 @@
 #define LC_POUCH_RECORD_QUEUE_UPDATE 8U
 #define LC_POUCH_RECORD_QUEUE_REMOVE 9U
 #define LC_POUCH_RECORD_STATE_LINK 10U
+#define LC_POUCH_RECORD_HIGH_WATER 11U
 #define LC_POUCH_BACKEND_NAMESPACE ".lockd"
 #define LC_POUCH_BACKEND_KEY "backend-id"
 #define LC_POUCH_BACKEND_CONTENT_TYPE "text/plain"
@@ -37,6 +38,8 @@
 #define LC_POUCH_MAX_CONTENT_TYPE_BYTES 4096UL
 #define LC_POUCH_MAX_ETAG_BYTES 4096UL
 #define LC_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
+#define LC_POUCH_COMPACT_MIN_LOG_BYTES (64UL * 1024UL)
+#define LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER 2UL
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -115,6 +118,8 @@ typedef struct lc_pouch_disk_store {
   size_t queue_entry_capacity;
   long next_version;
   unsigned long replayed_log_size;
+  unsigned long replayed_record_count;
+  int defer_record_fsync;
 } lc_pouch_disk_store;
 
 typedef struct lc_pouch_file_source {
@@ -162,6 +167,27 @@ static int lc_pouch_disk_append_record(
     const char *key, const char *content_type, const char *etag, long version,
     const unsigned char *body, size_t body_length,
     unsigned long *body_offset_out, lc_error *error);
+static int lc_pouch_disk_append_fd_record(
+    lc_pouch_disk_store *store, unsigned long type, const char *namespace_name,
+    const char *key, const char *content_type, const char *etag, long version,
+    int body_fd, unsigned long body_offset, unsigned long body_length,
+    unsigned long *body_offset_out, lc_error *error);
+static int lc_pouch_disk_append_object_copy_record(
+    lc_pouch_disk_store *store, int read_fd, const char *namespace_name,
+    const char *key, const char *name, const char *id,
+    const char *payload_content_type, unsigned long src_body_offset,
+    unsigned long src_body_length, long created_at_unix, long updated_at_unix,
+    unsigned long *payload_offset_out, lc_error *error);
+static int lc_pouch_disk_append_queue_put_fd_entry(
+    lc_pouch_disk_store *store, lc_pouch_disk_queue_entry *entry,
+    int payload_fd, unsigned long payload_offset, unsigned long payload_length,
+    lc_error *error);
+static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
+                                                  long version,
+                                                  lc_error *error);
+static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
+                                              unsigned long log_size,
+                                              lc_error *error);
 static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error);
 static int lc_pouch_disk_read_state(lc_pouch_store *self,
                                     const char *namespace_name, const char *key,
@@ -424,6 +450,17 @@ static int lc_pouch_read_all(int fd, void *bytes, size_t count,
   return 1;
 }
 
+static int lc_pouch_disk_fsync_record(lc_pouch_disk_store *store,
+                                      const char *message, lc_error *error) {
+  if (store->defer_record_fsync) {
+    return LC_OK;
+  }
+  if (fsync(store->log_fd) != 0) {
+    return lc_pouch_set_errno(error, message);
+  }
+  return LC_OK;
+}
+
 static char *lc_pouch_join_path(const lc_pouch_allocator *allocator,
                                 const char *root, const char *leaf) {
   size_t root_len;
@@ -484,7 +521,8 @@ static int lc_pouch_disk_mark_replayed_to_current_size(
     return lc_pouch_set_errno(error, "failed to stat pouch log");
   }
   store->replayed_log_size = (unsigned long)st.st_size;
-  return LC_OK;
+  return lc_pouch_disk_maybe_compact_locked(store, (unsigned long)st.st_size,
+                                            error);
 }
 
 static int lc_pouch_disk_unlock(lc_pouch_disk_store *store, lc_error *error) {
@@ -1784,6 +1822,7 @@ static int lc_pouch_disk_append_record(
   unsigned long payload_len;
   unsigned long crc;
   off_t start;
+  int rc;
 
   ns_len = (unsigned long)strlen(namespace_name);
   key_len = (unsigned long)strlen(key);
@@ -1845,12 +1884,41 @@ static int lc_pouch_disk_append_record(
        !lc_pouch_write_all(store->log_fd, body, body_length))) {
     return lc_pouch_set_errno(error, "failed to append pouch log record");
   }
-  if (fsync(store->log_fd) != 0) {
-    return lc_pouch_set_errno(error, "failed to fsync pouch log");
+  rc = lc_pouch_disk_fsync_record(store, "failed to fsync pouch log", error);
+  if (rc != LC_OK) {
+    return rc;
   }
   *body_offset_out = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
                      key_len + ct_len + etag_len;
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_record_count++;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
+                                                  long version,
+                                                  lc_error *error) {
+  unsigned char header[LC_POUCH_HEADER_SIZE];
+
+  memset(header, 0, sizeof(header));
+  memcpy(header, LC_POUCH_LOG_MAGIC, 4U);
+  lc_pouch_put_u32(header + 4, LC_POUCH_HEADER_SIZE);
+  lc_pouch_put_u32(header + 8, LC_POUCH_RECORD_HIGH_WATER);
+  lc_pouch_put_u64(header + 36, (unsigned long)version);
+  lc_pouch_put_u32(header + 52, lc_pouch_crc32(NULL, 0U));
+  lc_pouch_put_u32(header + 56, LC_POUCH_RECORD_VERSION);
+  if (lseek(store->log_fd, 0, SEEK_END) < 0) {
+    return lc_pouch_set_errno(error, "failed to seek pouch log");
+  }
+  if (!lc_pouch_write_all(store->log_fd, header, sizeof(header))) {
+    return lc_pouch_set_errno(error, "failed to append pouch log record");
+  }
+  if (lc_pouch_disk_fsync_record(store, "failed to fsync pouch log", error) !=
+      LC_OK) {
+    return LC_ERR_TRANSPORT;
+  }
+  store->replayed_log_size = (unsigned long)-1;
+  store->replayed_record_count++;
   return LC_OK;
 }
 
@@ -2003,12 +2071,14 @@ static int lc_pouch_disk_append_fd_record(
   if (rc != LC_OK) {
     return rc;
   }
-  if (fsync(store->log_fd) != 0) {
-    return lc_pouch_set_errno(error, "failed to fsync pouch log");
+  rc = lc_pouch_disk_fsync_record(store, "failed to fsync pouch log", error);
+  if (rc != LC_OK) {
+    return rc;
   }
   *body_offset_out = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
                      key_len + ct_len + etag_len;
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_record_count++;
   return LC_OK;
 }
 
@@ -2098,11 +2168,202 @@ static int lc_pouch_disk_spool_source_to_temp(
   return LC_OK;
 }
 
+static unsigned long
+lc_pouch_disk_compaction_live_record_count(lc_pouch_disk_store *store) {
+  unsigned long count;
+  size_t index;
+
+  count = store->next_version > 1L ? 1UL : 0UL;
+  for (index = 0U; index < store->state_entry_count; ++index) {
+    if (!store->state_entries[index].deleted) {
+      count++;
+    }
+  }
+  for (index = 0U; index < store->meta_entry_count; ++index) {
+    if (!store->meta_entries[index].deleted) {
+      count++;
+    }
+  }
+  for (index = 0U; index < store->object_entry_count; ++index) {
+    if (!store->object_entries[index].deleted) {
+      count++;
+    }
+  }
+  for (index = 0U; index < store->queue_entry_count; ++index) {
+    if (!store->queue_entries[index].deleted) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static int lc_pouch_disk_fsync_root(lc_pouch_disk_store *store) {
+  int fd;
+  int rc;
+
+  fd = open(store->root_path, O_RDONLY);
+  if (fd < 0) {
+    return 0;
+  }
+  rc = fsync(fd) == 0;
+  close(fd);
+  return rc;
+}
+
+static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
+                                        lc_error *error) {
+  char *temp_path;
+  unsigned char *meta_payload;
+  size_t meta_payload_length;
+  unsigned long body_offset;
+  unsigned long old_record_count;
+  unsigned long old_replayed_size;
+  int old_fd;
+  int temp_fd;
+  int new_fd;
+  int rc;
+  size_t index;
+
+  temp_path = lc_pouch_join_path(&store->allocator, store->root_path,
+                                 "store.compact.tmp");
+  if (temp_path == NULL) {
+    return lc_pouch_set_nomem(error, "failed to allocate pouch compact path");
+  }
+  temp_fd = open(temp_path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+  if (temp_fd < 0) {
+    lc_pouch_free(&store->allocator, temp_path);
+    return lc_pouch_set_errno(error, "failed to open pouch compact log");
+  }
+
+  old_fd = store->log_fd;
+  old_record_count = store->replayed_record_count;
+  old_replayed_size = store->replayed_log_size;
+  store->log_fd = temp_fd;
+  store->defer_record_fsync = 1;
+  rc = LC_OK;
+  if (store->next_version > 1L) {
+    rc = lc_pouch_disk_append_high_water_record(store, store->next_version - 1L,
+                                                error);
+  }
+  for (index = 0U; rc == LC_OK && index < store->state_entry_count; ++index) {
+    lc_pouch_disk_state_entry *entry;
+
+    entry = &store->state_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    rc = lc_pouch_disk_append_fd_record(
+        store, LC_POUCH_RECORD_STATE_PUT, entry->namespace_name, entry->key,
+        entry->content_type, entry->etag, entry->version, old_fd,
+        entry->body_offset, entry->body_length, &body_offset, error);
+  }
+  for (index = 0U; rc == LC_OK && index < store->meta_entry_count; ++index) {
+    lc_pouch_disk_meta_entry *entry;
+
+    entry = &store->meta_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    meta_payload = NULL;
+    meta_payload_length = 0U;
+    if (!lc_pouch_encode_meta(store, &entry->meta, &meta_payload,
+                              &meta_payload_length)) {
+      rc = lc_pouch_set_nomem(error,
+                              "failed to encode pouch compact metadata");
+    } else {
+      rc = lc_pouch_disk_append_record(
+          store, LC_POUCH_RECORD_META_PUT, entry->namespace_name, entry->key,
+          NULL, entry->etag, entry->meta.version, meta_payload,
+          meta_payload_length, &body_offset, error);
+    }
+    lc_pouch_free(&store->allocator, meta_payload);
+  }
+  for (index = 0U; rc == LC_OK && index < store->object_entry_count; ++index) {
+    lc_pouch_disk_object_entry *entry;
+    unsigned long payload_offset;
+
+    entry = &store->object_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    rc = lc_pouch_disk_append_object_copy_record(
+        store, old_fd, entry->namespace_name, entry->key, entry->name,
+        entry->id, entry->content_type, entry->body_offset, entry->body_length,
+        entry->created_at_unix, entry->updated_at_unix, &payload_offset,
+        error);
+  }
+  for (index = 0U; rc == LC_OK && index < store->queue_entry_count; ++index) {
+    lc_pouch_disk_queue_entry *entry;
+
+    entry = &store->queue_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    rc = lc_pouch_disk_append_queue_put_fd_entry(store, entry, old_fd,
+                                                 entry->body_offset,
+                                                 entry->body_length, error);
+  }
+  if (rc == LC_OK && fsync(temp_fd) != 0) {
+    rc = lc_pouch_set_errno(error, "failed to fsync pouch compact log");
+  }
+
+  store->defer_record_fsync = 0;
+  store->log_fd = old_fd;
+  close(temp_fd);
+  if (rc != LC_OK) {
+    store->replayed_record_count = old_record_count;
+    store->replayed_log_size = old_replayed_size;
+    (void)lc_pouch_disk_replay(store, NULL);
+    unlink(temp_path);
+    lc_pouch_free(&store->allocator, temp_path);
+    return rc;
+  }
+  if (rename(temp_path, store->log_path) != 0) {
+    store->replayed_record_count = old_record_count;
+    store->replayed_log_size = old_replayed_size;
+    (void)lc_pouch_disk_replay(store, NULL);
+    unlink(temp_path);
+    lc_pouch_free(&store->allocator, temp_path);
+    return lc_pouch_set_errno(error, "failed to install pouch compact log");
+  }
+  lc_pouch_free(&store->allocator, temp_path);
+  new_fd = open(store->log_path, O_RDWR);
+  if (new_fd < 0) {
+    return lc_pouch_set_errno(error, "failed to reopen pouch compact log");
+  }
+  close(old_fd);
+  store->log_fd = new_fd;
+  rc = lc_pouch_disk_replay(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!lc_pouch_disk_fsync_root(store)) {
+    return lc_pouch_set_errno(error, "failed to fsync pouch root directory");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
+                                              unsigned long log_size,
+                                              lc_error *error) {
+  unsigned long live_count;
+
+  if (log_size < LC_POUCH_COMPACT_MIN_LOG_BYTES) {
+    return LC_OK;
+  }
+  live_count = lc_pouch_disk_compaction_live_record_count(store);
+  if (store->replayed_record_count <=
+      live_count * LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER) {
+    return LC_OK;
+  }
+  return lc_pouch_disk_compact_locked(store, error);
+}
+
 static int lc_pouch_disk_append_object_copy_record(
     lc_pouch_disk_store *store, int read_fd, const char *namespace_name,
     const char *key, const char *name, const char *id,
     const char *payload_content_type, unsigned long src_body_offset,
-    unsigned long src_body_length, long now_unix,
+    unsigned long src_body_length, long created_at_unix, long updated_at_unix,
     unsigned long *payload_offset_out, lc_error *error) {
   unsigned char header[LC_POUCH_HEADER_SIZE];
   unsigned char object_meta[LC_POUCH_OBJECT_META_SIZE];
@@ -2136,8 +2397,8 @@ static int lc_pouch_disk_append_object_copy_record(
                                 "pouch log record exceeds inline limits");
   }
 
-  lc_pouch_put_u64(object_meta, (unsigned long)now_unix);
-  lc_pouch_put_u64(object_meta + 8, (unsigned long)now_unix);
+  lc_pouch_put_u64(object_meta, (unsigned long)created_at_unix);
+  lc_pouch_put_u64(object_meta + 8, (unsigned long)updated_at_unix);
   lc_pouch_put_u32(object_meta + 16, payload_ct_len);
   lc_pouch_put_u64(object_meta + 20, src_body_length);
 
@@ -2192,13 +2453,15 @@ static int lc_pouch_disk_append_object_copy_record(
   if (rc != LC_OK) {
     return rc;
   }
-  if (fsync(store->log_fd) != 0) {
-    return lc_pouch_set_errno(error, "failed to fsync pouch log");
+  rc = lc_pouch_disk_fsync_record(store, "failed to fsync pouch log", error);
+  if (rc != LC_OK) {
+    return rc;
   }
   *payload_offset_out = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
                         key_len + name_len + id_len +
                         LC_POUCH_OBJECT_META_SIZE + payload_ct_len;
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_record_count++;
   return LC_OK;
 }
 
@@ -2695,6 +2958,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
 
   offset = 0UL;
   lc_pouch_disk_reset_indexes(store);
+  store->replayed_record_count = 0UL;
   if (lseek(store->log_fd, 0, SEEK_SET) < 0) {
     return lc_pouch_set_errno(error, "failed to rewind pouch log");
   }
@@ -2721,8 +2985,23 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
     expected_crc = lc_pouch_get_u32(header + 52);
     record_version = lc_pouch_get_u32(header + 56);
     if (header_size != LC_POUCH_HEADER_SIZE ||
-        (record_version != 0UL && record_version != LC_POUCH_RECORD_VERSION) ||
-        !lc_pouch_disk_validate_record_lengths(
+        (record_version != 0UL && record_version != LC_POUCH_RECORD_VERSION)) {
+      break;
+    }
+    if (type == LC_POUCH_RECORD_HIGH_WATER) {
+      if (ns_len != 0UL || key_len != 0UL || ct_len != 0UL ||
+          etag_len != 0UL || body_len != 0UL || payload_len != 0UL ||
+          expected_crc != lc_pouch_crc32(NULL, 0U)) {
+        break;
+      }
+      if ((long)version >= store->next_version) {
+        store->next_version = (long)version + 1L;
+      }
+      offset += LC_POUCH_HEADER_SIZE;
+      store->replayed_record_count++;
+      continue;
+    }
+    if (!lc_pouch_disk_validate_record_lengths(
             ns_len, key_len, ct_len, etag_len, body_len, payload_len) ||
         (type != LC_POUCH_RECORD_STATE_PUT &&
          type != LC_POUCH_RECORD_STATE_REMOVE &&
@@ -2761,6 +3040,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
         store->next_version = (long)version + 1L;
       }
       offset += LC_POUCH_HEADER_SIZE + payload_len;
+      store->replayed_record_count++;
       continue;
     }
     payload = (unsigned char *)lc_pouch_alloc(&store->allocator,
@@ -3063,6 +3343,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
       store->next_version = (long)version + 1L;
     }
     offset += LC_POUCH_HEADER_SIZE + payload_len;
+    store->replayed_record_count++;
     lc_pouch_free(&store->allocator, payload);
   }
   if (lseek(store->log_fd, (off_t)offset, SEEK_SET) < 0 ||
@@ -3959,7 +4240,7 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
   now_unix = (long)time(NULL);
   rc = lc_pouch_disk_append_object_copy_record(
       store, temp_fd, namespace_name, key, name, id, content_type, 0UL,
-      payload_length, now_unix, &payload_offset, error);
+      payload_length, now_unix, now_unix, &payload_offset, error);
   close(temp_fd);
   if (rc == LC_OK &&
       !lc_pouch_disk_upsert_object_entry(
@@ -4271,7 +4552,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   now_unix = (long)time(NULL);
   rc = lc_pouch_disk_append_object_copy_record(
       store, read_fd, namespace_name, dst_key, name, id,
-      src_content_type, src_body_offset, src_body_length, now_unix,
+      src_content_type, src_body_offset, src_body_length, now_unix, now_unix,
       &payload_offset, error);
   close(read_fd);
   if (rc == LC_OK &&
@@ -4637,8 +4918,9 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
   if (rc != LC_OK) {
     return rc;
   }
-  if (fsync(store->log_fd) != 0) {
-    return lc_pouch_set_errno(error, "failed to fsync pouch log");
+  rc = lc_pouch_disk_fsync_record(store, "failed to fsync pouch log", error);
+  if (rc != LC_OK) {
+    return rc;
   }
   body_offset = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
                 queue_len + message_id_len + meta_etag_len;
@@ -4656,6 +4938,7 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
     return lc_pouch_set_nomem(error, "failed to update pouch queue index");
   }
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_record_count++;
   return LC_OK;
 }
 
