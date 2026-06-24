@@ -578,6 +578,14 @@ ordered scan route, and `query_fallback_engine` is explicit rather than
 implicit. Scan mode is useful for tiny stores, diagnostics, index rebuild
 validation, and early deployments before a particular index feature exists.
 
+The scan route must remain a true configured route, not a compatibility shim
+inside indexed search. A pouch instance opened in scan mode must be able to
+serve match-all key and document queries even if `query.index` is absent,
+obsolete, corrupt, or for a future format version. Conversely, indexed mode must
+not silently degrade into a full-log scan for ordinary predicate execution,
+because that would hide the performance cliff that indexed search is intended
+to avoid.
+
 Scan mode is a real Go-style full log-backed scan route, not a synonym for the
 indexed path with fewer predicates and not a hidden fallback inside indexed
 search. Before serving a scan page, the disk backend must refresh from the
