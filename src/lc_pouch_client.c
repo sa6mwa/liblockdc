@@ -482,6 +482,7 @@ static int lc_pouch_txn_validate_pending_participants(
     const char *namespace_name;
     lc_pouch_meta_record record;
 
+    namespace_name = NULL;
     memset(&record, 0, sizeof(record));
     rc = lc_pouch_public_namespace(client,
                                    req->participants[index].namespace_name,
@@ -713,6 +714,7 @@ static int lc_pouch_txn_store_record(lc_client_handle *client,
   int rc;
 
   record = NULL;
+  record_len = 0U;
   source = NULL;
   memset(&opts, 0, sizeof(opts));
   memset(&info, 0, sizeof(info));
@@ -5217,6 +5219,74 @@ static int lc_pouch_query_selector_is_match_all(const char *selector_json) {
   return *p == '\0';
 }
 
+typedef enum lc_pouch_query_selector_kind {
+  LC_POUCH_QUERY_SELECTOR_UNSUPPORTED = 0,
+  LC_POUCH_QUERY_SELECTOR_MATCH_ALL = 1,
+  LC_POUCH_QUERY_SELECTOR_OWNER = 2
+} lc_pouch_query_selector_kind;
+
+typedef struct lc_pouch_query_owner_selector_json {
+  char *owner;
+} lc_pouch_query_owner_selector_json;
+
+static const lonejson_field lc_pouch_query_owner_selector_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_pouch_query_owner_selector_json, owner,
+                                "owner")};
+
+LONEJSON_MAP_DEFINE(lc_pouch_query_owner_selector_map,
+                    lc_pouch_query_owner_selector_json,
+                    lc_pouch_query_owner_selector_fields);
+
+static lc_pouch_query_selector_kind
+lc_pouch_query_selector_kind_parse(const char *selector_json, char **owner_out,
+                                   lc_error *error) {
+  lc_pouch_query_owner_selector_json selector;
+  lonejson *runtime;
+  lonejson_error lj_error;
+  lonejson_status status;
+
+  if (owner_out != NULL) {
+    *owner_out = NULL;
+  }
+  if (lc_pouch_query_selector_is_match_all(selector_json)) {
+    return LC_POUCH_QUERY_SELECTOR_MATCH_ALL;
+  }
+  if (selector_json == NULL) {
+    return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch query selector parser", NULL,
+                       NULL, NULL);
+    return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
+  }
+  memset(&selector, 0, sizeof(selector));
+  lonejson_error_init(&lj_error);
+  status = lc_lonejson_parse_cstr_value(
+      runtime, &lc_pouch_query_owner_selector_map, &selector, selector_json,
+      &lj_error);
+  if (status != LONEJSON_STATUS_OK || selector.owner == NULL) {
+    lc_lonejson_cleanup_value(runtime, &lc_pouch_query_owner_selector_map,
+                              &selector);
+    return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
+  }
+  if (owner_out != NULL) {
+    *owner_out = lc_strdup_local(selector.owner);
+    if (*owner_out == NULL) {
+      lc_lonejson_cleanup_value(runtime, &lc_pouch_query_owner_selector_map,
+                                &selector);
+      (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                         "failed to allocate pouch query owner selector", NULL,
+                         NULL, NULL);
+      return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
+    }
+  }
+  lc_lonejson_cleanup_value(runtime, &lc_pouch_query_owner_selector_map,
+                            &selector);
+  return LC_POUCH_QUERY_SELECTOR_OWNER;
+}
+
 typedef struct lc_pouch_query_keys_scan_context {
   const lc_query_key_handler *handler;
   void *handler_context;
@@ -5583,9 +5653,12 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
                                        const lc_query_req *req, lc_sink *dst,
                                        lc_query_res *out, lc_error *error) {
   lc_pouch_query_index_scan_req scan_req;
+  lc_pouch_query_owner_scan_req owner_req;
   lc_pouch_query_index_scan_res scan_res;
   lc_pouch_query_scan_visit_context visit;
+  lc_pouch_query_selector_kind selector_kind;
   const char *namespace_name;
+  char *owner_selector;
   int rc;
 
   if (client == NULL || req == NULL || dst == NULL || out == NULL) {
@@ -5598,26 +5671,39 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     return lc_pouch_client_unsupported(error,
                                        "pouch indexed query is not available");
   }
-  if (!lc_pouch_query_selector_is_match_all(req->selector_json)) {
+  owner_selector = NULL;
+  selector_kind =
+      lc_pouch_query_selector_kind_parse(req->selector_json, &owner_selector,
+                                         error);
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_UNSUPPORTED) {
+    lc_client_free(client, owner_selector);
+    if (error != NULL && error->code == LC_ERR_NOMEM) {
+      return LC_ERR_NOMEM;
+    }
     return lc_pouch_client_unsupported(
-        error, "pouch index query supports only match-all selector");
+        error,
+        "pouch index query supports only match-all or owner selector");
   }
   if (req->fields_json != NULL && req->fields_json[0] != '\0') {
+    lc_client_free(client, owner_selector);
     return lc_pouch_client_unsupported(
         error, "pouch index query does not support fields");
   }
   if (req->return_mode != NULL && req->return_mode[0] != '\0' &&
       strcmp(req->return_mode, "documents") != 0) {
+    lc_client_free(client, owner_selector);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index query return_mode must be documents", NULL,
                         NULL, NULL);
   }
   if (!lc_pouch_index_refresh_supported(req->refresh)) {
+    lc_client_free(client, owner_selector);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index query refresh must be wait_for", NULL,
                         NULL, NULL);
   }
   if (req->limit < 0L) {
+    lc_client_free(client, owner_selector);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query limit must be non-negative", NULL, NULL,
                         NULL);
@@ -5626,16 +5712,19 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
                                  error);
   if (rc != LC_OK) {
+    lc_client_free(client, owner_selector);
     return rc;
   }
   if (lc_pouch_index_refresh_is_wait_for(req->refresh)) {
     rc = lc_pouch_wait_for_index(client, namespace_name, error);
     if (rc != LC_OK) {
+      lc_client_free(client, owner_selector);
       return rc;
     }
   }
 
   memset(&scan_req, 0, sizeof(scan_req));
+  memset(&owner_req, 0, sizeof(owner_req));
   memset(&scan_res, 0, sizeof(scan_res));
   memset(&visit, 0, sizeof(visit));
   memset(out, 0, sizeof(*out));
@@ -5646,10 +5735,26 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   visit.scan.dst = dst;
   visit.namespace_name = namespace_name;
 
-  rc = client->pouch_store->query_index_scan(client->pouch_store, &scan_req,
-                                             lc_pouch_query_scan_visit_row,
-                                             &visit, &scan_res, error);
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER) {
+    if (client->pouch_store->query_owner_scan == NULL) {
+      lc_client_free(client, owner_selector);
+      return lc_pouch_client_unsupported(
+          error, "pouch indexed owner query is not available");
+    }
+    owner_req.namespace_name = namespace_name;
+    owner_req.owner = owner_selector;
+    owner_req.start_after = req->cursor;
+    owner_req.limit = (size_t)req->limit;
+    rc = client->pouch_store->query_owner_scan(
+        client->pouch_store, &owner_req, lc_pouch_query_scan_visit_row, &visit,
+        &scan_res, error);
+  } else {
+    rc = client->pouch_store->query_index_scan(client->pouch_store, &scan_req,
+                                               lc_pouch_query_scan_visit_row,
+                                               &visit, &scan_res, error);
+  }
   if (rc != LC_OK) {
+    lc_client_free(client, owner_selector);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
     return rc;
   }
@@ -5657,6 +5762,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   if (scan_res.next_start_after != NULL) {
     out->cursor = lc_strdup_local(scan_res.next_start_after);
     if (out->cursor == NULL) {
+      lc_client_free(client, owner_selector);
       lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator,
                                             &scan_res);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -5670,10 +5776,12 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
       lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
                                          error);
   if (lc_pouch_query_result_metadata_ready(out, error) != LC_OK) {
+    lc_client_free(client, owner_selector);
     lc_query_res_cleanup(out);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
     return LC_ERR_NOMEM;
   }
+  lc_client_free(client, owner_selector);
   lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
 }
@@ -5776,9 +5884,12 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
                                             void *context, lc_query_res *out,
                                             lc_error *error) {
   lc_pouch_query_index_scan_req scan_req;
+  lc_pouch_query_owner_scan_req owner_req;
   lc_pouch_query_index_scan_res scan_res;
   lc_pouch_query_keys_scan_context scan_context;
+  lc_pouch_query_selector_kind selector_kind;
   const char *namespace_name;
+  char *owner_selector;
   int rc;
 
   if (client == NULL || req == NULL || handler == NULL || out == NULL) {
@@ -5791,26 +5902,39 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     return lc_pouch_client_unsupported(
         error, "pouch indexed query_keys is not available");
   }
-  if (!lc_pouch_query_selector_is_match_all(req->selector_json)) {
+  owner_selector = NULL;
+  selector_kind =
+      lc_pouch_query_selector_kind_parse(req->selector_json, &owner_selector,
+                                         error);
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_UNSUPPORTED) {
+    lc_client_free(client, owner_selector);
+    if (error != NULL && error->code == LC_ERR_NOMEM) {
+      return LC_ERR_NOMEM;
+    }
     return lc_pouch_client_unsupported(
-        error, "pouch index query_keys supports only match-all selector");
+        error,
+        "pouch index query_keys supports only match-all or owner selector");
   }
   if (req->fields_json != NULL && req->fields_json[0] != '\0') {
+    lc_client_free(client, owner_selector);
     return lc_pouch_client_unsupported(
         error, "pouch index query_keys does not support fields");
   }
   if (req->return_mode != NULL && req->return_mode[0] != '\0' &&
       strcmp(req->return_mode, "keys") != 0) {
+    lc_client_free(client, owner_selector);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query_keys return_mode must be keys", NULL, NULL,
                         NULL);
   }
   if (!lc_pouch_index_refresh_supported(req->refresh)) {
+    lc_client_free(client, owner_selector);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index query_keys refresh must be wait_for", NULL,
                         NULL, NULL);
   }
   if (req->limit < 0L) {
+    lc_client_free(client, owner_selector);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query_keys limit must be non-negative", NULL,
                         NULL, NULL);
@@ -5819,16 +5943,19 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
                                  error);
   if (rc != LC_OK) {
+    lc_client_free(client, owner_selector);
     return rc;
   }
   if (lc_pouch_index_refresh_is_wait_for(req->refresh)) {
     rc = lc_pouch_wait_for_index(client, namespace_name, error);
     if (rc != LC_OK) {
+      lc_client_free(client, owner_selector);
       return rc;
     }
   }
 
   memset(&scan_req, 0, sizeof(scan_req));
+  memset(&owner_req, 0, sizeof(owner_req));
   memset(&scan_res, 0, sizeof(scan_res));
   memset(&scan_context, 0, sizeof(scan_context));
   memset(out, 0, sizeof(*out));
@@ -5838,10 +5965,26 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   scan_context.handler = handler;
   scan_context.handler_context = context;
 
-  rc = client->pouch_store->query_index_keys_scan(
-      client->pouch_store, &scan_req, lc_pouch_query_keys_index_visit,
-      &scan_context, &scan_res, error);
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER) {
+    if (client->pouch_store->query_owner_keys_scan == NULL) {
+      lc_client_free(client, owner_selector);
+      return lc_pouch_client_unsupported(
+          error, "pouch indexed owner query_keys is not available");
+    }
+    owner_req.namespace_name = namespace_name;
+    owner_req.owner = owner_selector;
+    owner_req.start_after = req->cursor;
+    owner_req.limit = (size_t)req->limit;
+    rc = client->pouch_store->query_owner_keys_scan(
+        client->pouch_store, &owner_req, lc_pouch_query_keys_index_visit,
+        &scan_context, &scan_res, error);
+  } else {
+    rc = client->pouch_store->query_index_keys_scan(
+        client->pouch_store, &scan_req, lc_pouch_query_keys_index_visit,
+        &scan_context, &scan_res, error);
+  }
   if (rc != LC_OK) {
+    lc_client_free(client, owner_selector);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
     return rc;
   }
@@ -5849,6 +5992,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   if (scan_res.next_start_after != NULL) {
     out->cursor = lc_strdup_local(scan_res.next_start_after);
     if (out->cursor == NULL) {
+      lc_client_free(client, owner_selector);
       lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator,
                                             &scan_res);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -5862,10 +6006,12 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
       lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
                                          error);
   if (lc_pouch_query_result_metadata_ready(out, error) != LC_OK) {
+    lc_client_free(client, owner_selector);
     lc_query_res_cleanup(out);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
     return LC_ERR_NOMEM;
   }
+  lc_client_free(client, owner_selector);
   lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
 }

@@ -5390,6 +5390,10 @@ static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
   }
 
   store = (lc_pouch_disk_store *)self->impl;
+  before_log_bytes = 0UL;
+  after_log_bytes = 0UL;
+  before_query_index_bytes = 0UL;
+  after_query_index_bytes = 0UL;
   memset(out, 0, sizeof(*out));
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {

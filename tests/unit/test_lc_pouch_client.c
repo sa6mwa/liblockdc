@@ -4884,15 +4884,27 @@ static void assert_pouch_unsupported(int rc, lc_error *error,
   lc_error_cleanup(error);
 }
 
+static lc_lease *pouch_acquire_query_key_for_owner(lc_client *client,
+                                                   const char *key,
+                                                   const char *owner,
+                                                   lc_error *error);
+
 static lc_lease *pouch_acquire_query_key(lc_client *client, const char *key,
                                          lc_error *error) {
+  return pouch_acquire_query_key_for_owner(client, key, "query-owner", error);
+}
+
+static lc_lease *pouch_acquire_query_key_for_owner(lc_client *client,
+                                                   const char *key,
+                                                   const char *owner,
+                                                   lc_error *error) {
   lc_acquire_req acquire;
   lc_lease *lease;
   int rc;
 
   lc_acquire_req_init(&acquire);
   acquire.key = key;
-  acquire.owner = "query-owner";
+  acquire.owner = owner;
   acquire.ttl_seconds = 60L;
   lease = NULL;
   rc = client->acquire(client, &acquire, &lease, error);
@@ -5540,6 +5552,84 @@ static void test_pouch_endpoint_default_index_query_streams_documents(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_index_query_filters_owner_selector(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-owner-docs");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+
+  alpha = pouch_acquire_query_key_for_owner(client, "alpha", "owner-a",
+                                            &error);
+  pouch_save_query_json(alpha, "{\"owner\":\"a\",\"value\":1}", &error);
+  bravo = pouch_acquire_query_key_for_owner(client, "bravo", "owner-b",
+                                            &error);
+  pouch_save_query_json(bravo, "{\"owner\":\"b\",\"value\":2}", &error);
+  charlie = pouch_acquire_query_key_for_owner(client, "charlie", "owner-a",
+                                              &error);
+  pouch_save_query_json(charlie, "{\"owner\":\"a\",\"value\":3}", &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  req.limit = 1L;
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_non_null(strstr(text, "\"document\":{\"owner\":\"a\",\"value\":1}"));
+  assert_null(strstr(text, "bravo"));
+  assert_string_equal(res.cursor, "alpha");
+  assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  req.cursor = "alpha";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_null(strstr(text, "bravo"));
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_default_index_query_waits_for_refresh(
     void **state) {
   char root[256];
@@ -5642,6 +5732,73 @@ static void test_pouch_endpoint_default_index_query_keys_pages(
   lc_query_res_cleanup(&res);
   alpha->close(alpha);
   bravo->close(bravo);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_index_query_keys_filters_owner_selector(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-owner-keys");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+  alpha = pouch_acquire_query_key_for_owner(client, "alpha", "owner-a",
+                                            &error);
+  bravo = pouch_acquire_query_key_for_owner(client, "bravo", "owner-b",
+                                            &error);
+  charlie = pouch_acquire_query_key_for_owner(client, "charlie", "owner-a",
+                                              &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{\"owner\":\"owner-a\"}";
+  req.limit = 1L;
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(res.cursor, "alpha");
+  assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.cursor = "alpha";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "charlie");
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&res);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
   client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -6763,7 +6920,8 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   query_req.selector_json = "{\"key\":\"alpha\"}";
   rc = client->query(client, &query_req, sink, &query_res, &error);
   assert_pouch_unsupported(rc, &error,
-                           "pouch index query supports only match-all selector");
+                           "pouch index query supports only match-all or "
+                           "owner selector");
   lc_sink_close(sink);
 
   memset(&key_handler, 0, sizeof(key_handler));
@@ -6773,8 +6931,8 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   rc = client->query_keys(client, &query_req, &key_handler, NULL, &query_res,
                           &error);
   assert_pouch_unsupported(rc, &error,
-                           "pouch index query_keys supports only match-all "
-                           "selector");
+                           "pouch index query_keys supports only match-all or "
+                           "owner selector");
 
   lc_namespace_config_req_init(&namespace_req);
   namespace_req.namespace_name = "default";
@@ -7831,8 +7989,12 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_streams_documents),
       cmocka_unit_test(
+          test_pouch_endpoint_index_query_filters_owner_selector),
+      cmocka_unit_test(
           test_pouch_endpoint_default_index_query_waits_for_refresh),
       cmocka_unit_test(test_pouch_endpoint_default_index_query_keys_pages),
+      cmocka_unit_test(
+          test_pouch_endpoint_index_query_keys_filters_owner_selector),
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_keys_waits_for_refresh),
       cmocka_unit_test(

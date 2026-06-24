@@ -63,6 +63,7 @@ cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS
 option(LOCKDC_BUILD_BENCHMARKS "Build local benchmark targets." ON)
 option(LOCKDC_BUILD_FUZZERS "Build clang/libFuzzer targets for parser and stream hardening." OFF)
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
+option(LOCKDC_RELEASE_WERROR "Treat warnings as errors for lockdc release builds." ON)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
 set(LOCKDC_OPENSSL_VERSION "3.6.2" CACHE STRING "Pinned OpenSSL release supplied by c.pkt.systems.")
@@ -178,6 +179,9 @@ function(lc_configure_c_target target)
             -Wextra
             -Wpedantic
         )
+        if(LOCKDC_RELEASE_WERROR AND CMAKE_BUILD_TYPE STREQUAL "Release")
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
     endif()
 endfunction()
 
