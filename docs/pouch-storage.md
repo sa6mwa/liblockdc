@@ -70,6 +70,129 @@ Additional parity details from the storage contract:
   fallback contract matters: scans are lexical, support `start_after` and
   `limit`, and may skip rows that disappear or become transient while scanning.
 
+## Disk Backend Deep-Dive Addendum
+
+The server disk implementation has several subtle correctness boundaries that
+must be treated as pouch design requirements rather than implementation
+accidents.
+
+Storage contract boundaries:
+
+- The backend interface is lower level than the public lockd API. It stores
+  metadata documents, state blobs, arbitrary objects, staged state, namespace
+  lists, backend identity, and optional capabilities. Leases, queues,
+  transactions, query summaries, and attachments are built by composing those
+  primitives.
+- Metadata is the coordination document. State and object records carry payload
+  heads, but public versioning, lease ownership, staged overlays, attachment
+  lists, and query-hidden state live in metadata. Any implementation that treats
+  a state payload record as the whole object will get CAS, remove, query, and
+  attachment behavior wrong.
+- Object storage is not merely attachment storage. Queue payloads, transaction
+  decision records, staged attachment payloads, backend identity, and future
+  internal objects all share the object plane and therefore share object CAS,
+  ETag, listing, copying, and compaction semantics.
+- Optional fast paths must preserve fallback semantics. Metadata summary scans
+  are optimized, but the fallback is still sorted metadata-key listing plus
+  summary loading with the same pagination and not-found behavior.
+
+Record and replay boundaries:
+
+- Replay validation is strictly linear. After a short read, bad header, bad
+  version, bad CRC, truncated type-specific metadata, or malformed state-link,
+  the segment tail is considered invalid and no later bytes are examined.
+- Snapshot replay is not a separate database. It is the first segment in a
+  deterministic replay order, followed by non-obsolete segment tails. Newer tail
+  records can override snapshot records through generation comparison.
+- Installed snapshots and obsolete sets change replay history. When manifest
+  changes install a snapshot or mark files obsolete, the in-memory replay
+  projection must reset and rebuild from the new ordered history.
+- The manifest is an accelerator and lifecycle journal. It is not the sole
+  authority for valid committed records: segment and snapshot directory scans
+  repair missing, legacy, or crash-incomplete manifest state.
+- Legacy open-only manifests need a repair path. Historical segments are
+  backfilled as sealed while the current open tail remains active, otherwise
+  old data becomes a permanent uncompacted tail.
+
+Commit and visibility boundaries:
+
+- Pending records are visible only to their own commit group. Readers and CAS
+  writers outside that group wait for the group outcome, then re-read current
+  indexes before deciding.
+- Applying pending records is independent from advancing replay offsets. A
+  later group may become visible before an earlier group, but the segment
+  `read_offset` advances only across the contiguous applied prefix. This avoids
+  rereading an uncommitted gap as durable history after a later refresh.
+- Failed append or fsync must wake waiters and clear the matching pending maps.
+  Waiters must see the error rather than a half-visible record or a permanent
+  block.
+- `no_sync` still participates in pending visibility and segment lifecycle. It
+  can mark a group logically complete, but an active segment cannot be sealed
+  before a later sync boundary covers prior no-sync epochs.
+- Marker touch is after durable commit and is only a wake/invalidation hint.
+  A failed marker touch cannot roll back the committed write, and a missing
+  marker cannot hide data from forced refresh or segment scans.
+
+Shared-root boundaries:
+
+- Same-key mutation is protected by three layers: per-store striped mutex,
+  process-global striped mutex for multiple handles in one process, and
+  advisory per-key file lock for other processes or hosts.
+- Single-writer mode is an optimization mode, not a different correctness
+  model. It skips per-key file locks for the owner but publishes exclusive
+  writer presence so peers can fence, wait, or detect stale writers.
+- `Close` and `Abort` intentionally differ. Close removes live writer presence;
+  abort stops background work without removing crash-detectable presence, so HA
+  and single-writer tests can observe stale ownership until TTL expiry.
+- Writer presence probes prefer the heartbeat payload over file mtime and fall
+  back to mtime for legacy markers. This avoids false positives from
+  misleading future mtimes.
+- Filesystem notification is never a durability or visibility requirement.
+  Polling and refresh are the baseline, including on NFS-like filesystems.
+
+Compaction boundaries:
+
+- Compaction captures live refs under lock, copies payloads outside the lock,
+  then revalidates that every captured ref is still current before installing a
+  snapshot. Validation drift means the temporary snapshot is abandoned.
+- Active segments, in-flight writes, pending commits, and no-sync epochs keep a
+  segment out of sealing and compaction.
+- State-link records preserve staged promotion without copying payloads in the
+  foreground. Compaction may rewrite a live link into a normal state-put record
+  only when the payload source is being compacted safely.
+- Any current state-link target outside the compaction result protects its
+  source segment or snapshot from obsolete cleanup.
+- Cleanup is retryable. Delete failures keep obsolete entries in memory and in
+  manifest-derived state so later passes can remove them.
+
+Integration-derived compatibility boundaries:
+
+- Remove is not a blind delete. Existing removes advance version and clear
+  state; empty removes report no removal; keepalive can still succeed after
+  remove while stale update/remove CAS fails; reacquire sees empty state at the
+  new version.
+- Queue dequeue is a lease/CAS protocol over storage. Only one contender may
+  claim a visible message, delayed nack hides until the delay expires, visibility
+  timeout handoff fences stale acks, retry exhaustion remains terminal after
+  reopen, and observability calls must not mutate queue state.
+- Start-consumer is storage-facing because handler success, explicit ack/nack,
+  handler failure, auto-ack, and state-save all persist through the same queue
+  and state primitives.
+- Query is storage-facing because flush-wait, refresh-wait, pagination,
+  namespace isolation, public-read results, streaming documents, and index
+  rebuild all depend on ordered summary visibility.
+- Transaction replay is storage-facing because commit and rollback records are
+  durable objects. Replay after restart must promote or discard staged state,
+  clean decision records, and wake query/queue observers without relying on an
+  in-memory transaction manager.
+
+These addendum points are the minimum parity checklist for any later segmented
+pouch backend. The current single-log implementation may collapse segments,
+manifest, and snapshots into one file, but it must still preserve the same
+observable boundaries: linear replay, pending-before-visible, forced refresh on
+uncertainty, streaming payload copy, conservative compaction, and queue/query
+visibility through committed storage records.
+
 ## Design Invariants From The Existing Disk Store
 
 The existing disk store is best understood as a durable projection system:
