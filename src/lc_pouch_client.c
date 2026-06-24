@@ -3740,6 +3740,7 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
                                          const lc_dequeue_req *req,
                                          lc_dequeue_batch_res *out,
                                          lc_error *error) {
+  lc_client_handle *client;
   lc_dequeue_req single_req;
   lc_message *message;
   lc_message **grown;
@@ -3765,6 +3766,7 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
                         "pouch dequeue wait_seconds must be non-negative",
                         NULL, NULL, NULL);
   }
+  client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
   single_req = *req;
   single_req.page_size = 1;
@@ -3782,17 +3784,17 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
     }
     if (rc != LC_OK) {
       lc_dequeue_batch_cleanup(out);
-      free(cursor);
+      lc_client_free(client, cursor);
       return rc;
     }
     if (message == NULL) {
       break;
     }
-    next_cursor = lc_strdup_local(message->next_cursor);
+    next_cursor = lc_client_strdup(client, message->next_cursor);
     if (message->next_cursor != NULL && next_cursor == NULL) {
       message->close(message);
       lc_dequeue_batch_cleanup(out);
-      free(cursor);
+      lc_client_free(client, cursor);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to copy pouch dequeue cursor", NULL, NULL,
                           NULL);
@@ -3802,20 +3804,20 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
     if (grown == NULL) {
       message->close(message);
       lc_dequeue_batch_cleanup(out);
-      free(next_cursor);
-      free(cursor);
+      lc_client_free(client, next_cursor);
+      lc_client_free(client, cursor);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to grow pouch dequeue batch", NULL, NULL,
                           NULL);
     }
-    free(cursor);
+    lc_client_free(client, cursor);
     cursor = next_cursor;
     single_req.start_after = cursor;
     out->messages = grown;
     out->messages[out->count] = message;
     out->count += 1U;
   }
-  free(cursor);
+  lc_client_free(client, cursor);
   return LC_OK;
 }
 
@@ -3823,6 +3825,7 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
                                             const lc_dequeue_req *req,
                                             const lc_consumer *consumer,
                                             int with_state, lc_error *error) {
+  lc_client_handle *client;
   lc_dequeue_req single_req;
   lc_message *message;
   lc_nack_req nack_req;
@@ -3855,6 +3858,7 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
                         "pouch dequeue wait_seconds must be non-negative",
                         NULL, NULL, NULL);
   }
+  client = (lc_client_handle *)self;
   single_req = *req;
   single_req.page_size = 1;
   cursor = NULL;
@@ -3873,7 +3877,7 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
     rc = lc_pouch_client_dequeue_once(self, &single_req, with_state, &message,
                                       &terminal, error);
     if (rc != LC_OK) {
-      free(cursor);
+      lc_client_free(client, cursor);
       return rc;
     }
     if (message == NULL) {
@@ -3886,13 +3890,13 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
           continue;
         }
       }
-      free(cursor);
+      lc_client_free(client, cursor);
       return LC_OK;
     }
-    next_cursor = lc_strdup_local(message->next_cursor);
+    next_cursor = lc_client_strdup(client, message->next_cursor);
     if (message->next_cursor != NULL && next_cursor == NULL) {
       message->close(message);
-      free(cursor);
+      lc_client_free(client, cursor);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to copy pouch subscribe cursor", NULL, NULL,
                           NULL);
@@ -3923,16 +3927,16 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
       message->close(message);
     }
     if (rc != LC_OK) {
-      free(next_cursor);
-      free(cursor);
+      lc_client_free(client, next_cursor);
+      lc_client_free(client, cursor);
       return error != NULL && error->code != LC_OK ? error->code : rc;
     }
-    free(cursor);
+    lc_client_free(client, cursor);
     cursor = next_cursor;
     single_req.start_after = cursor;
     ++index;
   }
-  free(cursor);
+  lc_client_free(client, cursor);
   return LC_OK;
 }
 
