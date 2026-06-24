@@ -3795,6 +3795,93 @@ static void test_independent_processes_dequeue_single_message_once(
   test_cleanup_root(root);
 }
 
+static void test_query_config_defaults_and_configured_options(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_disk_open_opts opts;
+  lc_pouch_query_config config;
+  lc_pouch_store *store;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-config");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&config, 0, sizeof(config));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->query_config);
+  rc = store->query_config(store, "default", &config, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(config.preferred_engine, "index");
+  assert_string_equal(config.fallback_engine, "none");
+  lc_pouch_query_config_cleanup(&allocator, &config);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  memset(&opts, 0, sizeof(opts));
+  opts.query_engine = "scan";
+  opts.query_fallback_engine = "index";
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store,
+                                       &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->query_config(store, "default", &config, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(config.preferred_engine, "scan");
+  assert_string_equal(config.fallback_engine, "index");
+  lc_pouch_query_config_cleanup(&allocator, &config);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_config_rejects_invalid_options(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_disk_open_opts opts;
+  lc_pouch_store *store;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-config-invalid");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  store = NULL;
+
+  opts.query_engine = "linear";
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store,
+                                       &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(store);
+  assert_string_equal(error.message,
+                      "pouch disk query_engine must be index or scan");
+  lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  opts.query_engine = "index";
+  opts.query_fallback_engine = "linear";
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store,
+                                       &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(store);
+  assert_string_equal(
+      error.message,
+      "pouch disk query_fallback_engine must be none, index, or scan");
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -3838,6 +3925,8 @@ int main(void) {
       cmocka_unit_test(test_independent_handles_refresh_before_operations),
       cmocka_unit_test(test_independent_processes_contend_with_cas),
       cmocka_unit_test(test_independent_processes_dequeue_single_message_once),
+      cmocka_unit_test(test_query_config_defaults_and_configured_options),
+      cmocka_unit_test(test_query_config_rejects_invalid_options),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
   };
 

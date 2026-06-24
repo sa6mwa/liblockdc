@@ -2558,7 +2558,9 @@ int lc_pouch_client_get_namespace_config_method(
     lc_client *self, const lc_namespace_config_req *req,
     lc_namespace_config_res *out, lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_query_config store_config;
   const char *namespace_name;
+  int rc;
 
   if (self == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2567,17 +2569,22 @@ int lc_pouch_client_get_namespace_config_method(
   }
   client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
+  memset(&store_config, 0, sizeof(store_config));
   namespace_name = lc_pouch_default_namespace(
       client, req != NULL ? req->namespace_name : NULL);
+  if (client->pouch_store == NULL || client->pouch_store->query_config == NULL) {
+    return lc_pouch_client_unsupported(
+        error, "pouch query configuration is not available");
+  }
+  rc = client->pouch_store->query_config(client->pouch_store, namespace_name,
+                                         &store_config, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   out->namespace_name = lc_strdup_local(namespace_name);
-  out->preferred_engine =
-      lc_strdup_local(client->pouch_query_engine != NULL
-                          ? client->pouch_query_engine
-                          : "index");
-  out->fallback_engine =
-      lc_strdup_local(client->pouch_query_fallback_engine != NULL
-                          ? client->pouch_query_fallback_engine
-                          : "none");
+  out->preferred_engine = lc_strdup_local(store_config.preferred_engine);
+  out->fallback_engine = lc_strdup_local(store_config.fallback_engine);
+  lc_pouch_query_config_cleanup(&client->pouch_allocator, &store_config);
   if (out->namespace_name == NULL || out->preferred_engine == NULL ||
       out->fallback_engine == NULL) {
     lc_namespace_config_res_cleanup(out);

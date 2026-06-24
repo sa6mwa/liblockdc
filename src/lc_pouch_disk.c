@@ -102,6 +102,8 @@ typedef struct lc_pouch_disk_store {
   char *root_path;
   char *log_path;
   char *lock_path;
+  char *query_engine;
+  char *query_fallback_engine;
   int log_fd;
   int lock_fd;
   lc_pouch_disk_state_entry *state_entries;
@@ -290,6 +292,10 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
                                      const char *queue,
                                      lc_pouch_queue_stats *out,
                                      lc_error *error);
+static int lc_pouch_disk_query_config(lc_pouch_store *self,
+                                      const char *namespace_name,
+                                      lc_pouch_query_config *out,
+                                      lc_error *error);
 static int lc_pouch_disk_backend_hash(lc_pouch_store *self, char **out,
                                       lc_error *error);
 static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error);
@@ -346,6 +352,41 @@ static int lc_pouch_disk_validate_namespace_queue(lc_error *error,
     return rc;
   }
   return lc_pouch_disk_validate_name(error, operation, "queue", queue);
+}
+
+static int lc_pouch_disk_query_engine_supported(const char *value,
+                                                int allow_none) {
+  if (value == NULL || value[0] == '\0') {
+    return 1;
+  }
+  if (strcmp(value, "index") == 0 || strcmp(value, "scan") == 0) {
+    return 1;
+  }
+  return allow_none && strcmp(value, "none") == 0;
+}
+
+static const char *lc_pouch_disk_query_engine_default(const char *value) {
+  return value != NULL && value[0] != '\0' ? value : "index";
+}
+
+static const char *lc_pouch_disk_query_fallback_default(const char *value) {
+  return value != NULL && value[0] != '\0' ? value : "none";
+}
+
+static int lc_pouch_disk_validate_open_opts(
+    const lc_pouch_disk_open_opts *opts, lc_error *error) {
+  if (opts == NULL) {
+    return LC_OK;
+  }
+  if (!lc_pouch_disk_query_engine_supported(opts->query_engine, 0)) {
+    return lc_pouch_set_invalid(error,
+                                "pouch disk query_engine must be index or scan");
+  }
+  if (!lc_pouch_disk_query_engine_supported(opts->query_fallback_engine, 1)) {
+    return lc_pouch_set_invalid(
+        error, "pouch disk query_fallback_engine must be none, index, or scan");
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_disk_add_overflows(unsigned long left,
@@ -5463,6 +5504,35 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_query_config(lc_pouch_store *self,
+                                      const char *namespace_name,
+                                      lc_pouch_query_config *out,
+                                      lc_error *error) {
+  lc_pouch_disk_store *store;
+  int rc;
+
+  if (self == NULL || namespace_name == NULL || out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "query_config requires store, namespace, and out");
+  }
+  rc = lc_pouch_disk_validate_name(error, "query_config", "namespace",
+                                   namespace_name);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  out->preferred_engine =
+      lc_pouch_strdup(&store->allocator, store->query_engine);
+  out->fallback_engine =
+      lc_pouch_strdup(&store->allocator, store->query_fallback_engine);
+  if (out->preferred_engine == NULL || out->fallback_engine == NULL) {
+    lc_pouch_query_config_cleanup(&store->allocator, out);
+    return lc_pouch_set_nomem(error, "failed to copy pouch query config");
+  }
+  return LC_OK;
+}
+
 static char *lc_pouch_disk_make_backend_hash(lc_pouch_disk_store *store) {
   unsigned long crc;
   char stack[96];
@@ -5616,6 +5686,8 @@ static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
   lc_pouch_free(&allocator, store->root_path);
   lc_pouch_free(&allocator, store->log_path);
   lc_pouch_free(&allocator, store->lock_path);
+  lc_pouch_free(&allocator, store->query_engine);
+  lc_pouch_free(&allocator, store->query_fallback_engine);
   lc_pouch_free(&allocator, store);
   return LC_OK;
 }
@@ -5627,7 +5699,17 @@ static int lc_pouch_disk_abort(lc_pouch_store *self, lc_error *error) {
 int lc_pouch_disk_open(const char *root_path,
                        const lc_pouch_allocator *allocator,
                        lc_pouch_store **out, lc_error *error) {
+  return lc_pouch_disk_open_with_options(root_path, allocator, NULL, out,
+                                         error);
+}
+
+int lc_pouch_disk_open_with_options(const char *root_path,
+                                    const lc_pouch_allocator *allocator,
+                                    const lc_pouch_disk_open_opts *opts,
+                                    lc_pouch_store **out, lc_error *error) {
   lc_pouch_disk_store *store;
+  const char *query_engine;
+  const char *query_fallback_engine;
   struct stat st;
   int rc;
 
@@ -5636,6 +5718,14 @@ int lc_pouch_disk_open(const char *root_path,
                                 "pouch disk open requires root_path and out");
   }
   *out = NULL;
+  rc = lc_pouch_disk_validate_open_opts(opts, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  query_engine = lc_pouch_disk_query_engine_default(
+      opts != NULL ? opts->query_engine : NULL);
+  query_fallback_engine = lc_pouch_disk_query_fallback_default(
+      opts != NULL ? opts->query_fallback_engine : NULL);
   if (stat(root_path, &st) != 0) {
     if (errno != ENOENT || mkdir(root_path, 0777) != 0) {
       return lc_pouch_set_errno(error, "failed to create pouch root directory");
@@ -5659,10 +5749,14 @@ int lc_pouch_disk_open(const char *root_path,
       lc_pouch_join_path(&store->allocator, root_path, "store.log");
   store->lock_path =
       lc_pouch_join_path(&store->allocator, root_path, "writer.lock");
+  store->query_engine = lc_pouch_strdup(&store->allocator, query_engine);
+  store->query_fallback_engine =
+      lc_pouch_strdup(&store->allocator, query_fallback_engine);
   if (store->root_path == NULL || store->log_path == NULL ||
-      store->lock_path == NULL) {
+      store->lock_path == NULL || store->query_engine == NULL ||
+      store->query_fallback_engine == NULL) {
     lc_pouch_disk_close(&store->pub, error);
-    return lc_pouch_set_nomem(error, "failed to allocate pouch disk paths");
+    return lc_pouch_set_nomem(error, "failed to allocate pouch disk options");
   }
   store->lock_fd = open(store->lock_path, O_RDWR | O_CREAT, 0666);
   if (store->lock_fd < 0) {
@@ -5711,6 +5805,7 @@ int lc_pouch_disk_open(const char *root_path,
   store->pub.nack_message = lc_pouch_disk_nack_message;
   store->pub.extend_message = lc_pouch_disk_extend_message;
   store->pub.queue_stats = lc_pouch_disk_queue_stats;
+  store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;
   store->pub.close = lc_pouch_disk_close;
   store->pub.abort = lc_pouch_disk_abort;

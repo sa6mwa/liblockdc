@@ -178,6 +178,16 @@ void lc_pouch_scan_meta_res_cleanup(const lc_pouch_allocator *allocator,
   memset(res, 0, sizeof(*res));
 }
 
+void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
+                                   lc_pouch_query_config *config) {
+  if (config == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, config->preferred_engine);
+  lc_pouch_free(allocator, config->fallback_engine);
+  memset(config, 0, sizeof(*config));
+}
+
 void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
                                         lc_pouch_staged_state_info *info) {
   if (info == NULL) {

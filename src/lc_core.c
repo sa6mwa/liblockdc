@@ -1096,6 +1096,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   lc_engine_client_config engine_config;
   lc_engine_error engine_error;
   lc_bundle_capture_source bundle_capture;
+  lc_pouch_disk_open_opts pouch_open_opts;
   unsigned char *bundle_bytes;
   size_t bundle_length;
   lc_client_handle *client;
@@ -1181,9 +1182,14 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     return public_rc;
   }
   if (client->is_pouch) {
-    rc = lc_pouch_disk_open(lc_pouch_endpoint_path(config->endpoints[0]),
-                            &client->pouch_allocator, &client->pouch_store,
-                            error);
+    memset(&pouch_open_opts, 0, sizeof(pouch_open_opts));
+    pouch_open_opts.query_engine =
+        lc_pouch_query_engine_default(config->pouch_query_engine);
+    pouch_open_opts.query_fallback_engine =
+        lc_pouch_query_fallback_default(config->pouch_query_fallback_engine);
+    rc = lc_pouch_disk_open_with_options(
+        lc_pouch_endpoint_path(config->endpoints[0]), &client->pouch_allocator,
+        &pouch_open_opts, &client->pouch_store, error);
     if (rc != LC_OK) {
       lc_client_close_method(&client->pub);
       lc_engine_error_cleanup(&engine_error);

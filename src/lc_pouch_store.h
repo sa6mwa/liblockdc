@@ -114,6 +114,16 @@ typedef struct lc_pouch_scan_meta_res {
 typedef int (*lc_pouch_scan_meta_visit_fn)(
     void *context, const lc_pouch_scan_meta_row *row, lc_error *error);
 
+typedef struct lc_pouch_query_config {
+  char *preferred_engine;
+  char *fallback_engine;
+} lc_pouch_query_config;
+
+typedef struct lc_pouch_disk_open_opts {
+  const char *query_engine;
+  const char *query_fallback_engine;
+} lc_pouch_disk_open_opts;
+
 typedef struct lc_pouch_object_info {
   char *id;
   char *name;
@@ -284,6 +294,8 @@ struct lc_pouch_store {
   int (*queue_stats)(lc_pouch_store *self, const char *namespace_name,
                      const char *queue, lc_pouch_queue_stats *out,
                      lc_error *error);
+  int (*query_config)(lc_pouch_store *self, const char *namespace_name,
+                      lc_pouch_query_config *out, lc_error *error);
   int (*backend_hash)(lc_pouch_store *self, char **out, lc_error *error);
   int (*close)(lc_pouch_store *self, lc_error *error);
   int (*abort)(lc_pouch_store *self, lc_error *error);
@@ -313,6 +325,8 @@ void lc_pouch_store_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                      lc_pouch_store_meta_res *res);
 void lc_pouch_scan_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_scan_meta_res *res);
+void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
+                                   lc_pouch_query_config *config);
 void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
                                         lc_pouch_staged_state_info *info);
 void lc_pouch_staged_state_list_cleanup(const lc_pouch_allocator *allocator,
@@ -329,5 +343,9 @@ void lc_pouch_queue_stats_cleanup(const lc_pouch_allocator *allocator,
 int lc_pouch_disk_open(const char *root_path,
                        const lc_pouch_allocator *allocator,
                        lc_pouch_store **out, lc_error *error);
+int lc_pouch_disk_open_with_options(const char *root_path,
+                                    const lc_pouch_allocator *allocator,
+                                    const lc_pouch_disk_open_opts *opts,
+                                    lc_pouch_store **out, lc_error *error);
 
 #endif
