@@ -2621,6 +2621,74 @@ static void test_query_index_keys_replays_sidecar_without_metadata_log(
   test_cleanup_root(root);
 }
 
+static void test_query_index_sidecar_compacts_with_store_log(void **state) {
+  char root[256];
+  char owner[2048];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_store_meta_res updated;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture capture;
+  lc_error error;
+  size_t index;
+  size_t sidecar_records;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-sidecar-compact");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&updated, 0, sizeof(updated));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  memset(owner, 'o', sizeof(owner));
+  owner[sizeof(owner) - 1U] = '\0';
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = owner;
+  meta.lease_id = "lease-compact";
+  meta.state_etag = "state-compact";
+  for (index = 0U; index < 160U; ++index) {
+    meta.version = (long)index + 1L;
+    rc = store->store_meta(store, "default", "compact-key", &meta,
+                           stored.etag, &updated, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+    stored = updated;
+    memset(&updated, 0, sizeof(updated));
+  }
+
+  sidecar_records = count_query_index_records_of_type(
+      root, TEST_POUCH_QUERY_INDEX_RECORD_META);
+  assert_true(sidecar_records < 80U);
+
+  req.namespace_name = "default";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "compact-key");
+  assert_true(scan.index_seq >= 160UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -5048,6 +5116,7 @@ int main(void) {
       cmocka_unit_test(test_query_index_sidecar_appends_metadata_records),
       cmocka_unit_test(
           test_query_index_keys_replays_sidecar_without_metadata_log),
+      cmocka_unit_test(test_query_index_sidecar_compacts_with_store_log),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),

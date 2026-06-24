@@ -3184,31 +3184,50 @@ static int lc_pouch_disk_fsync_root(lc_pouch_disk_store *store) {
 static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
                                         lc_error *error) {
   char *temp_path;
+  char *temp_query_path;
   unsigned char *meta_payload;
   size_t meta_payload_length;
   unsigned long body_offset;
   unsigned long old_record_count;
   unsigned long old_replayed_size;
   int old_fd;
+  int old_query_fd;
   int temp_fd;
+  int temp_query_fd;
   int rc;
   size_t index;
 
   temp_path = lc_pouch_join_path(&store->allocator, store->root_path,
                                  "store.compact.tmp");
-  if (temp_path == NULL) {
+  temp_query_path = lc_pouch_join_path(&store->allocator, store->root_path,
+                                       "query.index.compact.tmp");
+  if (temp_path == NULL || temp_query_path == NULL) {
+    lc_pouch_free(&store->allocator, temp_path);
+    lc_pouch_free(&store->allocator, temp_query_path);
     return lc_pouch_set_nomem(error, "failed to allocate pouch compact path");
   }
   temp_fd = open(temp_path, O_RDWR | O_CREAT | O_TRUNC, 0666);
   if (temp_fd < 0) {
     lc_pouch_free(&store->allocator, temp_path);
+    lc_pouch_free(&store->allocator, temp_query_path);
     return lc_pouch_set_errno(error, "failed to open pouch compact log");
+  }
+  temp_query_fd = open(temp_query_path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+  if (temp_query_fd < 0) {
+    close(temp_fd);
+    unlink(temp_path);
+    lc_pouch_free(&store->allocator, temp_path);
+    lc_pouch_free(&store->allocator, temp_query_path);
+    return lc_pouch_set_errno(error,
+                              "failed to open pouch compact query index");
   }
 
   old_fd = store->log_fd;
+  old_query_fd = store->query_index_fd;
   old_record_count = store->replayed_record_count;
   old_replayed_size = store->replayed_log_size;
   store->log_fd = temp_fd;
+  store->query_index_fd = temp_query_fd;
   store->defer_record_fsync = 1;
   rc = LC_OK;
   if (store->next_version > 1L) {
@@ -3248,6 +3267,17 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     }
     lc_pouch_free(&store->allocator, meta_payload);
   }
+  for (index = 0U; rc == LC_OK && index < store->meta_entry_count; ++index) {
+    lc_pouch_disk_meta_entry *entry;
+
+    entry = &store->meta_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    rc = lc_pouch_disk_append_query_index_record(
+        store, entry->namespace_name, entry->key, entry->etag,
+        entry->meta.version, &entry->meta, 0, error);
+  }
   for (index = 0U; rc == LC_OK && index < store->object_entry_count; ++index) {
     lc_pouch_disk_object_entry *entry;
     unsigned long payload_offset;
@@ -3276,6 +3306,10 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
   if (rc == LC_OK && fsync(temp_fd) != 0) {
     rc = lc_pouch_set_errno(error, "failed to fsync pouch compact log");
   }
+  if (rc == LC_OK && fsync(temp_query_fd) != 0) {
+    rc = lc_pouch_set_errno(error,
+                            "failed to fsync pouch compact query index");
+  }
   store->defer_record_fsync = 0;
   if (rc == LC_OK) {
     rc = lc_pouch_disk_replay(store, error);
@@ -3283,26 +3317,55 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
 
   if (rc != LC_OK) {
     store->log_fd = old_fd;
+    store->query_index_fd = old_query_fd;
     store->replayed_record_count = old_record_count;
     store->replayed_log_size = old_replayed_size;
     (void)lc_pouch_disk_replay(store, NULL);
     close(temp_fd);
+    close(temp_query_fd);
     unlink(temp_path);
+    unlink(temp_query_path);
     lc_pouch_free(&store->allocator, temp_path);
+    lc_pouch_free(&store->allocator, temp_query_path);
     return rc;
+  }
+  if (rename(temp_query_path, store->query_index_path) != 0) {
+    store->log_fd = old_fd;
+    store->query_index_fd = old_query_fd;
+    store->replayed_record_count = old_record_count;
+    store->replayed_log_size = old_replayed_size;
+    (void)lc_pouch_disk_replay(store, NULL);
+    close(temp_fd);
+    close(temp_query_fd);
+    unlink(temp_path);
+    unlink(temp_query_path);
+    lc_pouch_free(&store->allocator, temp_path);
+    lc_pouch_free(&store->allocator, temp_query_path);
+    return lc_pouch_set_errno(error,
+                              "failed to install pouch compact query index");
   }
   if (rename(temp_path, store->log_path) != 0) {
     store->log_fd = old_fd;
+    close(old_query_fd);
+    store->query_index_fd = temp_query_fd;
+    store->replayed_query_index_size = (unsigned long)-1;
+    store->replayed_query_index_record_count = 0UL;
     store->replayed_record_count = old_record_count;
     store->replayed_log_size = old_replayed_size;
     (void)lc_pouch_disk_replay(store, NULL);
     close(temp_fd);
     unlink(temp_path);
     lc_pouch_free(&store->allocator, temp_path);
+    lc_pouch_free(&store->allocator, temp_query_path);
     return lc_pouch_set_errno(error, "failed to install pouch compact log");
   }
   lc_pouch_free(&store->allocator, temp_path);
+  lc_pouch_free(&store->allocator, temp_query_path);
   close(old_fd);
+  close(old_query_fd);
+  store->query_index_fd = temp_query_fd;
+  store->replayed_query_index_size = (unsigned long)-1;
+  store->replayed_query_index_record_count = 0UL;
   if (!lc_pouch_disk_fsync_root(store)) {
     return lc_pouch_set_errno(error, "failed to fsync pouch root directory");
   }
