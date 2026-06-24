@@ -2932,6 +2932,8 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   lc_enqueue_res enqueue_res;
   lc_ack_op ack_req;
   lc_ack_res ack_res;
+  lc_namespace_config_req namespace_req;
+  lc_namespace_config_res namespace_res;
   lc_get_res get_res;
   lc_lease *lease;
   lc_source *source;
@@ -2947,6 +2949,7 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   memset(&get_res, 0, sizeof(get_res));
   memset(&enqueue_res, 0, sizeof(enqueue_res));
   memset(&ack_res, 0, sizeof(ack_res));
+  memset(&namespace_res, 0, sizeof(namespace_res));
   client = open_pouch_client(endpoint);
 
   lc_acquire_req_init(&acquire_req);
@@ -2977,6 +2980,14 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_ack_res_cleanup(&ack_res);
   lc_error_cleanup(&error);
+
+  lc_namespace_config_req_init(&namespace_req);
+  namespace_req.namespace_name = ".lockd";
+  rc = client->get_namespace_config(client, &namespace_req, &namespace_res,
+                                    &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_namespace_config_res_cleanup(&namespace_res);
+  lc_error_cleanup(&error);
   client->close(client);
 
   reserved_default_client = open_pouch_client_with_namespace(endpoint, ".lockd");
@@ -2996,6 +3007,13 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+
+  lc_namespace_config_req_init(&namespace_req);
+  rc = reserved_default_client->get_namespace_config(
+      reserved_default_client, &namespace_req, &namespace_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_namespace_config_res_cleanup(&namespace_res);
   lc_error_cleanup(&error);
   reserved_default_client->close(reserved_default_client);
   test_cleanup_root(root);

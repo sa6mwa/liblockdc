@@ -3059,8 +3059,13 @@ int lc_pouch_client_get_namespace_config_method(
   client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
   memset(&store_config, 0, sizeof(store_config));
-  namespace_name = lc_pouch_default_namespace(
-      client, req != NULL ? req->namespace_name : NULL);
+  namespace_name = NULL;
+  rc = lc_pouch_public_namespace(client,
+                                 req != NULL ? req->namespace_name : NULL,
+                                 &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (client->pouch_store == NULL || client->pouch_store->query_config == NULL) {
     return lc_pouch_client_unsupported(
         error, "pouch query configuration is not available");
