@@ -46,6 +46,8 @@ static void cleanup_pouch_root(const char *root) {
 
   snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
   unlink(path);
+  snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
+  unlink(path);
   snprintf(path, sizeof(path), "%s/store.log", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);

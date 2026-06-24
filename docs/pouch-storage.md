@@ -479,6 +479,9 @@ invariants: payload spans are copied with bounded buffers, existing read
 sources keep their old file descriptor alive across rename, foreground writers
 stay serialized, corrupt tails remain replay-truncated, and monotonic tokens
 survive compaction through a private high-water record.
+Opening a store also removes stale `store.compact.tmp` and
+`query.index.compact.tmp` files while holding the writer lock, so crash leftovers
+from an interrupted compaction do not accumulate or confuse later runs.
 
 The single-log milestone is not the v1 search-performance shape. A searchable
 pouch store must not use full-log scanning as the preferred indexed-query path.

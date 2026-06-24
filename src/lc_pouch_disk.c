@@ -655,6 +655,44 @@ static int lc_pouch_disk_force_replay_locked(lc_pouch_disk_store *store,
   return lc_pouch_disk_replay(store, error);
 }
 
+static int lc_pouch_disk_unlink_if_exists(const char *path,
+                                          const char *message,
+                                          lc_error *error) {
+  if (unlink(path) == 0 || errno == ENOENT) {
+    return LC_OK;
+  }
+  return lc_pouch_set_errno(error, message);
+}
+
+static int lc_pouch_disk_cleanup_stale_compaction(lc_pouch_disk_store *store,
+                                                  lc_error *error) {
+  char *temp_path;
+  char *temp_query_path;
+  int rc;
+
+  temp_path = lc_pouch_join_path(&store->allocator, store->root_path,
+                                 "store.compact.tmp");
+  temp_query_path = lc_pouch_join_path(&store->allocator, store->root_path,
+                                       "query.index.compact.tmp");
+  if (temp_path == NULL || temp_query_path == NULL) {
+    lc_pouch_free(&store->allocator, temp_path);
+    lc_pouch_free(&store->allocator, temp_query_path);
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch compact cleanup path");
+  }
+
+  rc = lc_pouch_disk_unlink_if_exists(
+      temp_path, "failed to remove stale pouch compact log", error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_unlink_if_exists(
+        temp_query_path, "failed to remove stale pouch compact query index",
+        error);
+  }
+  lc_pouch_free(&store->allocator, temp_path);
+  lc_pouch_free(&store->allocator, temp_query_path);
+  return rc;
+}
+
 static int lc_pouch_disk_unlock(lc_pouch_disk_store *store, lc_error *error) {
   struct flock lock;
 
@@ -7021,6 +7059,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
     lc_pouch_disk_close(&store->pub, error);
     return rc;
   }
+  rc = lc_pouch_disk_cleanup_stale_compaction(store, error);
   if (lc_pouch_disk_unlock(store, error) != LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }

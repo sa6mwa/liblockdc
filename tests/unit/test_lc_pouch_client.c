@@ -40,7 +40,13 @@ static void test_endpoint_with_query(char *buffer, size_t buffer_size,
 static void test_cleanup_root(const char *root) {
   char path[512];
 
+  snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
+  unlink(path);
   snprintf(path, sizeof(path), "%s/store.log", root);
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/query.index", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
   unlink(path);

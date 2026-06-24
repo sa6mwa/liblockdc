@@ -1,6 +1,7 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +102,10 @@ static void test_root_path(char *buffer, size_t buffer_size,
 static void test_cleanup_root(const char *root) {
   char path[512];
 
+  snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
+  unlink(path);
   snprintf(path, sizeof(path), "%s/store.log", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
@@ -108,6 +113,17 @@ static void test_cleanup_root(const char *root) {
   snprintf(path, sizeof(path), "%s/query.index", root);
   unlink(path);
   rmdir(root);
+}
+
+static void test_write_marker_file(const char *path) {
+  static const char marker[] = "stale";
+  int fd;
+
+  fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, marker, sizeof(marker) - 1U),
+                   (ssize_t)(sizeof(marker) - 1U));
+  assert_int_equal(close(fd), 0);
 }
 
 static lc_source *source_from_text(const char *text) {
@@ -5182,6 +5198,55 @@ static void test_query_config_rejects_invalid_options(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_open_removes_stale_compaction_temps(void **state) {
+  char root[256];
+  char temp_log[512];
+  char temp_query[512];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_put_state_res put_res;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "open-stale-compaction");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_res, 0, sizeof(put_res));
+  store = NULL;
+  source = NULL;
+
+  assert_int_equal(mkdir(root, 0777), 0);
+  snprintf(temp_log, sizeof(temp_log), "%s/store.compact.tmp", root);
+  snprintf(temp_query, sizeof(temp_query), "%s/query.index.compact.tmp", root);
+  test_write_marker_file(temp_log);
+  test_write_marker_file(temp_query);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store);
+  assert_int_equal(access(temp_log, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
+  errno = 0;
+  assert_int_equal(access(temp_query, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
+
+  source = source_from_text("after stale cleanup");
+  rc = store->write_state(store, "default", "key", source, NULL, &put_res,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -5248,6 +5313,7 @@ int main(void) {
       cmocka_unit_test(test_independent_processes_dequeue_single_message_once),
       cmocka_unit_test(test_query_config_defaults_and_configured_options),
       cmocka_unit_test(test_query_config_rejects_invalid_options),
+      cmocka_unit_test(test_open_removes_stale_compaction_temps),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
   };
 
