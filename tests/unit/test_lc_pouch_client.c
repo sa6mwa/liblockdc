@@ -276,6 +276,59 @@ static void partial_pouch_rollback_participant(lc_client *client,
   lc_pouch_meta_record_cleanup(&handle->pouch_allocator, &record);
 }
 
+static void expire_pouch_participant_lease(lc_client *client,
+                                           const char *namespace_name,
+                                           const char *key,
+                                           const char *txn_id,
+                                           lc_error *error) {
+  lc_client_handle *handle;
+  lc_pouch_meta_record record;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_meta next_meta;
+  int rc;
+
+  handle = (lc_client_handle *)client;
+  memset(&record, 0, sizeof(record));
+  memset(&stored, 0, sizeof(stored));
+  rc = handle->pouch_store->load_meta(handle->pouch_store, namespace_name, key,
+                                      &record, error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(record.found);
+  assert_string_equal(record.meta.txn_id, txn_id);
+
+  next_meta = record.meta;
+  next_meta.lease_expires_at_unix = 1L;
+  rc = handle->pouch_store->store_meta(handle->pouch_store, namespace_name, key,
+                                       &next_meta, record.etag, &stored,
+                                       error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_pouch_store_meta_res_cleanup(&handle->pouch_allocator, &stored);
+  lc_pouch_meta_record_cleanup(&handle->pouch_allocator, &record);
+}
+
+static void assert_pouch_staged_state_missing(lc_client *client,
+                                              const char *namespace_name,
+                                              const char *key,
+                                              const char *txn_id,
+                                              lc_error *error) {
+  lc_client_handle *handle;
+  lc_source *body;
+  lc_pouch_state_info info;
+  int rc;
+
+  handle = (lc_client_handle *)client;
+  body = NULL;
+  memset(&info, 0, sizeof(info));
+  rc = handle->pouch_store->load_staged_state(handle->pouch_store,
+                                              namespace_name, key, txn_id,
+                                              &body, &info, error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(body);
+  lc_pouch_state_info_cleanup(&handle->pouch_allocator, &info);
+}
+
 static lc_client *open_pouch_client_with_namespace(const char *endpoint,
                                                    const char *namespace_name) {
   lc_client_config config;
@@ -6669,6 +6722,72 @@ static void test_pouch_endpoint_txn_recovery_scans_decision_objects(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_txn_recovery_cleans_abandoned_staged_state(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "txn-recovery-abandoned-staged");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "txn/abandoned-key";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":1}");
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "txn-abandoned-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, lease, "{\"value\":2}", &error);
+  expire_pouch_participant_lease(client, "default", "txn/abandoned-key",
+                                 "txn-abandoned-1", &error);
+  lc_lease_close(lease);
+  lease = NULL;
+  client->close(client);
+
+  client = open_pouch_client(endpoint);
+  assert_pouch_client_state_text(client, "txn/abandoned-key", "{\"value\":1}",
+                                 &error);
+  assert_pouch_staged_state_missing(client, "default", "txn/abandoned-key",
+                                    "txn-abandoned-1", &error);
+
+  acquire.owner = "after-abandoned-cleanup";
+  acquire.txn_id = NULL;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease->txn_id);
+  assert_true(strcmp(lease->txn_id, "txn-abandoned-1") != 0);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
@@ -6795,6 +6914,8 @@ int main(void) {
           test_pouch_endpoint_txn_recovery_continues_after_partial_rollback),
       cmocka_unit_test(
           test_pouch_endpoint_txn_recovery_scans_decision_objects),
+      cmocka_unit_test(
+          test_pouch_endpoint_txn_recovery_cleans_abandoned_staged_state),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

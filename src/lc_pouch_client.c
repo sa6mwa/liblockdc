@@ -90,6 +90,13 @@ typedef struct lc_pouch_txn_recovery_list {
   size_t capacity;
 } lc_pouch_txn_recovery_list;
 
+typedef struct lc_pouch_txn_abandoned_cleanup_context {
+  lc_client_handle *client;
+  const lc_pouch_txn_recovery_list *protected_txns;
+  const char *namespace_name;
+  long now_unix;
+} lc_pouch_txn_abandoned_cleanup_context;
+
 static int lc_pouch_file_sink_write(lc_sink *self, const void *bytes,
                                     size_t count, lc_error *error) {
   lc_pouch_file_sink *sink;
@@ -1023,10 +1030,85 @@ static int lc_pouch_txn_collect_namespace(lc_client_handle *client,
   return LC_OK;
 }
 
+static int lc_pouch_txn_abandoned_cleanup_visit(
+    void *context, const lc_pouch_scan_meta_row *row, lc_error *error) {
+  lc_pouch_txn_abandoned_cleanup_context *cleanup;
+  lc_txn_participant participant;
+
+  cleanup = (lc_pouch_txn_abandoned_cleanup_context *)context;
+  if (cleanup == NULL || row == NULL || row->key == NULL ||
+      row->meta == NULL || row->meta->txn_id == NULL ||
+      row->meta->txn_id[0] == '\0') {
+    return LC_OK;
+  }
+  if (lc_pouch_txn_recovery_list_contains(cleanup->protected_txns,
+                                          row->meta->txn_id) ||
+      row->meta->lease_expires_at_unix > cleanup->now_unix) {
+    return LC_OK;
+  }
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = cleanup->namespace_name;
+  participant.key = row->key;
+  return lc_pouch_txn_apply_participant(
+      cleanup->client, row->meta->txn_id, &participant,
+      LC_POUCH_TXN_STATE_ROLLED_BACK, 1, error);
+}
+
+static int lc_pouch_txn_cleanup_abandoned_namespace(
+    lc_client_handle *client, const char *namespace_name,
+    const lc_pouch_txn_recovery_list *protected_txns, lc_error *error) {
+  lc_pouch_txn_abandoned_cleanup_context cleanup;
+  lc_pouch_scan_meta_req req;
+  lc_pouch_scan_meta_res scan;
+  char *cursor;
+  char *next_cursor;
+  int rc;
+
+  memset(&cleanup, 0, sizeof(cleanup));
+  cleanup.client = client;
+  cleanup.protected_txns = protected_txns;
+  cleanup.namespace_name = namespace_name;
+  cleanup.now_unix = lc_pouch_now_unix();
+
+  cursor = NULL;
+  do {
+    memset(&req, 0, sizeof(req));
+    memset(&scan, 0, sizeof(scan));
+    req.namespace_name = namespace_name;
+    req.start_after = cursor;
+    req.limit = 128U;
+    req.include_hidden = 1;
+    next_cursor = NULL;
+    rc = client->pouch_store->scan_meta(
+        client->pouch_store, &req, lc_pouch_txn_abandoned_cleanup_visit,
+        &cleanup, &scan, error);
+    if (rc != LC_OK) {
+      lc_client_free(client, cursor);
+      return rc;
+    }
+    if (scan.truncated && scan.next_start_after != NULL) {
+      next_cursor = lc_client_strdup(client, scan.next_start_after);
+      if (next_cursor == NULL) {
+        lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan);
+        lc_client_free(client, cursor);
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to copy pouch abandoned txn cursor", NULL,
+                            NULL, NULL);
+      }
+    }
+    lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan);
+    lc_client_free(client, cursor);
+    cursor = next_cursor;
+  } while (cursor != NULL);
+  return LC_OK;
+}
+
 int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_namespace_list namespaces;
-  lc_pouch_txn_recovery_list list;
+  lc_pouch_txn_recovery_list protected_txns;
+  lc_pouch_txn_recovery_list replay_txns;
   lc_txn_replay_req req;
   lc_txn_replay_res res;
   size_t index;
@@ -1039,33 +1121,46 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
   }
   client = (lc_client_handle *)self;
   memset(&namespaces, 0, sizeof(namespaces));
-  memset(&list, 0, sizeof(list));
-  list.client = client;
-  rc = lc_pouch_txn_collect_decision_objects(client, &list, error);
+  memset(&protected_txns, 0, sizeof(protected_txns));
+  memset(&replay_txns, 0, sizeof(replay_txns));
+  protected_txns.client = client;
+  replay_txns.client = client;
+  rc = lc_pouch_txn_collect_decision_objects(client, &protected_txns, error);
   if (rc != LC_OK) {
-    lc_pouch_txn_recovery_list_cleanup(&list);
+    lc_pouch_txn_recovery_list_cleanup(&protected_txns);
     return rc;
+  }
+  for (index = 0U; index < protected_txns.count; ++index) {
+    rc = lc_pouch_txn_recovery_list_add(&replay_txns,
+                                        protected_txns.txn_ids[index], error);
+    if (rc != LC_OK) {
+      lc_pouch_txn_recovery_list_cleanup(&protected_txns);
+      lc_pouch_txn_recovery_list_cleanup(&replay_txns);
+      return rc;
+    }
   }
   rc = client->pouch_store->list_namespaces(client->pouch_store, &namespaces,
                                             error);
   if (rc != LC_OK) {
+    lc_pouch_txn_recovery_list_cleanup(&protected_txns);
+    lc_pouch_txn_recovery_list_cleanup(&replay_txns);
     return rc;
   }
   for (index = 0U; index < namespaces.count; ++index) {
-    rc = lc_pouch_txn_collect_namespace(client, namespaces.names[index], &list,
-                                        error);
+    rc = lc_pouch_txn_collect_namespace(client, namespaces.names[index],
+                                        &replay_txns, error);
     if (rc != LC_OK) {
       lc_pouch_namespace_list_cleanup(&client->pouch_allocator, &namespaces);
-      lc_pouch_txn_recovery_list_cleanup(&list);
+      lc_pouch_txn_recovery_list_cleanup(&protected_txns);
+      lc_pouch_txn_recovery_list_cleanup(&replay_txns);
       return rc;
     }
   }
-  lc_pouch_namespace_list_cleanup(&client->pouch_allocator, &namespaces);
 
-  for (index = 0U; index < list.count; ++index) {
+  for (index = 0U; index < replay_txns.count; ++index) {
     lc_txn_replay_req_init(&req);
     memset(&res, 0, sizeof(res));
-    req.txn_id = list.txn_ids[index];
+    req.txn_id = replay_txns.txn_ids[index];
     rc = lc_pouch_client_txn_replay_method(self, &req, &res, error);
     lc_txn_replay_res_cleanup(&res);
     if (rc == LC_ERR_SERVER && error != NULL && error->http_status == 404L) {
@@ -1073,11 +1168,33 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
       continue;
     }
     if (rc != LC_OK) {
-      lc_pouch_txn_recovery_list_cleanup(&list);
+      lc_pouch_namespace_list_cleanup(&client->pouch_allocator, &namespaces);
+      lc_pouch_txn_recovery_list_cleanup(&protected_txns);
+      lc_pouch_txn_recovery_list_cleanup(&replay_txns);
+      return rc;
+    }
+    rc = lc_pouch_txn_recovery_list_add(&protected_txns,
+                                        replay_txns.txn_ids[index], error);
+    if (rc != LC_OK) {
+      lc_pouch_namespace_list_cleanup(&client->pouch_allocator, &namespaces);
+      lc_pouch_txn_recovery_list_cleanup(&protected_txns);
+      lc_pouch_txn_recovery_list_cleanup(&replay_txns);
       return rc;
     }
   }
-  lc_pouch_txn_recovery_list_cleanup(&list);
+  for (index = 0U; index < namespaces.count; ++index) {
+    rc = lc_pouch_txn_cleanup_abandoned_namespace(
+        client, namespaces.names[index], &protected_txns, error);
+    if (rc != LC_OK) {
+      lc_pouch_namespace_list_cleanup(&client->pouch_allocator, &namespaces);
+      lc_pouch_txn_recovery_list_cleanup(&protected_txns);
+      lc_pouch_txn_recovery_list_cleanup(&replay_txns);
+      return rc;
+    }
+  }
+  lc_pouch_namespace_list_cleanup(&client->pouch_allocator, &namespaces);
+  lc_pouch_txn_recovery_list_cleanup(&protected_txns);
+  lc_pouch_txn_recovery_list_cleanup(&replay_txns);
   return LC_OK;
 }
 
