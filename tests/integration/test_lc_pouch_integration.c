@@ -688,6 +688,121 @@ static void test_pouch_public_attachment_delete_semantics(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_attachment_prevent_overwrite(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_attach_req attach_req;
+  lc_attach_res first_attach;
+  lc_attach_res duplicate_attach;
+  lc_attach_res overwrite_attach;
+  lc_attachment_list attachments;
+  lc_attachment_get_req get_attachment_req;
+  lc_attachment_get_res get_attachment_res;
+  lc_error error;
+  long version_after_first;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "attachment-prevent-overwrite");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&first_attach, 0, sizeof(first_attach));
+  memset(&duplicate_attach, 0, sizeof(duplicate_attach));
+  memset(&overwrite_attach, 0, sizeof(overwrite_attach));
+  memset(&attachments, 0, sizeof(attachments));
+  memset(&get_attachment_res, 0, sizeof(get_attachment_res));
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/prevent-overwrite";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "same.txt";
+  attach_req.content_type = "text/plain";
+  attach_req.prevent_overwrite = 1;
+  source = source_from_text("first-body", &error);
+  rc = lease->attach(lease, &attach_req, source, &first_attach, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(first_attach.attachment.name, "same.txt");
+  version_after_first = lease->version;
+
+  source = source_from_text("duplicate-body", &error);
+  rc = lease->attach(lease, &attach_req, source, &duplicate_attach, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "attachment_exists");
+  assert_int_equal(lease->version, version_after_first);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lease->list_attachments(lease, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 1U);
+  assert_string_equal(attachments.items[0].name, "same.txt");
+  lc_attachment_list_cleanup(&attachments);
+
+  attach_req.prevent_overwrite = 0;
+  source = source_from_text("overwrite-body", &error);
+  rc = lease->attach(lease, &attach_req, source, &overwrite_attach, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(overwrite_attach.attachment.name, "same.txt");
+  assert_string_not_equal(overwrite_attach.attachment.id,
+                          first_attach.attachment.id);
+  assert_int_equal(lease->version, version_after_first + 1L);
+
+  rc = lease->list_attachments(lease, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 1U);
+  assert_string_equal(attachments.items[0].name, "same.txt");
+  lc_attachment_list_cleanup(&attachments);
+
+  lc_attachment_get_req_init(&get_attachment_req);
+  get_attachment_req.selector.name = "same.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->get_attachment(lease, &get_attachment_req, sink,
+                             &get_attachment_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(get_attachment_res.attachment.id,
+                      overwrite_attach.attachment.id);
+  assert_sink_text(sink, "overwrite-body", &error);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  client->close(client);
+  client = NULL;
+
+  lc_attach_res_cleanup(&first_attach);
+  lc_attach_res_cleanup(&duplicate_attach);
+  lc_attach_res_cleanup(&overwrite_attach);
+  lc_attachment_get_res_cleanup(&get_attachment_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_shared_handles(void **state) {
   char root[256];
   char endpoint[320];
@@ -1827,6 +1942,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
+      cmocka_unit_test(test_pouch_public_attachment_prevent_overwrite),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(test_pouch_public_queue_nack_delay_redelivery),
