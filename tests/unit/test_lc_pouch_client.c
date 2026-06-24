@@ -2453,6 +2453,82 @@ static void test_pouch_endpoint_lease_load_respects_json_limit(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_lease_load_repairs_state_meta_gap(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res put_res;
+  lc_get_res get_res;
+  lc_source *source;
+  lc_error error;
+  pouch_value_doc value_doc;
+  pouch_value_doc loaded_doc;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "lease-load-repair");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client(endpoint);
+  handle = (lc_client_handle *)client;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "mapped-repair";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  value_doc.value = 1;
+  rc = lease->save(lease, &pouch_value_map, &value_doc, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_non_null(lease->state_etag);
+
+  put_opts.content_type = "application/json";
+  put_opts.if_state_etag = lease->state_etag;
+  source = source_from_text("{\"value\":2}");
+  rc = handle->pouch_store->write_state(handle->pouch_store,
+                                        lease->namespace_name, lease->key,
+                                        source, &put_opts, &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(put_res.new_version, 2L);
+  assert_non_null(put_res.new_state_etag);
+
+  memset(&loaded_doc, 0, sizeof(loaded_doc));
+  rc = lease->load(lease, &pouch_value_map, &loaded_doc, NULL, &get_res,
+                   &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(loaded_doc.value, 2);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.etag, put_res.new_state_etag);
+  assert_int_equal(get_res.version, put_res.new_version);
+  assert_string_equal(lease->state_etag, put_res.new_state_etag);
+  assert_int_equal(lease->version, put_res.new_version);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_get_res_cleanup(&get_res);
+  lc_pouch_put_state_res_cleanup(&handle->pouch_allocator, &put_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void
 test_pouch_endpoint_acquire_for_update_repairs_post_promotion_meta_failure(
     void **state) {
@@ -7104,6 +7180,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_acquire_for_update_repairs_post_promotion_meta_failure),
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
+      cmocka_unit_test(
+          test_pouch_endpoint_lease_load_repairs_state_meta_gap),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_waits_for_later_enqueue),
       cmocka_unit_test(test_pouch_endpoint_watch_queue_snapshots),

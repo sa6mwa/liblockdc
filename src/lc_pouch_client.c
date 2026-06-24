@@ -61,6 +61,12 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
                                                lc_error *error);
 static int lc_pouch_refresh_lease(lc_lease_handle *lease,
                                   const lc_pouch_meta *meta, lc_error *error);
+static int lc_pouch_repair_meta_state_gap(lc_client_handle *client,
+                                          const char *namespace_name,
+                                          const char *key,
+                                          lc_pouch_meta_record *record,
+                                          const lc_pouch_state_info *known_state,
+                                          lc_error *error);
 static int lc_pouch_set_lease_state(lc_lease_handle *lease,
                                     const char *state_etag, long version,
                                     lc_error *error);
@@ -1533,6 +1539,14 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
   }
   rc = lease->client->pouch_store->load_meta(
       lease->client->pouch_store, namespace_name, lease->key, &record, error);
+  if (rc != LC_OK) {
+    lc_get_res_cleanup(out);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    lc_pouch_state_info_cleanup(allocator, &info);
+    return rc;
+  }
+  rc = lc_pouch_repair_meta_state_gap(lease->client, namespace_name, lease->key,
+                                      &record, &info, error);
   if (rc != LC_OK) {
     lc_get_res_cleanup(out);
     lc_pouch_meta_record_cleanup(allocator, &record);
