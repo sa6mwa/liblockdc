@@ -393,6 +393,57 @@ static int pouch_acquire_for_update_empty_handler(
   return rc;
 }
 
+static int pouch_acquire_for_update_noop_handler(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  pouch_acquire_for_update_test *test;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  size_t written;
+  int rc;
+
+  test = (pouch_acquire_for_update_test *)context;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  written = 0U;
+
+  assert_non_null(test);
+  assert_non_null(update);
+  assert_non_null(update->lease);
+  if (test->expected_snapshot != NULL) {
+    assert_true(update->state.has_state);
+    assert_non_null(update->state.reader);
+    assert_true(update->state.version > 0L);
+    rc = lc_sink_to_memory(&sink, error);
+    assert_lc_ok(rc, error);
+    rc = lc_copy(update->state.reader, sink, &written, error);
+    assert_lc_ok(rc, error);
+    assert_true(written > 0U);
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+    assert_lc_ok(rc, error);
+    assert_int_equal(length, strlen(test->expected_snapshot));
+    assert_memory_equal(bytes, test->expected_snapshot, length);
+    lc_sink_close(sink);
+  } else {
+    assert_false(update->state.has_state);
+    assert_null(update->state.reader);
+    assert_int_equal(update->state.version, 0L);
+  }
+
+  test->saw_snapshot = 1;
+  if (test->observer != NULL && test->key != NULL) {
+    if (test->expected_visible_during_update != NULL) {
+      assert_client_state_text(test->observer, test->key,
+                               test->expected_visible_during_update, error);
+    } else {
+      assert_client_state_empty(test->observer, test->key, error);
+    }
+    test->checked_staged_invisible = 1;
+  }
+  return LC_OK;
+}
+
 static int pouch_consumer_state_handle(void *context,
                                        lc_consumer_message *message,
                                        lc_error *error) {
@@ -3844,6 +3895,98 @@ static void test_pouch_public_acquire_for_update_creates_empty_state(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_acquire_for_update_noop_releases_unchanged(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *observer;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_error error;
+  pouch_acquire_for_update_test handler_state;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "acquire-for-update-noop");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  observer = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&handler_state, 0, sizeof(handler_state));
+
+  open_pouch_client(endpoint, &client, &error);
+  open_pouch_client(endpoint, &observer, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/acquire-for-update-noop-key";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire.owner = "noop-existing";
+  handler_state.observer = observer;
+  handler_state.key = "integration/acquire-for-update-noop-key";
+  handler_state.expected_snapshot = "{\"value\":1}";
+  handler_state.expected_visible_during_update = "{\"value\":1}";
+  rc = lc_acquire_for_update(client, &acquire,
+                             pouch_acquire_for_update_noop_handler,
+                             &handler_state, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(handler_state.saw_snapshot);
+  assert_true(handler_state.checked_staged_invisible);
+  assert_client_state_text(client, "integration/acquire-for-update-noop-key",
+                           "{\"value\":1}", &error);
+
+  acquire.owner = "after-noop-existing";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  memset(&handler_state, 0, sizeof(handler_state));
+  acquire.key = "integration/acquire-for-update-noop-empty-key";
+  acquire.owner = "noop-empty";
+  handler_state.observer = observer;
+  handler_state.key = "integration/acquire-for-update-noop-empty-key";
+  rc = lc_acquire_for_update(client, &acquire,
+                             pouch_acquire_for_update_noop_handler,
+                             &handler_state, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(handler_state.saw_snapshot);
+  assert_true(handler_state.checked_staged_invisible);
+  assert_client_state_empty(client,
+                            "integration/acquire-for-update-noop-empty-key",
+                            &error);
+
+  acquire.owner = "after-noop-empty";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  client->close(client);
+  observer->close(observer);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_cas_across_clients(void **state) {
   char root[256];
   char endpoint[320];
@@ -4182,6 +4325,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_acquire_for_update_stages_state),
       cmocka_unit_test(
           test_pouch_public_acquire_for_update_creates_empty_state),
+      cmocka_unit_test(
+          test_pouch_public_acquire_for_update_noop_releases_unchanged),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
       cmocka_unit_test(test_pouch_public_mutate_local_shared_state),
