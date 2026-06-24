@@ -5310,6 +5310,92 @@ static void test_pouch_public_transaction_prepare_survives_reopen(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_transaction_rollback_discards_update(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "txn-rollback-update");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-rollback";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "integration-txn-rollback-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":2}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_client_state_text(client, "integration/txn-rollback", "{\"value\":1}",
+                           &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "integration/txn-rollback";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-txn-rollback-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "rolled_back");
+  lc_txn_decision_res_cleanup(&decision_res);
+  assert_client_state_text(client, "integration/txn-rollback", "{\"value\":1}",
+                           &error);
+
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "integration-txn-rollback-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_lc_server_error(rc, &error, 404L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_lease_close(lease);
+  lease = NULL;
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_txn_replay_res_cleanup(&replay_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_consumer_service_explicit_defer_redelivery(
     void **state) {
   char root[256];
@@ -5476,6 +5562,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_mutate_local_shared_state),
       cmocka_unit_test(
           test_pouch_public_transaction_prepare_survives_reopen),
+      cmocka_unit_test(
+          test_pouch_public_transaction_rollback_discards_update),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
