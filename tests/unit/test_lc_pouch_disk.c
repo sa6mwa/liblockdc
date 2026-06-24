@@ -4355,6 +4355,7 @@ static void test_query_index_keys_recreates_missing_sidecar(void **state) {
   lc_pouch_store_meta_res stored;
   lc_pouch_query_index_scan_req req;
   lc_pouch_query_index_scan_res scan;
+  scan_capture row_capture;
   key_capture capture;
   lc_error error;
   int rc;
@@ -4368,6 +4369,7 @@ static void test_query_index_keys_recreates_missing_sidecar(void **state) {
   memset(&stored, 0, sizeof(stored));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
+  memset(&row_capture, 0, sizeof(row_capture));
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
@@ -4388,6 +4390,16 @@ static void test_query_index_keys_recreates_missing_sidecar(void **state) {
   assert_int_equal(unlink(index_path), 0);
 
   req.namespace_name = "default";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
+                               &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(row_capture.count, 1U);
+  assert_string_equal(row_capture.keys[0], "alpha");
+  assert_int_equal(row_capture.versions[0], 1L);
+  assert_false(scan.truncated);
+  assert_true(test_query_index_size(root) > 0);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
@@ -4413,6 +4425,7 @@ static void test_query_index_keys_rebuilds_future_sidecar_version(
   lc_pouch_store_meta_res stored;
   lc_pouch_query_index_scan_req req;
   lc_pouch_query_index_scan_res scan;
+  scan_capture row_capture;
   key_capture capture;
   lc_error error;
   off_t original_query_index_size;
@@ -4427,6 +4440,7 @@ static void test_query_index_keys_rebuilds_future_sidecar_version(
   memset(&stored, 0, sizeof(stored));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
+  memset(&row_capture, 0, sizeof(row_capture));
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
@@ -4460,6 +4474,18 @@ static void test_query_index_keys_rebuilds_future_sidecar_version(
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
+                               &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(row_capture.count, 2U);
+  assert_string_equal(row_capture.keys[0], "alpha");
+  assert_int_equal(row_capture.versions[0], 1L);
+  assert_string_equal(row_capture.keys[1], "bravo");
+  assert_int_equal(row_capture.versions[1], 2L);
+  assert_false(scan.truncated);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
@@ -4486,6 +4512,7 @@ static void test_query_index_keys_truncates_partial_sidecar_field(
   lc_pouch_store_meta_res stored;
   lc_pouch_query_index_scan_req req;
   lc_pouch_query_index_scan_res scan;
+  scan_capture row_capture;
   key_capture capture;
   lc_error error;
   off_t original_query_index_size;
@@ -4501,6 +4528,7 @@ static void test_query_index_keys_truncates_partial_sidecar_field(
   memset(&stored, 0, sizeof(stored));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
+  memset(&row_capture, 0, sizeof(row_capture));
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
@@ -4536,6 +4564,17 @@ static void test_query_index_keys_truncates_partial_sidecar_field(
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
+                               &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(row_capture.count, 2U);
+  assert_string_equal(row_capture.keys[0], "alpha");
+  assert_int_equal(row_capture.versions[0], 1L);
+  assert_string_equal(row_capture.keys[1], "bravo");
+  assert_int_equal(row_capture.versions[1], 2L);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
