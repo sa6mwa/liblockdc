@@ -1850,6 +1850,87 @@ static void test_pouch_endpoint_queue_rejects_missing_or_wrong_txn_id(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_queue_rejects_missing_or_stale_meta_etag(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_ack_op ack_req;
+  lc_ack_res ack_res;
+  lc_message *message;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-meta-etag-validation");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&ack_res, 0, sizeof(ack_res));
+  client = open_pouch_client(endpoint);
+  message = NULL;
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 60L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("etag-message");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_non_null(message->meta_etag);
+
+  memset(&ack_req, 0, sizeof(ack_req));
+  ack_req.message.namespace_name = message->namespace_name;
+  ack_req.message.queue = message->queue;
+  ack_req.message.message_id = message->message_id;
+  ack_req.message.lease_id = message->lease_id;
+  ack_req.message.fencing_token = message->fencing_token;
+  rc = client->queue_ack(client, &ack_req, &ack_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_false(ack_res.acked);
+  lc_ack_res_cleanup(&ack_res);
+  lc_error_cleanup(&error);
+
+  ack_req.message.meta_etag = "stale-meta-etag";
+  rc = client->queue_ack(client, &ack_req, &ack_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "queue_lease_not_active");
+  assert_false(ack_res.acked);
+  lc_ack_res_cleanup(&ack_res);
+  lc_error_cleanup(&error);
+
+  ack_req.message.meta_etag = message->meta_etag;
+  rc = client->queue_ack(client, &ack_req, &ack_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(ack_res.acked);
+  lc_ack_res_cleanup(&ack_res);
+  message->close(message);
+  message = NULL;
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   char root[256];
   char endpoint[320];
@@ -2466,6 +2547,8 @@ int main(void) {
           test_pouch_endpoint_queue_rejects_expired_delivery_ref),
       cmocka_unit_test(
           test_pouch_endpoint_queue_rejects_missing_or_wrong_txn_id),
+      cmocka_unit_test(
+          test_pouch_endpoint_queue_rejects_missing_or_stale_meta_etag),
       cmocka_unit_test(test_pouch_endpoint_rejects_reserved_namespace),
       cmocka_unit_test(test_pouch_endpoint_dequeue_with_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
