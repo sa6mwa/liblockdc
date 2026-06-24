@@ -8316,6 +8316,11 @@ static int lc_pouch_disk_queue_ref_valid(lc_pouch_disk_queue_entry *entry,
                         "queue_lease_not_active", NULL);
   }
   now_unix = (long)time(NULL);
+  if (entry->expires_at_unix <= now_unix) {
+    return lc_error_set(error, LC_ERR_SERVER, 409L,
+                        "pouch queue message has expired", NULL,
+                        "queue_message_expired", NULL);
+  }
   if (entry->lease_expires_at_unix <= now_unix) {
     return lc_error_set(error, LC_ERR_SERVER, 409L,
                         "pouch queue message lease has expired", NULL,

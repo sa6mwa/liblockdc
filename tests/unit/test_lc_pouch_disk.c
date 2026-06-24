@@ -6956,6 +6956,93 @@ static void test_queue_ttl_expiry_removes_pending_candidate_after_replay(
   test_cleanup_root(root);
 }
 
+static void test_queue_inflight_ttl_expiry_rejects_ack(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_ref ref;
+  lc_pouch_queue_stats stats;
+  lc_error error;
+  int acked;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-inflight-ttl-expired");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&ref, 0, sizeof(ref));
+  memset(&stats, 0, sizeof(stats));
+  store = NULL;
+  payload = NULL;
+  acked = 0;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 1L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("expires-in-flight");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  lc_source_close(payload);
+  payload = NULL;
+  assert_string_equal(dequeued.message_id, enqueued.message_id);
+
+  ref.namespace_name = dequeued.namespace_name;
+  ref.queue = dequeued.queue;
+  ref.message_id = dequeued.message_id;
+  ref.lease_id = dequeued.lease_id;
+  ref.txn_id = dequeued.txn_id;
+  ref.fencing_token = dequeued.fencing_token;
+  ref.meta_etag = dequeued.meta_etag;
+
+  sleep(2U);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 0);
+  assert_int_equal(stats.pending_candidates, 0);
+  assert_null(stats.head_message_id);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  rc = store->ack_message(store, &ref, &acked, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "queue_message_expired");
+  assert_false(acked);
+  lc_error_cleanup(&error);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_nack_allocation_failure_preserves_active_lease(
     void **state) {
   char root[256];
@@ -10977,6 +11064,7 @@ int main(void) {
       cmocka_unit_test(test_queue_delay_hides_until_visible),
       cmocka_unit_test(
           test_queue_ttl_expiry_removes_pending_candidate_after_replay),
+      cmocka_unit_test(test_queue_inflight_ttl_expiry_rejects_ack),
       cmocka_unit_test(
           test_queue_nack_allocation_failure_preserves_active_lease),
       cmocka_unit_test(

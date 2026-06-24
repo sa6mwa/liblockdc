@@ -2992,6 +2992,91 @@ static void test_pouch_public_queue_ttl_expiry_removes_candidate(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_queue_inflight_ttl_expiry_rejects_ack(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *worker;
+  lc_source *source;
+  lc_message *message;
+  lc_message *empty;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "queue-inflight-ttl-expiry");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  worker = NULL;
+  source = NULL;
+  message = NULL;
+  empty = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &worker, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "inflight-ttl-expiry";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 1L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("expires-in-flight", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "inflight-ttl-expiry";
+  dequeue_req.owner = "ttl-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = worker->dequeue(worker, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_true(message->lease_expires_at_unix > 0L);
+
+  sleep(2U);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "inflight-ttl-expiry";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  assert_null(stats.head_message_id);
+  lc_queue_stats_res_cleanup(&stats);
+
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "queue_message_expired");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  message->close(message);
+  message = NULL;
+
+  rc = worker->dequeue(worker, &dequeue_req, &empty, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(empty);
+
+  producer->close(producer);
+  worker->close(worker);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_visibility_redelivery(void **state) {
   char root[256];
   char endpoint[320];
@@ -5067,6 +5152,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_queue_initial_delay_hides_until_visible),
       cmocka_unit_test(test_pouch_public_queue_ttl_expiry_removes_candidate),
+      cmocka_unit_test(
+          test_pouch_public_queue_inflight_ttl_expiry_rejects_ack),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(test_pouch_public_queue_nack_delay_redelivery),
       cmocka_unit_test(test_pouch_public_queue_retry_exhaustion_terminal),
