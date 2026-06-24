@@ -60,6 +60,12 @@ typedef struct lc_pouch_disk_meta_entry {
   int deleted;
 } lc_pouch_disk_meta_entry;
 
+typedef struct lc_pouch_disk_meta_upsert {
+  lc_pouch_disk_meta_entry entry;
+  int existing;
+  int is_new;
+} lc_pouch_disk_meta_upsert;
+
 typedef struct lc_pouch_disk_object_entry {
   char *namespace_name;
   char *key;
@@ -728,18 +734,40 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
                                            int deleted) {
   lc_pouch_disk_meta_entry *entry;
   lc_pouch_disk_meta_entry *grown;
+  lc_pouch_disk_meta_entry staged;
   int existing;
   int is_new;
 
   existing = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
   is_new = existing < 0;
+  memset(&staged, 0, sizeof(staged));
+  staged.namespace_name = is_new ? lc_pouch_strdup(&store->allocator,
+                                                   namespace_name)
+                                 : NULL;
+  staged.key = is_new ? lc_pouch_strdup(&store->allocator, key) : NULL;
+  staged.etag = lc_pouch_strdup(&store->allocator, etag);
+  if ((is_new && (staged.namespace_name == NULL || staged.key == NULL)) ||
+      (etag != NULL && staged.etag == NULL) ||
+      !lc_pouch_meta_copy(&store->allocator, &staged.meta, meta)) {
+    lc_pouch_disk_meta_entry_cleanup(store, &staged);
+    return 0;
+  }
+  staged.deleted = deleted;
+
   if (existing >= 0) {
     entry = &store->meta_entries[existing];
     lc_pouch_free(&store->allocator, entry->etag);
     entry->etag = NULL;
     lc_pouch_meta_cleanup(&store->allocator, &entry->meta);
+    entry->etag = staged.etag;
+    entry->meta = staged.meta;
+    entry->deleted = staged.deleted;
+    staged.etag = NULL;
+    memset(&staged.meta, 0, sizeof(staged.meta));
+    return 1;
   } else {
     if (!lc_pouch_disk_query_index_reserve(store)) {
+      lc_pouch_disk_meta_entry_cleanup(store, &staged);
       return 0;
     }
     if (store->meta_entry_count == store->meta_entry_capacity) {
@@ -752,6 +780,7 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
           &store->allocator, store->meta_entries,
           new_capacity * sizeof(store->meta_entries[0]));
       if (grown == NULL) {
+        lc_pouch_disk_meta_entry_cleanup(store, &staged);
         return 0;
       }
       memset(grown + store->meta_entry_capacity, 0,
@@ -760,22 +789,98 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
       store->meta_entry_capacity = new_capacity;
     }
     entry = &store->meta_entries[store->meta_entry_count++];
-    entry->namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
-    entry->key = lc_pouch_strdup(&store->allocator, key);
-    if (entry->namespace_name == NULL || entry->key == NULL) {
-      return 0;
-    }
+    *entry = staged;
+    memset(&staged, 0, sizeof(staged));
   }
-  entry->etag = lc_pouch_strdup(&store->allocator, etag);
-  if (etag != NULL && entry->etag == NULL) {
-    return 0;
-  }
-  if (!lc_pouch_meta_copy(&store->allocator, &entry->meta, meta)) {
-    return 0;
-  }
-  entry->deleted = deleted;
   if (is_new && !lc_pouch_disk_query_index_insert(
                     store, store->meta_entry_count - 1U)) {
+    store->meta_entry_count--;
+    lc_pouch_disk_meta_entry_cleanup(store, entry);
+    return 0;
+  }
+  return 1;
+}
+
+static void lc_pouch_disk_meta_upsert_cleanup(
+    lc_pouch_disk_store *store, lc_pouch_disk_meta_upsert *upsert) {
+  lc_pouch_disk_meta_entry_cleanup(store, &upsert->entry);
+  upsert->existing = -1;
+  upsert->is_new = 0;
+}
+
+static int lc_pouch_disk_prepare_meta_upsert(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
+    const char *etag, const lc_pouch_meta *meta, int deleted,
+    lc_pouch_disk_meta_upsert *upsert) {
+  lc_pouch_disk_meta_entry *grown;
+
+  memset(upsert, 0, sizeof(*upsert));
+  upsert->existing = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
+  upsert->is_new = upsert->existing < 0;
+  upsert->entry.namespace_name =
+      upsert->is_new ? lc_pouch_strdup(&store->allocator, namespace_name) : NULL;
+  upsert->entry.key =
+      upsert->is_new ? lc_pouch_strdup(&store->allocator, key) : NULL;
+  upsert->entry.etag = lc_pouch_strdup(&store->allocator, etag);
+  if ((upsert->is_new &&
+       (upsert->entry.namespace_name == NULL || upsert->entry.key == NULL)) ||
+      (etag != NULL && upsert->entry.etag == NULL) ||
+      !lc_pouch_meta_copy(&store->allocator, &upsert->entry.meta, meta)) {
+    lc_pouch_disk_meta_upsert_cleanup(store, upsert);
+    return 0;
+  }
+  upsert->entry.deleted = deleted;
+
+  if (upsert->is_new) {
+    if (!lc_pouch_disk_query_index_reserve(store)) {
+      lc_pouch_disk_meta_upsert_cleanup(store, upsert);
+      return 0;
+    }
+    if (store->meta_entry_count == store->meta_entry_capacity) {
+      size_t new_capacity;
+
+      new_capacity = store->meta_entry_capacity == 0U
+                         ? 16U
+                         : store->meta_entry_capacity * 2U;
+      grown = (lc_pouch_disk_meta_entry *)lc_pouch_realloc(
+          &store->allocator, store->meta_entries,
+          new_capacity * sizeof(store->meta_entries[0]));
+      if (grown == NULL) {
+        lc_pouch_disk_meta_upsert_cleanup(store, upsert);
+        return 0;
+      }
+      memset(grown + store->meta_entry_capacity, 0,
+             (new_capacity - store->meta_entry_capacity) * sizeof(grown[0]));
+      store->meta_entries = grown;
+      store->meta_entry_capacity = new_capacity;
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_disk_commit_meta_upsert(
+    lc_pouch_disk_store *store, lc_pouch_disk_meta_upsert *upsert) {
+  lc_pouch_disk_meta_entry *entry;
+
+  if (!upsert->is_new) {
+    entry = &store->meta_entries[upsert->existing];
+    lc_pouch_free(&store->allocator, entry->etag);
+    entry->etag = NULL;
+    lc_pouch_meta_cleanup(&store->allocator, &entry->meta);
+    entry->etag = upsert->entry.etag;
+    entry->meta = upsert->entry.meta;
+    entry->deleted = upsert->entry.deleted;
+    upsert->entry.etag = NULL;
+    memset(&upsert->entry.meta, 0, sizeof(upsert->entry.meta));
+    return 1;
+  }
+
+  entry = &store->meta_entries[store->meta_entry_count++];
+  *entry = upsert->entry;
+  memset(&upsert->entry, 0, sizeof(upsert->entry));
+  if (!lc_pouch_disk_query_index_insert(store, store->meta_entry_count - 1U)) {
+    store->meta_entry_count--;
+    lc_pouch_disk_meta_entry_cleanup(store, entry);
     return 0;
   }
   return 1;
@@ -1696,6 +1801,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   size_t payload_length;
   char *etag;
   unsigned long body_offset;
+  lc_pouch_disk_meta_upsert upsert;
   int index;
   int rc;
 
@@ -1725,6 +1831,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   }
   payload = NULL;
   payload_length = 0U;
+  memset(&upsert, 0, sizeof(upsert));
   if (!lc_pouch_encode_meta(store, meta, &payload, &payload_length)) {
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to encode pouch metadata");
@@ -1735,11 +1842,17 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch metadata etag");
   }
+  if (!lc_pouch_disk_prepare_meta_upsert(store, namespace_name, key, etag, meta,
+                                         0, &upsert)) {
+    lc_pouch_free(&store->allocator, etag);
+    lc_pouch_free(&store->allocator, payload);
+    lc_pouch_disk_unlock(store, error);
+    return lc_pouch_set_nomem(error, "failed to update pouch metadata index");
+  }
   rc = lc_pouch_disk_append_record(
       store, LC_POUCH_RECORD_META_PUT, namespace_name, key, NULL, etag,
       meta->version, payload, payload_length, &body_offset, error);
-  if (rc == LC_OK && !lc_pouch_disk_upsert_meta_entry(store, namespace_name,
-                                                      key, etag, meta, 0)) {
+  if (rc == LC_OK && !lc_pouch_disk_commit_meta_upsert(store, &upsert)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch metadata index");
   }
   if (rc == LC_OK && meta->version >= store->next_version) {
@@ -1757,6 +1870,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, payload);
+  lc_pouch_disk_meta_upsert_cleanup(store, &upsert);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }

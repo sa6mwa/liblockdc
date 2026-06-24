@@ -1926,6 +1926,84 @@ static void test_query_index_projection_replays_updates_and_deletes(
   test_cleanup_root(root);
 }
 
+static void test_metadata_update_allocation_failure_preserves_indexes(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_meta_record loaded;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_store_meta_res updated;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "meta-update-alloc-failure");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&loaded, 0, sizeof(loaded));
+  memset(&stored, 0, sizeof(stored));
+  memset(&updated, 0, sizeof(updated));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner-old";
+  meta.lease_id = "lease-old";
+  meta.state_etag = "state-old";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "lease-key", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner-allocation-failure-sentinel";
+  meta.lease_id = "lease-new";
+  meta.state_etag = "state-new";
+  meta.version = 2L;
+  tracked.fail_malloc_size = strlen(meta.owner) + 1U;
+  rc = store->store_meta(store, "default", "lease-key", &meta, stored.etag,
+                         &updated, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to update pouch metadata index");
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+
+  rc = store->load_meta(store, "default", "lease-key", &loaded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded.found);
+  assert_string_equal(loaded.meta.owner, "owner-old");
+  assert_string_equal(loaded.meta.lease_id, "lease-old");
+  assert_int_equal(loaded.meta.version, 1L);
+  lc_pouch_meta_record_cleanup(&allocator, &loaded);
+
+  req.namespace_name = "default";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "lease-key");
+  assert_int_equal(capture.versions[0], 1L);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  lc_pouch_store_meta_res_cleanup(&allocator, &updated);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_index_flush_reports_current_projection(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -4183,6 +4261,8 @@ int main(void) {
           test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(
           test_query_index_projection_replays_updates_and_deletes),
+      cmocka_unit_test(
+          test_metadata_update_allocation_failure_preserves_indexes),
       cmocka_unit_test(test_index_flush_reports_current_projection),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
