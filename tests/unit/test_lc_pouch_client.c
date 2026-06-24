@@ -2538,6 +2538,21 @@ static void pouch_save_query_json(lc_lease *lease, const char *json,
   assert_int_equal(rc, LC_OK);
 }
 
+static void pouch_save_query_json_with_type(lc_lease *lease, const char *json,
+                                            const char *content_type,
+                                            lc_error *error) {
+  lc_update_opts opts;
+  lc_source *source;
+  int rc;
+
+  source = source_from_text(json);
+  lc_update_opts_init(&opts);
+  opts.content_type = content_type;
+  rc = lease->update(lease, source, &opts, error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+}
+
 static void pouch_hide_query_key(lc_lease *lease, lc_error *error) {
   lc_metadata_req metadata_req;
   int rc;
@@ -2792,6 +2807,55 @@ static void test_pouch_endpoint_scan_query_streams_documents_with_paging(
   bravo->close(bravo);
   charlie->close(charlie);
   delta->close(delta);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-scan-json-escaping");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+  lease = pouch_acquire_query_key(client, "escape\"\\key", &error);
+  pouch_save_query_json_with_type(
+      lease, "{\"escaped\":true}",
+      "application/json; note=\"quoted\\value\"", &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "\"key\":\"escape\\\"\\\\key\""));
+  assert_non_null(strstr(
+      text,
+      "\"content_type\":\"application/json; note=\\\"quoted\\\\value\\\"\""));
+  assert_non_null(strstr(text, "\"document\":{\"escaped\":true}"));
+
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+  lease->close(lease);
   client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -3304,6 +3368,8 @@ int main(void) {
           test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys),
       cmocka_unit_test(
           test_pouch_endpoint_scan_query_streams_documents_with_paging),
+      cmocka_unit_test(
+          test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson),
       cmocka_unit_test(test_pouch_endpoint_configured_scan_query_without_hint),
       cmocka_unit_test(test_pouch_endpoint_configured_scan_fallback_query),
       cmocka_unit_test(test_pouch_endpoint_scan_query_rejects_lql_selector),

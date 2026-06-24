@@ -2120,6 +2120,24 @@ typedef struct lc_pouch_query_scan_context {
   lc_sink *dst;
 } lc_pouch_query_scan_context;
 
+typedef struct lc_pouch_query_row_meta_json {
+  char *key;
+  char *content_type;
+  char *etag;
+  lonejson_int64 version;
+} lc_pouch_query_row_meta_json;
+
+static const lonejson_field lc_pouch_query_row_meta_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC(lc_pouch_query_row_meta_json, key, "key"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_pouch_query_row_meta_json, content_type,
+                                "content_type"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_pouch_query_row_meta_json, etag, "etag"),
+    LONEJSON_FIELD_I64(lc_pouch_query_row_meta_json, version, "version")};
+
+LONEJSON_MAP_DEFINE(lc_pouch_query_row_meta_map,
+                    lc_pouch_query_row_meta_json,
+                    lc_pouch_query_row_meta_fields);
+
 static int lc_pouch_query_keys_callback_failed(lc_error *error,
                                                const char *fallback) {
   if (error != NULL && error->code != LC_OK) {
@@ -2183,56 +2201,6 @@ static int lc_pouch_sink_write_cstr(lc_sink *dst, const char *text,
   return lc_pouch_sink_write_all(dst, text, strlen(text), error);
 }
 
-static int lc_pouch_query_write_json_string(lc_sink *dst, const char *value,
-                                            lc_error *error) {
-  const unsigned char *p;
-  char escape[7];
-  int rc;
-
-  rc = lc_pouch_sink_write_cstr(dst, "\"", error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  if (value != NULL) {
-    p = (const unsigned char *)value;
-    while (*p != '\0') {
-      if (*p == '"' || *p == '\\') {
-        escape[0] = '\\';
-        escape[1] = (char)*p;
-        rc = lc_pouch_sink_write_all(dst, escape, 2U, error);
-      } else if (*p == '\b') {
-        rc = lc_pouch_sink_write_cstr(dst, "\\b", error);
-      } else if (*p == '\f') {
-        rc = lc_pouch_sink_write_cstr(dst, "\\f", error);
-      } else if (*p == '\n') {
-        rc = lc_pouch_sink_write_cstr(dst, "\\n", error);
-      } else if (*p == '\r') {
-        rc = lc_pouch_sink_write_cstr(dst, "\\r", error);
-      } else if (*p == '\t') {
-        rc = lc_pouch_sink_write_cstr(dst, "\\t", error);
-      } else if (*p < 0x20U) {
-        snprintf(escape, sizeof(escape), "\\u%04x", (unsigned int)*p);
-        rc = lc_pouch_sink_write_all(dst, escape, 6U, error);
-      } else {
-        rc = lc_pouch_sink_write_all(dst, p, 1U, error);
-      }
-      if (rc != LC_OK) {
-        return rc;
-      }
-      ++p;
-    }
-  }
-  return lc_pouch_sink_write_cstr(dst, "\"", error);
-}
-
-static int lc_pouch_query_write_json_long(lc_sink *dst, long value,
-                                          lc_error *error) {
-  char buffer[64];
-
-  snprintf(buffer, sizeof(buffer), "%ld", value);
-  return lc_pouch_sink_write_cstr(dst, buffer, error);
-}
-
 static int lc_pouch_content_type_is_json(const char *content_type) {
   size_t length;
 
@@ -2242,6 +2210,66 @@ static int lc_pouch_content_type_is_json(const char *content_type) {
   length = strlen("application/json");
   return strncmp(content_type, "application/json", length) == 0 &&
          (content_type[length] == '\0' || content_type[length] == ';');
+}
+
+static int lc_pouch_lonejson_error(lc_error *error, lonejson_status status,
+                                   const lonejson_error *lj_error,
+                                   const char *message) {
+  int code;
+
+  code = status == LONEJSON_STATUS_ALLOCATION_FAILED ||
+                 status == LONEJSON_STATUS_OVERFLOW
+             ? LC_ERR_NOMEM
+             : LC_ERR_INVALID;
+  return lc_error_set(
+      error, code, 0L,
+      lj_error != NULL && lj_error->message[0] != '\0' ? lj_error->message
+                                                       : message,
+      NULL, NULL, NULL);
+}
+
+static int lc_pouch_query_write_row_prefix(lc_sink *dst, const char *key,
+                                           const lc_pouch_state_info *state,
+                                           lc_error *error) {
+  lc_pouch_query_row_meta_json row;
+  lonejson *runtime;
+  lonejson_error lj_error;
+  lonejson_owned_buffer owned;
+  lonejson_status status;
+  int rc;
+
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query JSON runtime", NULL,
+                        NULL, NULL);
+  }
+  memset(&row, 0, sizeof(row));
+  row.key = (char *)key;
+  row.content_type = (char *)(state != NULL ? state->content_type : NULL);
+  row.etag = (char *)(state != NULL ? state->etag : NULL);
+  row.version = state != NULL ? (lonejson_int64)state->version : 0;
+  owned = lonejson_default_owned_buffer();
+  lonejson_error_init(&lj_error);
+  status = runtime->serialize_owned(runtime, &lc_pouch_query_row_meta_map,
+                                    &row, &owned, &lj_error);
+  if (status != LONEJSON_STATUS_OK) {
+    lonejson_owned_buffer_free(&owned);
+    return lc_pouch_lonejson_error(error, status, &lj_error,
+                                   "failed to serialize pouch query row");
+  }
+  if (owned.len == 0U || owned.data[owned.len - 1U] != '}') {
+    lonejson_owned_buffer_free(&owned);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query row serializer returned invalid JSON",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_sink_write_all(dst, owned.data, owned.len - 1U, error);
+  lonejson_owned_buffer_free(&owned);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_sink_write_cstr(dst, ",\"document\":", error);
 }
 
 static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
@@ -2264,31 +2292,7 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
   embed_json = body != NULL && !state.no_content &&
                lc_pouch_content_type_is_json(state.content_type);
 
-  rc = lc_pouch_sink_write_cstr(scan->dst, "{\"key\":", error);
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_write_json_string(scan->dst, row->key, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_sink_write_cstr(scan->dst, ",\"content_type\":", error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_write_json_string(scan->dst, state.content_type, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_sink_write_cstr(scan->dst, ",\"etag\":", error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_write_json_string(scan->dst, state.etag, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_sink_write_cstr(scan->dst, ",\"version\":", error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_write_json_long(scan->dst, state.version, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_sink_write_cstr(scan->dst, ",\"document\":", error);
-  }
+  rc = lc_pouch_query_write_row_prefix(scan->dst, row->key, &state, error);
   if (rc == LC_OK && embed_json) {
     rc = lc_pouch_copy_source_to_sink(body, scan->dst, error);
   } else if (rc == LC_OK) {
