@@ -1159,13 +1159,15 @@ static void test_pouch_endpoint_remove_without_state_is_noop(void **state) {
   rc = client->acquire(client, &acquire_req, &reacquired, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(reacquired);
+  assert_int_equal(reacquired->version, 2L);
   sink = NULL;
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   rc = reacquired->get(reacquired, sink, NULL, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(get_res.no_content);
-  assert_int_equal(get_res.version, 0L);
+  assert_int_equal(get_res.version, 2L);
+  assert_int_equal(reacquired->version, 2L);
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
   rc = reacquired->release(reacquired, &release_req, &error);

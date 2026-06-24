@@ -2566,7 +2566,8 @@ static void test_pouch_public_remove_recreate_semantics(void **state) {
   rc = reacquired->get(reacquired, sink, NULL, &get_res, &error);
   assert_lc_ok(rc, &error);
   assert_true(get_res.no_content);
-  assert_int_equal(get_res.version, 0L);
+  assert_int_equal(get_res.version, 2L);
+  assert_int_equal(reacquired->version, 2L);
   lc_get_res_cleanup(&get_res);
   lc_sink_close(sink);
   sink = NULL;

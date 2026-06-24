@@ -471,28 +471,26 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
     lc_pouch_state_info_cleanup(allocator, &info);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  if (!info.no_content) {
-    rc = lease->client->pouch_store->load_meta(
-        lease->client->pouch_store, namespace_name, lease->key, &record, error);
+  rc = lease->client->pouch_store->load_meta(
+      lease->client->pouch_store, namespace_name, lease->key, &record, error);
+  if (rc != LC_OK) {
+    lc_get_res_cleanup(out);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    lc_pouch_state_info_cleanup(allocator, &info);
+    return rc;
+  }
+  if (record.found) {
+    rc = lc_pouch_refresh_lease(lease, &record.meta, error);
     if (rc != LC_OK) {
       lc_get_res_cleanup(out);
       lc_pouch_meta_record_cleanup(allocator, &record);
       lc_pouch_state_info_cleanup(allocator, &info);
       return rc;
     }
-    if (record.found) {
-      rc = lc_pouch_refresh_lease(lease, &record.meta, error);
-      if (rc != LC_OK) {
-        lc_get_res_cleanup(out);
-        lc_pouch_meta_record_cleanup(allocator, &record);
-        lc_pouch_state_info_cleanup(allocator, &info);
-        return rc;
-      }
-      out->version = record.meta.version;
-      out->fencing_token = record.meta.fencing_token;
-    }
-    lc_pouch_meta_record_cleanup(allocator, &record);
+    out->version = record.meta.version;
+    out->fencing_token = record.meta.fencing_token;
   }
+  lc_pouch_meta_record_cleanup(allocator, &record);
   lc_pouch_state_info_cleanup(allocator, &info);
   return LC_OK;
 }
@@ -1186,21 +1184,19 @@ int lc_pouch_client_get_method(lc_client *self, const char *key,
     lc_pouch_state_info_cleanup(allocator, &info);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  if (!info.no_content) {
-    rc = client->pouch_store->load_meta(client->pouch_store, namespace_name, key,
-                                        &record, error);
-    if (rc != LC_OK) {
-      lc_get_res_cleanup(out);
-      lc_pouch_meta_record_cleanup(allocator, &record);
-      lc_pouch_state_info_cleanup(allocator, &info);
-      return rc;
-    }
-    if (record.found) {
-      out->version = record.meta.version;
-      out->fencing_token = record.meta.fencing_token;
-    }
+  rc = client->pouch_store->load_meta(client->pouch_store, namespace_name, key,
+                                      &record, error);
+  if (rc != LC_OK) {
+    lc_get_res_cleanup(out);
     lc_pouch_meta_record_cleanup(allocator, &record);
+    lc_pouch_state_info_cleanup(allocator, &info);
+    return rc;
   }
+  if (record.found) {
+    out->version = record.meta.version;
+    out->fencing_token = record.meta.fencing_token;
+  }
+  lc_pouch_meta_record_cleanup(allocator, &record);
   lc_pouch_state_info_cleanup(allocator, &info);
   return LC_OK;
 }
@@ -1305,21 +1301,19 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
     lc_pouch_state_info_cleanup(allocator, &info);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  if (!info.no_content) {
-    rc = client->pouch_store->load_meta(client->pouch_store, namespace_name, key,
-                                        &record, error);
-    if (rc != LC_OK) {
-      lc_get_res_cleanup(out);
-      lc_pouch_meta_record_cleanup(allocator, &record);
-      lc_pouch_state_info_cleanup(allocator, &info);
-      return rc;
-    }
-    if (record.found) {
-      out->version = record.meta.version;
-      out->fencing_token = record.meta.fencing_token;
-    }
+  rc = client->pouch_store->load_meta(client->pouch_store, namespace_name, key,
+                                      &record, error);
+  if (rc != LC_OK) {
+    lc_get_res_cleanup(out);
     lc_pouch_meta_record_cleanup(allocator, &record);
+    lc_pouch_state_info_cleanup(allocator, &info);
+    return rc;
   }
+  if (record.found) {
+    out->version = record.meta.version;
+    out->fencing_token = record.meta.fencing_token;
+  }
+  lc_pouch_meta_record_cleanup(allocator, &record);
   lc_pouch_state_info_cleanup(allocator, &info);
   return LC_OK;
 }
@@ -2812,7 +2806,7 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
   lease = (lc_lease_handle *)self;
   rc = lc_pouch_client_get_method(&lease->client->pub, lease->key, opts, dst,
                                   out, error);
-  if (rc == LC_OK && out != NULL && !out->no_content) {
+  if (rc == LC_OK && out != NULL) {
     new_state_etag = lc_client_strdup(lease->client, out->etag);
     if (out->etag != NULL && new_state_etag == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
