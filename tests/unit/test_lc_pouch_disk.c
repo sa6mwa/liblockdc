@@ -520,6 +520,13 @@ static void truncate_store_log(const char *root) {
   close(fd);
 }
 
+static void chmod_store_log(const char *root, mode_t mode) {
+  char log_path[512];
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  assert_int_equal(chmod(log_path, mode), 0);
+}
+
 static void test_put_u32(unsigned char *dst, unsigned long value) {
   dst[0] = (unsigned char)(value & 255UL);
   dst[1] = (unsigned char)((value >> 8) & 255UL);
@@ -4248,6 +4255,76 @@ static void test_object_copy_streams_existing_payload_without_large_alloc(
   test_cleanup_root(root);
 }
 
+static void test_object_copy_source_open_failure_leaves_destination_unchanged(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source source;
+  lc_pouch_put_object_opts put_opts;
+  lc_pouch_copy_object_opts copy_opts;
+  lc_pouch_object_info original;
+  lc_pouch_object_info copied;
+  lc_pouch_object_list list;
+  lc_error error;
+  size_t payload_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-copy-source-open-failure");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&copy_opts, 0, sizeof(copy_opts));
+  memset(&original, 0, sizeof(original));
+  memset(&copied, 0, sizeof(copied));
+  memset(&list, 0, sizeof(list));
+  store = NULL;
+  payload_length = 128U * 1024U;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  counting_source_init(&source, payload_length);
+  put_opts.name = "large.bin";
+  put_opts.content_type = "application/octet-stream";
+  put_opts.prevent_overwrite = 1;
+  rc = store->put_object(store, "default", "source-key", &source.pub,
+                         &put_opts, &original, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(original.size, (long)payload_length);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
+                   1U);
+
+  chmod_store_log(root, 0);
+
+  copy_opts.source.name = "large.bin";
+  copy_opts.prevent_overwrite = 1;
+  rc = store->copy_object(store, "default", "source-key", "dest-key",
+                          &copy_opts, &copied, &error);
+  chmod_store_log(root, 0600);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "failed to open pouch log for object copy");
+  assert_null(copied.id);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
+                   1U);
+  lc_error_cleanup(&error);
+
+  rc = store->list_objects(store, "default", "dest-key", &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 0U);
+  lc_pouch_object_list_cleanup(&allocator, &list);
+
+  lc_pouch_object_info_cleanup(&allocator, &original);
+  lc_pouch_object_info_cleanup(&allocator, &copied);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
     void **state) {
   char root[256];
@@ -7395,6 +7472,8 @@ int main(void) {
       cmocka_unit_test(test_object_put_streams_payload_without_large_alloc),
       cmocka_unit_test(
           test_object_copy_streams_existing_payload_without_large_alloc),
+      cmocka_unit_test(
+          test_object_copy_source_open_failure_leaves_destination_unchanged),
       cmocka_unit_test(
           test_queue_dequeue_skips_replay_after_same_handle_enqueue),
       cmocka_unit_test(test_queue_rejects_negative_timing_options),
