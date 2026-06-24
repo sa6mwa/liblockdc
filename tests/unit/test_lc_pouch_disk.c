@@ -4718,6 +4718,106 @@ static void test_independent_handles_refresh_index_projection(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_independent_handle_reopens_compacted_query_index(
+    void **state) {
+  char root[256];
+  char owner[2048];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_store_meta_res updated;
+  lc_pouch_query_index_scan_req scan_req;
+  lc_pouch_query_index_scan_res scan_res;
+  key_capture key_rows;
+  lc_error error;
+  size_t index;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "shared-query-index-reopen");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&updated, 0, sizeof(updated));
+  memset(&scan_req, 0, sizeof(scan_req));
+  memset(&scan_res, 0, sizeof(scan_res));
+  memset(&key_rows, 0, sizeof(key_rows));
+  memset(owner, 'o', sizeof(owner));
+  owner[sizeof(owner) - 1U] = '\0';
+  first = NULL;
+  second = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "initial-owner";
+  meta.lease_id = "lease-initial";
+  meta.state_etag = "state-initial";
+  meta.version = 1L;
+  rc = second->store_meta(second, "default", "shared-key", &meta, NULL,
+                          &stored, &error);
+  assert_int_equal(rc, LC_OK);
+
+  scan_req.namespace_name = "default";
+  rc = first->query_index_keys_scan(first, &scan_req, capture_query_key,
+                                    &key_rows, &scan_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(key_rows.count, 1U);
+  assert_string_equal(key_rows.keys[0], "shared-key");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan_res);
+
+  meta.owner = owner;
+  meta.lease_id = "lease-compact";
+  meta.state_etag = "state-compact";
+  meta.has_query_hidden = 0;
+  meta.query_hidden = 0;
+  for (index = 0U; index < 160U; ++index) {
+    meta.version = (long)index + 2L;
+    rc = second->store_meta(second, "default", "shared-key", &meta,
+                            stored.etag, &updated, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+    stored = updated;
+    memset(&updated, 0, sizeof(updated));
+  }
+
+  meta.owner = "hidden-owner";
+  meta.lease_id = "lease-hidden";
+  meta.state_etag = "state-hidden";
+  meta.version = 1000L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 1;
+  rc = second->store_meta(second, "default", "shared-key", &meta, stored.etag,
+                          &updated, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  stored = updated;
+  memset(&updated, 0, sizeof(updated));
+
+  memset(&key_rows, 0, sizeof(key_rows));
+  rc = first->query_index_keys_scan(first, &scan_req, capture_query_key,
+                                    &key_rows, &scan_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(key_rows.count, 0U);
+  assert_true(scan_res.index_seq >= 1000UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan_res);
+
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void child_process_cas_update(const char *root, const char *expected_etag,
                                      int start_fd, const char *payload) {
   lc_pouch_store *store;
@@ -5145,6 +5245,8 @@ int main(void) {
           test_queue_retry_exhaustion_is_not_pending_after_replay),
       cmocka_unit_test(test_independent_handles_refresh_before_operations),
       cmocka_unit_test(test_independent_handles_refresh_index_projection),
+      cmocka_unit_test(
+          test_independent_handle_reopens_compacted_query_index),
       cmocka_unit_test(test_independent_processes_contend_with_cas),
       cmocka_unit_test(test_independent_processes_dequeue_single_message_once),
       cmocka_unit_test(test_query_config_defaults_and_configured_options),

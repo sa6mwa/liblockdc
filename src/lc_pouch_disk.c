@@ -3586,6 +3586,7 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
                                             lc_error *error) {
   unsigned char header[LC_POUCH_QUERY_INDEX_HEADER_SIZE];
   struct stat st;
+  struct stat path_st;
   unsigned long offset;
   unsigned long type;
   unsigned long header_size;
@@ -3600,9 +3601,28 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
   unsigned long record_version;
   unsigned long flags;
   int short_read;
+  int new_fd;
 
   if (fstat(store->query_index_fd, &st) != 0) {
     return lc_pouch_set_errno(error, "failed to stat pouch query index");
+  }
+  if (stat(store->query_index_path, &path_st) != 0) {
+    return lc_pouch_set_errno(error, "failed to stat pouch query index path");
+  }
+  if (st.st_dev != path_st.st_dev || st.st_ino != path_st.st_ino) {
+    new_fd = open(store->query_index_path, O_RDWR);
+    if (new_fd < 0) {
+      return lc_pouch_set_errno(error,
+                                "failed to reopen replaced pouch query index");
+    }
+    close(store->query_index_fd);
+    store->query_index_fd = new_fd;
+    store->replayed_query_index_size = (unsigned long)-1;
+    store->replayed_query_index_record_count = 0UL;
+    if (fstat(store->query_index_fd, &st) != 0) {
+      return lc_pouch_set_errno(error,
+                                "failed to stat reopened pouch query index");
+    }
   }
   if ((unsigned long)st.st_size == store->replayed_query_index_size) {
     return LC_OK;
