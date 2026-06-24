@@ -1,6 +1,7 @@
 #include "lc_api_internal.h"
 #include "lc_internal.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -43,8 +44,39 @@ static long lc_pouch_now_unix(void) { return (long)time(NULL); }
 
 int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
                                  const lc_update_opts *opts, lc_error *error);
+static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
+                                               const lc_update_opts *opts,
+                                               lc_error *error);
 static int lc_pouch_refresh_lease(lc_lease_handle *lease,
                                   const lc_pouch_meta *meta, lc_error *error);
+
+typedef struct lc_pouch_acquire_for_update_file_sink {
+  FILE *fp;
+} lc_pouch_acquire_for_update_file_sink;
+
+static int lc_pouch_acquire_for_update_sink_write(lc_sink *self,
+                                                  const void *bytes,
+                                                  size_t count,
+                                                  lc_error *error) {
+  lc_pouch_acquire_for_update_file_sink *sink;
+
+  sink = (lc_pouch_acquire_for_update_file_sink *)self->impl;
+  if (sink == NULL || sink->fp == NULL) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "pouch acquire_for_update sink is closed", NULL, NULL,
+                        NULL);
+  }
+  if (count > 0U && fwrite(bytes, 1U, count, sink->fp) != count) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to write pouch acquire_for_update snapshot",
+                        strerror(errno), NULL, NULL);
+  }
+  return 1;
+}
+
+static void lc_pouch_acquire_for_update_sink_close(lc_sink *self) {
+  (void)self;
+}
 
 static char *lc_pouch_new_lease_id(lc_client_handle *client, const char *key,
                                    long fencing_token) {
@@ -59,8 +91,9 @@ static char *lc_pouch_new_txn_id(lc_client_handle *client, const char *key,
                                  long fencing_token) {
   char stack[160];
 
-  snprintf(stack, sizeof(stack), "pouch-txn-%ld-%ld-%s", (long)time(NULL),
-           fencing_token, key != NULL ? key : "lease");
+  (void)key;
+  snprintf(stack, sizeof(stack), "pouch-txn-%ld-%ld", (long)time(NULL),
+           fencing_token);
   return lc_client_strdup(client, stack);
 }
 
@@ -616,7 +649,10 @@ static int lc_pouch_refresh_lease(lc_lease_handle *lease,
                            "failed to copy pouch lease owner") != LC_OK ||
       lc_pouch_copy_client(lease->client, &lease_id, meta->lease_id, error,
                            "failed to copy pouch lease id") != LC_OK ||
-      lc_pouch_copy_client(lease->client, &txn_id, meta->txn_id, error,
+      lc_pouch_copy_client(lease->client, &txn_id,
+                           meta->txn_id != NULL ? meta->txn_id
+                                                : lease->txn_id,
+                           error,
                            "failed to copy pouch transaction id") != LC_OK ||
       lc_pouch_copy_client(lease->client, &state_etag, meta->state_etag, error,
                            "failed to copy pouch state etag") != LC_OK) {
@@ -648,6 +684,25 @@ static int lc_pouch_refresh_lease(lc_lease_handle *lease,
   lease->pub.fencing_token = lease->fencing_token;
   lease->pub.has_query_hidden = lease->has_query_hidden;
   lease->pub.query_hidden = lease->query_hidden;
+  return LC_OK;
+}
+
+static int lc_pouch_set_lease_state(lc_lease_handle *lease,
+                                    const char *state_etag, long version,
+                                    lc_error *error) {
+  char *new_state_etag;
+
+  new_state_etag = lc_client_strdup(lease->client, state_etag);
+  if (state_etag != NULL && new_state_etag == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch lease state etag", NULL, NULL,
+                        NULL);
+  }
+  lc_client_free(lease->client, lease->state_etag);
+  lease->state_etag = new_state_etag;
+  lease->version = version;
+  lease->pub.state_etag = lease->state_etag;
+  lease->pub.version = lease->version;
   return LC_OK;
 }
 
@@ -791,6 +846,226 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   lc_pouch_store_meta_res_cleanup(allocator, &stored);
   lc_pouch_meta_record_cleanup(allocator, &existing);
   return LC_OK;
+}
+
+int lc_pouch_client_acquire_for_update_method(
+    lc_client *self, const lc_acquire_req *req,
+    lc_acquire_for_update_handler_fn handler, void *handler_context,
+    lc_error *error) {
+  lc_client_handle *client;
+  lc_lease *lease;
+  lc_lease_handle *lease_handle;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_error handler_error;
+  lc_error release_error;
+  lc_pouch_acquire_for_update_file_sink file_sink;
+  lc_sink sink;
+  lc_acquire_for_update_context update;
+  lc_pouch_promote_staged_opts promote_opts;
+  lc_pouch_discard_staged_opts discard_opts;
+  lc_pouch_put_state_res promoted;
+  lc_pouch_meta_record record;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_meta next_meta;
+  lc_lease_ref ref;
+  char *generated_txn_id;
+  FILE *fp;
+  FILE *snapshot_fp;
+  int rc;
+  int release_rc;
+
+  if (self == NULL || req == NULL || handler == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch acquire_for_update requires self, req, and "
+                        "handler",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  lease = NULL;
+  lease_handle = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  lc_get_opts_init(&get_opts);
+  lc_release_req_init(&release_req);
+  lc_error_init(&handler_error);
+  lc_error_init(&release_error);
+  memset(&update, 0, sizeof(update));
+  memset(&promote_opts, 0, sizeof(promote_opts));
+  memset(&discard_opts, 0, sizeof(discard_opts));
+  memset(&promoted, 0, sizeof(promoted));
+  memset(&record, 0, sizeof(record));
+  memset(&stored, 0, sizeof(stored));
+  memset(&ref, 0, sizeof(ref));
+  generated_txn_id = NULL;
+  fp = NULL;
+  snapshot_fp = NULL;
+  rc = lc_pouch_client_acquire_method(self, req, &lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  lease_handle = (lc_lease_handle *)lease;
+  if (lease_handle->txn_id == NULL || lease_handle->txn_id[0] == '\0') {
+    generated_txn_id =
+        lc_pouch_new_txn_id(client, lease_handle->key,
+                            lease_handle->fencing_token);
+    if (generated_txn_id == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch acquire_for_update "
+                        "transaction id",
+                        NULL, NULL, NULL);
+      goto release_and_return;
+    }
+    lc_client_free(client, lease_handle->txn_id);
+    lease_handle->txn_id = generated_txn_id;
+    lease_handle->pub.txn_id = lease_handle->txn_id;
+    generated_txn_id = NULL;
+  }
+
+  fp = tmpfile();
+  if (fp == NULL) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to create pouch acquire_for_update snapshot file",
+                      strerror(errno), NULL, NULL);
+    goto release_and_return;
+  }
+  file_sink.fp = fp;
+  sink.write = lc_pouch_acquire_for_update_sink_write;
+  sink.close = lc_pouch_acquire_for_update_sink_close;
+  sink.impl = &file_sink;
+
+  rc = lc_lease_get(lease, &sink, &get_opts, &get_res, error);
+  if (rc != LC_OK) {
+    goto release_and_return;
+  }
+  if (fflush(fp) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to flush pouch acquire_for_update snapshot",
+                      strerror(errno), NULL, NULL);
+    goto release_and_return;
+  }
+  rewind(fp);
+
+  lease_handle->pouch_stage_active = 1;
+  lease_handle->pouch_stage_dirty = 0;
+  lease_handle->pouch_stage_version = 0L;
+  lc_client_free(client, lease_handle->pouch_stage_etag);
+  lease_handle->pouch_stage_etag = NULL;
+  lease->update = lc_pouch_lease_staged_update_method;
+
+  update.lease = lease;
+  update.state.has_state = !get_res.no_content;
+  update.state.content_type = get_res.content_type;
+  update.state.etag = get_res.etag;
+  update.state.version = get_res.version;
+  update.state.fencing_token = get_res.fencing_token;
+  update.state.correlation_id = get_res.correlation_id;
+  if (!get_res.no_content) {
+    snapshot_fp = fp;
+    fp = NULL;
+    update.state.reader = lc_source_from_open_file(snapshot_fp, 1);
+    snapshot_fp = NULL;
+    if (update.state.reader == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to wrap pouch acquire_for_update snapshot "
+                        "source",
+                        NULL, NULL, NULL);
+      goto release_and_return;
+    }
+  }
+
+  rc = handler(handler_context, &update, &handler_error);
+  if (update.state.reader != NULL) {
+    lc_source_close(update.state.reader);
+    update.state.reader = NULL;
+  }
+  if (rc != LC_OK) {
+    discard_opts.ignore_not_found = 1;
+    if (lease_handle->pouch_stage_dirty) {
+      (void)client->pouch_store->discard_staged_state(
+          client->pouch_store, lease_handle->namespace_name, lease_handle->key,
+          lease_handle->txn_id, &discard_opts, &release_error);
+    }
+    release_req.rollback = 1;
+    if (error != NULL) {
+      *error = handler_error;
+      lc_error_init(&handler_error);
+    }
+    goto release_and_return;
+  }
+
+  if (lease_handle->pouch_stage_dirty) {
+    promote_opts.expected_head_etag = get_res.no_content ? NULL : get_res.etag;
+    rc = client->pouch_store->promote_staged_state(
+        client->pouch_store, lease_handle->namespace_name, lease_handle->key,
+        lease_handle->txn_id, &promote_opts, &promoted, error);
+    if (rc != LC_OK) {
+      discard_opts.ignore_not_found = 1;
+      (void)client->pouch_store->discard_staged_state(
+          client->pouch_store, lease_handle->namespace_name, lease_handle->key,
+          lease_handle->txn_id, &discard_opts, &release_error);
+      release_req.rollback = 1;
+      goto release_and_return;
+    }
+  }
+  if (lease_handle->pouch_stage_dirty && rc == LC_OK) {
+    memset(&ref, 0, sizeof(ref));
+    ref.namespace_name = lease_handle->namespace_name;
+    ref.key = lease_handle->key;
+    ref.lease_id = lease_handle->lease_id;
+    ref.txn_id = lease_handle->txn_id;
+    ref.fencing_token = lease_handle->fencing_token;
+    rc = lc_pouch_validate_active_lease(client, &ref, &record, error);
+    if (rc == LC_OK) {
+      next_meta = record.meta;
+      next_meta.version = promoted.new_version;
+      next_meta.state_etag = promoted.new_state_etag;
+      rc = client->pouch_store->store_meta(
+          client->pouch_store, record.namespace_name, lease_handle->key,
+          &next_meta, record.etag, &stored, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_set_lease_state(lease_handle, promoted.new_state_etag,
+                                    promoted.new_version, error);
+    }
+    if (rc != LC_OK) {
+      release_req.rollback = 1;
+    }
+  }
+
+release_and_return:
+  if (update.state.reader != NULL) {
+    lc_source_close(update.state.reader);
+    update.state.reader = NULL;
+  }
+  if (fp != NULL) {
+    fclose(fp);
+    fp = NULL;
+  }
+  if (lease != NULL) {
+    lc_pouch_install_lease_methods(lease);
+  }
+  release_rc = lc_lease_release(lease, &release_req, &release_error);
+  if (release_rc != LC_OK && rc == LC_OK) {
+    rc = release_rc;
+    if (error != NULL) {
+      *error = release_error;
+      lc_error_init(&release_error);
+    }
+  }
+  if (release_rc == LC_OK) {
+    lease = NULL;
+  } else if (lease != NULL) {
+    lc_lease_close(lease);
+  }
+  lc_pouch_store_meta_res_cleanup(&client->pouch_allocator, &stored);
+  lc_pouch_meta_record_cleanup(&client->pouch_allocator, &record);
+  lc_pouch_put_state_res_cleanup(&client->pouch_allocator, &promoted);
+  lc_client_free(client, generated_txn_id);
+  lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&handler_error);
+  lc_error_cleanup(&release_error);
+  return rc;
 }
 
 int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
@@ -1100,6 +1375,91 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                               "failed to copy pouch update etag");
   }
   lc_pouch_store_meta_res_cleanup(allocator, &stored);
+  lc_pouch_put_state_res_cleanup(allocator, &put);
+  lc_pouch_meta_record_cleanup(allocator, &record);
+  return rc;
+}
+
+static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
+                                               const lc_update_opts *opts,
+                                               lc_error *error) {
+  lc_lease_handle *lease;
+  lc_pouch_meta_record record;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res put;
+  lc_pouch_allocator *allocator;
+  lc_lease_ref ref;
+  char *stage_etag;
+  int rc;
+
+  if (self == NULL || src == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged update requires self and src", NULL,
+                        NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  if (!lease->pouch_stage_active) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged update requires acquire_for_update",
+                        NULL, NULL, NULL);
+  }
+  if (opts != NULL && opts->has_if_version &&
+      opts->if_version != lease->version) {
+    return lc_error_set(error, LC_ERR_SERVER, 412L,
+                        "pouch staged update version precondition failed",
+                        NULL, "precondition_failed", NULL);
+  }
+  if (opts != NULL && opts->if_state_etag != NULL &&
+      (lease->state_etag == NULL ||
+       strcmp(opts->if_state_etag, lease->state_etag) != 0)) {
+    return lc_error_set(error, LC_ERR_SERVER, 412L,
+                        "pouch staged update etag precondition failed", NULL,
+                        "precondition_failed", NULL);
+  }
+
+  allocator = &lease->client->pouch_allocator;
+  memset(&record, 0, sizeof(record));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&put, 0, sizeof(put));
+  memset(&ref, 0, sizeof(ref));
+  ref.namespace_name = lease->namespace_name;
+  ref.key = lease->key;
+  ref.lease_id = lease->lease_id;
+  ref.txn_id = lease->txn_id;
+  ref.fencing_token = lease->fencing_token;
+  rc = lc_pouch_validate_active_lease(lease->client, &ref, &record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  put_opts.content_type =
+      opts != NULL && opts->content_type != NULL ? opts->content_type
+                                                 : "application/json";
+  if (lease->pouch_stage_dirty) {
+    put_opts.if_state_etag = lease->pouch_stage_etag;
+    put_opts.if_version = lease->pouch_stage_version;
+    put_opts.has_if_version = lease->pouch_stage_version > 0L;
+  }
+
+  rc = lease->client->pouch_store->stage_state(
+      lease->client->pouch_store, record.namespace_name, lease->key,
+      lease->txn_id, src, &put_opts, &put, error);
+  if (rc == LC_OK) {
+    stage_etag = lc_client_strdup(lease->client, put.new_state_etag);
+    if (put.new_state_etag != NULL && stage_etag == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch staged update etag", NULL, NULL,
+                        NULL);
+    } else {
+      lc_client_free(lease->client, lease->pouch_stage_etag);
+      lease->pouch_stage_etag = stage_etag;
+      lease->pouch_stage_version = put.new_version;
+      lease->pouch_stage_dirty = 1;
+      rc = lc_pouch_set_lease_state(lease, put.new_state_etag, put.new_version,
+                                    error);
+    }
+  }
+
   lc_pouch_put_state_res_cleanup(allocator, &put);
   lc_pouch_meta_record_cleanup(allocator, &record);
   return rc;

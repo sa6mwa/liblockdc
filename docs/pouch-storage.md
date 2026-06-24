@@ -1121,6 +1121,17 @@ The staging listing contract is narrower than generic object listing. It must
 include direct staged state objects only and exclude nested staged attachment
 objects such as `.staging/<txn>/attachments/...`.
 
+Client `acquire_for_update` must route handler state writes through staged state
+instead of the ordinary update path. A release request with `rollback` is not
+itself a rollback mechanism if the handler has already committed visible state.
+The pouch client adapter therefore installs a staged update receiver only for
+the duration of the handler callback. Handler success promotes the staged state,
+then updates the active lease metadata to the promoted state version and ETag
+before release. Handler failure discards the staged key and releases with
+rollback. Reads by other clients must never observe a handler write before
+promotion, and a failing handler must leave the previous committed state
+reachable.
+
 Transaction decision records live in the reserved transaction namespace as
 objects. Recovery must support:
 
@@ -1363,6 +1374,13 @@ observable client behavior:
   and the decision record is cleaned;
 - restart with staged state and no valid decision: expired staging is rolled
   back and staging objects are removed;
+- acquire_for_update handler failure after a state write: the staged state is
+  discarded, the active lease is released with rollback, and the last committed
+  state remains visible;
+- acquire_for_update promotion success followed by metadata store failure:
+  callers see an error and the lease is released with rollback, but recovery
+  must treat the promoted state and stale metadata as a repairable consistency
+  gap because promotion cannot be unlinked after it is durably appended;
 - queue ack after visibility handoff: stale owner ack is rejected after another
   owner claims and acks;
 - queue TTL expiry, delayed nack, immediate nack, retry exhaustion, and replay

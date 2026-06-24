@@ -1443,5 +1443,6 @@ void lc_lease_close_method(lc_lease *self) {
   lc_client_free(lease->client, lease->txn_id);
   lc_client_free(lease->client, lease->state_etag);
   lc_client_free(lease->client, lease->queue_state_etag);
+  lc_client_free(lease->client, lease->pouch_stage_etag);
   lc_client_free(lease->client, lease);
 }

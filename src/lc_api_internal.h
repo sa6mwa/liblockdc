@@ -66,6 +66,10 @@ struct lc_lease_handle {
   long lease_expires_at_unix;
   char *state_etag;
   char *queue_state_etag;
+  int pouch_stage_active;
+  int pouch_stage_dirty;
+  char *pouch_stage_etag;
+  long pouch_stage_version;
   int has_query_hidden;
   int query_hidden;
 };
@@ -186,6 +190,10 @@ int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                              lc_lease **out, lc_error *error);
 int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                                    lc_lease **out, lc_error *error);
+int lc_pouch_client_acquire_for_update_method(
+    lc_client *self, const lc_acquire_req *req,
+    lc_acquire_for_update_handler_fn handler, void *handler_context,
+    lc_error *error);
 int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
                                     lc_describe_res *out, lc_error *error);
 int lc_pouch_client_get_method(lc_client *self, const char *key,

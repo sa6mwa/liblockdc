@@ -1270,6 +1270,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.close = lc_client_close_method;
   if (client->is_pouch) {
     client->pub.acquire = lc_pouch_client_acquire_method;
+    client->pub.acquire_for_update = lc_pouch_client_acquire_for_update_method;
     client->pub.describe = lc_pouch_client_describe_method;
     client->pub.get = lc_pouch_client_get_method;
     client->pub.load = lc_pouch_client_load_method;

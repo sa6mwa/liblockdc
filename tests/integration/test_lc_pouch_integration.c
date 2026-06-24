@@ -139,6 +139,12 @@ typedef struct pouch_consumer_failure_test {
   int saw_delivery_error;
 } pouch_consumer_failure_test;
 
+typedef struct pouch_acquire_for_update_test {
+  const char *expected_snapshot;
+  const char *next_state;
+  int saw_snapshot;
+} pouch_acquire_for_update_test;
+
 typedef struct pouch_subscribe_state_test {
   size_t handled;
   char queue[64];
@@ -153,6 +159,67 @@ typedef struct pouch_watch_state {
   char head_message_id[128];
   char correlation_id[64];
 } pouch_watch_state;
+
+static int pouch_acquire_for_update_handler(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  pouch_acquire_for_update_test *test;
+  lc_sink *sink;
+  lc_source *source;
+  const void *bytes;
+  size_t length;
+  size_t written;
+  int rc;
+
+  test = (pouch_acquire_for_update_test *)context;
+  sink = NULL;
+  source = NULL;
+  bytes = NULL;
+  length = 0U;
+  written = 0U;
+  assert_non_null(test);
+  assert_non_null(update);
+  assert_non_null(update->lease);
+  assert_true(update->state.has_state);
+  assert_non_null(update->state.reader);
+  assert_true(update->state.version > 0L);
+
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  rc = lc_copy(update->state.reader, sink, &written, error);
+  assert_lc_ok(rc, error);
+  assert_true(written > 0U);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  assert_lc_ok(rc, error);
+  assert_int_equal(length, strlen(test->expected_snapshot));
+  assert_memory_equal(bytes, test->expected_snapshot, length);
+  test->saw_snapshot = 1;
+  lc_sink_close(sink);
+
+  source = source_from_text(test->next_state, error);
+  rc = update->lease->update(update->lease, source, NULL, error);
+  lc_source_close(source);
+  return rc;
+}
+
+static int pouch_acquire_for_update_failing_handler(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  lc_source *source;
+  int rc;
+
+  (void)context;
+  assert_non_null(update);
+  assert_non_null(update->lease);
+  source = source_from_text("{\"value\":3,\"via\":\"rollback\"}", error);
+  rc = update->lease->update(update->lease, source, NULL, error);
+  lc_source_close(source);
+  assert_lc_ok(rc, error);
+  if (error != NULL) {
+    error->code = LC_ERR_INVALID;
+    error->message = strdup("intentional pouch acquire_for_update failure");
+    assert_non_null(error->message);
+  }
+  return LC_ERR_INVALID;
+}
 
 static int pouch_consumer_state_handle(void *context,
                                        lc_consumer_message *message,
@@ -2225,6 +2292,75 @@ static void test_pouch_public_consumer_service_failure_redelivery(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_acquire_for_update_stages_state(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_error error;
+  pouch_acquire_for_update_test handler_state;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "acquire-for-update");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&handler_state, 0, sizeof(handler_state));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/acquire-for-update-key";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire.owner = "commit";
+  handler_state.expected_snapshot = "{\"value\":1}";
+  handler_state.next_state = "{\"value\":2,\"via\":\"commit\"}";
+  rc = lc_acquire_for_update(client, &acquire,
+                             pouch_acquire_for_update_handler, &handler_state,
+                             &error);
+  assert_lc_ok(rc, &error);
+  assert_true(handler_state.saw_snapshot);
+  assert_client_state_text(client, "integration/acquire-for-update-key",
+                           "{\"value\":2,\"via\":\"commit\"}", &error);
+
+  acquire.owner = "rollback";
+  rc = lc_acquire_for_update(client, &acquire,
+                             pouch_acquire_for_update_failing_handler, NULL,
+                             &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_non_null(error.message);
+  assert_string_equal(error.message,
+                      "intentional pouch acquire_for_update failure");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_client_state_text(client, "integration/acquire-for-update-key",
+                           "{\"value\":2,\"via\":\"commit\"}", &error);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_cas_across_clients(void **state) {
   char root[256];
   char endpoint[320];
@@ -2460,6 +2596,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_consumer_service_start_wait_with_state),
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
+      cmocka_unit_test(test_pouch_public_acquire_for_update_stages_state),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
   };
