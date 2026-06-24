@@ -1009,6 +1009,65 @@ static int bench_pouch_scan_query(long iterations) {
   return rc == LC_OK ? 0 : 1;
 }
 
+static int bench_pouch_index_query(long iterations) {
+  char root[256];
+  char endpoint[320];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_sink *sink;
+  lc_query_req req;
+  lc_query_res res;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "index-query");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_query_rows(root, iterations, &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  sink = NULL;
+  rc = lc_sink_to_file("/dev/null", &sink, &error);
+  if (rc != LC_OK) {
+    client->close(client);
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.selector_json = "{}";
+  req.limit = iterations;
+  rc = client->query(client, &req, sink, &res, &error);
+  if (rc == LC_OK && res.index_seq == 0UL) {
+    fprintf(stderr, "pouch-index-query did not report an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_query_res_cleanup(&res);
+  lc_sink_close(sink);
+  client->close(client);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int run_case(const bench_case *test_case, long iterations) {
   double start_seconds;
   double end_seconds;
@@ -1050,7 +1109,7 @@ static void print_usage(const char *argv0) {
       "[all|streams|json|mutate-parse|mutate-apply|pouch-state|"
       "pouch-staged|pouch-object|pouch-queue|pouch-compaction|"
       "pouch-scan-meta|pouch-open-rebuild|pouch-index-scan|"
-      "pouch-scan-query]\n",
+      "pouch-scan-query|pouch-index-query]\n",
       argv0);
 }
 
@@ -1068,7 +1127,8 @@ int main(int argc, char **argv) {
       {"pouch-scan-meta", 1000L, bench_pouch_scan_meta},
       {"pouch-open-rebuild", 1000L, bench_pouch_open_rebuild},
       {"pouch-index-scan", 1000L, bench_pouch_index_scan},
-      {"pouch-scan-query", 1000L, bench_pouch_scan_query}};
+      {"pouch-scan-query", 1000L, bench_pouch_scan_query},
+      {"pouch-index-query", 1000L, bench_pouch_index_query}};
   const char *scenario;
   long iterations;
   size_t i;
