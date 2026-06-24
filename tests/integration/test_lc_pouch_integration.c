@@ -5480,6 +5480,152 @@ static void test_pouch_public_transaction_mutate_uses_staged_state(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_transaction_remove_commits_delete(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_remove_req remove_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "txn-remove-commit");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  memset(&decision_res, 0, sizeof(decision_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-remove";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "integration-txn-remove-commit-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  lc_remove_req_init(&remove_req);
+  rc = lease->remove(lease, &remove_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_client_state_text(client, "integration/txn-remove", "{\"value\":1}",
+                           &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "integration/txn-remove";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-txn-remove-commit-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "committed");
+  lc_txn_decision_res_cleanup(&decision_res);
+  assert_client_state_empty(client, "integration/txn-remove", &error);
+
+  lc_lease_close(lease);
+  lease = NULL;
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_transaction_remove_rollback_keeps_state(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_remove_req remove_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "txn-remove-rollback");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  memset(&decision_res, 0, sizeof(decision_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-remove-rollback";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "integration-txn-remove-rollback-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  lc_remove_req_init(&remove_req);
+  rc = lease->remove(lease, &remove_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_client_state_text(client, "integration/txn-remove-rollback",
+                           "{\"value\":1}", &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "integration/txn-remove-rollback";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-txn-remove-rollback-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "rolled_back");
+  lc_txn_decision_res_cleanup(&decision_res);
+  assert_client_state_text(client, "integration/txn-remove-rollback",
+                           "{\"value\":1}", &error);
+
+  lc_lease_close(lease);
+  lease = NULL;
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_consumer_service_explicit_defer_redelivery(
     void **state) {
   char root[256];
@@ -5650,6 +5796,9 @@ int main(void) {
           test_pouch_public_transaction_rollback_discards_update),
       cmocka_unit_test(
           test_pouch_public_transaction_mutate_uses_staged_state),
+      cmocka_unit_test(test_pouch_public_transaction_remove_commits_delete),
+      cmocka_unit_test(
+          test_pouch_public_transaction_remove_rollback_keeps_state),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

@@ -59,6 +59,9 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
 static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
                                                const lc_update_opts *opts,
                                                lc_error *error);
+static int lc_pouch_lease_staged_remove_method(lc_lease *self,
+                                               const lc_remove_req *opts,
+                                               lc_error *error);
 static int lc_pouch_lease_mutate_staged_method(lc_lease *self,
                                                const lc_mutate_req *req,
                                                lc_error *error);
@@ -705,7 +708,8 @@ static int lc_pouch_txn_delete_record(lc_client_handle *client,
 static int lc_pouch_txn_clear_participant_meta(
     lc_client_handle *client, const char *namespace_name,
     const lc_txn_participant *participant, const lc_pouch_meta_record *record,
-    const char *state_etag, long state_version, lc_error *error) {
+    int update_state_etag, const char *state_etag, long state_version,
+    lc_error *error) {
   lc_pouch_store_meta_res stored;
   lc_pouch_meta next_meta;
   int rc;
@@ -716,7 +720,7 @@ static int lc_pouch_txn_clear_participant_meta(
   next_meta.lease_id = NULL;
   next_meta.txn_id = NULL;
   next_meta.lease_expires_at_unix = 0L;
-  if (state_etag != NULL) {
+  if (update_state_etag) {
     next_meta.state_etag = (char *)state_etag;
   }
   if (state_version > 0L) {
@@ -747,6 +751,20 @@ static int lc_pouch_txn_finish_already_promoted_commit(
   if (body != NULL) {
     body->close(body);
   }
+  if (state.no_content) {
+    if (record->meta.state_etag == NULL ||
+        state.version <= record->meta.version) {
+      lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
+      return lc_error_set(error, LC_ERR_SERVER, 404L,
+                          "pouch staged state was not found", NULL,
+                          "not_found", NULL);
+    }
+    rc = lc_pouch_txn_clear_participant_meta(
+        client, namespace_name, participant, record, 1, NULL, state.version,
+        error);
+    lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
+    return rc;
+  }
   if (record->meta.state_etag == NULL || state.etag == NULL ||
       strcmp(record->meta.state_etag, state.etag) == 0) {
     lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
@@ -755,7 +773,7 @@ static int lc_pouch_txn_finish_already_promoted_commit(
                         NULL);
   }
   rc = lc_pouch_txn_clear_participant_meta(
-      client, namespace_name, participant, record, state.etag, state.version,
+      client, namespace_name, participant, record, 1, state.etag, state.version,
       error);
   lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
   return rc;
@@ -812,7 +830,7 @@ static int lc_pouch_txn_apply_participant(lc_client_handle *client,
     if (rc == LC_OK) {
       rc = lc_pouch_txn_clear_participant_meta(
           client, namespace_name, participant, &record,
-          promoted.new_state_etag, promoted.new_version, error);
+          1, promoted.new_state_etag, promoted.new_version, error);
     }
   } else if (state == LC_POUCH_TXN_STATE_ROLLED_BACK) {
     discard_opts.ignore_not_found = 1;
@@ -821,7 +839,7 @@ static int lc_pouch_txn_apply_participant(lc_client_handle *client,
         &discard_opts, error);
     if (rc == LC_OK) {
       rc = lc_pouch_txn_clear_participant_meta(
-          client, namespace_name, participant, &record, NULL, 0L, error);
+          client, namespace_name, participant, &record, 0, NULL, 0L, error);
     }
   } else {
     rc = LC_OK;
@@ -1532,9 +1550,11 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
 
   out->no_content = info.no_content;
   out->version = info.version;
-  if (lc_pouch_copy_public(&out->content_type, info.content_type, error,
+  if (lc_pouch_copy_public(&out->content_type,
+                           info.no_content ? NULL : info.content_type, error,
                            "failed to copy pouch content type") != LC_OK ||
-      lc_pouch_copy_public(&out->etag, info.etag, error,
+      lc_pouch_copy_public(&out->etag, info.no_content ? NULL : info.etag,
+                           error,
                            "failed to copy pouch etag") != LC_OK) {
     lc_get_res_cleanup(out);
     lc_pouch_state_info_cleanup(allocator, &info);
@@ -2775,9 +2795,11 @@ static int lc_pouch_client_get_in_namespace(
   }
   out->no_content = info.no_content;
   out->version = info.version;
-  if (lc_pouch_copy_public(&out->content_type, info.content_type, error,
+  if (lc_pouch_copy_public(&out->content_type,
+                           info.no_content ? NULL : info.content_type, error,
                            "failed to copy pouch content type") != LC_OK ||
-      lc_pouch_copy_public(&out->etag, info.etag, error,
+      lc_pouch_copy_public(&out->etag, info.no_content ? NULL : info.etag,
+                           error,
                            "failed to copy pouch etag") != LC_OK) {
     lc_get_res_cleanup(out);
     lc_pouch_state_info_cleanup(allocator, &info);
@@ -2912,9 +2934,11 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
 
   out->no_content = info.no_content;
   out->version = info.version;
-  if (lc_pouch_copy_public(&out->content_type, info.content_type, error,
+  if (lc_pouch_copy_public(&out->content_type,
+                           info.no_content ? NULL : info.content_type, error,
                            "failed to copy pouch content type") != LC_OK ||
-      lc_pouch_copy_public(&out->etag, info.etag, error,
+      lc_pouch_copy_public(&out->etag, info.no_content ? NULL : info.etag,
+                           error,
                            "failed to copy pouch etag") != LC_OK) {
     lc_get_res_cleanup(out);
     lc_pouch_state_info_cleanup(allocator, &info);
@@ -3093,7 +3117,7 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
   put_opts.content_type = opts != NULL && opts->content_type != NULL
                               ? opts->content_type
                               : "application/json";
-  if (lease->pouch_stage_dirty) {
+  if (lease->pouch_stage_dirty && lease->pouch_stage_etag != NULL) {
     put_opts.if_state_etag = lease->pouch_stage_etag;
     put_opts.if_version = lease->pouch_stage_version;
     put_opts.has_if_version = lease->pouch_stage_version > 0L;
@@ -3116,6 +3140,78 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
       rc = lc_pouch_set_lease_state(lease, put.new_state_etag, put.new_version,
                                     error);
     }
+  }
+
+  lc_pouch_put_state_res_cleanup(allocator, &put);
+  lc_pouch_meta_record_cleanup(allocator, &record);
+  return rc;
+}
+
+static int lc_pouch_lease_staged_remove_method(lc_lease *self,
+                                               const lc_remove_req *opts,
+                                               lc_error *error) {
+  lc_lease_handle *lease;
+  lc_pouch_meta_record record;
+  lc_pouch_put_state_res put;
+  lc_pouch_allocator *allocator;
+  lc_lease_ref ref;
+  const char *expected_staged_etag;
+  int rc;
+
+  if (self == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged remove requires self", NULL, NULL,
+                        NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  if (!lease->pouch_stage_active && !lease->pouch_txn_explicit) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged remove requires acquire_for_update or "
+                        "an explicit transaction",
+                        NULL, NULL, NULL);
+  }
+  if (opts != NULL && opts->has_if_version &&
+      opts->if_version != lease->version) {
+    return lc_error_set(error, LC_ERR_SERVER, 412L,
+                        "pouch staged remove version precondition failed",
+                        NULL, "precondition_failed", NULL);
+  }
+  if (opts != NULL && opts->if_state_etag != NULL &&
+      (lease->state_etag == NULL ||
+       strcmp(opts->if_state_etag, lease->state_etag) != 0)) {
+    return lc_error_set(error, LC_ERR_SERVER, 412L,
+                        "pouch staged remove etag precondition failed", NULL,
+                        "precondition_failed", NULL);
+  }
+  if (!lease->pouch_stage_dirty && lease->state_etag == NULL) {
+    return LC_OK;
+  }
+
+  allocator = &lease->client->pouch_allocator;
+  memset(&record, 0, sizeof(record));
+  memset(&put, 0, sizeof(put));
+  memset(&ref, 0, sizeof(ref));
+  ref.namespace_name = lease->namespace_name;
+  ref.key = lease->key;
+  ref.lease_id = lease->lease_id;
+  ref.txn_id = lease->txn_id;
+  ref.fencing_token = lease->fencing_token;
+  rc = lc_pouch_validate_active_lease(lease->client, &ref, &record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  expected_staged_etag =
+      lease->pouch_stage_dirty ? lease->pouch_stage_etag : NULL;
+  rc = lease->client->pouch_store->stage_state_remove(
+      lease->client->pouch_store, record.namespace_name, lease->key,
+      lease->txn_id, expected_staged_etag, &put, error);
+  if (rc == LC_OK) {
+    lc_client_free(lease->client, lease->pouch_stage_etag);
+    lease->pouch_stage_etag = NULL;
+    lease->pouch_stage_version = put.new_version;
+    lease->pouch_stage_dirty = 1;
+    rc = lc_pouch_set_lease_state(lease, NULL, put.new_version, error);
   }
 
   lc_pouch_put_state_res_cleanup(allocator, &put);
@@ -5745,6 +5841,9 @@ int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *opts,
                         "pouch lease remove requires self", NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  if (lease->pouch_stage_active || lease->pouch_txn_explicit) {
+    return lc_pouch_lease_staged_remove_method(self, opts, error);
+  }
   memset(&req, 0, sizeof(req));
   memset(&res, 0, sizeof(res));
   req.lease.namespace_name = lease->namespace_name;

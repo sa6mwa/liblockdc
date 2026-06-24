@@ -1534,6 +1534,132 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_staged_state_remove_promote_discard_and_reopen(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res base;
+  lc_pouch_put_state_res staged_remove;
+  lc_pouch_put_state_res promoted_remove;
+  lc_pouch_put_state_res discarded_remove;
+  lc_pouch_promote_staged_opts promote_opts;
+  lc_pouch_discard_staged_opts discard_opts;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "staged-remove");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&base, 0, sizeof(base));
+  memset(&staged_remove, 0, sizeof(staged_remove));
+  memset(&promoted_remove, 0, sizeof(promoted_remove));
+  memset(&discarded_remove, 0, sizeof(discarded_remove));
+  memset(&promote_opts, 0, sizeof(promote_opts));
+  memset(&discard_opts, 0, sizeof(discard_opts));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->stage_state_remove);
+
+  source = source_from_text("base");
+  rc = store->write_state(store, "default", "lease-key", source, NULL, &base,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->stage_state_remove(store, "default", "lease-key", "txn-remove",
+                                 NULL, &staged_remove, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_null(staged_remove.new_state_etag);
+
+  rc = store->load_staged_state(store, "default", "lease-key", "txn-remove",
+                                &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  assert_int_equal(info.version, staged_remove.new_version);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->read_state(store, "default", "lease-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "base");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  discard_opts.ignore_not_found = 0;
+  rc = store->discard_staged_state(store, "default", "lease-key", "txn-remove",
+                                   &discard_opts, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->read_state(store, "default", "lease-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "base");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->stage_state_remove(store, "default", "lease-key", "txn-remove-2",
+                                 NULL, &discarded_remove, &error);
+  assert_int_equal(rc, LC_OK);
+  promote_opts.expected_head_etag = base.new_state_etag;
+  rc = store->promote_staged_state(store, "default", "lease-key",
+                                   "txn-remove-2", &promote_opts,
+                                   &promoted_remove, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_null(promoted_remove.new_state_etag);
+  assert_true(promoted_remove.new_version > base.new_version);
+
+  rc = store->read_state(store, "default", "lease-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  assert_int_equal(info.version, promoted_remove.new_version);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->read_state(store, "default", "lease-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  assert_int_equal(info.version, promoted_remove.new_version);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &base);
+  lc_pouch_put_state_res_cleanup(&allocator, &staged_remove);
+  lc_pouch_put_state_res_cleanup(&allocator, &promoted_remove);
+  lc_pouch_put_state_res_cleanup(&allocator, &discarded_remove);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_staged_state_listing_orders_paginates_and_replays(
     void **state) {
   char root[256];
@@ -11513,6 +11639,7 @@ int main(void) {
       cmocka_unit_test(
           test_state_write_index_allocation_failure_replays_cleanly),
       cmocka_unit_test(test_staged_state_promote_discard_and_reopen),
+      cmocka_unit_test(test_staged_state_remove_promote_discard_and_reopen),
       cmocka_unit_test(test_staged_state_listing_orders_paginates_and_replays),
       cmocka_unit_test(test_staged_state_rejects_pathlike_transaction_ids),
       cmocka_unit_test(test_root_staged_state_lists_and_discards),

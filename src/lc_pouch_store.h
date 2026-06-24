@@ -410,6 +410,10 @@ struct lc_pouch_store {
                      const char *key, const char *txn_id, lc_source *body,
                      const lc_pouch_put_state_opts *opts,
                      lc_pouch_put_state_res *out, lc_error *error);
+  int (*stage_state_remove)(lc_pouch_store *self, const char *namespace_name,
+                            const char *key, const char *txn_id,
+                            const char *expected_etag,
+                            lc_pouch_put_state_res *out, lc_error *error);
   int (*load_staged_state)(lc_pouch_store *self, const char *namespace_name,
                            const char *key, const char *txn_id,
                            lc_source **body, lc_pouch_state_info *out,
