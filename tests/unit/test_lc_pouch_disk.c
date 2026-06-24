@@ -766,6 +766,7 @@ static void truncate_log_after_first_record(const char *root) {
 typedef struct scan_capture {
   char keys[8][64];
   long versions[8];
+  long updated_at_unix[8];
   int query_hidden[8];
   size_t count;
 } scan_capture;
@@ -789,6 +790,7 @@ static int capture_scan_row(void *context, const lc_pouch_scan_meta_row *row,
   snprintf(capture->keys[capture->count],
            sizeof(capture->keys[capture->count]), "%s", row->key);
   capture->versions[capture->count] = row->meta->version;
+  capture->updated_at_unix[capture->count] = row->meta->updated_at_unix;
   capture->query_hidden[capture->count] = row->meta->query_hidden;
   capture->count++;
   return LC_OK;
@@ -2281,6 +2283,7 @@ static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   meta.txn_id = "txn-a";
   meta.state_etag = "state-a";
   meta.version = 7L;
+  meta.updated_at_unix = 1111L;
   meta.lease_expires_at_unix = 1234L;
   meta.fencing_token = 77L;
   meta.has_query_hidden = 1;
@@ -2302,6 +2305,7 @@ static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   assert_string_equal(loaded.meta.txn_id, "txn-a");
   assert_string_equal(loaded.meta.state_etag, "state-a");
   assert_int_equal(loaded.meta.version, 7L);
+  assert_int_equal(loaded.meta.updated_at_unix, 1111L);
   assert_int_equal(loaded.meta.lease_expires_at_unix, 1234L);
   assert_int_equal(loaded.meta.fencing_token, 77L);
   assert_true(loaded.meta.has_query_hidden);
@@ -2313,6 +2317,7 @@ static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   meta.txn_id = NULL;
   meta.state_etag = "state-b";
   meta.version = 8L;
+  meta.updated_at_unix = 2222L;
   meta.lease_expires_at_unix = 2234L;
   meta.fencing_token = 78L;
   meta.has_query_hidden = 1;
@@ -2340,6 +2345,7 @@ static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   assert_string_equal(loaded.etag, updated.etag);
   assert_string_equal(loaded.meta.owner, "owner-b");
   assert_null(loaded.meta.txn_id);
+  assert_int_equal(loaded.meta.updated_at_unix, 2222L);
   assert_false(loaded.meta.query_hidden);
   lc_pouch_meta_record_cleanup(&allocator, &loaded);
 
@@ -2392,6 +2398,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   meta.lease_id = "lease-b";
   meta.state_etag = "state-b";
   meta.version = 20L;
+  meta.updated_at_unix = 2020L;
   meta.has_query_hidden = 1;
   meta.query_hidden = 0;
   rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
@@ -2402,6 +2409,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   meta.lease_id = "lease-a";
   meta.state_etag = "state-a";
   meta.version = 10L;
+  meta.updated_at_unix = 1010L;
   meta.query_hidden = 1;
   rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
                          &error);
@@ -2411,6 +2419,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   meta.lease_id = "lease-c";
   meta.state_etag = "state-c";
   meta.version = 30L;
+  meta.updated_at_unix = 3030L;
   meta.query_hidden = 0;
   rc = store->store_meta(store, "other", "aardvark", &meta, NULL, &stored,
                          &error);
@@ -2420,6 +2429,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   meta.lease_id = "lease-d";
   meta.state_etag = "state-d";
   meta.version = 40L;
+  meta.updated_at_unix = 4040L;
   rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
                          &error);
   assert_int_equal(rc, LC_OK);
@@ -2430,6 +2440,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   meta.lease_id = "lease-d";
   meta.state_etag = "state-d";
   meta.version = 50L;
+  meta.updated_at_unix = 5050L;
   meta.query_hidden = 0;
   rc = store->store_meta(store, "default", "delta", &meta, NULL, &stored,
                          &error);
@@ -2443,6 +2454,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   assert_int_equal(capture.count, 1U);
   assert_string_equal(capture.keys[0], "bravo");
   assert_int_equal(capture.versions[0], 20L);
+  assert_int_equal(capture.updated_at_unix[0], 2020L);
   assert_false(capture.query_hidden[0]);
   assert_true(scan.truncated);
   assert_string_equal(scan.next_start_after, "bravo");
@@ -2456,6 +2468,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   assert_int_equal(capture.count, 1U);
   assert_string_equal(capture.keys[0], "delta");
   assert_int_equal(capture.versions[0], 50L);
+  assert_int_equal(capture.updated_at_unix[0], 5050L);
   assert_false(capture.query_hidden[0]);
   assert_false(scan.truncated);
   assert_null(scan.next_start_after);
@@ -2475,6 +2488,8 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   assert_int_equal(capture.count, 2U);
   assert_string_equal(capture.keys[0], "bravo");
   assert_string_equal(capture.keys[1], "delta");
+  assert_int_equal(capture.updated_at_unix[0], 2020L);
+  assert_int_equal(capture.updated_at_unix[1], 5050L);
   assert_false(scan.truncated);
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
 
@@ -3077,6 +3092,7 @@ static void test_metadata_update_allocation_failure_preserves_indexes(
   meta.lease_id = "lease-old";
   meta.state_etag = "state-old";
   meta.version = 1L;
+  meta.updated_at_unix = 101L;
   rc = store->store_meta(store, "default", "lease-key", &meta, NULL, &stored,
                          &error);
   assert_int_equal(rc, LC_OK);
@@ -3085,6 +3101,7 @@ static void test_metadata_update_allocation_failure_preserves_indexes(
   meta.lease_id = "lease-new";
   meta.state_etag = "state-new";
   meta.version = 2L;
+  meta.updated_at_unix = 202L;
   tracked.fail_malloc_size = strlen(meta.owner) + 1U;
   rc = store->store_meta(store, "default", "lease-key", &meta, stored.etag,
                          &updated, &error);
@@ -3099,6 +3116,7 @@ static void test_metadata_update_allocation_failure_preserves_indexes(
   assert_string_equal(loaded.meta.owner, "owner-old");
   assert_string_equal(loaded.meta.lease_id, "lease-old");
   assert_int_equal(loaded.meta.version, 1L);
+  assert_int_equal(loaded.meta.updated_at_unix, 101L);
   lc_pouch_meta_record_cleanup(&allocator, &loaded);
 
   req.namespace_name = "default";
@@ -3108,6 +3126,7 @@ static void test_metadata_update_allocation_failure_preserves_indexes(
   assert_int_equal(capture.count, 1U);
   assert_string_equal(capture.keys[0], "lease-key");
   assert_int_equal(capture.versions[0], 1L);
+  assert_int_equal(capture.updated_at_unix[0], 101L);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);

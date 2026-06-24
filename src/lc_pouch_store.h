@@ -74,6 +74,7 @@ typedef struct lc_pouch_meta {
   char *txn_id;
   char *state_etag;
   long version;
+  long updated_at_unix;
   long lease_expires_at_unix;
   long fencing_token;
   int has_query_hidden;
