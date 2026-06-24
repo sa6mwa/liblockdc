@@ -3006,6 +3006,8 @@ static void test_pouch_public_queue_inflight_ttl_expiry_rejects_ack(
   lc_dequeue_req dequeue_req;
   lc_queue_stats_req stats_req;
   lc_queue_stats_res stats;
+  lc_nack_req nack_req;
+  lc_extend_req extend_req;
   lc_error error;
   int rc;
 
@@ -3063,6 +3065,25 @@ static void test_pouch_public_queue_inflight_ttl_expiry_rejects_ack(
   assert_string_equal(error.server_code, "queue_message_expired");
   lc_error_cleanup(&error);
   lc_error_init(&error);
+
+  lc_nack_req_init(&nack_req);
+  nack_req.intent = LC_NACK_INTENT_FAILURE;
+  rc = message->nack(message, &nack_req, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "queue_message_expired");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_extend_req_init(&extend_req);
+  extend_req.extend_by_seconds = 30L;
+  rc = message->extend(message, &extend_req, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "queue_message_expired");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
   message->close(message);
   message = NULL;
 

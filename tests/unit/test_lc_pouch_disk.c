@@ -6967,6 +6967,8 @@ static void test_queue_inflight_ttl_expiry_rejects_ack(void **state) {
   lc_pouch_dequeue_opts dequeue_opts;
   lc_pouch_queue_message_info enqueued;
   lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_message_info nacked;
+  lc_pouch_queue_message_info extended;
   lc_pouch_queue_ref ref;
   lc_pouch_queue_stats stats;
   lc_error error;
@@ -6982,6 +6984,8 @@ static void test_queue_inflight_ttl_expiry_rejects_ack(void **state) {
   memset(&dequeue_opts, 0, sizeof(dequeue_opts));
   memset(&enqueued, 0, sizeof(enqueued));
   memset(&dequeued, 0, sizeof(dequeued));
+  memset(&nacked, 0, sizeof(nacked));
+  memset(&extended, 0, sizeof(extended));
   memset(&ref, 0, sizeof(ref));
   memset(&stats, 0, sizeof(stats));
   store = NULL;
@@ -7035,6 +7039,22 @@ static void test_queue_inflight_ttl_expiry_rejects_ack(void **state) {
   assert_false(acked);
   lc_error_cleanup(&error);
 
+  rc = store->nack_message(store, &ref, 0L, 1, &nacked, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "queue_message_expired");
+  assert_null(nacked.message_id);
+  lc_error_cleanup(&error);
+
+  rc = store->extend_message(store, &ref, 30L, &extended, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "queue_message_expired");
+  assert_null(extended.message_id);
+  lc_error_cleanup(&error);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &extended);
+  lc_pouch_queue_message_info_cleanup(&allocator, &nacked);
   lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
   lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
   rc = store->close(store, &error);
