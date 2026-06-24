@@ -57,6 +57,7 @@
 #define LC_POUCH_FSYNC_QUEUE_WAKE 5
 #define LC_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
 #define LC_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
+#define LC_POUCH_WRITER_MARKER_TTL_SECONDS 60L
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -784,16 +785,19 @@ static int lc_pouch_disk_write_writer_marker(lc_pouch_disk_store *store,
   int fd;
   size_t body_len;
   unsigned long log_size;
+  long now_unix;
 
   if (store->writer_marker_path == NULL) {
     return LC_OK;
   }
   store->writer_marker_seq++;
+  now_unix = (long)time(NULL);
   log_size = store->replayed_log_size != (unsigned long)-1
                  ? store->replayed_log_size
                  : 0UL;
-  snprintf(body, sizeof(body), "pid=%ld\nsequence=%lu\nlog_size=%lu\n%s",
-           (long)getpid(), store->writer_marker_seq, log_size,
+  snprintf(body, sizeof(body),
+           "pid=%ld\nsequence=%lu\nupdated_at_unix=%ld\nlog_size=%lu\n%s",
+           (long)getpid(), store->writer_marker_seq, now_unix, log_size,
            (store->writer_marker_seq % 2UL) != 0UL ? "pad=x\n" : "");
   body_len = strlen(body);
   fd = open(store->writer_marker_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -7548,6 +7552,61 @@ static int lc_pouch_disk_fsync_stats(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_parse_marker_updated_at(const char *bytes,
+                                                 long *out) {
+  const char *cursor;
+  const char *line;
+  const char *value;
+  char *end;
+  long parsed;
+
+  cursor = bytes;
+  while (cursor != NULL && *cursor != '\0') {
+    line = strstr(cursor, "updated_at_unix=");
+    if (line == NULL) {
+      return 0;
+    }
+    if (line == bytes || line[-1] == '\n') {
+      value = line + strlen("updated_at_unix=");
+      parsed = strtol(value, &end, 10);
+      if (end != value && (*end == '\n' || *end == '\0')) {
+        *out = parsed;
+        return 1;
+      }
+    }
+    cursor = strchr(line, '\n');
+    if (cursor != NULL) {
+      cursor++;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_disk_writer_marker_stale(const char *path,
+                                             const struct stat *st,
+                                             long now_unix) {
+  char bytes[256];
+  long updated_at_unix;
+  ssize_t got;
+  int fd;
+
+  updated_at_unix = 0L;
+  fd = open(path, O_RDONLY);
+  if (fd >= 0) {
+    got = read(fd, bytes, sizeof(bytes) - 1U);
+    (void)close(fd);
+    if (got > 0) {
+      bytes[(size_t)got] = '\0';
+      if (lc_pouch_disk_parse_marker_updated_at(bytes, &updated_at_unix)) {
+        return updated_at_unix <=
+               now_unix - LC_POUCH_WRITER_MARKER_TTL_SECONDS;
+      }
+    }
+  }
+  return (long)st->st_mtime <=
+         now_unix - LC_POUCH_WRITER_MARKER_TTL_SECONDS;
+}
+
 static int lc_pouch_disk_writer_status(lc_pouch_store *self,
                                        lc_pouch_writer_status *out,
                                        lc_error *error) {
@@ -7555,7 +7614,11 @@ static int lc_pouch_disk_writer_status(lc_pouch_store *self,
   DIR *dir;
   struct dirent *entry;
   const char *own_leaf;
+  char *marker_path;
+  struct stat st;
+  long now_unix;
   size_t prefix_len;
+  int stale;
 
   if (self == NULL || out == NULL) {
     return lc_pouch_set_invalid(error, "writer_status requires store and out");
@@ -7574,6 +7637,7 @@ static int lc_pouch_disk_writer_status(lc_pouch_store *self,
   own_leaf = strrchr(store->writer_marker_path, '/');
   own_leaf = own_leaf != NULL ? own_leaf + 1 : store->writer_marker_path;
   prefix_len = strlen(LC_POUCH_WRITER_MARKER_PREFIX);
+  now_unix = (long)time(NULL);
   dir = opendir(store->root_path);
   if (dir == NULL) {
     lc_pouch_writer_status_cleanup(&store->allocator, out);
@@ -7584,10 +7648,29 @@ static int lc_pouch_disk_writer_status(lc_pouch_store *self,
         0) {
       continue;
     }
-    out->active_marker_count++;
+    marker_path =
+        lc_pouch_join_path(&store->allocator, store->root_path, entry->d_name);
+    if (marker_path == NULL) {
+      closedir(dir);
+      lc_pouch_writer_status_cleanup(&store->allocator, out);
+      return lc_pouch_set_nomem(error,
+                                "failed to allocate pouch writer marker path");
+    }
+    if (stat(marker_path, &st) != 0) {
+      lc_pouch_free(&store->allocator, marker_path);
+      continue;
+    }
+    stale = lc_pouch_disk_writer_marker_stale(marker_path, &st, now_unix);
+    lc_pouch_free(&store->allocator, marker_path);
     if (strcmp(entry->d_name, own_leaf) == 0) {
       out->own_marker_present = 1;
-    } else {
+    }
+    if (stale) {
+      out->stale_marker_count++;
+      continue;
+    }
+    out->active_marker_count++;
+    if (strcmp(entry->d_name, own_leaf) != 0) {
       out->other_marker_count++;
     }
   }

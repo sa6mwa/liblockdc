@@ -466,8 +466,10 @@ The private storage vtable also exposes namespace listing over the disk
 backend's live projections; it reports unique sorted namespaces with active
 state, metadata, object, or queue entries after an authoritative replay refresh.
 Writer-presence diagnostics report advisory file-lock marker mode, this
-handle's heartbeat sequence, whether its marker is present, and how many peer
-markers are currently visible in the store root.
+handle's heartbeat sequence, whether its marker is present, how many active peer
+markers are currently visible in the store root, and how many markers are stale.
+New marker files carry an `updated_at_unix` heartbeat; legacy marker files
+without that field fall back to mtime.
 
 ## Performance Model
 

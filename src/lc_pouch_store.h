@@ -293,6 +293,7 @@ typedef struct lc_pouch_writer_status {
   int own_marker_present;
   size_t active_marker_count;
   size_t other_marker_count;
+  size_t stale_marker_count;
   unsigned long heartbeat_sequence;
 } lc_pouch_writer_status;
 
