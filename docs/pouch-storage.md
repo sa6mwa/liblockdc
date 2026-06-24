@@ -499,8 +499,10 @@ put/delete paths acquire the per-key guard before the global append-log lock.
 Multi-key object copy acquires source and destination key guards in
 lexicographic order before the global append-log lock. Queue enqueue, dequeue,
 ack, nack, and extend acquire the queue-name key guard before the global
-append-log lock. The remaining cutover work is deeper diagnostics for
-stripe/cache utilization.
+append-log lock. Lock diagnostics now report stripe count, active process-held
+locks, same-process contention counts, and the process-wide lock descriptor
+cache exposes hits, misses, evictions, closes, current size, and capacity so hot
+key contention and descriptor reuse are observable.
 Read diagnostics expose a bounded process-wide read-file descriptor cache for
 the current single-log store. State reads, object reads, and queue dequeue
 payload reads borrow an idle descriptor when possible, seek it to the live
@@ -1672,7 +1674,9 @@ hot-key compaction churn, metadata summary scans, open/replay index rebuild,
 direct indexed summary scans, direct key-only indexed scans, public indexed
 document query streaming, public scan-mode document query streaming, public
 indexed key streaming, public scan-mode key streaming, and retention sweep
-throughput over metadata/state rows.
+throughput over metadata/state rows. The native harness also includes a hot-key
+contention case that repeatedly contends two store handles on one key and
+verifies that lock-contention diagnostics advance under that workload.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local
 benchmarks rather than performance gates; the larger matrix above remains the
