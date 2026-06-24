@@ -1044,6 +1044,83 @@ test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_scan_query_keys_can_be_configured_by_endpoint(
+    void **state) {
+  char root[256];
+  char writer_endpoint[320];
+  char scan_endpoint[384];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "scan-query-keys-endpoint");
+  pouch_endpoint(writer_endpoint, sizeof(writer_endpoint), root);
+  pouch_endpoint_with_query(scan_endpoint, sizeof(scan_endpoint), root,
+                            "query_engine=scan");
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  alpha = NULL;
+  bravo = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_client(writer_endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "scan-key-endpoint-writer";
+  acquire.ttl_seconds = 60L;
+  acquire.key = "integration/query-keys-endpoint/bravo";
+  rc = writer->acquire(writer, &acquire, &bravo, &error);
+  assert_lc_ok(rc, &error);
+  acquire.key = "integration/query-keys-endpoint/alpha";
+  rc = writer->acquire(writer, &acquire, &alpha, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = alpha->release(alpha, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  alpha = NULL;
+  rc = bravo->release(bravo, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  bravo = NULL;
+  writer->close(writer);
+  writer = NULL;
+
+  open_pouch_client(scan_endpoint, &reader, &error);
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 2L;
+  rc = reader->query_keys(reader, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "integration/query-keys-endpoint/alpha");
+  assert_string_equal(capture.keys[1], "integration/query-keys-endpoint/bravo");
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_null(query_res.cursor);
+  assert_int_equal(query_res.index_seq, 0UL);
+
+  lc_query_res_cleanup(&query_res);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_scan_query_documents_refreshes_open_reader(
     void **state) {
   char root[256];
@@ -3696,6 +3773,8 @@ int main(void) {
           test_pouch_public_scan_query_can_be_configured_by_endpoint),
       cmocka_unit_test(
           test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh),
+      cmocka_unit_test(
+          test_pouch_public_scan_query_keys_can_be_configured_by_endpoint),
       cmocka_unit_test(
           test_pouch_public_scan_query_documents_refreshes_open_reader),
       cmocka_unit_test(
