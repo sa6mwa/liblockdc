@@ -99,6 +99,7 @@ typedef struct lc_pouch_disk_query_summary_entry {
   char *key;
   char *etag;
   long version;
+  long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   int deleted;
@@ -2796,6 +2797,7 @@ static int lc_pouch_disk_query_summary_upsert(
     return 0;
   }
   staged.version = version;
+  staged.updated_at_unix = meta != NULL ? meta->updated_at_unix : 0L;
   staged.has_query_hidden = meta != NULL ? meta->has_query_hidden : 0;
   staged.query_hidden = meta != NULL ? meta->query_hidden : 0;
   staged.deleted = deleted;
@@ -2810,6 +2812,7 @@ static int lc_pouch_disk_query_summary_upsert(
     lc_pouch_free(&store->allocator, entry->etag);
     entry->etag = staged.etag;
     entry->version = staged.version;
+    entry->updated_at_unix = staged.updated_at_unix;
     entry->has_query_hidden = staged.has_query_hidden;
     entry->query_hidden = staged.query_hidden;
     entry->deleted = staged.deleted;
@@ -2998,6 +3001,23 @@ static int lc_pouch_disk_copy_meta_for_scan(
     lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, dst);
     return 0;
   }
+  return 1;
+}
+
+static int lc_pouch_disk_copy_summary_for_scan(
+    lc_pouch_disk_store *store, lc_pouch_disk_scan_meta_copy *dst,
+    const lc_pouch_disk_query_summary_entry *src) {
+  memset(dst, 0, sizeof(*dst));
+  dst->key = lc_pouch_strdup(&store->allocator, src->key);
+  dst->etag = lc_pouch_strdup(&store->allocator, src->etag);
+  if (dst->key == NULL || (src->etag != NULL && dst->etag == NULL)) {
+    lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, dst);
+    return 0;
+  }
+  dst->meta.version = src->version;
+  dst->meta.updated_at_unix = src->updated_at_unix;
+  dst->meta.has_query_hidden = src->has_query_hidden;
+  dst->meta.query_hidden = src->query_hidden;
   return 1;
 }
 
@@ -4485,17 +4505,17 @@ static int lc_pouch_disk_query_index_scan(
   }
 
   start_key = req->start_after != NULL ? req->start_after : "";
-  if (lc_pouch_disk_query_index_find(store, req->namespace_name, start_key,
-                                     &start_index) &&
+  if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
+                                       &start_index) &&
       req->start_after != NULL) {
     start_index++;
   }
 
-  for (index = start_index; index < store->query_meta_index_count; ++index) {
-    lc_pouch_disk_meta_entry *entry;
+  for (index = start_index; index < store->query_summary_entry_count; ++index) {
+    lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
 
-    entry = &store->meta_entries[store->query_meta_indices[index]];
+    entry = &store->query_summary_entries[index];
     namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
     if (namespace_cmp > 0) {
       break;
@@ -4504,7 +4524,7 @@ static int lc_pouch_disk_query_index_scan(
       continue;
     }
     if (entry->deleted ||
-        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
+        (entry->has_query_hidden && entry->query_hidden)) {
       continue;
     }
     if (req->limit > 0U && visit_count == req->limit) {
@@ -4524,13 +4544,13 @@ static int lc_pouch_disk_query_index_scan(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_meta_index_count &&
+  for (index = start_index; index < store->query_summary_entry_count &&
                         row_index < visit_count;
        ++index) {
-    lc_pouch_disk_meta_entry *entry;
+    lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
 
-    entry = &store->meta_entries[store->query_meta_indices[index]];
+    entry = &store->query_summary_entries[index];
     namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
     if (namespace_cmp > 0) {
       break;
@@ -4539,17 +4559,17 @@ static int lc_pouch_disk_query_index_scan(
       continue;
     }
     if (entry->deleted ||
-        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
+        (entry->has_query_hidden && entry->query_hidden)) {
       continue;
     }
-    if (!lc_pouch_disk_copy_meta_for_scan(store, &rows[row_index], entry)) {
+    if (!lc_pouch_disk_copy_summary_for_scan(store, &rows[row_index], entry)) {
       for (index = 0U; index < row_index; ++index) {
         lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
       }
       lc_pouch_free(&store->allocator, rows);
       lc_pouch_disk_unlock(store, error);
       return lc_pouch_set_nomem(error,
-                                "failed to copy pouch query index row");
+                                "failed to copy pouch query summary row");
     }
     row_index++;
   }
@@ -6061,13 +6081,21 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
         (flags & LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN) != 0UL;
     deleted = (flags & LC_POUCH_QUERY_INDEX_FLAG_DELETED) != 0UL;
     if (lc_pouch_disk_query_index_matches_meta(store, namespace_name, key, etag,
-                                               (long)version, deleted) &&
-        !lc_pouch_disk_query_summary_upsert(store, namespace_name, key, etag,
-                                            (long)version, &meta, deleted)) {
-      lc_pouch_free(&store->allocator, namespace_name);
-      lc_pouch_free(&store->allocator, key);
-      lc_pouch_free(&store->allocator, etag);
-      return lc_pouch_set_nomem(error, "failed to replay pouch query index");
+                                               (long)version, deleted)) {
+      int meta_index;
+      const lc_pouch_meta *summary_meta;
+
+      meta_index = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
+      summary_meta = meta_index >= 0 ? &store->meta_entries[meta_index].meta
+                                     : &meta;
+      if (!lc_pouch_disk_query_summary_upsert(store, namespace_name, key, etag,
+                                              (long)version, summary_meta,
+                                              deleted)) {
+        lc_pouch_free(&store->allocator, namespace_name);
+        lc_pouch_free(&store->allocator, key);
+        lc_pouch_free(&store->allocator, etag);
+        return lc_pouch_set_nomem(error, "failed to replay pouch query index");
+      }
     }
     lc_pouch_free(&store->allocator, namespace_name);
     lc_pouch_free(&store->allocator, key);

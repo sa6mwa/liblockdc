@@ -3220,6 +3220,8 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 1U);
   assert_string_equal(capture.keys[0], "alpha");
+  assert_int_equal(capture.versions[0], 1L);
+  assert_false(capture.query_hidden[0]);
   assert_true(scan.truncated);
   assert_string_equal(scan.next_start_after, "alpha");
   assert_true(scan.index_seq > 0UL);
@@ -3234,6 +3236,10 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   assert_int_equal(capture.count, 2U);
   assert_string_equal(capture.keys[0], "bravo");
   assert_string_equal(capture.keys[1], "charlie");
+  assert_int_equal(capture.versions[0], 2L);
+  assert_int_equal(capture.versions[1], 5L);
+  assert_false(capture.query_hidden[0]);
+  assert_false(capture.query_hidden[1]);
   assert_false(scan.truncated);
   assert_null(scan.next_start_after);
   assert_true(scan.index_seq > 0UL);

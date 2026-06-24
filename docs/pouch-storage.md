@@ -661,6 +661,10 @@ Key-only indexed scans have their own storage primitive and copy only visible
 keys before invoking callbacks. The current disk backend serves that primitive
 from the query-summary projection rather than the full metadata row array, so
 `query_keys` does not pay for metadata row copies that only document scans need.
+Indexed match-all document scans also page over the query-summary projection
+and copy only the row fields currently required by query callbacks: key, ETag,
+version, update timestamp, and query-hidden state. Document payloads are still
+loaded only after a summary row survives pagination and visibility filtering.
 Large-namespace low-match indexed searches must be able to walk the relevant
 posting/candidate sets without loading every metadata summary or every document
 payload in the namespace.
