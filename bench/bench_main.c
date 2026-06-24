@@ -15,6 +15,21 @@ typedef struct bench_case {
   int (*run)(long iterations);
 } bench_case;
 
+typedef struct bench_alloc_header {
+  size_t size;
+} bench_alloc_header;
+
+typedef struct bench_alloc_metrics {
+  unsigned long malloc_calls;
+  unsigned long calloc_calls;
+  unsigned long realloc_calls;
+  unsigned long free_calls;
+  size_t outstanding_bytes;
+  size_t peak_outstanding_bytes;
+} bench_alloc_metrics;
+
+static bench_alloc_metrics g_bench_alloc_metrics;
+
 static double bench_now_seconds(void) {
   struct timespec ts;
 
@@ -22,6 +37,105 @@ static double bench_now_seconds(void) {
     return 0.0;
   }
   return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
+}
+
+static void bench_alloc_metrics_reset(void) {
+  memset(&g_bench_alloc_metrics, 0, sizeof(g_bench_alloc_metrics));
+}
+
+static void bench_alloc_note_alloc(size_t size) {
+  g_bench_alloc_metrics.outstanding_bytes += size;
+  if (g_bench_alloc_metrics.outstanding_bytes >
+      g_bench_alloc_metrics.peak_outstanding_bytes) {
+    g_bench_alloc_metrics.peak_outstanding_bytes =
+        g_bench_alloc_metrics.outstanding_bytes;
+  }
+}
+
+static void bench_alloc_note_free(size_t size) {
+  if (g_bench_alloc_metrics.outstanding_bytes >= size) {
+    g_bench_alloc_metrics.outstanding_bytes -= size;
+  } else {
+    g_bench_alloc_metrics.outstanding_bytes = 0U;
+  }
+}
+
+static void *bench_alloc_malloc(void *context, size_t size) {
+  bench_alloc_header *header;
+
+  (void)context;
+  header = (bench_alloc_header *)malloc(sizeof(*header) + size);
+  if (header == NULL) {
+    return NULL;
+  }
+  header->size = size;
+  g_bench_alloc_metrics.malloc_calls++;
+  bench_alloc_note_alloc(size);
+  return (void *)(header + 1);
+}
+
+static void *bench_alloc_calloc(void *context, size_t count, size_t size) {
+  bench_alloc_header *header;
+  size_t bytes;
+
+  (void)context;
+  if (count != 0U && size > ((size_t)-1) / count) {
+    return NULL;
+  }
+  bytes = count * size;
+  header = (bench_alloc_header *)calloc(1U, sizeof(*header) + bytes);
+  if (header == NULL) {
+    return NULL;
+  }
+  header->size = bytes;
+  g_bench_alloc_metrics.calloc_calls++;
+  bench_alloc_note_alloc(bytes);
+  return (void *)(header + 1);
+}
+
+static void *bench_alloc_realloc(void *context, void *ptr, size_t size) {
+  bench_alloc_header *old_header;
+  bench_alloc_header *new_header;
+  size_t old_size;
+
+  (void)context;
+  if (ptr == NULL) {
+    g_bench_alloc_metrics.realloc_calls++;
+    return bench_alloc_malloc(NULL, size);
+  }
+  old_header = ((bench_alloc_header *)ptr) - 1;
+  old_size = old_header->size;
+  new_header =
+      (bench_alloc_header *)realloc(old_header, sizeof(*new_header) + size);
+  if (new_header == NULL) {
+    return NULL;
+  }
+  new_header->size = size;
+  g_bench_alloc_metrics.realloc_calls++;
+  bench_alloc_note_free(old_size);
+  bench_alloc_note_alloc(size);
+  return (void *)(new_header + 1);
+}
+
+static void bench_alloc_free(void *context, void *ptr) {
+  bench_alloc_header *header;
+
+  (void)context;
+  if (ptr == NULL) {
+    return;
+  }
+  header = ((bench_alloc_header *)ptr) - 1;
+  g_bench_alloc_metrics.free_calls++;
+  bench_alloc_note_free(header->size);
+  free(header);
+}
+
+static void bench_pouch_allocator(lc_pouch_allocator *allocator) {
+  memset(allocator, 0, sizeof(*allocator));
+  allocator->malloc_fn = bench_alloc_malloc;
+  allocator->calloc_fn = bench_alloc_calloc;
+  allocator->realloc_fn = bench_alloc_realloc;
+  allocator->free_fn = bench_alloc_free;
 }
 
 static int bench_mutate_open(void *context, const char *resolved_path,
@@ -273,8 +387,10 @@ static int bench_pouch_read_and_check(lc_source *source, const char *expected,
   return strcmp(buffer, expected) == 0 ? 0 : 1;
 }
 
-static int bench_pouch_store_row(lc_pouch_store *store, const char *key,
-                                 const char *json, lc_error *error) {
+static int bench_pouch_store_row(lc_pouch_store *store,
+                                 const lc_pouch_allocator *allocator,
+                                 const char *key, const char *json,
+                                 lc_error *error) {
   lc_source *source;
   lc_pouch_put_state_opts opts;
   lc_pouch_put_state_res put_res;
@@ -294,7 +410,7 @@ static int bench_pouch_store_row(lc_pouch_store *store, const char *key,
   rc = store->write_state(store, "bench", key, source, &opts, &put_res, error);
   lc_source_close(source);
   if (rc != LC_OK) {
-    lc_pouch_put_state_res_cleanup(NULL, &put_res);
+    lc_pouch_put_state_res_cleanup(allocator, &put_res);
     return 1;
   }
   meta.owner = "bench-owner";
@@ -305,8 +421,8 @@ static int bench_pouch_store_row(lc_pouch_store *store, const char *key,
   meta.lease_expires_at_unix = 3600L;
   meta.fencing_token = put_res.new_version;
   rc = store->store_meta(store, "bench", key, &meta, NULL, &meta_res, error);
-  lc_pouch_store_meta_res_cleanup(NULL, &meta_res);
-  lc_pouch_put_state_res_cleanup(NULL, &put_res);
+  lc_pouch_store_meta_res_cleanup(allocator, &meta_res);
+  lc_pouch_put_state_res_cleanup(allocator, &put_res);
   return rc == LC_OK ? 0 : 1;
 }
 
@@ -326,7 +442,33 @@ static int bench_pouch_seed_query_rows(const char *root, long rows,
   for (i = 0; i < rows; ++i) {
     snprintf(key, sizeof(key), "bench/query/%08ld", i);
     snprintf(json, sizeof(json), "{\"value\":%ld}", i);
-    if (bench_pouch_store_row(store, key, json, error) != 0) {
+    if (bench_pouch_store_row(store, NULL, key, json, error) != 0) {
+      store->close(store, error);
+      return 1;
+    }
+  }
+  rc = store->close(store, error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_seed_query_rows_with_allocator(
+    const char *root, long rows, const lc_pouch_allocator *allocator,
+    lc_error *error) {
+  lc_pouch_store *store;
+  char key[96];
+  char json[96];
+  long i;
+  int rc;
+
+  store = NULL;
+  rc = lc_pouch_disk_open(root, allocator, &store, error);
+  if (rc != LC_OK) {
+    return 1;
+  }
+  for (i = 0; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/query/%08ld", i);
+    snprintf(json, sizeof(json), "{\"value\":%ld}", i);
+    if (bench_pouch_store_row(store, allocator, key, json, error) != 0) {
       store->close(store, error);
       return 1;
     }
@@ -740,6 +882,77 @@ static int bench_pouch_scan_meta(long iterations) {
   return rc == LC_OK && count.rows == iterations ? 0 : 1;
 }
 
+static int bench_pouch_open_rebuild(long iterations) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "open-rebuild");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_query_rows(root, iterations, &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  bench_alloc_metrics_reset();
+  bench_pouch_allocator(&allocator);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc == LC_OK) {
+    rc = store->close(store, &error);
+  }
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_index_scan(long iterations) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res res;
+  bench_scan_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "index-scan");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  bench_pouch_allocator(&allocator);
+  if (bench_pouch_seed_query_rows_with_allocator(root, iterations, &allocator,
+                                                 &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  bench_alloc_metrics_reset();
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&count, 0, sizeof(count));
+  req.namespace_name = "bench";
+  req.limit = (size_t)iterations;
+  rc = store->query_index_scan(store, &req, bench_scan_count_visit, &count,
+                               &res, &error);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &res);
+  store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK && count.rows == iterations ? 0 : 1;
+}
+
 static int bench_pouch_scan_query(long iterations) {
   char root[256];
   char endpoint[320];
@@ -806,6 +1019,7 @@ static int run_case(const bench_case *test_case, long iterations) {
 
   effective_iterations =
       iterations > 0L ? iterations : test_case->default_iterations;
+  bench_alloc_metrics_reset();
   start_seconds = bench_now_seconds();
   if (test_case->run(effective_iterations) != 0) {
     return 1;
@@ -819,9 +1033,13 @@ static int run_case(const bench_case *test_case, long iterations) {
   ops_per_sec = (double)effective_iterations / elapsed_seconds;
   ns_per_op =
       (elapsed_seconds * 1000000000.0) / (double)effective_iterations;
-  printf("%-16s %12ld %14.2f %14.2f\n", test_case->name,
-         effective_iterations,
-         ops_per_sec, ns_per_op);
+  printf("%-18s %12ld %14.2f %14.2f %12lu %12lu %12lu\n", test_case->name,
+         effective_iterations, ops_per_sec, ns_per_op,
+         g_bench_alloc_metrics.malloc_calls +
+             g_bench_alloc_metrics.calloc_calls +
+             g_bench_alloc_metrics.realloc_calls,
+         g_bench_alloc_metrics.free_calls,
+         (unsigned long)g_bench_alloc_metrics.peak_outstanding_bytes);
   return 0;
 }
 
@@ -831,7 +1049,8 @@ static void print_usage(const char *argv0) {
       "usage: %s [iterations] "
       "[all|streams|json|mutate-parse|mutate-apply|pouch-state|"
       "pouch-staged|pouch-object|pouch-queue|pouch-compaction|"
-      "pouch-scan-meta|pouch-scan-query]\n",
+      "pouch-scan-meta|pouch-open-rebuild|pouch-index-scan|"
+      "pouch-scan-query]\n",
       argv0);
 }
 
@@ -847,6 +1066,8 @@ int main(int argc, char **argv) {
       {"pouch-queue", 1000L, bench_pouch_queue_roundtrip},
       {"pouch-compaction", 120L, bench_pouch_compaction},
       {"pouch-scan-meta", 1000L, bench_pouch_scan_meta},
+      {"pouch-open-rebuild", 1000L, bench_pouch_open_rebuild},
+      {"pouch-index-scan", 1000L, bench_pouch_index_scan},
       {"pouch-scan-query", 1000L, bench_pouch_scan_query}};
   const char *scenario;
   long iterations;
@@ -866,8 +1087,9 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  printf("%-16s %12s %14s %14s\n", "benchmark", "iterations", "ops/sec",
-         "ns/op");
+  printf("%-18s %12s %14s %14s %12s %12s %12s\n", "benchmark",
+         "iterations", "ops/sec", "ns/op", "allocs", "frees",
+         "peak_bytes");
 
   ran = 0;
   for (i = 0U; i < sizeof(bench_cases) / sizeof(bench_cases[0]); ++i) {
