@@ -9,6 +9,7 @@
 #include <cmocka.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -34,6 +35,14 @@
 #define TEST_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
 #define TEST_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
 #define TEST_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
+
+typedef struct test_same_process_key_lock_thread {
+  const char *root;
+  int start_fd;
+  int ready_fd;
+  int done_fd;
+  int result;
+} test_same_process_key_lock_thread;
 
 typedef struct tracked_allocator {
   size_t malloc_calls;
@@ -8147,11 +8156,11 @@ static void test_lock_status_reports_global_writer_lock_counters(
 
   rc = first->lock_status(first, &status, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(status.mode, "global-writer-fcntl");
+  assert_string_equal(status.mode, "key-striped-fcntl");
   assert_non_null(strstr(status.path, "writer.lock"));
   assert_true(status.uses_fcntl_byte_range_lock);
   assert_true(status.uses_global_writer_lock);
-  assert_false(status.uses_per_key_lock_cache);
+  assert_true(status.uses_per_key_lock_cache);
   assert_true(status.lock_acquisitions >= 1UL);
   assert_true(status.lock_releases <= status.lock_acquisitions);
   lc_pouch_lock_status_cleanup(&allocator, &status);
@@ -8191,7 +8200,7 @@ static void test_lock_status_reports_global_writer_lock_counters(
   assert_true(status.replay_refreshes >= 1UL);
   lc_pouch_lock_status_cleanup(&allocator, &status);
 
-  tracked.fail_malloc_size = strlen("global-writer-fcntl") + 1U;
+  tracked.fail_malloc_size = strlen("key-striped-fcntl") + 1U;
   rc = first->lock_status(first, &status, &error);
   assert_int_equal(rc, LC_ERR_NOMEM);
   assert_string_equal(error.message, "failed to copy pouch lock status");
@@ -8688,6 +8697,80 @@ static void child_process_dequeue_after_ready(const char *root, int start_fd,
   _exit(0);
 }
 
+static void test_thread_write_signal(int fd, const char *value) {
+  ssize_t written;
+
+  do {
+    written = write(fd, value, 1U);
+  } while (written < 0 && errno == EINTR);
+  (void)written;
+}
+
+static void *thread_write_state_after_ready(void *arg) {
+  test_same_process_key_lock_thread *ctx;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_error error;
+  char start;
+  int rc;
+
+  ctx = (test_same_process_key_lock_thread *)arg;
+  store = NULL;
+  source = NULL;
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&error, 0, sizeof(error));
+  ctx->result = 200;
+  rc = lc_pouch_disk_open(ctx->root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    ctx->result = rc;
+    test_thread_write_signal(ctx->done_fd, "e");
+    return NULL;
+  }
+  opts.content_type = "text/plain";
+  rc = lc_source_from_memory("same-process-thread",
+                             strlen("same-process-thread"), &source, &error);
+  if (rc != LC_OK) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    ctx->result = rc;
+    test_thread_write_signal(ctx->done_fd, "e");
+    return NULL;
+  }
+  if (read(ctx->start_fd, &start, 1U) != 1) {
+    lc_source_close(source);
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    ctx->result = 201;
+    test_thread_write_signal(ctx->done_fd, "e");
+    return NULL;
+  }
+  close(ctx->start_fd);
+  ctx->start_fd = -1;
+  if (write(ctx->ready_fd, "r", 1U) != 1) {
+    lc_source_close(source);
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    ctx->result = 202;
+    test_thread_write_signal(ctx->done_fd, "e");
+    return NULL;
+  }
+  close(ctx->ready_fd);
+  ctx->ready_fd = -1;
+  rc = store->write_state(store, "default", "thread-key", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  lc_pouch_put_state_res_cleanup(NULL, &put_res);
+  store->close(store, NULL);
+  lc_error_cleanup(&error);
+  ctx->result = rc;
+  test_thread_write_signal(ctx->done_fd, "d");
+  return NULL;
+}
+
 static void test_try_lock_key_serializes_same_process_handles(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -8755,7 +8838,7 @@ static void test_try_lock_key_serializes_same_process_handles(void **state) {
 
   rc = second->lock_status(second, &status, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(status.mode, "global-writer-fcntl");
+  assert_string_equal(status.mode, "key-striped-fcntl");
   assert_true(status.lock_acquisitions >= 2UL);
   lc_pouch_lock_status_cleanup(&allocator, &status);
 
@@ -8765,6 +8848,106 @@ static void test_try_lock_key_serializes_same_process_handles(void **state) {
   rc = second->close(second, &error);
   assert_int_equal(rc, LC_OK);
   rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_key_lock_wait_serializes_same_process_threads(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_key_lock *lock;
+  lc_source *body;
+  lc_pouch_state_info state_info;
+  lc_error error;
+  test_same_process_key_lock_thread ctx;
+  pthread_t thread;
+  int start_pipe[2];
+  int ready_pipe[2];
+  int done_pipe[2];
+  char byte;
+  int acquired;
+  int flags;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "key-lock-thread-contention");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&ctx, 0, sizeof(ctx));
+  store = NULL;
+  lock = NULL;
+  body = NULL;
+  start_pipe[0] = -1;
+  start_pipe[1] = -1;
+  ready_pipe[0] = -1;
+  ready_pipe[1] = -1;
+  done_pipe[0] = -1;
+  done_pipe[1] = -1;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = pipe(start_pipe);
+  assert_int_equal(rc, 0);
+  rc = pipe(ready_pipe);
+  assert_int_equal(rc, 0);
+  rc = pipe(done_pipe);
+  assert_int_equal(rc, 0);
+  flags = fcntl(done_pipe[0], F_GETFL, 0);
+  assert_true(flags >= 0);
+  rc = fcntl(done_pipe[0], F_SETFL, flags | O_NONBLOCK);
+  assert_int_equal(rc, 0);
+
+  rc = store->try_lock_key(store, "default", "thread-key", &lock, &acquired,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(lock);
+
+  ctx.root = root;
+  ctx.start_fd = start_pipe[0];
+  ctx.ready_fd = ready_pipe[1];
+  ctx.done_fd = done_pipe[1];
+  ctx.result = 199;
+  rc = pthread_create(&thread, NULL, thread_write_state_after_ready, &ctx);
+  assert_int_equal(rc, 0);
+  assert_int_equal(write(start_pipe[1], "x", 1U), 1);
+  close(start_pipe[1]);
+  start_pipe[1] = -1;
+  assert_int_equal(read(ready_pipe[0], &byte, 1U), 1);
+  close(ready_pipe[0]);
+  ready_pipe[0] = -1;
+
+  test_sleep_for_lock_wait();
+  rc = read(done_pipe[0], &byte, 1U);
+  assert_int_equal(rc, -1);
+  assert_int_equal(errno, EAGAIN);
+
+  rc = store->unlock_key(store, lock, &error);
+  assert_int_equal(rc, LC_OK);
+  lock = NULL;
+  rc = pthread_join(thread, NULL);
+  assert_int_equal(rc, 0);
+  assert_int_equal(ctx.result, LC_OK);
+  assert_int_equal(read(done_pipe[0], &byte, 1U), 1);
+  close(done_pipe[0]);
+  done_pipe[0] = -1;
+  close(done_pipe[1]);
+  done_pipe[1] = -1;
+
+  rc = store->read_state(store, "default", "thread-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  assert_non_null(body);
+  lc_source_close(body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -9595,6 +9778,7 @@ int main(void) {
       cmocka_unit_test(test_lock_status_reports_global_writer_lock_counters),
       cmocka_unit_test(test_lock_key_path_escapes_namespace_and_key),
       cmocka_unit_test(test_try_lock_key_serializes_same_process_handles),
+      cmocka_unit_test(test_key_lock_wait_serializes_same_process_threads),
       cmocka_unit_test(test_try_lock_key_serializes_cross_process_handles),
       cmocka_unit_test(test_write_state_waits_for_cross_process_key_lock),
       cmocka_unit_test(test_store_meta_waits_for_cross_process_key_lock),

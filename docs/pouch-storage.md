@@ -470,26 +470,24 @@ handle's heartbeat sequence, whether its marker is present, how many active peer
 markers are currently visible in the store root, and how many markers are stale.
 New marker files carry an `updated_at_unix` heartbeat; legacy marker files
 without that field fall back to mtime.
-Lock diagnostics report the current `global-writer-fcntl` mode, lock path,
-whether the implementation uses a root-level writer lock or per-key lock cache,
-and counters for lock acquisitions, releases, replay refreshes, and log reopens.
-The current implementation is intentionally observable as a global writer-lock
-model; future per-key lock caching should change these diagnostics as part of
-the cutover. The private disk vtable also exposes the lock-key path normalizer
-and a nonblocking per-key advisory lock primitive: lock paths live under
-`locks/<namespace>/<key>`, with key bytes percent-escaped so slash-separated
-user keys do not become filesystem path components. The current per-key
-primitive creates those lock files, uses `fcntl` byte-range locks for
-cross-process contention, and adds a process-local held-lock registry so two
-store handles in the same process contend before the full striped lock cache
-lands. State write/remove, metadata store/delete, and single-key object
-put/delete paths now acquire the per-key guard before the global append-log
-lock. Multi-key object copy acquires source and destination key guards in
+Lock diagnostics report the current `key-striped-fcntl` mode, lock path,
+whether the implementation still uses the root-level append writer lock, whether
+per-key lock caching/striping is active, and counters for lock acquisitions,
+releases, replay refreshes, and log reopens. The private disk vtable also
+exposes the lock-key path normalizer and a nonblocking per-key advisory lock
+primitive: lock paths live under `locks/<namespace>/<key>`, with key bytes
+percent-escaped so slash-separated user keys do not become filesystem path
+components. The current per-key primitive creates those lock files, acquires
+per-store and process-wide striped mutexes before touching the lock file, uses
+`fcntl` byte-range locks for cross-process contention, and tracks process-local
+held locks so two store handles in the same process contend before filesystem
+locking. State write/remove, metadata store/delete, and single-key object
+put/delete paths acquire the per-key guard before the global append-log lock.
+Multi-key object copy acquires source and destination key guards in
 lexicographic order before the global append-log lock. Queue enqueue, dequeue,
 ack, nack, and extend acquire the queue-name key guard before the global
-append-log lock. The remaining cutover work is the full striped lock cache and
-diagnostic updates that distinguish the per-operation guards from the global
-writer lock.
+append-log lock. The remaining cutover work is bounded lock-file descriptor LRU
+caching and deeper diagnostics for stripe/cache utilization.
 
 ## Performance Model
 

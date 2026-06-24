@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,7 @@
 #define LC_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
 #define LC_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
 #define LC_POUCH_WRITER_MARKER_TTL_SECONDS 60L
+#define LC_POUCH_KEY_LOCK_STRIPES 64U
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -154,6 +156,8 @@ typedef struct lc_pouch_disk_store {
   unsigned long lock_releases;
   unsigned long lock_replay_refreshes;
   unsigned long lock_log_reopens;
+  pthread_mutex_t key_stripes[LC_POUCH_KEY_LOCK_STRIPES];
+  int key_stripes_initialized;
   lc_pouch_disk_state_entry *state_entries;
   size_t state_entry_count;
   size_t state_entry_capacity;
@@ -184,11 +188,20 @@ typedef struct lc_pouch_disk_store {
 struct lc_pouch_key_lock {
   lc_pouch_allocator allocator;
   char *path;
+  lc_pouch_disk_store *store;
+  size_t local_stripe;
+  size_t process_stripe;
+  int local_stripe_locked;
+  int process_stripe_locked;
   int fd;
   struct lc_pouch_key_lock *process_next;
 };
 
 static lc_pouch_key_lock *lc_pouch_process_key_locks;
+static pthread_once_t lc_pouch_process_key_stripes_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t lc_pouch_process_key_stripes[LC_POUCH_KEY_LOCK_STRIPES];
+static pthread_mutex_t lc_pouch_process_key_registry_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct lc_pouch_file_source {
   lc_pouch_allocator allocator;
@@ -591,6 +604,146 @@ static void lc_pouch_disk_lock_escape(char *dst, const char *value) {
   *dst = '\0';
 }
 
+static void lc_pouch_disk_init_process_key_stripes(void) {
+  pthread_mutexattr_t attr;
+  size_t index;
+
+  if (pthread_mutexattr_init(&attr) != 0) {
+    return;
+  }
+  (void)pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  for (index = 0U; index < LC_POUCH_KEY_LOCK_STRIPES; ++index) {
+    (void)pthread_mutex_init(&lc_pouch_process_key_stripes[index], &attr);
+  }
+  (void)pthread_mutexattr_destroy(&attr);
+}
+
+static int lc_pouch_disk_init_store_key_stripes(lc_pouch_disk_store *store,
+                                                lc_error *error) {
+  pthread_mutexattr_t attr;
+  size_t index;
+  int err;
+
+  err = pthread_mutexattr_init(&attr);
+  if (err != 0) {
+    errno = err;
+    return lc_pouch_set_errno(error,
+                              "failed to initialize pouch key lock attributes");
+  }
+  err = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  if (err != 0) {
+    errno = err;
+    (void)pthread_mutexattr_destroy(&attr);
+    return lc_pouch_set_errno(error,
+                              "failed to configure pouch key lock attributes");
+  }
+  for (index = 0U; index < LC_POUCH_KEY_LOCK_STRIPES; ++index) {
+    err = pthread_mutex_init(&store->key_stripes[index], &attr);
+    if (err != 0) {
+      errno = err;
+      while (index > 0U) {
+        index--;
+        (void)pthread_mutex_destroy(&store->key_stripes[index]);
+      }
+      (void)pthread_mutexattr_destroy(&attr);
+      return lc_pouch_set_errno(error,
+                                "failed to initialize pouch key lock stripe");
+    }
+  }
+  store->key_stripes_initialized = 1;
+  (void)pthread_mutexattr_destroy(&attr);
+  return LC_OK;
+}
+
+static void lc_pouch_disk_destroy_store_key_stripes(
+    lc_pouch_disk_store *store) {
+  size_t index;
+
+  if (store == NULL || !store->key_stripes_initialized) {
+    return;
+  }
+  for (index = 0U; index < LC_POUCH_KEY_LOCK_STRIPES; ++index) {
+    (void)pthread_mutex_destroy(&store->key_stripes[index]);
+  }
+  store->key_stripes_initialized = 0;
+}
+
+static size_t lc_pouch_disk_key_lock_stripe(const char *namespace_name,
+                                            const char *key) {
+  const unsigned char *cursor;
+  unsigned long hash;
+
+  hash = 2166136261UL;
+  cursor = (const unsigned char *)namespace_name;
+  while (*cursor != '\0') {
+    hash ^= (unsigned long)*cursor++;
+    hash *= 16777619UL;
+  }
+  hash ^= (unsigned long)'/';
+  hash *= 16777619UL;
+  cursor = (const unsigned char *)key;
+  while (*cursor != '\0') {
+    hash ^= (unsigned long)*cursor++;
+    hash *= 16777619UL;
+  }
+  return (size_t)(hash % LC_POUCH_KEY_LOCK_STRIPES);
+}
+
+static int lc_pouch_disk_lock_key_stripes(lc_pouch_disk_store *store,
+                                          const char *namespace_name,
+                                          const char *key,
+                                          size_t *stripe_out,
+                                          lc_error *error) {
+  size_t stripe;
+  int err;
+
+  if (store == NULL || namespace_name == NULL || key == NULL ||
+      stripe_out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "lock_key_stripes requires store, namespace, key, and output");
+  }
+  (void)pthread_once(&lc_pouch_process_key_stripes_once,
+                     lc_pouch_disk_init_process_key_stripes);
+  stripe = lc_pouch_disk_key_lock_stripe(namespace_name, key);
+  err = pthread_mutex_lock(&store->key_stripes[stripe]);
+  if (err != 0) {
+    errno = err;
+    return lc_pouch_set_errno(error,
+                              "failed to lock pouch store key stripe");
+  }
+  err = pthread_mutex_lock(&lc_pouch_process_key_stripes[stripe]);
+  if (err != 0) {
+    errno = err;
+    (void)pthread_mutex_unlock(&store->key_stripes[stripe]);
+    return lc_pouch_set_errno(error,
+                              "failed to lock pouch process key stripe");
+  }
+  *stripe_out = stripe;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_unlock_key_stripes(lc_pouch_disk_store *store,
+                                            size_t stripe,
+                                            lc_error *error) {
+  int rc;
+  int err;
+
+  rc = LC_OK;
+  err = pthread_mutex_unlock(&lc_pouch_process_key_stripes[stripe]);
+  if (err != 0) {
+    errno = err;
+    rc = lc_pouch_set_errno(error,
+                            "failed to unlock pouch process key stripe");
+  }
+  err = pthread_mutex_unlock(&store->key_stripes[stripe]);
+  if (err != 0 && rc == LC_OK) {
+    errno = err;
+    rc = lc_pouch_set_errno(error,
+                            "failed to unlock pouch store key stripe");
+  }
+  return rc;
+}
+
 static char *lc_pouch_disk_make_lock_key_path(lc_pouch_disk_store *store,
                                               const char *namespace_name,
                                               const char *key) {
@@ -709,34 +862,44 @@ static int lc_pouch_disk_ensure_lock_namespace(lc_pouch_disk_store *store,
 
 static int lc_pouch_disk_process_key_lock_held(const char *path) {
   lc_pouch_key_lock *cursor;
+  int held;
 
+  held = 0;
+  (void)pthread_mutex_lock(&lc_pouch_process_key_registry_mutex);
   cursor = lc_pouch_process_key_locks;
   while (cursor != NULL) {
     if (cursor->path != NULL && strcmp(cursor->path, path) == 0) {
-      return 1;
+      held = 1;
+      break;
     }
     cursor = cursor->process_next;
   }
-  return 0;
+  (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
+  return held;
 }
 
 static void lc_pouch_disk_process_key_lock_add(lc_pouch_key_lock *lock) {
+  (void)pthread_mutex_lock(&lc_pouch_process_key_registry_mutex);
   lock->process_next = lc_pouch_process_key_locks;
   lc_pouch_process_key_locks = lock;
+  (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
 }
 
 static void lc_pouch_disk_process_key_lock_remove(lc_pouch_key_lock *lock) {
   lc_pouch_key_lock **cursor;
 
+  (void)pthread_mutex_lock(&lc_pouch_process_key_registry_mutex);
   cursor = &lc_pouch_process_key_locks;
   while (*cursor != NULL) {
     if (*cursor == lock) {
       *cursor = lock->process_next;
       lock->process_next = NULL;
+      (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
       return;
     }
     cursor = &(*cursor)->process_next;
   }
+  (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
 }
 
 static void lc_pouch_disk_sleep_for_key_lock(void) {
@@ -8147,7 +8310,7 @@ static int lc_pouch_disk_lock_status(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
-  out->mode = lc_pouch_strdup(&store->allocator, "global-writer-fcntl");
+  out->mode = lc_pouch_strdup(&store->allocator, "key-striped-fcntl");
   out->path = lc_pouch_strdup(&store->allocator, store->lock_path);
   if (out->mode == NULL || out->path == NULL) {
     lc_pouch_lock_status_cleanup(&store->allocator, out);
@@ -8155,7 +8318,7 @@ static int lc_pouch_disk_lock_status(lc_pouch_store *self,
   }
   out->uses_fcntl_byte_range_lock = 1;
   out->uses_global_writer_lock = 1;
-  out->uses_per_key_lock_cache = 0;
+  out->uses_per_key_lock_cache = 1;
   out->lock_acquisitions = store->lock_acquisitions;
   out->lock_releases = store->lock_releases;
   out->replay_refreshes = store->lock_replay_refreshes;
@@ -8199,8 +8362,10 @@ static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
   lc_pouch_key_lock *key_lock;
   struct flock fcntl_lock;
   char *path;
+  size_t stripe;
   int fd;
   int rc;
+  int stripes_locked;
 
   if (lock != NULL) {
     *lock = NULL;
@@ -8227,13 +8392,24 @@ static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
   if (path == NULL) {
     return lc_pouch_set_nomem(error, "failed to allocate pouch lock key path");
   }
+  stripe = 0U;
+  stripes_locked = 0;
+  rc = lc_pouch_disk_lock_key_stripes(store, namespace_name, key, &stripe,
+                                      error);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, path);
+    return rc;
+  }
+  stripes_locked = 1;
   if (lc_pouch_disk_process_key_lock_held(path)) {
     lc_pouch_free(&store->allocator, path);
+    lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return LC_OK;
   }
   fd = open(path, O_RDWR | O_CREAT, 0666);
   if (fd < 0) {
     lc_pouch_free(&store->allocator, path);
+    lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return lc_pouch_set_errno(error, "failed to open pouch key lock");
   }
 
@@ -8244,10 +8420,12 @@ static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
     if (errno == EACCES || errno == EAGAIN) {
       close(fd);
       lc_pouch_free(&store->allocator, path);
+      lc_pouch_disk_unlock_key_stripes(store, stripe, error);
       return LC_OK;
     }
     close(fd);
     lc_pouch_free(&store->allocator, path);
+    lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return lc_pouch_set_errno(error, "failed to lock pouch key lock");
   }
 
@@ -8258,10 +8436,16 @@ static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
     (void)fcntl(fd, F_SETLK, &fcntl_lock);
     close(fd);
     lc_pouch_free(&store->allocator, path);
+    lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch key lock");
   }
   key_lock->allocator = store->allocator;
   key_lock->path = path;
+  key_lock->store = store;
+  key_lock->local_stripe = stripe;
+  key_lock->process_stripe = stripe;
+  key_lock->local_stripe_locked = stripes_locked;
+  key_lock->process_stripe_locked = stripes_locked;
   key_lock->fd = fd;
   lc_pouch_disk_process_key_lock_add(key_lock);
   store->lock_acquisitions++;
@@ -8279,8 +8463,10 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
   lc_pouch_key_lock *key_lock;
   struct flock fcntl_lock;
   char *path;
+  size_t stripe;
   int fd;
   int rc;
+  int stripes_locked;
 
   if (lock != NULL) {
     *lock = NULL;
@@ -8303,12 +8489,22 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
   if (path == NULL) {
     return lc_pouch_set_nomem(error, "failed to allocate pouch lock key path");
   }
+  stripe = 0U;
+  stripes_locked = 0;
+  rc = lc_pouch_disk_lock_key_stripes(store, namespace_name, key, &stripe,
+                                      error);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, path);
+    return rc;
+  }
+  stripes_locked = 1;
   while (lc_pouch_disk_process_key_lock_held(path)) {
     lc_pouch_disk_sleep_for_key_lock();
   }
   fd = open(path, O_RDWR | O_CREAT, 0666);
   if (fd < 0) {
     lc_pouch_free(&store->allocator, path);
+    lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return lc_pouch_set_errno(error, "failed to open pouch key lock");
   }
 
@@ -8321,6 +8517,7 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
     }
     close(fd);
     lc_pouch_free(&store->allocator, path);
+    lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return lc_pouch_set_errno(error, "failed to lock pouch key lock");
   }
 
@@ -8331,10 +8528,16 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
     (void)fcntl(fd, F_SETLK, &fcntl_lock);
     close(fd);
     lc_pouch_free(&store->allocator, path);
+    lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch key lock");
   }
   key_lock->allocator = store->allocator;
   key_lock->path = path;
+  key_lock->store = store;
+  key_lock->local_stripe = stripe;
+  key_lock->process_stripe = stripe;
+  key_lock->local_stripe_locked = stripes_locked;
+  key_lock->process_stripe_locked = stripes_locked;
   key_lock->fd = fd;
   lc_pouch_disk_process_key_lock_add(key_lock);
   store->lock_acquisitions++;
@@ -8442,6 +8645,15 @@ static int lc_pouch_disk_unlock_key(lc_pouch_store *self,
     rc = lc_pouch_set_errno(error, "failed to close pouch key lock");
   }
   lock->fd = -1;
+  if ((lock->process_stripe_locked || lock->local_stripe_locked) &&
+      lc_pouch_disk_unlock_key_stripes(
+          lock->store != NULL ? lock->store : store, lock->process_stripe,
+          error) != LC_OK &&
+      rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  lock->process_stripe_locked = 0;
+  lock->local_stripe_locked = 0;
   lc_pouch_free(&lock->allocator, lock->path);
   lc_pouch_free(&lock->allocator, lock);
   if (rc == LC_OK) {
@@ -8648,6 +8860,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->writer_marker_path);
   lc_pouch_free(&allocator, store->query_engine);
   lc_pouch_free(&allocator, store->query_fallback_engine);
+  lc_pouch_disk_destroy_store_key_stripes(store);
   lc_pouch_free(&allocator, store);
   return LC_OK;
 }
@@ -8711,6 +8924,11 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->replayed_query_index_size = (unsigned long)-1;
   store->next_version = 1L;
   store->pub.impl = store;
+  rc = lc_pouch_disk_init_store_key_stripes(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_close(&store->pub, error);
+    return rc;
+  }
   store->root_path = lc_pouch_strdup(&store->allocator, root_path);
   store->log_path =
       lc_pouch_join_path(&store->allocator, root_path, "store.log");
