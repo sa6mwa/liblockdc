@@ -363,6 +363,11 @@ struct lc_pouch_store {
   int (*scan_meta)(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
                    lc_pouch_scan_meta_visit_fn visit, void *visit_ctx,
                    lc_pouch_scan_meta_res *out, lc_error *error);
+  int (*scan_meta_keys)(lc_pouch_store *self,
+                        const lc_pouch_scan_meta_req *req,
+                        lc_pouch_query_index_key_visit_fn visit,
+                        void *visit_ctx, lc_pouch_scan_meta_res *out,
+                        lc_error *error);
 
   int (*read_state)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, lc_source **body,
@@ -625,12 +630,14 @@ record. Indexed scans must never trust sidecar rows that do not match current
 metadata, and key-only scans must agree with document scans even after a sidecar
 tail fault. Later field postings and `liblql` predicates must extend this
 boundary with storage-owned index segments/postings and candidate iteration,
-rather than falling back to a single full-log scan. Key-only indexed scans have
-their own storage primitive and copy only visible keys before invoking
-callbacks, so `query_keys` does not pay for metadata row copies that only
-document scans need. Large-namespace low-match indexed searches must be able to
-walk the relevant posting/candidate sets without loading every metadata summary
-or every document payload in the namespace.
+rather than falling back to a single full-log scan. Scan-mode key-only queries
+should use a storage key-scan primitive when the backend provides one, so
+configured scan mode does not copy full metadata rows for `query_keys`.
+Key-only indexed scans have their own storage primitive and copy only visible
+keys before invoking callbacks, so `query_keys` does not pay for metadata row
+copies that only document scans need. Large-namespace low-match indexed
+searches must be able to walk the relevant posting/candidate sets without
+loading every metadata summary or every document payload in the namespace.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and

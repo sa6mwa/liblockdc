@@ -3094,9 +3094,15 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
   scan_context.handler = handler;
   scan_context.handler_context = context;
 
-  rc = client->pouch_store->scan_meta(client->pouch_store, &scan_req,
-                                      lc_pouch_query_keys_scan_visit,
-                                      &scan_context, &scan_res, error);
+  if (client->pouch_store->scan_meta_keys != NULL) {
+    rc = client->pouch_store->scan_meta_keys(
+        client->pouch_store, &scan_req, lc_pouch_query_keys_index_visit,
+        &scan_context, &scan_res, error);
+  } else {
+    rc = client->pouch_store->scan_meta(client->pouch_store, &scan_req,
+                                        lc_pouch_query_keys_scan_visit,
+                                        &scan_context, &scan_res, error);
+  }
   if (rc != LC_OK) {
     lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
     return rc;

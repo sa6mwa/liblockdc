@@ -355,6 +355,10 @@ struct lc_pouch_store {
   int (*scan_meta)(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
                    lc_pouch_scan_meta_visit_fn visit, void *visit_context,
                    lc_pouch_scan_meta_res *out, lc_error *error);
+  int (*scan_meta_keys)(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
+                        lc_pouch_query_index_key_visit_fn visit,
+                        void *visit_context, lc_pouch_scan_meta_res *out,
+                        lc_error *error);
   int (*query_index_scan)(lc_pouch_store *self,
                           const lc_pouch_query_index_scan_req *req,
                           lc_pouch_scan_meta_visit_fn visit,

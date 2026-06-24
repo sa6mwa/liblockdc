@@ -2727,6 +2727,103 @@ static void test_metadata_scan_forces_full_log_replay(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_metadata_key_scan_orders_paginates_and_replays(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_scan_meta_req req;
+  lc_pouch_scan_meta_res scan;
+  key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "meta-key-scan");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->scan_meta_keys);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-hidden";
+  meta.state_etag = "state-hidden";
+  meta.version = 3L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 1;
+  rc = store->store_meta(store, "default", "hidden", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-deleted";
+  meta.state_etag = "state-deleted";
+  meta.version = 4L;
+  meta.has_query_hidden = 0;
+  meta.query_hidden = 0;
+  rc = store->store_meta(store, "default", "deleted", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->delete_meta(store, "default", "deleted", stored.etag, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  req.namespace_name = "default";
+  req.limit = 1U;
+  rc = store->scan_meta_keys(store, &req, capture_query_key, &capture, &scan,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "alpha");
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = "alpha";
+  req.limit = 8U;
+  rc = store->scan_meta_keys(store, &req, capture_query_key, &capture, &scan,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_staged_state_rejects_pathlike_transaction_ids(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -10741,6 +10838,7 @@ int main(void) {
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_metadata_scan_forces_full_log_replay),
+      cmocka_unit_test(test_metadata_key_scan_orders_paginates_and_replays),
       cmocka_unit_test(
           test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(
