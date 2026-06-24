@@ -3488,6 +3488,50 @@ static int child_exit_code(pid_t pid) {
   return WEXITSTATUS(status);
 }
 
+static void child_process_dequeue_one(const char *root, int start_fd) {
+  lc_pouch_store *store;
+  lc_pouch_dequeue_opts opts;
+  lc_pouch_queue_message_info message;
+  lc_source *body;
+  lc_error error;
+  char ready;
+  int rc;
+
+  store = NULL;
+  body = NULL;
+  memset(&opts, 0, sizeof(opts));
+  memset(&message, 0, sizeof(message));
+  memset(&error, 0, sizeof(error));
+  if (read(start_fd, &ready, 1U) != 1) {
+    _exit(30);
+  }
+  close(start_fd);
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(31);
+  }
+  opts.owner = "worker";
+  opts.visibility_timeout_seconds = 60L;
+  rc = store->dequeue_message(store, "default", "jobs", &opts, &body,
+                              &message, &error);
+  if (rc != LC_OK) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(32);
+  }
+  if (body == NULL) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(2);
+  }
+  lc_source_close(body);
+  lc_pouch_queue_message_info_cleanup(NULL, &message);
+  store->close(store, NULL);
+  lc_error_cleanup(&error);
+  _exit(0);
+}
+
 static void test_independent_processes_contend_with_cas(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -3580,6 +3624,90 @@ static void test_independent_processes_contend_with_cas(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_independent_processes_dequeue_single_message_once(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_stats stats;
+  lc_error error;
+  int start_pipe[2];
+  int first_code;
+  int second_code;
+  int rc;
+  pid_t first_pid;
+  pid_t second_pid;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "process-dequeue");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&stats, 0, sizeof(stats));
+  store = NULL;
+  start_pipe[0] = -1;
+  start_pipe[1] = -1;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 60L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queue-process-body");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = pipe(start_pipe);
+  assert_int_equal(rc, 0);
+  first_pid = fork();
+  assert_true(first_pid >= 0);
+  if (first_pid == 0) {
+    close(start_pipe[1]);
+    child_process_dequeue_one(root, start_pipe[0]);
+  }
+  second_pid = fork();
+  assert_true(second_pid >= 0);
+  if (second_pid == 0) {
+    close(start_pipe[1]);
+    child_process_dequeue_one(root, start_pipe[0]);
+  }
+  close(start_pipe[0]);
+  start_pipe[0] = -1;
+  assert_int_equal(write(start_pipe[1], "xx", 2U), 2);
+  close(start_pipe[1]);
+  start_pipe[1] = -1;
+
+  first_code = child_exit_code(first_pid);
+  second_code = child_exit_code(second_pid);
+  assert_true((first_code == 0 && second_code == 2) ||
+              (first_code == 2 && second_code == 0));
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 0);
+  assert_int_equal(stats.pending_candidates, 1);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -3621,6 +3749,7 @@ int main(void) {
           test_queue_retry_exhaustion_is_not_pending_after_replay),
       cmocka_unit_test(test_independent_handles_refresh_before_operations),
       cmocka_unit_test(test_independent_processes_contend_with_cas),
+      cmocka_unit_test(test_independent_processes_dequeue_single_message_once),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
   };
 
