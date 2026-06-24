@@ -1150,6 +1150,12 @@ static int lc_pouch_endpoint_options_parse(
   if (options->root_path == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
+  if (options->root_path[0] != '/') {
+    lc_pouch_endpoint_options_cleanup(allocator, options);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint path must be absolute", NULL, NULL,
+                        NULL);
+  }
   if (query == NULL) {
     return LC_OK;
   }

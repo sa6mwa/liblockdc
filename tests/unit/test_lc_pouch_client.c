@@ -3065,6 +3065,24 @@ static void test_pouch_endpoint_rejects_invalid_query_options(void **state) {
                       "invalid percent escape in pouch endpoint");
   assert_string_equal(error.detail, "query_engine");
   lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  endpoints[0] = "pouch://relative-root";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message, "pouch endpoint path must be absolute");
+  lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  endpoints[0] = "pouch://?query_engine=scan";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message, "pouch endpoint path must be absolute");
+  lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
 
