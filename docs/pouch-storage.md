@@ -840,6 +840,12 @@ Refresh should:
 4. Replay unread committed records in deterministic order.
 5. Track writer marker snapshots to skip unnecessary scans.
 
+When the current implementation uses a single compactable log file, refresh
+must also detect that the open log file descriptor no longer matches the active
+`store.log` path. Another handle may have compacted by renaming a replacement
+log over the old path. A reader must reopen the active log before deciding that
+its local replay offset is current.
+
 Writer markers are small files touched after commit. They are an optimization:
 if no marker changed, a reader can often skip segment scanning. The marker
 mechanism must tolerate filesystems with coarse mtimes by also considering file

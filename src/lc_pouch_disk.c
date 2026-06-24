@@ -557,6 +557,8 @@ static char *lc_pouch_join_path(const lc_pouch_allocator *allocator,
 static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
   struct flock lock;
   struct stat st;
+  struct stat path_st;
+  int new_fd;
   int rc;
 
   memset(&lock, 0, sizeof(lock));
@@ -569,6 +571,27 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
     lock.l_type = F_UNLCK;
     (void)fcntl(store->lock_fd, F_SETLK, &lock);
     return lc_pouch_set_errno(error, "failed to stat pouch log");
+  }
+  if (stat(store->log_path, &path_st) != 0) {
+    lock.l_type = F_UNLCK;
+    (void)fcntl(store->lock_fd, F_SETLK, &lock);
+    return lc_pouch_set_errno(error, "failed to stat pouch log path");
+  }
+  if (st.st_dev != path_st.st_dev || st.st_ino != path_st.st_ino) {
+    new_fd = open(store->log_path, O_RDWR);
+    if (new_fd < 0) {
+      lock.l_type = F_UNLCK;
+      (void)fcntl(store->lock_fd, F_SETLK, &lock);
+      return lc_pouch_set_errno(error, "failed to reopen replaced pouch log");
+    }
+    close(store->log_fd);
+    store->log_fd = new_fd;
+    store->replayed_log_size = (unsigned long)-1;
+    if (fstat(store->log_fd, &st) != 0) {
+      lock.l_type = F_UNLCK;
+      (void)fcntl(store->lock_fd, F_SETLK, &lock);
+      return lc_pouch_set_errno(error, "failed to stat reopened pouch log");
+    }
   }
   if ((unsigned long)st.st_size == store->replayed_log_size) {
     return LC_OK;

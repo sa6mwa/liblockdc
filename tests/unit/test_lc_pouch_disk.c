@@ -3040,6 +3040,108 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_independent_handle_refreshes_after_log_replacement(
+    void **state) {
+  char root[256];
+  char payload[4096];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_meta_record loaded_meta;
+  lc_error error;
+  size_t index;
+  size_t read_length;
+  long last_version;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "replace-refresh");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&loaded_meta, 0, sizeof(loaded_meta));
+  memset(payload, 'x', sizeof(payload));
+  first = NULL;
+  second = NULL;
+  body = NULL;
+  last_version = 0L;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = second->load_meta(second, "default", "lease-key", &loaded_meta,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(loaded_meta.found);
+  lc_pouch_meta_record_cleanup(&allocator, &loaded_meta);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-a";
+  meta.state_etag = "state-a";
+  meta.version = 10L;
+  rc = first->store_meta(first, "default", "lease-key", &meta, NULL,
+                         &meta_res, &error);
+  assert_int_equal(rc, LC_OK);
+
+  state_opts.content_type = "application/octet-stream";
+  for (index = 0U; index < 80U; ++index) {
+    source = NULL;
+    rc = lc_source_from_memory(payload, sizeof(payload), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = first->write_state(first, "default", "hot-key", source, &state_opts,
+                            &put_res, &error);
+    lc_source_close(source);
+    assert_int_equal(rc, LC_OK);
+    last_version = put_res.new_version;
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+    memset(&put_res, 0, sizeof(put_res));
+  }
+
+  assert_true(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT) <
+              25U);
+
+  rc = second->load_meta(second, "default", "lease-key", &loaded_meta,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded_meta.found);
+  assert_string_equal(loaded_meta.etag, meta_res.etag);
+  assert_string_equal(loaded_meta.meta.owner, "owner-a");
+  lc_pouch_meta_record_cleanup(&allocator, &loaded_meta);
+
+  rc = second->read_state(second, "default", "hot-key", &body, &state_info,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(state_info.version, last_version);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, sizeof(payload));
+  lc_source_close(body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_dequeue_survives_compaction_refresh(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -4473,6 +4575,8 @@ int main(void) {
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
       cmocka_unit_test(
           test_auto_compaction_preserves_live_heads_and_tokens),
+      cmocka_unit_test(
+          test_independent_handle_refreshes_after_log_replacement),
       cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
