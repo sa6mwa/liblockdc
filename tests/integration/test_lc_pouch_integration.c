@@ -501,6 +501,148 @@ static void test_pouch_public_cas_across_clients(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_remove_recreate_semantics(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_lease *reacquired;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_remove_op remove_op;
+  lc_remove_req remove_req;
+  lc_remove_res remove_res;
+  lc_keepalive_req keepalive_req;
+  lc_update_opts update_opts;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_error error;
+  char *stale_state_etag;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "remove-recreate");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  reacquired = NULL;
+  source = NULL;
+  sink = NULL;
+  stale_state_etag = NULL;
+  memset(&remove_res, 0, sizeof(remove_res));
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/remove-key";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, 0L);
+  assert_null(lease->state_etag);
+
+  lc_remove_req_init(&remove_req);
+  rc = lease->remove(lease, &remove_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, 0L);
+  assert_null(lease->state_etag);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"version\":1}", &error);
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, 1L);
+  assert_non_null(lease->state_etag);
+  stale_state_etag = strdup(lease->state_etag);
+  assert_non_null(stale_state_etag);
+
+  lc_remove_op_init(&remove_op);
+  lease_ref_from_lease(lease, &remove_op.lease);
+  remove_op.has_if_version = 1;
+  remove_op.if_version = 0L;
+  remove_op.if_state_etag = stale_state_etag;
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_remove_res_cleanup(&remove_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_client_state_text(client, "integration/remove-key", "{\"version\":1}",
+                           &error);
+
+  lc_remove_req_init(&remove_req);
+  remove_req.if_state_etag = lease->state_etag;
+  rc = lease->remove(lease, &remove_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(lease->state_etag);
+  assert_int_equal(lease->version, 2L);
+
+  update_opts.if_state_etag = stale_state_etag;
+  source = source_from_text("{\"version\":2}", &error);
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_keepalive_req_init(&keepalive_req);
+  keepalive_req.ttl_seconds = 60L;
+  rc = lease->keepalive(lease, &keepalive_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, 2L);
+  assert_null(lease->state_etag);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire.owner = "owner-b";
+  rc = client->acquire(client, &acquire, &reacquired, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(reacquired);
+  assert_int_equal(reacquired->version, 2L);
+  assert_null(reacquired->state_etag);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = reacquired->get(reacquired, sink, NULL, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(get_res.no_content);
+  assert_int_equal(get_res.version, 0L);
+  lc_get_res_cleanup(&get_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  source = source_from_text("{\"version\":3}", &error);
+  update_opts.if_state_etag = NULL;
+  rc = reacquired->update(reacquired, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(reacquired->version, 3L);
+  assert_client_state_text(client, "integration/remove-key", "{\"version\":3}",
+                           &error);
+
+  rc = reacquired->release(reacquired, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  reacquired = NULL;
+  client->close(client);
+
+  lc_remove_res_cleanup(&remove_res);
+  lc_get_res_cleanup(&get_res);
+  free(stale_state_etag);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_public_state_attachment_shared_handles),
@@ -508,6 +650,7 @@ int main(void) {
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
+      cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

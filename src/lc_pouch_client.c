@@ -1184,6 +1184,12 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   if (rc != LC_OK) {
     return rc;
   }
+  if (req->has_if_version && record.meta.version != req->if_version) {
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return lc_error_set(error, LC_ERR_SERVER, 412L,
+                        "pouch remove version precondition failed", NULL,
+                        "precondition_failed", NULL);
+  }
   rc = client->pouch_store->remove_state(client->pouch_store,
                                          record.namespace_name, req->lease.key,
                                          req->if_state_etag, &removed, error);
@@ -2572,6 +2578,10 @@ int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *opts,
     req.if_state_etag = opts->if_state_etag;
     req.if_version = opts->if_version;
     req.has_if_version = opts->has_if_version;
+  }
+  if (!req.has_if_version && lease->version > 0L) {
+    req.if_version = lease->version;
+    req.has_if_version = 1;
   }
   rc = lc_pouch_client_remove_method(&lease->client->pub, &req, &res, error);
   if (rc == LC_OK && res.removed) {
