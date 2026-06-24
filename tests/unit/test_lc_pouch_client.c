@@ -117,6 +117,30 @@ static lc_client *open_pouch_client_with_limit(const char *endpoint,
   return client;
 }
 
+static lc_client *open_pouch_client_with_query_config(
+    const char *endpoint, const char *preferred_engine,
+    const char *fallback_engine) {
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  const char *endpoints[1];
+  int rc;
+
+  memset(&error, 0, sizeof(error));
+  lc_client_config_init(&config);
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "default";
+  config.pouch_query_engine = preferred_engine;
+  config.pouch_query_fallback_engine = fallback_engine;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(client);
+  lc_error_cleanup(&error);
+  return client;
+}
+
 static lc_client *open_pouch_client(const char *endpoint) {
   return open_pouch_client_with_namespace(endpoint, "default");
 }
@@ -2419,6 +2443,173 @@ static void assert_pouch_unsupported(int rc, lc_error *error,
   lc_error_cleanup(error);
 }
 
+static void test_pouch_endpoint_reports_query_mode_defaults(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_namespace_config_req req;
+  lc_namespace_config_res res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-defaults");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+
+  lc_namespace_config_req_init(&req);
+  req.namespace_name = "default";
+  rc = client->get_namespace_config(client, &req, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(res.namespace_name, "default");
+  assert_string_equal(res.preferred_engine, "index");
+  assert_string_equal(res.fallback_engine, "none");
+
+  lc_namespace_config_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_reports_configured_scan_mode(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_namespace_config_req req;
+  lc_namespace_config_res res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-scan");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client_with_query_config(endpoint, "scan", NULL);
+
+  lc_namespace_config_req_init(&req);
+  req.namespace_name = "default";
+  rc = client->get_namespace_config(client, &req, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(res.preferred_engine, "scan");
+  assert_string_equal(res.fallback_engine, "none");
+
+  lc_namespace_config_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_reports_configured_scan_fallback(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_namespace_config_req req;
+  lc_namespace_config_res res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-fallback");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client_with_query_config(endpoint, "index", "scan");
+
+  lc_namespace_config_req_init(&req);
+  req.namespace_name = "default";
+  rc = client->get_namespace_config(client, &req, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(res.preferred_engine, "index");
+  assert_string_equal(res.fallback_engine, "scan");
+
+  lc_namespace_config_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_rejects_invalid_query_mode_config(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  const char *endpoints[1];
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-invalid");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  lc_client_config_init(&config);
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_query_engine = "linear";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch_query_engine must be index or scan");
+  lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  config.pouch_query_engine = "index";
+  config.pouch_query_fallback_engine = "linear";
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(
+      error.message, "pouch_query_fallback_engine must be none, index, or scan");
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_rejects_invalid_query_engine_hint(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-invalid-hint");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  req.engine = "linear";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch query engine must be index or scan");
+
+  lc_error_cleanup(&error);
+  lc_sink_close(sink);
+  client->close(client);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_reports_local_unsupported_surfaces(
     void **state) {
   char root[256];
@@ -2478,8 +2669,10 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   namespace_req.namespace_name = "default";
   rc = client->get_namespace_config(client, &namespace_req, &namespace_res,
                                     &error);
-  assert_pouch_unsupported(
-      rc, &error, "pouch namespace management is not supported");
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(namespace_res.preferred_engine, "index");
+  assert_string_equal(namespace_res.fallback_engine, "none");
+  lc_namespace_config_res_cleanup(&namespace_res);
   namespace_req.preferred_engine = "index";
   rc = client->update_namespace_config(client, &namespace_req, &namespace_res,
                                        &error);
@@ -2555,6 +2748,13 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_auto_ack),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_with_state),
+      cmocka_unit_test(test_pouch_endpoint_reports_query_mode_defaults),
+      cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_mode),
+      cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_fallback),
+      cmocka_unit_test(
+          test_pouch_endpoint_rejects_invalid_query_mode_config),
+      cmocka_unit_test(
+          test_pouch_endpoint_rejects_invalid_query_engine_hint),
       cmocka_unit_test(
           test_pouch_endpoint_reports_local_unsupported_surfaces),
   };

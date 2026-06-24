@@ -2054,13 +2054,35 @@ static int lc_pouch_client_unsupported(lc_error *error, const char *message) {
   return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
 }
 
+static int lc_pouch_query_engine_supported(const char *value) {
+  return value == NULL || value[0] == '\0' || strcmp(value, "index") == 0 ||
+         strcmp(value, "scan") == 0;
+}
+
+static int lc_pouch_validate_query_engine(const lc_query_req *req,
+                                          lc_error *error) {
+  if (req != NULL && !lc_pouch_query_engine_supported(req->engine)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query engine must be index or scan", NULL, NULL,
+                        NULL);
+  }
+  return LC_OK;
+}
+
 int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                                  lc_sink *dst, lc_query_res *out,
                                  lc_error *error) {
   (void)self;
-  (void)req;
   (void)dst;
   (void)out;
+  {
+    int rc;
+
+    rc = lc_pouch_validate_query_engine(req, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   return lc_pouch_client_unsupported(error,
                                      "pouch query requires the LQL slice");
 }
@@ -2071,10 +2093,17 @@ int lc_pouch_client_query_keys_method(lc_client *self,
                                       void *context, lc_query_res *out,
                                       lc_error *error) {
   (void)self;
-  (void)req;
   (void)handler;
   (void)context;
   (void)out;
+  {
+    int rc;
+
+    rc = lc_pouch_validate_query_engine(req, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   return lc_pouch_client_unsupported(error,
                                      "pouch query_keys requires the LQL slice");
 }
@@ -2082,11 +2111,35 @@ int lc_pouch_client_query_keys_method(lc_client *self,
 int lc_pouch_client_get_namespace_config_method(
     lc_client *self, const lc_namespace_config_req *req,
     lc_namespace_config_res *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_unsupported(
-      error, "pouch namespace management is not supported");
+  lc_client_handle *client;
+  const char *namespace_name;
+
+  if (self == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "get_namespace_config requires self and out", NULL,
+                        NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  namespace_name = lc_pouch_default_namespace(
+      client, req != NULL ? req->namespace_name : NULL);
+  out->namespace_name = lc_strdup_local(namespace_name);
+  out->preferred_engine =
+      lc_strdup_local(client->pouch_query_engine != NULL
+                          ? client->pouch_query_engine
+                          : "index");
+  out->fallback_engine =
+      lc_strdup_local(client->pouch_query_fallback_engine != NULL
+                          ? client->pouch_query_fallback_engine
+                          : "none");
+  if (out->namespace_name == NULL || out->preferred_engine == NULL ||
+      out->fallback_engine == NULL) {
+    lc_namespace_config_res_cleanup(out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch namespace configuration",
+                        NULL, NULL, NULL);
+  }
+  return LC_OK;
 }
 
 int lc_pouch_client_update_namespace_config_method(

@@ -2730,5 +2730,7 @@ void lc_client_close_method(lc_client *self) {
   lc_client_free(client, client->client_bundle_bytes);
   lc_client_free(client, client->client_bundle_path);
   lc_client_free(client, client->default_namespace);
+  lc_client_free(client, client->pouch_query_engine);
+  lc_client_free(client, client->pouch_query_fallback_engine);
   lc_client_free(client, client);
 }

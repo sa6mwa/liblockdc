@@ -47,6 +47,8 @@ struct lc_client_handle {
   int insecure_skip_verify;
   int prefer_http_2;
   size_t http_json_response_limit_bytes;
+  char *pouch_query_engine;
+  char *pouch_query_fallback_engine;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;

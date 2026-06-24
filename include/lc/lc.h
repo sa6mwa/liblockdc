@@ -140,6 +140,14 @@ typedef struct lc_client_config {
    * `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`.
    */
   size_t http_json_response_limit_bytes;
+  /** Default query engine for `pouch://` clients. `NULL` or empty uses
+   * `"index"`. Supported values are `"index"` and `"scan"`.
+   */
+  const char *pouch_query_engine;
+  /** Fallback query engine for `pouch://` clients. `NULL` or empty uses
+   * `"none"`. Supported values are `"none"`, `"index"`, and `"scan"`.
+   */
+  const char *pouch_query_fallback_engine;
   /** Borrowed client logger used for SDK diagnostics. Defaults to a no-op
    * logger. */
   pslog_logger *logger;

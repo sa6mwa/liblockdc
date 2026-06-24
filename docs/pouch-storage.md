@@ -301,12 +301,14 @@ of rewritten JSON files.
 
 - Pouch v1 does not implement management APIs.
 - Public client surfaces that pouch does not yet implement, including public
-  LQL query calls before `liblql`, namespace/index management, public
+  LQL query calls before `liblql`, namespace/index mutation management, public
   transaction-control replay/decision calls, and TC cluster/resource-manager
-  calls, must return deterministic local unsupported errors. A `pouch://`
-  client must never fall through to HTTP transport for an unimplemented
-  server-side surface. Internal indexed metadata scans are not optional: they
-  are part of the storage engine even before the public LQL surface is enabled.
+  calls, must return deterministic local unsupported errors. Pouch may report
+  the locally configured query engine defaults through namespace configuration
+  reads. A `pouch://` client must never fall through to HTTP transport for an
+  unimplemented server-side surface. Internal indexed metadata scans are not
+  optional: they are part of the storage engine even before the public LQL
+  surface is enabled.
 - Pouch v1 does not implement authentication, authorization, permissions, TLS,
   or remote networking concerns.
 - Pouch is not a fake HTTP server. The client adapter may preserve the public
