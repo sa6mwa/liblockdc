@@ -19,6 +19,7 @@
 #define TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET 44U
 #define TEST_POUCH_HEADER_RECORD_VERSION_OFFSET 56U
 #define TEST_POUCH_RECORD_STATE_PUT 1U
+#define TEST_POUCH_RECORD_STATE_REMOVE 2U
 #define TEST_POUCH_RECORD_META_PUT 3U
 #define TEST_POUCH_RECORD_OBJECT_PUT 5U
 #define TEST_POUCH_RECORD_QUEUE_PUT 7U
@@ -1781,6 +1782,75 @@ static void test_metadata_scan_forces_full_log_replay(void **state) {
 
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_staged_state_rejects_pathlike_transaction_ids(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_pouch_promote_staged_opts promote_opts;
+  lc_pouch_discard_staged_opts discard_opts;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "staged-txn-path");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&info, 0, sizeof(info));
+  memset(&promote_opts, 0, sizeof(promote_opts));
+  memset(&discard_opts, 0, sizeof(discard_opts));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  state_opts.content_type = "text/plain";
+  source = source_from_text("draft");
+  rc = store->stage_state(store, "default", "lease-key", "txn/bad", source,
+                          &state_opts, &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  rc = store->load_staged_state(store, "default", "lease-key", "txn/bad",
+                                &read_body, &info, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(read_body);
+  lc_error_cleanup(&error);
+
+  rc = store->promote_staged_state(store, "default", "lease-key", "txn/bad",
+                                   &promote_opts, &put_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+
+  rc = store->discard_staged_state(store, "default", "lease-key", "txn/bad",
+                                   &discard_opts, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
+                   0U);
+  assert_int_equal(
+      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 0U);
+  lc_error_cleanup(&error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
@@ -4735,6 +4805,7 @@ int main(void) {
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_staged_state_promote_discard_and_reopen),
       cmocka_unit_test(test_staged_state_listing_orders_paginates_and_replays),
+      cmocka_unit_test(test_staged_state_rejects_pathlike_transaction_ids),
       cmocka_unit_test(test_root_staged_state_lists_and_discards),
       cmocka_unit_test(test_replay_truncates_trailing_partial_record),
       cmocka_unit_test(test_replay_rebuilds_indexes_after_external_truncation),
