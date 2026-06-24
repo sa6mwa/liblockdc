@@ -434,9 +434,9 @@ static int lc_pouch_disk_get_object(lc_pouch_store *self,
                                     const lc_pouch_object_selector *selector,
                                     lc_source **body, lc_pouch_object_info *out,
                                     lc_error *error);
-static char *lc_pouch_make_object_id_from_crc(lc_pouch_disk_store *store,
-                                              const char *name,
-                                              unsigned long crc);
+static char *lc_pouch_make_object_id_from_sha256(lc_pouch_disk_store *store,
+                                                 const char *name,
+                                                 const char *sha256_hex);
 static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                                      const char *namespace_name,
                                      const char *src_key, const char *dst_key,
@@ -3251,14 +3251,42 @@ static int lc_pouch_disk_upsert_object_entry(
   return 1;
 }
 
-static char *lc_pouch_make_object_id_from_crc(lc_pouch_disk_store *store,
-                                              const char *name,
-                                              unsigned long crc) {
-  char stack[128];
+static char *lc_pouch_make_object_id_from_sha256(lc_pouch_disk_store *store,
+                                                 const char *name,
+                                                 const char *sha256_hex) {
+  size_t prefix_len;
+  size_t hash_len;
+  size_t name_len;
+  unsigned long alloc_len;
+  unsigned long total_len;
+  char *id;
 
-  snprintf(stack, sizeof(stack), "pouch-obj-%08lx-%s", crc,
-           name != NULL ? name : "attachment");
-  return lc_pouch_strdup(&store->allocator, stack);
+  if (sha256_hex == NULL) {
+    return NULL;
+  }
+  prefix_len = strlen("pouch-obj-");
+  hash_len = strlen(sha256_hex);
+  name_len = strlen(name != NULL ? name : "attachment");
+  total_len = (unsigned long)prefix_len;
+  if (lc_pouch_disk_add_overflows(total_len, (unsigned long)hash_len,
+                                  &total_len) ||
+      lc_pouch_disk_add_overflows(total_len, 1UL, &total_len) ||
+      lc_pouch_disk_add_overflows(total_len, (unsigned long)name_len,
+                                  &total_len) ||
+      lc_pouch_disk_add_overflows(total_len, 1UL, &alloc_len) ||
+      alloc_len > (unsigned long)((size_t)-1)) {
+    return NULL;
+  }
+  id = (char *)lc_pouch_alloc(&store->allocator, (size_t)alloc_len);
+  if (id == NULL) {
+    return NULL;
+  }
+  memcpy(id, "pouch-obj-", prefix_len);
+  memcpy(id + prefix_len, sha256_hex, hash_len);
+  id[prefix_len + hash_len] = '-';
+  memcpy(id + prefix_len + hash_len + 1U,
+         name != NULL ? name : "attachment", name_len + 1U);
+  return id;
 }
 
 static int lc_pouch_disk_find_queue_entry(lc_pouch_disk_store *store,
@@ -7597,7 +7625,7 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
     lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
-  id = lc_pouch_make_object_id_from_crc(store, name, payload_crc);
+  id = lc_pouch_make_object_id_from_sha256(store, name, payload_sha256);
   if (id == NULL) {
     close(temp_fd);
     lc_pouch_disk_unlock(store, error);
@@ -7795,7 +7823,6 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   char *src_plaintext_sha256;
   char *src_content_type;
   const char *name;
-  unsigned long payload_crc;
   unsigned long payload_offset;
   unsigned long src_body_offset;
   unsigned long src_body_length;
@@ -7876,6 +7903,17 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   src_body_offset = src_entry->body_offset;
   src_body_length = src_entry->body_length;
   src_size = src_entry->size;
+  existing = lc_pouch_disk_find_object_by_name(store, namespace_name, dst_key,
+                                               name);
+  if (existing >= 0 && opts->prevent_overwrite) {
+    lc_pouch_free(&store->allocator, src_plaintext_sha256);
+    lc_pouch_free(&store->allocator, src_content_type);
+    lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
+    return lc_error_set(error, LC_ERR_SERVER, 409L,
+                        "pouch attachment already exists", NULL,
+                        "attachment_exists", NULL);
+  }
   read_fd = open(store->log_path, O_RDONLY);
   if (read_fd < 0) {
     lc_pouch_free(&store->allocator, src_plaintext_sha256);
@@ -7885,31 +7923,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     return lc_pouch_set_errno(error,
                               "failed to open pouch log for object copy");
   }
-  payload_crc = 0xffffffffUL;
-  rc = lc_pouch_disk_crc_fd_span(read_fd, src_body_offset, src_body_length,
-                                 &payload_crc, error);
-  if (rc != LC_OK) {
-    close(read_fd);
-    lc_pouch_free(&store->allocator, src_plaintext_sha256);
-    lc_pouch_free(&store->allocator, src_content_type);
-    lc_pouch_disk_unlock(store, error);
-    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
-    return rc;
-  }
-  payload_crc ^= 0xffffffffUL;
-  existing = lc_pouch_disk_find_object_by_name(store, namespace_name, dst_key,
-                                               name);
-  if (existing >= 0 && opts->prevent_overwrite) {
-    close(read_fd);
-    lc_pouch_free(&store->allocator, src_plaintext_sha256);
-    lc_pouch_free(&store->allocator, src_content_type);
-    lc_pouch_disk_unlock(store, error);
-    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
-    return lc_error_set(error, LC_ERR_SERVER, 409L,
-                        "pouch attachment already exists", NULL,
-                        "attachment_exists", NULL);
-  }
-  id = lc_pouch_make_object_id_from_crc(store, name, payload_crc);
+  id = lc_pouch_make_object_id_from_sha256(store, name, src_plaintext_sha256);
   if (id == NULL) {
     close(read_fd);
     lc_pouch_free(&store->allocator, src_plaintext_sha256);

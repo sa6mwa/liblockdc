@@ -4093,6 +4093,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   assert_non_null(first.id);
+  assert_non_null(strstr(first.id, payload_one_sha256));
   assert_string_equal(first.name, "result.txt");
   assert_string_equal(first.content_type, "text/plain");
   assert_string_equal(first.plaintext_sha256, payload_one_sha256);
@@ -4140,6 +4141,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(copied.name, "result.txt");
   assert_string_equal(copied.id, first.id);
+  assert_non_null(strstr(copied.id, payload_one_sha256));
   assert_string_equal(copied.content_type, "text/plain");
   assert_string_equal(copied.plaintext_sha256, payload_one_sha256);
   assert_int_equal(copied.size, 11L);
@@ -4183,6 +4185,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
+  assert_non_null(strstr(fetched.id, payload_two_sha256));
   assert_string_equal(fetched.plaintext_sha256, payload_two_sha256);
   lc_pouch_object_info_cleanup(&allocator, &fetched);
   rc = store->delete_all_objects(store, "default", "lease-key", &deleted_count,
