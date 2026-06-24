@@ -6797,12 +6797,10 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   assert_int_equal(error.http_status, 404L);
   lc_error_cleanup(&error);
   lc_txn_decision_req_init(&decision_req);
-  decision_req.txn_id = "txn-1";
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
-                      "pouch transaction decision requires txn_id and "
-                      "participants");
+                      "pouch transaction decision requires txn_id");
   lc_error_cleanup(&error);
 
   lc_tc_lease_acquire_req_init(&tc_acquire_req);

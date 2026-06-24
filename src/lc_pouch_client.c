@@ -353,8 +353,12 @@ static int lc_pouch_txn_validate_decision_req(lc_client_handle *client,
   int rc;
 
   if (client == NULL || req == NULL || req->txn_id == NULL ||
-      req->txn_id[0] == '\0' || req->participants == NULL ||
-      req->participant_count == 0U) {
+      req->txn_id[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction decision requires txn_id", NULL,
+                        NULL, NULL);
+  }
+  if (req->participant_count > 0U && req->participants == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch transaction decision requires txn_id and "
                         "participants",
