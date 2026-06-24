@@ -495,7 +495,10 @@ survive the index predicates.
 
 Full ordered scanning remains a supported backend mode, just not the preferred
 default. Pouch configuration must be able to select indexed mode, scan mode,
-and fallback policy when a store/client instance is opened. The public client
+and fallback policy when a store/client instance is opened. This is an
+instance-level choice with the same operational role as the server disk store's
+query backend mode: a caller can intentionally run a pouch instance in scan
+mode even though indexed mode is the normal production route. The public client
 can set this through `lc_client_config.pouch_query_engine` and
 `lc_client_config.pouch_query_fallback_engine`, or directly on a pouch endpoint
 with `pouch:///path?query_engine=scan&query_fallback_engine=index`. Endpoint
@@ -503,17 +506,19 @@ settings override the client defaults for that opened store. Scan mode is
 useful for tiny stores, diagnostics, index rebuild validation, and early
 deployments before a particular index feature exists.
 
-Scan mode is a real full-log/full-summary route, not a synonym for the indexed
-path with fewer predicates. Before serving a scan page, the disk backend must
-refresh from the authoritative log state, including the equivalent of a forced
-segment/log scan when marker state, open-file replacement, or configured refresh
-intervals make cached projections uncertain. It may then serve the page from a
-rebuilt in-memory summary projection so long as the projection was derived from
-that authoritative refresh. The scan result must preserve stable lexical key
-ordering, honor `start_after` and `limit`, skip query-hidden rows, and avoid
-payload materialization until a surviving query row needs its document body.
-This keeps Go-style scan correctness available for pouch instances that request
-it while keeping indexed search as the default and preferred performance path.
+Scan mode is a real Go-style log-backed scan route, not a synonym for the
+indexed path with fewer predicates and not a hidden fallback inside indexed
+search. Before serving a scan page, the disk backend must refresh from the
+authoritative log state, including the equivalent of a forced segment/log scan
+when marker state, open-file replacement, or configured refresh intervals make
+cached projections uncertain. After that authoritative refresh it may serve the
+page from the rebuilt ordered metadata-summary projection, rather than rereading
+every payload record for every page. The scan result must preserve stable
+lexical key ordering, honor `start_after` and `limit`, skip query-hidden rows,
+and avoid payload materialization until a surviving query row needs its document
+body. This keeps full log-scan correctness available for pouch instances that
+request it while keeping indexed search as the default and preferred
+performance path.
 Fallback policy applies only to configured default routing, not to explicit
 per-request engine hints. For example, a store configured with
 `query_engine=scan&query_fallback_engine=index` should route `refresh=wait_for`
