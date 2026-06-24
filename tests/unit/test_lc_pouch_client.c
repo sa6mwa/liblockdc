@@ -1758,6 +1758,163 @@ static void test_pouch_endpoint_watch_queue_snapshots(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_queue_rejects_negative_timing_options(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_extend_req extend_req;
+  lc_nack_req nack_req;
+  lc_message *message;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-negative-timing");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats_res, 0, sizeof(stats_res));
+  client = open_pouch_client(endpoint);
+  message = NULL;
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.delay_seconds = -1L;
+  source = source_from_text("invalid-delay");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "enqueue_message delay_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = -1L;
+  source = source_from_text("invalid-visibility");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "enqueue_message visibility_timeout_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.ttl_seconds = -1L;
+  source = source_from_text("invalid-ttl");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "enqueue_message ttl_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.max_attempts = -1;
+  source = source_from_text("invalid-attempts");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "enqueue_message max_attempts must be non-negative");
+  lc_error_cleanup(&error);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(stats_res.available);
+  assert_int_equal(stats_res.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("valid-message");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = -1L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "dequeue_message visibility_timeout_seconds must be non-negative");
+  assert_null(message);
+  lc_error_cleanup(&error);
+
+  memset(&stats_res, 0, sizeof(stats_res));
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(stats_res.available);
+  assert_int_equal(stats_res.pending_candidates, 1);
+  assert_string_equal(stats_res.head_message_id, enqueue_res.message_id);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+
+  lc_nack_req_init(&nack_req);
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  nack_req.delay_seconds = -1L;
+  rc = message->nack(message, &nack_req, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "nack_message delay_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  lc_extend_req_init(&extend_req);
+  extend_req.extend_by_seconds = -1L;
+  rc = message->extend(message, &extend_req, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "extend_message extend_by_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+
+  memset(&stats_res, 0, sizeof(stats_res));
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(stats_res.available);
+  assert_int_equal(stats_res.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_queue_variants_reject_missing_owner(
     void **state) {
   char root[256];
@@ -4323,6 +4480,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_watch_queue_snapshots),
+      cmocka_unit_test(
+          test_pouch_endpoint_queue_rejects_negative_timing_options),
       cmocka_unit_test(
           test_pouch_endpoint_queue_variants_reject_missing_owner),
       cmocka_unit_test(
