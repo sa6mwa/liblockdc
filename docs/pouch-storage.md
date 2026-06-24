@@ -655,12 +655,12 @@ metadata, and key-only scans must agree with document scans even after a sidecar
 tail fault. Later field postings and `liblql` predicates must extend this
 boundary with storage-owned index segments/postings and candidate iteration,
 rather than falling back to a single full-log scan. Scan-mode key-only queries
-should use a storage key-scan primitive when the backend provides one, so
-configured scan mode does not copy full metadata rows for `query_keys`.
-Key-only indexed scans have their own storage primitive and copy only visible
-keys before invoking callbacks. The current disk backend serves that primitive
-from the query-summary projection rather than the full metadata row array, so
-`query_keys` does not pay for metadata row copies that only document scans need.
+use a storage key-scan primitive when the backend provides one, so configured
+scan mode does not copy full metadata rows for `query_keys`.
+Key-only scan and indexed-scan primitives copy only visible keys before
+invoking callbacks. The current disk backend serves both primitives from the
+query-summary projection rather than the full metadata row array, so
+`query_keys` does not pay for metadata row copies.
 Indexed match-all document scans also page over the query-summary projection
 and copy only the row fields currently required by query callbacks: key, ETag,
 version, update timestamp, and query-hidden state. Document payloads are still

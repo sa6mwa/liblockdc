@@ -4349,17 +4349,17 @@ static int lc_pouch_disk_scan_meta_keys(
   }
 
   start_key = req->start_after != NULL ? req->start_after : "";
-  if (lc_pouch_disk_query_index_find(store, req->namespace_name, start_key,
-                                     &start_index) &&
+  if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
+                                       &start_index) &&
       req->start_after != NULL) {
     start_index++;
   }
 
-  for (index = start_index; index < store->query_meta_index_count; ++index) {
-    lc_pouch_disk_meta_entry *entry;
+  for (index = start_index; index < store->query_summary_entry_count; ++index) {
+    lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
 
-    entry = &store->meta_entries[store->query_meta_indices[index]];
+    entry = &store->query_summary_entries[index];
     namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
     if (namespace_cmp > 0) {
       break;
@@ -4368,8 +4368,8 @@ static int lc_pouch_disk_scan_meta_keys(
       continue;
     }
     if (entry->deleted ||
-        (!req->include_hidden && entry->meta.has_query_hidden &&
-         entry->meta.query_hidden)) {
+        (!req->include_hidden && entry->has_query_hidden &&
+         entry->query_hidden)) {
       continue;
     }
     if (req->limit > 0U && visit_count == req->limit) {
@@ -4389,13 +4389,13 @@ static int lc_pouch_disk_scan_meta_keys(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_meta_index_count &&
+  for (index = start_index; index < store->query_summary_entry_count &&
                         row_index < visit_count;
        ++index) {
-    lc_pouch_disk_meta_entry *entry;
+    lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
 
-    entry = &store->meta_entries[store->query_meta_indices[index]];
+    entry = &store->query_summary_entries[index];
     namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
     if (namespace_cmp > 0) {
       break;
@@ -4404,8 +4404,8 @@ static int lc_pouch_disk_scan_meta_keys(
       continue;
     }
     if (entry->deleted ||
-        (!req->include_hidden && entry->meta.has_query_hidden &&
-         entry->meta.query_hidden)) {
+        (!req->include_hidden && entry->has_query_hidden &&
+         entry->query_hidden)) {
       continue;
     }
     keys[row_index] = lc_pouch_strdup(&store->allocator, entry->key);

@@ -2946,6 +2946,21 @@ static void test_metadata_key_scan_orders_paginates_and_replays(void **state) {
   assert_null(scan.next_start_after);
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
 
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = NULL;
+  req.limit = 8U;
+  req.include_hidden = 1;
+  rc = store->scan_meta_keys(store, &req, capture_query_key, &capture, &scan,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 3U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(capture.keys[2], "hidden");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
