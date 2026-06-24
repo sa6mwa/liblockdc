@@ -3048,6 +3048,110 @@ static void test_pouch_public_queue_transaction_ack_commit_removes(
   cleanup_pouch_root(root);
 }
 
+static void
+test_pouch_public_queue_transaction_recovery_rolls_back_ack(void **state) {
+  char root[256];
+  char endpoint[320];
+  char participant_namespace[64];
+  char participant_key[256];
+  lc_client *client;
+  lc_source *source;
+  lc_message *message;
+  lc_message *redelivery;
+  lc_lease *state_lease;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "queue-txn-recovery-rollback");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  message = NULL;
+  redelivery = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&decision_res, 0, sizeof(decision_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "txn-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("recovery-rollback-work", &error);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "txn-jobs";
+  dequeue_req.owner = "worker";
+  dequeue_req.txn_id = "integration-queue-txn-recovery-rollback-1";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+
+  state_lease = message->state(message);
+  assert_non_null(state_lease);
+  snprintf(participant_namespace, sizeof(participant_namespace), "%s",
+           state_lease->namespace_name);
+  snprintf(participant_key, sizeof(participant_key), "%s", state_lease->key);
+  source = source_from_text("{\"acked\":true}", &error);
+  rc = state_lease->update(state_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = participant_namespace;
+  participant.key = participant_key;
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-queue-txn-recovery-rollback-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  decision_req.expires_at_unix = 1L;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "prepared");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  client->close(client);
+  client = NULL;
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "txn-jobs";
+  dequeue_req.owner = "worker-2";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue(client, &dequeue_req, &redelivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(redelivery);
+  assert_string_equal(redelivery->message_id, enqueue_res.message_id);
+  rc = redelivery->ack(redelivery, &error);
+  assert_lc_ok(rc, &error);
+  redelivery = NULL;
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_initial_delay_hides_until_visible(
     void **state) {
   char root[256];
@@ -5951,6 +6055,8 @@ int main(void) {
           test_pouch_public_queue_transaction_ack_rollback_redelivers),
       cmocka_unit_test(
           test_pouch_public_queue_transaction_ack_commit_removes),
+      cmocka_unit_test(
+          test_pouch_public_queue_transaction_recovery_rolls_back_ack),
       cmocka_unit_test(
           test_pouch_public_queue_initial_delay_hides_until_visible),
       cmocka_unit_test(test_pouch_public_queue_ttl_expiry_removes_candidate),
