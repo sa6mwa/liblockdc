@@ -4731,6 +4731,7 @@ static void test_pouch_endpoint_reports_query_mode_defaults(void **state) {
   assert_string_equal(res.namespace_name, "default");
   assert_string_equal(res.preferred_engine, "index");
   assert_string_equal(res.fallback_engine, "none");
+  assert_string_equal(res.correlation_id, "pouch-namespace-config");
 
   lc_namespace_config_res_cleanup(&res);
   client->close(client);
@@ -4761,6 +4762,7 @@ static void test_pouch_endpoint_reports_configured_scan_mode(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(res.preferred_engine, "scan");
   assert_string_equal(res.fallback_engine, "none");
+  assert_string_equal(res.correlation_id, "pouch-namespace-config");
 
   lc_namespace_config_res_cleanup(&res);
   client->close(client);
@@ -4792,6 +4794,7 @@ static void test_pouch_endpoint_reports_configured_scan_fallback(
   assert_int_equal(rc, LC_OK);
   assert_string_equal(res.preferred_engine, "index");
   assert_string_equal(res.fallback_engine, "scan");
+  assert_string_equal(res.correlation_id, "pouch-namespace-config");
 
   lc_namespace_config_res_cleanup(&res);
   client->close(client);
@@ -5516,6 +5519,7 @@ static void test_pouch_endpoint_flush_index_reports_current_sequence(
   assert_true(res.flushed);
   assert_false(res.pending);
   assert_true(res.index_seq > 0UL);
+  assert_string_equal(res.correlation_id, "pouch-index-flush");
   lc_index_flush_res_cleanup(&res);
 
   lc_index_flush_req_init(&req);
@@ -5525,6 +5529,7 @@ static void test_pouch_endpoint_flush_index_reports_current_sequence(
   assert_string_equal(res.namespace_name, "default");
   assert_string_equal(res.mode, "now");
   assert_true(res.index_seq > 0UL);
+  assert_string_equal(res.correlation_id, "pouch-index-flush");
   lc_index_flush_res_cleanup(&res);
 
   lc_index_flush_req_init(&req);
@@ -6528,6 +6533,7 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   assert_int_equal(rc, LC_OK);
   assert_string_equal(namespace_res.preferred_engine, "index");
   assert_string_equal(namespace_res.fallback_engine, "none");
+  assert_string_equal(namespace_res.correlation_id, "pouch-namespace-config");
   lc_namespace_config_res_cleanup(&namespace_res);
   namespace_req.preferred_engine = "index";
   rc = client->update_namespace_config(client, &namespace_req, &namespace_res,
@@ -6545,6 +6551,7 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   assert_true(flush_res.accepted);
   assert_true(flush_res.flushed);
   assert_false(flush_res.pending);
+  assert_string_equal(flush_res.correlation_id, "pouch-index-flush");
   lc_index_flush_res_cleanup(&flush_res);
 
   lc_txn_replay_req_init(&replay_req);

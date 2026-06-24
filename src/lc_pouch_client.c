@@ -4406,9 +4406,10 @@ int lc_pouch_client_get_namespace_config_method(
   out->namespace_name = lc_strdup_local(namespace_name);
   out->preferred_engine = lc_strdup_local(store_config.preferred_engine);
   out->fallback_engine = lc_strdup_local(store_config.fallback_engine);
+  out->correlation_id = lc_strdup_local("pouch-namespace-config");
   lc_pouch_query_config_cleanup(&client->pouch_allocator, &store_config);
   if (out->namespace_name == NULL || out->preferred_engine == NULL ||
-      out->fallback_engine == NULL) {
+      out->fallback_engine == NULL || out->correlation_id == NULL) {
     lc_namespace_config_res_cleanup(out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch namespace configuration",
@@ -4468,9 +4469,10 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   out->flushed = store_res.flushed;
   out->pending = store_res.pending;
   out->index_seq = store_res.index_seq;
+  out->correlation_id = lc_strdup_local("pouch-index-flush");
   lc_pouch_index_flush_res_cleanup(&client->pouch_allocator, &store_res);
   if (out->namespace_name == NULL || out->mode == NULL ||
-      out->flush_id == NULL) {
+      out->flush_id == NULL || out->correlation_id == NULL) {
     lc_index_flush_res_cleanup(out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch index flush result", NULL,

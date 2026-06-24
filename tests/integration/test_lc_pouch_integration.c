@@ -2098,6 +2098,7 @@ static void test_pouch_public_flush_index_refreshes_open_reader(void **state) {
   assert_true(before_flush.accepted);
   assert_true(before_flush.flushed);
   assert_false(before_flush.pending);
+  assert_string_equal(before_flush.correlation_id, "pouch-index-flush");
   before_seq = before_flush.index_seq;
 
   lc_acquire_req_init(&acquire);
@@ -2128,6 +2129,7 @@ static void test_pouch_public_flush_index_refreshes_open_reader(void **state) {
   assert_true(after_first_flush.accepted);
   assert_true(after_first_flush.flushed);
   assert_false(after_first_flush.pending);
+  assert_string_equal(after_first_flush.correlation_id, "pouch-index-flush");
   assert_true(after_first_flush.index_seq > before_seq);
   first_seq = after_first_flush.index_seq;
 
@@ -2153,6 +2155,7 @@ static void test_pouch_public_flush_index_refreshes_open_reader(void **state) {
   assert_true(after_second_flush.accepted);
   assert_true(after_second_flush.flushed);
   assert_false(after_second_flush.pending);
+  assert_string_equal(after_second_flush.correlation_id, "pouch-index-flush");
   assert_true(after_second_flush.index_seq > first_seq);
 
   lc_index_flush_res_cleanup(&before_flush);
