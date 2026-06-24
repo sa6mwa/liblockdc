@@ -923,6 +923,7 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   lc_pouch_state_info info;
   lc_error error;
   char *text;
+  const char *state_sha256;
   int rc;
 
   (void)state;
@@ -935,6 +936,8 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   memset(&info, 0, sizeof(info));
   store = NULL;
   read_body = NULL;
+  state_sha256 =
+      "48208f9428d64634bd8e28ff345bf0eab60d53c18fa2fbdb0b9bc1e84df2b5f6";
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
@@ -948,6 +951,7 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(put_res.new_version, 1L);
   assert_non_null(put_res.new_state_etag);
+  assert_string_equal(put_res.new_state_etag, state_sha256);
   assert_int_equal(put_res.bytes, 11L);
 
   rc = store->close(store, &error);

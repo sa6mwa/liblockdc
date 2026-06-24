@@ -63,6 +63,8 @@
 #define LC_POUCH_LOCK_FD_CACHE_CAPACITY 32U
 #define LC_POUCH_READ_FD_CACHE_CAPACITY 32U
 #define LC_POUCH_SHA256_HEX_SIZE 65U
+#define LC_POUCH_EMPTY_SHA256_HEX                                               \
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 typedef struct lc_pouch_sha256 {
   unsigned long state[8];
@@ -3493,6 +3495,11 @@ static char *lc_pouch_make_etag(lc_pouch_disk_store *store, long version,
   return lc_pouch_make_etag_from_crc(store, version, crc);
 }
 
+static char *lc_pouch_make_sha256_etag(lc_pouch_disk_store *store,
+                                       const char *sha256_hex) {
+  return lc_pouch_strdup(&store->allocator, sha256_hex);
+}
+
 static int lc_pouch_check_cas(lc_pouch_disk_state_entry *entry,
                               const char *expected_etag, long if_version,
                               int has_if_version, lc_error *error) {
@@ -6774,6 +6781,7 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
   lc_pouch_key_lock *key_lock;
   unsigned long payload_length;
   unsigned long payload_crc;
+  char payload_sha256[LC_POUCH_SHA256_HEX_SIZE];
   char *etag;
   const char *content_type;
   unsigned long body_offset;
@@ -6818,15 +6826,15 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
   }
   temp_fd = -1;
   rc = lc_pouch_disk_spool_source_to_temp(
-      store, body, 0, 0U, &temp_fd, &payload_length, &payload_crc, NULL,
-      error);
+      store, body, 0, 0U, &temp_fd, &payload_length, &payload_crc,
+      payload_sha256, error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   version = store->next_version++;
-  etag = lc_pouch_make_etag_from_crc(store, version, payload_crc);
+  etag = lc_pouch_make_sha256_etag(store, payload_sha256);
   if (etag == NULL) {
     close(temp_fd);
     lc_pouch_disk_unlock(store, error);
@@ -6924,7 +6932,7 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
     return LC_OK;
   }
   version = store->next_version++;
-  etag = lc_pouch_make_etag(store, version, NULL, 0U);
+  etag = lc_pouch_make_sha256_etag(store, LC_POUCH_EMPTY_SHA256_HEX);
   if (etag == NULL) {
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key(self, key_lock, error);
@@ -7119,7 +7127,7 @@ static int lc_pouch_disk_append_state_remove_locked(
   int rc;
 
   version = store->next_version++;
-  etag = lc_pouch_make_etag(store, version, NULL, 0U);
+  etag = lc_pouch_make_sha256_etag(store, LC_POUCH_EMPTY_SHA256_HEX);
   if (etag == NULL) {
     return lc_pouch_set_nomem(error, "failed to allocate pouch remove etag");
   }
