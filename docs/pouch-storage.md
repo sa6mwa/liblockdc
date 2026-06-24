@@ -490,13 +490,17 @@ still comes from the log, but the preferred query path should touch index data
 first and load full metadata or payload bytes only for candidate rows that
 survive the index predicates.
 
-Full ordered metadata-summary scanning remains a supported backend mode, just
-not the preferred default. Pouch configuration must be able to select indexed
-mode, scan mode, and fallback policy when a store/client instance is opened.
-Scan mode is useful for tiny stores, diagnostics, index rebuild validation, and
-early deployments before a particular index feature exists. It must still use
-the backend summary scan path and stable key ordering; it must not materialize
-payloads or silently replay the entire append log on every query.
+Full ordered scanning remains a supported backend mode, just not the preferred
+default. Pouch configuration must be able to select indexed mode, scan mode,
+and fallback policy when a store/client instance is opened. The public client
+can set this through `lc_client_config.pouch_query_engine` and
+`lc_client_config.pouch_query_fallback_engine`, or directly on a pouch endpoint
+with `pouch:///path?query_engine=scan&query_fallback_engine=index`. Endpoint
+settings override the client defaults for that opened store. Scan mode is
+useful for tiny stores, diagnostics, index rebuild validation, and early
+deployments before a particular index feature exists. It is the explicit
+full-scan route and must preserve stable key ordering while avoiding payload
+materialization until a surviving query row needs its document body.
 
 The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index
@@ -506,21 +510,21 @@ indexed match-all scans do not allocate and sort the general metadata table on
 every request. This projection is rebuilt from the authoritative log on open and
 updated on metadata put/delete; later field postings and `liblql` predicates
 must extend this boundary rather than falling back to a single full-log scan.
-In explicit scan mode, calls route through ordered metadata summaries and emit
-no index sequence because no durable query index is consulted. `query_keys`
-streams keys, excludes `query_hidden=true` metadata, uses `cursor` as
-`start_after`, and returns `keys` as the return mode. `query` streams NDJSON
-document rows in the same ordered page, embeds JSON state payloads as
-`document`, emits `null` for non-JSON or empty state payloads, returns
-`documents`, and reports local metadata such as `query_candidates`. Pouch
-`flush_index` is synchronous for the current local projection: it returns
-accepted/flushed/not-pending and the latest index sequence. Indexed match-all
-queries accept `refresh=wait_for` by performing the same synchronous local
-index flush before scanning the indexed projection. Explicit scan mode remains
-available for full-log scanning but does not accept refresh hints because no
-durable query index is consulted. Non-empty field selection, non-document scan
-return modes, and nontrivial LQL selectors remain unsupported until the
-indexed/LQL query slice lands.
+In explicit scan mode, calls route through the ordered scan path and emit no
+index sequence because no durable query index is consulted. `query_keys` streams
+keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
+returns `keys` as the return mode. `query` streams NDJSON document rows in the
+same ordered page, embeds JSON state payloads as `document`, emits `null` for
+non-JSON or empty state payloads, returns `documents`, and reports local
+metadata such as `query_candidates`. Pouch `flush_index` is synchronous for the
+current local projection: it returns accepted/flushed/not-pending and the
+latest index sequence. Indexed match-all queries accept `refresh=wait_for` by
+performing the same synchronous local index flush before scanning the indexed
+projection. Explicit scan mode remains available for full-log/full-summary
+scanning but does not accept refresh hints because no durable query index is
+consulted. Non-empty field selection, non-document scan return modes, and
+nontrivial LQL selectors remain unsupported until the indexed/LQL query slice
+lands.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a

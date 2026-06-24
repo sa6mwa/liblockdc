@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <cmocka.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -28,6 +29,11 @@ static void test_root_path(char *buffer, size_t buffer_size,
 
 static void test_endpoint(char *buffer, size_t buffer_size, const char *root) {
   snprintf(buffer, buffer_size, "pouch://%s", root);
+}
+
+static void test_endpoint_with_query(char *buffer, size_t buffer_size,
+                                     const char *root, const char *query) {
+  snprintf(buffer, buffer_size, "pouch://%s?%s", root, query);
 }
 
 static void test_cleanup_root(const char *root) {
@@ -2658,6 +2664,84 @@ static void test_pouch_endpoint_reports_configured_scan_fallback(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_query_options_configure_scan_mode(
+    void **state) {
+  char root[256];
+  char endpoint[384];
+  char log_path[512];
+  lc_client *client;
+  lc_namespace_config_req req;
+  lc_namespace_config_res res;
+  lc_error error;
+  struct stat st;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-url");
+  test_cleanup_root(root);
+  test_endpoint_with_query(
+      endpoint, sizeof(endpoint), root,
+      "query_engine=scan&query_fallback_engine=index");
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  assert_int_equal(stat(log_path, &st), 0);
+
+  lc_namespace_config_req_init(&req);
+  req.namespace_name = "default";
+  rc = client->get_namespace_config(client, &req, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(res.preferred_engine, "scan");
+  assert_string_equal(res.fallback_engine, "index");
+
+  lc_namespace_config_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_rejects_invalid_query_options(void **state) {
+  char root[256];
+  char endpoint[384];
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  const char *endpoints[1];
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-url-invalid");
+  test_cleanup_root(root);
+  memset(&error, 0, sizeof(error));
+  lc_client_config_init(&config);
+  test_endpoint_with_query(endpoint, sizeof(endpoint), root,
+                           "query_engine=linear");
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch endpoint query_engine must be index or scan");
+  lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  test_endpoint_with_query(endpoint, sizeof(endpoint), root, "unknown=scan");
+  endpoints[0] = endpoint;
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "unsupported pouch endpoint query option");
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys(
     void **state) {
   char root[256];
@@ -3672,6 +3756,9 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_reports_query_mode_defaults),
       cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_mode),
       cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_fallback),
+      cmocka_unit_test(
+          test_pouch_endpoint_query_options_configure_scan_mode),
+      cmocka_unit_test(test_pouch_endpoint_rejects_invalid_query_options),
       cmocka_unit_test(
           test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys),
       cmocka_unit_test(

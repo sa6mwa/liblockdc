@@ -965,6 +965,137 @@ static const char *lc_pouch_query_fallback_default(const char *value) {
   return value != NULL && value[0] != '\0' ? value : "none";
 }
 
+typedef struct lc_pouch_endpoint_options {
+  char *root_path;
+  char *query_engine;
+  char *query_fallback_engine;
+} lc_pouch_endpoint_options;
+
+static void lc_pouch_endpoint_options_cleanup(
+    const lc_allocator *allocator, lc_pouch_endpoint_options *options) {
+  if (options == NULL) {
+    return;
+  }
+  lc_free_with_allocator(allocator, options->root_path);
+  lc_free_with_allocator(allocator, options->query_engine);
+  lc_free_with_allocator(allocator, options->query_fallback_engine);
+  memset(options, 0, sizeof(*options));
+}
+
+static int lc_query_part_equal(const char *part, size_t part_len,
+                               const char *expected) {
+  size_t expected_len;
+
+  expected_len = strlen(expected);
+  return part_len == expected_len && strncmp(part, expected, part_len) == 0;
+}
+
+static int lc_pouch_endpoint_parse_option(
+    const lc_allocator *allocator, const char *key, size_t key_len,
+    const char *value, size_t value_len, lc_pouch_endpoint_options *options,
+    lc_error *error) {
+  char *copy;
+
+  if (key_len == 0U) {
+    return LC_OK;
+  }
+  if (lc_query_part_equal(key, key_len, "query_engine") ||
+      lc_query_part_equal(key, key_len, "pouch_query_engine")) {
+    copy = lc_dup_bytes_with_allocator(allocator, value, value_len);
+    if (copy == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch endpoint query_engine",
+                          NULL, NULL, NULL);
+    }
+    if (!lc_pouch_query_engine_supported(copy, 0)) {
+      lc_free_with_allocator(allocator, copy);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch endpoint query_engine must be index or scan",
+                          NULL, NULL, NULL);
+    }
+    lc_free_with_allocator(allocator, options->query_engine);
+    options->query_engine = copy;
+    return LC_OK;
+  }
+  if (lc_query_part_equal(key, key_len, "query_fallback_engine") ||
+      lc_query_part_equal(key, key_len, "pouch_query_fallback_engine")) {
+    copy = lc_dup_bytes_with_allocator(allocator, value, value_len);
+    if (copy == NULL) {
+      return lc_error_set(
+          error, LC_ERR_NOMEM, 0L,
+          "failed to allocate pouch endpoint query_fallback_engine", NULL, NULL,
+          NULL);
+    }
+    if (!lc_pouch_query_engine_supported(copy, 1)) {
+      lc_free_with_allocator(allocator, copy);
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          "pouch endpoint query_fallback_engine must be none, index, or scan",
+          NULL, NULL, NULL);
+    }
+    lc_free_with_allocator(allocator, options->query_fallback_engine);
+    options->query_fallback_engine = copy;
+    return LC_OK;
+  }
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "unsupported pouch endpoint query option", NULL, NULL,
+                      NULL);
+}
+
+static int lc_pouch_endpoint_options_parse(
+    const lc_allocator *allocator, const char *endpoint,
+    lc_pouch_endpoint_options *options, lc_error *error) {
+  const char *path;
+  const char *query;
+  const char *cursor;
+  size_t path_len;
+  int rc;
+
+  memset(options, 0, sizeof(*options));
+  path = lc_pouch_endpoint_path(endpoint);
+  query = path != NULL ? strchr(path, '?') : NULL;
+  path_len = query != NULL ? (size_t)(query - path) : strlen(path);
+  options->root_path = lc_dup_bytes_with_allocator(allocator, path, path_len);
+  if (options->root_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch endpoint path", NULL, NULL,
+                        NULL);
+  }
+  if (query == NULL) {
+    return LC_OK;
+  }
+
+  cursor = query + 1;
+  while (*cursor != '\0') {
+    const char *part;
+    const char *equals;
+    const char *next;
+    size_t key_len;
+    size_t value_len;
+
+    part = cursor;
+    next = strchr(part, '&');
+    if (next == NULL) {
+      next = part + strlen(part);
+    }
+    equals = part;
+    while (equals < next && *equals != '=') {
+      ++equals;
+    }
+    key_len = (size_t)(equals - part);
+    value_len = equals < next ? (size_t)(next - equals - 1) : 0U;
+    rc = lc_pouch_endpoint_parse_option(
+        allocator, part, key_len, equals < next ? equals + 1 : next, value_len,
+        options, error);
+    if (rc != LC_OK) {
+      lc_pouch_endpoint_options_cleanup(allocator, options);
+      return rc;
+    }
+    cursor = *next == '&' ? next + 1 : next;
+  }
+  return LC_OK;
+}
+
 void lc_client_config_init(lc_client_config *config) {
   if (config == NULL) {
     return;
@@ -1096,6 +1227,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   lc_engine_client_config engine_config;
   lc_engine_error engine_error;
   lc_bundle_capture_source bundle_capture;
+  lc_pouch_endpoint_options pouch_endpoint_options;
   lc_pouch_disk_open_opts pouch_open_opts;
   unsigned char *bundle_bytes;
   size_t bundle_length;
@@ -1111,6 +1243,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   }
   lc_engine_error_init(&engine_error);
   memset(&bundle_capture, 0, sizeof(bundle_capture));
+  memset(&pouch_endpoint_options, 0, sizeof(pouch_endpoint_options));
   bundle_bytes = NULL;
   bundle_length = 0U;
   is_pouch = config->endpoint_count == 1U &&
@@ -1182,19 +1315,55 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     return public_rc;
   }
   if (client->is_pouch) {
-    memset(&pouch_open_opts, 0, sizeof(pouch_open_opts));
-    pouch_open_opts.query_engine =
-        lc_pouch_query_engine_default(config->pouch_query_engine);
-    pouch_open_opts.query_fallback_engine =
-        lc_pouch_query_fallback_default(config->pouch_query_fallback_engine);
-    rc = lc_pouch_disk_open_with_options(
-        lc_pouch_endpoint_path(config->endpoints[0]), &client->pouch_allocator,
-        &pouch_open_opts, &client->pouch_store, error);
+    const char *effective_query_engine;
+    const char *effective_query_fallback_engine;
+
+    rc = lc_pouch_endpoint_options_parse(&config->allocator,
+                                         config->endpoints[0],
+                                         &pouch_endpoint_options, error);
     if (rc != LC_OK) {
       lc_client_close_method(&client->pub);
       lc_engine_error_cleanup(&engine_error);
       lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
       return rc;
+    }
+    effective_query_engine =
+        pouch_endpoint_options.query_engine != NULL
+            ? pouch_endpoint_options.query_engine
+            : lc_pouch_query_engine_default(config->pouch_query_engine);
+    effective_query_fallback_engine =
+        pouch_endpoint_options.query_fallback_engine != NULL
+            ? pouch_endpoint_options.query_fallback_engine
+            : lc_pouch_query_fallback_default(
+                  config->pouch_query_fallback_engine);
+    memset(&pouch_open_opts, 0, sizeof(pouch_open_opts));
+    pouch_open_opts.query_engine = effective_query_engine;
+    pouch_open_opts.query_fallback_engine = effective_query_fallback_engine;
+    rc = lc_pouch_disk_open_with_options(
+        pouch_endpoint_options.root_path, &client->pouch_allocator,
+        &pouch_open_opts, &client->pouch_store, error);
+    if (rc != LC_OK) {
+      lc_client_close_method(&client->pub);
+      lc_engine_error_cleanup(&engine_error);
+      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      lc_pouch_endpoint_options_cleanup(&config->allocator,
+                                        &pouch_endpoint_options);
+      return rc;
+    }
+    client->pouch_query_engine =
+        lc_client_strdup(client, effective_query_engine);
+    client->pouch_query_fallback_engine =
+        lc_client_strdup(client, effective_query_fallback_engine);
+    lc_pouch_endpoint_options_cleanup(&config->allocator,
+                                      &pouch_endpoint_options);
+    if (client->pouch_query_engine == NULL ||
+        client->pouch_query_fallback_engine == NULL) {
+      lc_client_close_method(&client->pub);
+      lc_engine_error_cleanup(&engine_error);
+      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy pouch query configuration", NULL,
+                          NULL, NULL);
     }
   }
   bundle_bytes = bundle_capture.bytes;
@@ -1259,21 +1428,6 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->logger = lc_engine_client_logger(client->engine);
   client->http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
-  if (client->is_pouch) {
-    client->pouch_query_engine = lc_client_strdup(
-        client, lc_pouch_query_engine_default(config->pouch_query_engine));
-    client->pouch_query_fallback_engine = lc_client_strdup(
-        client, lc_pouch_query_fallback_default(
-                    config->pouch_query_fallback_engine));
-    if (client->pouch_query_engine == NULL ||
-        client->pouch_query_fallback_engine == NULL) {
-      lc_client_close_method(&client->pub);
-      lc_engine_error_cleanup(&engine_error);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to copy pouch query configuration", NULL,
-                          NULL, NULL);
-    }
-  }
   client->pub.acquire = lc_client_acquire_method;
   client->pub.acquire_for_update = lc_client_acquire_for_update_method;
   client->pub.describe = lc_client_describe_method;
