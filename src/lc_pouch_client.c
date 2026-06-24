@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -3742,6 +3743,8 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
   lc_dequeue_req single_req;
   lc_message *message;
   lc_message **grown;
+  char *cursor;
+  char *next_cursor;
   int limit;
   int index;
   int rc;
@@ -3765,6 +3768,7 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
   memset(out, 0, sizeof(*out));
   single_req = *req;
   single_req.page_size = 1;
+  cursor = NULL;
   limit = req->page_size > 0 ? req->page_size : 1;
   for (index = 0; index < limit; ++index) {
     message = NULL;
@@ -3778,24 +3782,40 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
     }
     if (rc != LC_OK) {
       lc_dequeue_batch_cleanup(out);
+      free(cursor);
       return rc;
     }
     if (message == NULL) {
       break;
+    }
+    next_cursor = lc_strdup_local(message->next_cursor);
+    if (message->next_cursor != NULL && next_cursor == NULL) {
+      message->close(message);
+      lc_dequeue_batch_cleanup(out);
+      free(cursor);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy pouch dequeue cursor", NULL, NULL,
+                          NULL);
     }
     grown = (lc_message **)lc_realloc_local(
         out->messages, (out->count + 1U) * sizeof(out->messages[0]));
     if (grown == NULL) {
       message->close(message);
       lc_dequeue_batch_cleanup(out);
+      free(next_cursor);
+      free(cursor);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to grow pouch dequeue batch", NULL, NULL,
                           NULL);
     }
+    free(cursor);
+    cursor = next_cursor;
+    single_req.start_after = cursor;
     out->messages = grown;
     out->messages[out->count] = message;
     out->count += 1U;
   }
+  free(cursor);
   return LC_OK;
 }
 
@@ -3807,6 +3827,8 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
   lc_message *message;
   lc_nack_req nack_req;
   lc_error nack_error;
+  char *cursor;
+  char *next_cursor;
   int limit;
   int index;
   int terminal;
@@ -3835,6 +3857,7 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
   }
   single_req = *req;
   single_req.page_size = 1;
+  cursor = NULL;
   limit = req->page_size > 0 ? req->page_size : 1;
   deadline_ms = 0L;
   if (req->wait_seconds > 0L) {
@@ -3850,6 +3873,7 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
     rc = lc_pouch_client_dequeue_once(self, &single_req, with_state, &message,
                                       &terminal, error);
     if (rc != LC_OK) {
+      free(cursor);
       return rc;
     }
     if (message == NULL) {
@@ -3862,7 +3886,16 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
           continue;
         }
       }
+      free(cursor);
       return LC_OK;
+    }
+    next_cursor = lc_strdup_local(message->next_cursor);
+    if (message->next_cursor != NULL && next_cursor == NULL) {
+      message->close(message);
+      free(cursor);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy pouch subscribe cursor", NULL, NULL,
+                          NULL);
     }
     rc = consumer->handle(consumer->context, message, error);
     if (rc == LC_OK && !terminal) {
@@ -3890,10 +3923,16 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
       message->close(message);
     }
     if (rc != LC_OK) {
+      free(next_cursor);
+      free(cursor);
       return error != NULL && error->code != LC_OK ? error->code : rc;
     }
+    free(cursor);
+    cursor = next_cursor;
+    single_req.start_after = cursor;
     ++index;
   }
+  free(cursor);
   return LC_OK;
 }
 

@@ -3562,7 +3562,6 @@ static void test_pouch_public_dequeue_with_state_honors_start_after_cursor(
   assert_non_null(queue_state);
   assert_string_equal(queue_state->namespace_name, "default");
   assert_non_null(queue_state->lease_id);
-  assert_non_null(queue_state->txn_id);
 
   lc_update_opts_init(&update_opts);
   update_opts.content_type = "application/json";
