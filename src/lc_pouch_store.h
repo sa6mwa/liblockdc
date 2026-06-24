@@ -96,6 +96,7 @@ typedef struct lc_pouch_store_meta_res {
 
 typedef struct lc_pouch_scan_meta_req {
   const char *namespace_name;
+  const char *owner;
   const char *start_after;
   size_t limit;
   int include_hidden;

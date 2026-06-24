@@ -1570,6 +1570,132 @@ static void test_pouch_public_scan_query_keys_can_be_configured_by_endpoint(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_scan_query_owner_selector_filters_candidates(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "scan-query-owner-selector");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  alpha = NULL;
+  bravo = NULL;
+  charlie = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_scan_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+
+  acquire.key = "integration/scan-owner/alpha";
+  acquire.owner = "owner-a";
+  rc = client->acquire(client, &acquire, &alpha, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"owner\":\"a\",\"ordinal\":1}", &error);
+  rc = alpha->update(alpha, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/scan-owner/bravo";
+  acquire.owner = "owner-b";
+  rc = client->acquire(client, &acquire, &bravo, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"owner\":\"b\",\"ordinal\":2}", &error);
+  rc = bravo->update(bravo, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/scan-owner/charlie";
+  acquire.owner = "owner-a";
+  rc = client->acquire(client, &acquire, &charlie, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"owner\":\"a\",\"ordinal\":3}", &error);
+  rc = charlie->update(charlie, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{\"owner\":\"owner-a\"}";
+  query_req.limit = 10L;
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/scan-owner/alpha\""));
+  assert_non_null(strstr(text, "\"document\":{\"owner\":\"a\",\"ordinal\":1}"));
+  assert_non_null(strstr(text, "\"key\":\"integration/scan-owner/charlie\""));
+  assert_non_null(strstr(text, "\"document\":{\"owner\":\"a\",\"ordinal\":3}"));
+  assert_null(strstr(text, "integration/scan-owner/bravo"));
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
+  assert_int_equal(query_res.index_seq, 0UL);
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{\"owner\":\"owner-a\"}";
+  query_req.limit = 10L;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "integration/scan-owner/alpha");
+  assert_string_equal(capture.keys[1], "integration/scan-owner/charlie");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
+  assert_int_equal(query_res.index_seq, 0UL);
+
+  lc_query_res_cleanup(&query_res);
+  lc_release_req_init(&release_req);
+  rc = alpha->release(alpha, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  rc = bravo->release(bravo, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  rc = charlie->release(charlie, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_scan_query_documents_refreshes_open_reader(
     void **state) {
   char root[256];
@@ -7456,6 +7582,8 @@ int main(void) {
           test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh),
       cmocka_unit_test(
           test_pouch_public_scan_query_keys_can_be_configured_by_endpoint),
+      cmocka_unit_test(
+          test_pouch_public_scan_query_owner_selector_filters_candidates),
       cmocka_unit_test(
           test_pouch_public_scan_query_documents_refreshes_open_reader),
       cmocka_unit_test(

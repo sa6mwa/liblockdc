@@ -648,19 +648,19 @@ The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index
 scan primitive and return the current `index_seq`. Before `liblql` integration,
 indexed mode also accepts the exact owner selector form `{"owner":"..."}` and
-routes it through storage-owned owner postings. Scan mode intentionally remains
-the explicit full-summary match-all route and rejects owner selectors. The
-current disk backend keeps the sorted metadata projection as the authoritative
-in-memory index for match-all scans, while `query.index` remains a durable
-sidecar accelerator that can be validated against the store log and truncated at
-the last verified record. Indexed scans must never trust sidecar rows that do
-not match current metadata, and key-only scans must agree with document scans
-even after a sidecar tail fault. Later field postings and `liblql` predicates
-must extend this boundary with storage-owned index segments/postings and
-candidate iteration, rather than falling back to a single full-log scan.
-Scan-mode key-only queries use a storage key-scan primitive when the backend
-provides one, so configured scan mode does not copy full metadata rows for
-`query_keys`.
+routes it through storage-owned owner postings. Scan mode accepts the same
+pre-LQL selector set, but resolves owner equality by walking the ordered
+full-summary scan route instead of consulting owner postings. The current disk
+backend keeps the sorted metadata projection as the authoritative in-memory
+index for match-all scans, while `query.index` remains a durable sidecar
+accelerator that can be validated against the store log and truncated at the
+last verified record. Indexed scans must never trust sidecar rows that do not
+match current metadata, and key-only scans must agree with document scans even
+after a sidecar tail fault. Later field postings and `liblql` predicates must
+extend this boundary with storage-owned index segments/postings and candidate
+iteration, rather than falling back to a single full-log scan. Scan-mode
+key-only queries use a storage key-scan primitive when the backend provides
+one, so configured scan mode does not copy full metadata rows for `query_keys`.
 Key-only scan and indexed-scan primitives copy only visible keys before
 invoking callbacks. The current disk backend serves both primitives from the
 query-summary projection rather than the full metadata row array, so
@@ -682,15 +682,16 @@ payload in the namespace.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
-returns `keys` as the return mode. Both `query_keys` and `query` report local
-metadata such as `query_candidates`. `query` streams NDJSON document rows in the
-same ordered page, embeds JSON state payloads as `document`, emits `null` for
-non-JSON or empty state payloads, and returns `documents`. Pouch `flush_index`
-is synchronous for the
-current local projection: it returns accepted/flushed/not-pending and the
-latest index sequence. That sequence is a logical monotonic token derived from
-the storage high-water mark, not a physical log record count, so compaction and
-reopen cannot make query tokens move backwards. Indexed match-all queries accept
+returns `keys` as the return mode. Exact owner selectors filter that same
+ordered scan before limits and cursors are applied. Both `query_keys` and
+`query` report local metadata such as `query_candidates`. `query` streams NDJSON
+document rows in the same ordered page, embeds JSON state payloads as
+`document`, emits `null` for non-JSON or empty state payloads, and returns
+`documents`. Pouch `flush_index` is synchronous for the current local
+projection: it returns accepted/flushed/not-pending and the latest index
+sequence. That sequence is a logical monotonic token derived from the storage
+high-water mark, not a physical log record count, so compaction and reopen
+cannot make query tokens move backwards. Indexed match-all queries accept
 `refresh=wait_for` by performing the same synchronous local index flush before
 scanning the indexed projection. Explicit scan mode remains available for
 full-log/full-summary scanning through the ordered metadata summary API, but it
