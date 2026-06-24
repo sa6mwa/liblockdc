@@ -2069,6 +2069,33 @@ static int lc_pouch_validate_query_engine(const lc_query_req *req,
   return LC_OK;
 }
 
+static int lc_pouch_index_refresh_is_wait_for(const char *refresh) {
+  return refresh != NULL && strcmp(refresh, "wait_for") == 0;
+}
+
+static int lc_pouch_index_refresh_supported(const char *refresh) {
+  return refresh == NULL || refresh[0] == '\0' ||
+         lc_pouch_index_refresh_is_wait_for(refresh);
+}
+
+static int lc_pouch_wait_for_index(lc_client_handle *client,
+                                   const char *namespace_name,
+                                   lc_error *error) {
+  lc_pouch_index_flush_res flush_res;
+  int rc;
+
+  if (client == NULL || client->pouch_store == NULL ||
+      client->pouch_store->flush_index == NULL) {
+    return lc_pouch_client_unsupported(
+        error, "pouch indexed query refresh is not available");
+  }
+  memset(&flush_res, 0, sizeof(flush_res));
+  rc = client->pouch_store->flush_index(client->pouch_store, namespace_name,
+                                       "wait", &flush_res, error);
+  lc_pouch_index_flush_res_cleanup(&client->pouch_allocator, &flush_res);
+  return rc;
+}
+
 static const char *lc_pouch_effective_query_engine(lc_client_handle *client,
                                                    const lc_query_req *req) {
   if (req != NULL && req->engine != NULL && req->engine[0] != '\0') {
@@ -2446,9 +2473,10 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
                         "pouch index query return_mode must be documents",
                         NULL, NULL, NULL);
   }
-  if (req->refresh != NULL && req->refresh[0] != '\0') {
-    return lc_pouch_client_unsupported(
-        error, "pouch index query does not support refresh");
+  if (!lc_pouch_index_refresh_supported(req->refresh)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index query refresh must be wait_for", NULL,
+                        NULL, NULL);
   }
   if (req->limit < 0L) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2460,6 +2488,12 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
                                  error);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (lc_pouch_index_refresh_is_wait_for(req->refresh)) {
+    rc = lc_pouch_wait_for_index(client, namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
 
   memset(&scan_req, 0, sizeof(scan_req));
@@ -2627,9 +2661,10 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
                         "pouch query_keys return_mode must be keys", NULL,
                         NULL, NULL);
   }
-  if (req->refresh != NULL && req->refresh[0] != '\0') {
-    return lc_pouch_client_unsupported(
-        error, "pouch index query_keys does not support refresh");
+  if (!lc_pouch_index_refresh_supported(req->refresh)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index query_keys refresh must be wait_for",
+                        NULL, NULL, NULL);
   }
   if (req->limit < 0L) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2641,6 +2676,12 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
                                  error);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (lc_pouch_index_refresh_is_wait_for(req->refresh)) {
+    rc = lc_pouch_wait_for_index(client, namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
 
   memset(&scan_req, 0, sizeof(scan_req));

@@ -2920,6 +2920,52 @@ static void test_pouch_endpoint_default_index_query_streams_documents(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_default_index_query_waits_for_refresh(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-refresh");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+  lease = pouch_acquire_query_key(client, "refreshed", &error);
+  pouch_save_query_json(lease, "{\"fresh\":true}", &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  req.refresh = "wait_for";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"refreshed\""));
+  assert_non_null(strstr(text, "\"document\":{\"fresh\":true}"));
+  assert_string_equal(res.return_mode, "documents");
+  assert_true(res.index_seq > 0UL);
+
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_default_index_query_keys_pages(
     void **state) {
   char root[256];
@@ -2974,6 +3020,86 @@ static void test_pouch_endpoint_default_index_query_keys_pages(
   lc_query_res_cleanup(&res);
   alpha->close(alpha);
   bravo->close(bravo);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_default_index_query_keys_waits_for_refresh(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-keys-index-refresh");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+  lease = pouch_acquire_query_key(client, "refreshed-key", &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  req.refresh = "wait_for";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "refreshed-key");
+  assert_string_equal(res.return_mode, "keys");
+  assert_true(res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&res);
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_default_index_query_rejects_unknown_refresh(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_sink *sink;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-bad-refresh");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  req.refresh = "later";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch index query refresh must be wait_for");
+
+  lc_sink_close(sink);
   client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -3554,7 +3680,13 @@ int main(void) {
           test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson),
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_streams_documents),
+      cmocka_unit_test(
+          test_pouch_endpoint_default_index_query_waits_for_refresh),
       cmocka_unit_test(test_pouch_endpoint_default_index_query_keys_pages),
+      cmocka_unit_test(
+          test_pouch_endpoint_default_index_query_keys_waits_for_refresh),
+      cmocka_unit_test(
+          test_pouch_endpoint_default_index_query_rejects_unknown_refresh),
       cmocka_unit_test(
           test_pouch_endpoint_flush_index_reports_current_sequence),
       cmocka_unit_test(test_pouch_endpoint_configured_scan_query_without_hint),

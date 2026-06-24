@@ -509,9 +509,12 @@ page, embeds JSON state payloads as `document`, emits `null` for non-JSON or
 empty state payloads, returns `documents`, and reports local metadata such as
 `query_candidates`. Pouch `flush_index` is synchronous for the current local
 projection: it returns accepted/flushed/not-pending and the latest index
-sequence. Non-empty field selection, refresh hints, non-document scan return
-modes, and nontrivial LQL selectors remain unsupported until the indexed/LQL
-query slice lands.
+sequence. Indexed match-all queries accept `refresh=wait_for` by performing the
+same synchronous local index flush before scanning the indexed projection.
+Explicit scan mode remains available for full-log scanning but does not accept
+refresh hints because no durable query index is consulted. Non-empty field
+selection, non-document scan return modes, and nontrivial LQL selectors remain
+unsupported until the indexed/LQL query slice lands.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
