@@ -1296,6 +1296,28 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.subscribe_with_state =
         lc_pouch_client_subscribe_with_state_method;
     client->pub.watch_queue = lc_pouch_client_watch_queue_method;
+    client->pub.query = lc_pouch_client_query_method;
+    client->pub.query_keys = lc_pouch_client_query_keys_method;
+    client->pub.get_namespace_config =
+        lc_pouch_client_get_namespace_config_method;
+    client->pub.update_namespace_config =
+        lc_pouch_client_update_namespace_config_method;
+    client->pub.flush_index = lc_pouch_client_flush_index_method;
+    client->pub.txn_replay = lc_pouch_client_txn_replay_method;
+    client->pub.txn_prepare = lc_pouch_client_txn_prepare_method;
+    client->pub.txn_commit = lc_pouch_client_txn_commit_method;
+    client->pub.txn_rollback = lc_pouch_client_txn_rollback_method;
+    client->pub.tc_lease_acquire = lc_pouch_client_tc_lease_acquire_method;
+    client->pub.tc_lease_renew = lc_pouch_client_tc_lease_renew_method;
+    client->pub.tc_lease_release = lc_pouch_client_tc_lease_release_method;
+    client->pub.tc_leader = lc_pouch_client_tc_leader_method;
+    client->pub.tc_cluster_announce =
+        lc_pouch_client_tc_cluster_announce_method;
+    client->pub.tc_cluster_leave = lc_pouch_client_tc_cluster_leave_method;
+    client->pub.tc_cluster_list = lc_pouch_client_tc_cluster_list_method;
+    client->pub.tc_rm_register = lc_pouch_client_tc_rm_register_method;
+    client->pub.tc_rm_unregister = lc_pouch_client_tc_rm_unregister_method;
+    client->pub.tc_rm_list = lc_pouch_client_tc_rm_list_method;
   }
   client->pub.default_namespace = client->default_namespace;
   *out = &client->pub;

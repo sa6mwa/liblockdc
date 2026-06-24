@@ -202,6 +202,30 @@ static int watch_test_handle(void *context, const lc_watch_event *event,
   return LC_OK;
 }
 
+static int query_key_begin_unexpected(void *context, lc_error *error) {
+  (void)context;
+  (void)error;
+  fail_msg("pouch query_keys handler must not be called");
+  return LC_ERR_INVALID;
+}
+
+static int query_key_chunk_unexpected(void *context, const char *bytes,
+                                      size_t len, lc_error *error) {
+  (void)context;
+  (void)bytes;
+  (void)len;
+  (void)error;
+  fail_msg("pouch query_keys handler must not be called");
+  return LC_ERR_INVALID;
+}
+
+static int query_key_end_unexpected(void *context, lc_error *error) {
+  (void)context;
+  (void)error;
+  fail_msg("pouch query_keys handler must not be called");
+  return LC_ERR_INVALID;
+}
+
 static int consumer_service_test_handle(void *context,
                                         lc_consumer_message *message,
                                         lc_error *error) {
@@ -2292,6 +2316,117 @@ static void test_pouch_endpoint_consumer_service_with_state(void **state) {
   test_cleanup_root(root);
 }
 
+static void assert_pouch_unsupported(int rc, lc_error *error,
+                                     const char *message) {
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error->code, LC_ERR_INVALID);
+  assert_string_equal(error->message, message);
+  lc_error_cleanup(error);
+}
+
+static void test_pouch_endpoint_reports_local_unsupported_surfaces(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler key_handler;
+  lc_namespace_config_req namespace_req;
+  lc_namespace_config_res namespace_res;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_tc_lease_acquire_req tc_acquire_req;
+  lc_tc_lease_acquire_res tc_acquire_res;
+  lc_tc_leader_res tc_leader_res;
+  lc_sink *sink;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "unsupported-surfaces");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&namespace_res, 0, sizeof(namespace_res));
+  memset(&flush_res, 0, sizeof(flush_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&tc_acquire_res, 0, sizeof(tc_acquire_res));
+  memset(&tc_leader_res, 0, sizeof(tc_leader_res));
+  client = open_pouch_client(endpoint);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_pouch_unsupported(rc, &error, "pouch query requires the LQL slice");
+  lc_sink_close(sink);
+
+  memset(&key_handler, 0, sizeof(key_handler));
+  key_handler.begin = query_key_begin_unexpected;
+  key_handler.chunk = query_key_chunk_unexpected;
+  key_handler.end = query_key_end_unexpected;
+  rc = client->query_keys(client, &query_req, &key_handler, NULL, &query_res,
+                          &error);
+  assert_pouch_unsupported(rc, &error,
+                           "pouch query_keys requires the LQL slice");
+
+  lc_namespace_config_req_init(&namespace_req);
+  namespace_req.namespace_name = "default";
+  rc = client->get_namespace_config(client, &namespace_req, &namespace_res,
+                                    &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch namespace management is not supported");
+  namespace_req.preferred_engine = "index";
+  rc = client->update_namespace_config(client, &namespace_req, &namespace_res,
+                                       &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch namespace management is not supported");
+
+  lc_index_flush_req_init(&flush_req);
+  flush_req.namespace_name = "default";
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_pouch_unsupported(rc, &error,
+                           "pouch index flush requires the LQL slice");
+
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "txn-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch public transaction control is not supported");
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "txn-1";
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch public transaction control is not supported");
+
+  lc_tc_lease_acquire_req_init(&tc_acquire_req);
+  tc_acquire_req.candidate_id = "candidate";
+  tc_acquire_req.candidate_endpoint = "pouch://candidate";
+  tc_acquire_req.term = 1UL;
+  tc_acquire_req.ttl_ms = 1000L;
+  rc = client->tc_lease_acquire(client, &tc_acquire_req, &tc_acquire_res,
+                                &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+  rc = client->tc_leader(client, &tc_leader_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
@@ -2323,6 +2458,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_auto_ack),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_with_state),
+      cmocka_unit_test(
+          test_pouch_endpoint_reports_local_unsupported_surfaces),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
