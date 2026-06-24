@@ -404,8 +404,18 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   metadata_req.if_version = lease->version;
   rc = lease->metadata(lease, &metadata_req, &error);
   assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 2L);
   assert_true(lease->has_query_hidden);
   assert_true(lease->query_hidden);
+
+  lc_describe_req_init(&describe_req);
+  describe_req.key = "alpha";
+  rc = client->describe(client, &describe_req, &describe_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(describe_res.version, lease->version);
+  assert_true(describe_res.has_query_hidden);
+  assert_true(describe_res.query_hidden);
+  lc_describe_res_cleanup(&describe_res);
 
   lc_keepalive_req_init(&keepalive_req);
   keepalive_req.ttl_seconds = 120L;
@@ -423,7 +433,7 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(lease->version, 2L);
+  assert_int_equal(lease->version, 3L);
   assert_int_equal(attach_res.version, lease->version);
   assert_non_null(attach_res.attachment.id);
   assert_string_equal(attach_res.attachment.name, "result.txt");
@@ -438,7 +448,7 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   rc = lease->attach(lease, &attach_req, source, &zeta_attach_res, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(lease->version, 3L);
+  assert_int_equal(lease->version, 4L);
   assert_string_equal(zeta_attach_res.attachment.name, "zeta.txt");
 
   lc_attach_req_init(&attach_req);
@@ -449,7 +459,7 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   rc = lease->attach(lease, &attach_req, source, &alpha_attach_res, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(lease->version, 4L);
+  assert_int_equal(lease->version, 5L);
   assert_string_equal(alpha_attach_res.attachment.name, "alpha.txt");
 
   source = source_from_text("duplicate-body");
@@ -457,7 +467,7 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_SERVER);
   assert_int_equal(error.http_status, 409L);
-  assert_int_equal(lease->version, 4L);
+  assert_int_equal(lease->version, 5L);
   lc_attach_res_cleanup(&duplicate_attach_res);
   lc_error_cleanup(&error);
 
@@ -516,12 +526,12 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   rc = lease->delete_attachment(lease, &attachment_selector, &deleted, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(deleted);
-  assert_int_equal(lease->version, 5L);
+  assert_int_equal(lease->version, 6L);
 
   rc = lease->delete_attachment(lease, &attachment_selector, &deleted, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(deleted);
-  assert_int_equal(lease->version, 5L);
+  assert_int_equal(lease->version, 6L);
 
   second_client = open_pouch_client(endpoint);
   rc = second_client->list_attachments(second_client, &list_req,
@@ -536,7 +546,7 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   rc = lease->delete_all_attachments(lease, &deleted, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(deleted, 2);
-  assert_int_equal(lease->version, 6L);
+  assert_int_equal(lease->version, 7L);
 
   rc = lease->list_attachments(lease, &attachment_list, &error);
   assert_int_equal(rc, LC_OK);
@@ -548,7 +558,7 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   rc = lease->remove(lease, &remove_req, &error);
   assert_int_equal(rc, LC_OK);
   assert_null(lease->state_etag);
-  assert_int_equal(lease->version, 7L);
+  assert_int_equal(lease->version, 8L);
 
   lc_release_req_init(&release_req);
   rc = lease->release(lease, &release_req, &error);
@@ -1222,6 +1232,7 @@ static void test_pouch_endpoint_release_preserves_state_for_reacquire(
   metadata_req.if_version = first_lease->version;
   rc = first_lease->metadata(first_lease, &metadata_req, &error);
   assert_int_equal(rc, LC_OK);
+  assert_int_equal(first_lease->version, 2L);
   assert_true(first_lease->query_hidden);
 
   first_etag = strdup(first_lease->state_etag);

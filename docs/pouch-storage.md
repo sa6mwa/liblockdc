@@ -559,6 +559,14 @@ cached summary is valid only while the corresponding metadata record ref remains
 the current head for that key; any newer metadata record must invalidate or
 replace the cached summary.
 
+Metadata generation is the public lockd object version. Metadata-only updates,
+such as changing `query_hidden`, must append a new metadata record and advance
+that version even when the state payload and state ETag are unchanged. Public
+state reads must therefore return the current metadata version, not merely the
+generation of the last state payload record. The state ETag remains the state
+content validator; the metadata version remains the object CAS token used by
+lease metadata, update, remove, attachment, queue-state, and reacquire flows.
+
 Remove semantics are part of the visible lockd contract:
 
 - removing an existing state deletes the state head and advances the lockd
