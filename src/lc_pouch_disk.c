@@ -3813,19 +3813,21 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
     namespace_name = lc_pouch_disk_replay_query_index_string(
         store, ns_len, &crc, &short_read, error);
     if (namespace_name == NULL) {
-      return short_read ? LC_OK
-                        : (error != NULL && error->code != LC_OK
-                               ? error->code
-                               : LC_ERR_NOMEM);
+      if (short_read) {
+        break;
+      }
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
     }
     key = lc_pouch_disk_replay_query_index_string(store, key_len, &crc,
                                                   &short_read, error);
     if (key == NULL) {
       lc_pouch_free(&store->allocator, namespace_name);
-      return short_read ? LC_OK
-                        : (error != NULL && error->code != LC_OK
-                               ? error->code
-                               : LC_ERR_NOMEM);
+      if (short_read) {
+        break;
+      }
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
     }
     if (etag_len > 0UL) {
       etag = lc_pouch_disk_replay_query_index_string(
@@ -3833,10 +3835,11 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
       if (etag == NULL) {
         lc_pouch_free(&store->allocator, namespace_name);
         lc_pouch_free(&store->allocator, key);
-        return short_read ? LC_OK
-                          : (error != NULL && error->code != LC_OK
-                                 ? error->code
-                                 : LC_ERR_NOMEM);
+        if (short_read) {
+          break;
+        }
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_NOMEM;
       }
     }
     if ((crc ^ 0xffffffffUL) != expected_crc) {
