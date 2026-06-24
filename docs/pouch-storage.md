@@ -481,13 +481,18 @@ components. The current per-key primitive creates those lock files, acquires
 per-store and process-wide striped mutexes before touching the lock file, uses
 `fcntl` byte-range locks for cross-process contention, and tracks process-local
 held locks so two store handles in the same process contend before filesystem
-locking. State write/remove, metadata store/delete, and single-key object
+locking. Released key-lock descriptors are retained in a bounded process-wide
+LRU cache with at most one cached descriptor for a lock path, so hot keys avoid
+open/close churn without violating classic `fcntl` lock lifetime rules. Every
+cached descriptor is unlocked before reuse and closed when evicted or when a
+store closes. State
+write/remove, metadata store/delete, and single-key object
 put/delete paths acquire the per-key guard before the global append-log lock.
 Multi-key object copy acquires source and destination key guards in
 lexicographic order before the global append-log lock. Queue enqueue, dequeue,
 ack, nack, and extend acquire the queue-name key guard before the global
-append-log lock. The remaining cutover work is bounded lock-file descriptor LRU
-caching and deeper diagnostics for stripe/cache utilization.
+append-log lock. The remaining cutover work is deeper diagnostics for
+stripe/cache utilization.
 
 ## Performance Model
 
@@ -550,11 +555,14 @@ mode even though indexed mode is the normal production route. The public client
 can set this through `lc_client_config.pouch_query_engine` and
 `lc_client_config.pouch_query_fallback_engine`, or directly on a pouch endpoint
 with `pouch:///path?query_engine=scan&query_fallback_engine=index`. Endpoint
-settings override the client defaults for that opened store. Scan mode is
-useful for tiny stores, diagnostics, index rebuild validation, and early
-deployments before a particular index feature exists.
+settings override the client defaults for that opened store. The disk backend
+also exposes the same choice through `lc_pouch_disk_open_with_options`, where
+`query_engine=index` is the default, `query_engine=scan` forces the log-backed
+ordered scan route, and `query_fallback_engine` is explicit rather than
+implicit. Scan mode is useful for tiny stores, diagnostics, index rebuild
+validation, and early deployments before a particular index feature exists.
 
-Scan mode is a real Go-style log-backed scan route, not a synonym for the
+Scan mode is a real Go-style full log-backed scan route, not a synonym for the
 indexed path with fewer predicates and not a hidden fallback inside indexed
 search. Before serving a scan page, the disk backend must refresh from the
 authoritative log state, including the equivalent of a forced segment/log scan

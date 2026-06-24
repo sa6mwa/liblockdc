@@ -60,6 +60,7 @@
 #define LC_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
 #define LC_POUCH_WRITER_MARKER_TTL_SECONDS 60L
 #define LC_POUCH_KEY_LOCK_STRIPES 64U
+#define LC_POUCH_LOCK_FD_CACHE_CAPACITY 32U
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -114,6 +115,14 @@ typedef struct lc_pouch_disk_key_lock_set {
   lc_pouch_key_lock *locks[2];
   size_t count;
 } lc_pouch_disk_key_lock_set;
+
+typedef struct lc_pouch_lock_fd_cache_entry {
+  lc_pouch_allocator allocator;
+  char *path;
+  int fd;
+  unsigned long used_at;
+  struct lc_pouch_lock_fd_cache_entry *next;
+} lc_pouch_lock_fd_cache_entry;
 
 typedef struct lc_pouch_disk_queue_entry {
   char *namespace_name;
@@ -198,9 +207,18 @@ struct lc_pouch_key_lock {
 };
 
 static lc_pouch_key_lock *lc_pouch_process_key_locks;
+static lc_pouch_lock_fd_cache_entry *lc_pouch_process_lock_fd_cache;
+static size_t lc_pouch_process_lock_fd_cache_count;
+static unsigned long lc_pouch_process_lock_fd_cache_clock;
+static unsigned long lc_pouch_process_lock_fd_cache_hits;
+static unsigned long lc_pouch_process_lock_fd_cache_misses;
+static unsigned long lc_pouch_process_lock_fd_cache_evictions;
+static unsigned long lc_pouch_process_lock_fd_cache_closes;
 static pthread_once_t lc_pouch_process_key_stripes_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t lc_pouch_process_key_stripes[LC_POUCH_KEY_LOCK_STRIPES];
 static pthread_mutex_t lc_pouch_process_key_registry_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t lc_pouch_process_lock_fd_cache_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct lc_pouch_file_source {
@@ -435,6 +453,9 @@ static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
                                        const char *namespace_name,
                                        const char *key, char **out,
                                        lc_error *error);
+static int lc_pouch_disk_lock_fd_cache_status(
+    lc_pouch_store *self, lc_pouch_lock_fd_cache_status *out,
+    lc_error *error);
 static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key,
@@ -900,6 +921,171 @@ static void lc_pouch_disk_process_key_lock_remove(lc_pouch_key_lock *lock) {
     cursor = &(*cursor)->process_next;
   }
   (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
+}
+
+static int lc_pouch_disk_take_cached_lock_fd(lc_pouch_disk_store *store,
+                                             const char *path, int *fd_out) {
+  lc_pouch_lock_fd_cache_entry **cursor;
+  lc_pouch_lock_fd_cache_entry *entry;
+
+  if (fd_out != NULL) {
+    *fd_out = -1;
+  }
+  if (store == NULL || path == NULL || fd_out == NULL) {
+    return 0;
+  }
+  (void)pthread_mutex_lock(&lc_pouch_process_lock_fd_cache_mutex);
+  cursor = &lc_pouch_process_lock_fd_cache;
+  while (*cursor != NULL) {
+    entry = *cursor;
+    if (entry->path != NULL && strcmp(entry->path, path) == 0) {
+      *fd_out = entry->fd;
+      *cursor = entry->next;
+      lc_pouch_process_lock_fd_cache_count--;
+      lc_pouch_process_lock_fd_cache_hits++;
+      (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
+      lc_pouch_free(&entry->allocator, entry->path);
+      lc_pouch_free(&entry->allocator, entry);
+      return 1;
+    }
+    cursor = &(*cursor)->next;
+  }
+  lc_pouch_process_lock_fd_cache_misses++;
+  (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
+  return 0;
+}
+
+static int lc_pouch_disk_open_key_lock_fd(lc_pouch_disk_store *store,
+                                          const char *path, int *fd_out,
+                                          lc_error *error) {
+  int fd;
+
+  if (fd_out != NULL) {
+    *fd_out = -1;
+  }
+  if (store == NULL || path == NULL || fd_out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "open_key_lock_fd requires store, path, and output");
+  }
+  if (lc_pouch_disk_take_cached_lock_fd(store, path, fd_out)) {
+    return LC_OK;
+  }
+  fd = open(path, O_RDWR | O_CREAT, 0666);
+  if (fd < 0) {
+    return lc_pouch_set_errno(error, "failed to open pouch key lock");
+  }
+  *fd_out = fd;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_cache_lock_fd(lc_pouch_disk_store *store,
+                                       char **path, int fd, lc_error *error) {
+  lc_pouch_lock_fd_cache_entry *entry;
+  lc_pouch_lock_fd_cache_entry **cursor;
+  lc_pouch_lock_fd_cache_entry **evict_cursor;
+  lc_pouch_lock_fd_cache_entry *evicted;
+  unsigned long oldest;
+  int rc;
+
+  if (store == NULL || path == NULL || *path == NULL || fd < 0) {
+    if (fd >= 0 && close(fd) != 0) {
+      return lc_pouch_set_errno(error, "failed to close pouch key lock");
+    }
+    return LC_OK;
+  }
+  entry = (lc_pouch_lock_fd_cache_entry *)lc_pouch_calloc(
+      &store->allocator, 1U, sizeof(*entry));
+  if (entry == NULL) {
+    if (close(fd) != 0) {
+      return lc_pouch_set_errno(error, "failed to close pouch key lock");
+    }
+    (void)pthread_mutex_lock(&lc_pouch_process_lock_fd_cache_mutex);
+    lc_pouch_process_lock_fd_cache_closes++;
+    (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
+    return LC_OK;
+  }
+  entry->allocator = store->allocator;
+  entry->path = *path;
+  entry->fd = fd;
+
+  (void)pthread_mutex_lock(&lc_pouch_process_lock_fd_cache_mutex);
+  if (lc_pouch_process_lock_fd_cache_count >=
+      LC_POUCH_LOCK_FD_CACHE_CAPACITY) {
+    evict_cursor = &lc_pouch_process_lock_fd_cache;
+    oldest = (*evict_cursor)->used_at;
+    cursor = &(*evict_cursor)->next;
+    while (*cursor != NULL) {
+      if ((*cursor)->used_at < oldest) {
+        oldest = (*cursor)->used_at;
+        evict_cursor = cursor;
+      }
+      cursor = &(*cursor)->next;
+    }
+    evicted = *evict_cursor;
+    *evict_cursor = evicted->next;
+    lc_pouch_process_lock_fd_cache_count--;
+    rc = LC_OK;
+    if (evicted->fd >= 0 && close(evicted->fd) != 0) {
+      rc = lc_pouch_set_errno(error, "failed to close cached pouch key lock");
+    } else {
+      lc_pouch_process_lock_fd_cache_closes++;
+    }
+    lc_pouch_free(&evicted->allocator, evicted->path);
+    lc_pouch_free(&evicted->allocator, evicted);
+    lc_pouch_process_lock_fd_cache_evictions++;
+    if (rc != LC_OK) {
+      if (close(fd) == 0) {
+        lc_pouch_process_lock_fd_cache_closes++;
+      }
+      (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
+      lc_pouch_free(&entry->allocator, entry);
+      return rc;
+    }
+  }
+  entry->used_at = ++lc_pouch_process_lock_fd_cache_clock;
+  entry->next = lc_pouch_process_lock_fd_cache;
+  lc_pouch_process_lock_fd_cache = entry;
+  lc_pouch_process_lock_fd_cache_count++;
+  (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
+  *path = NULL;
+  return LC_OK;
+}
+
+static void lc_pouch_disk_close_lock_fd_cache(lc_pouch_disk_store *store) {
+  lc_pouch_lock_fd_cache_entry *entry;
+
+  (void)store;
+  (void)pthread_mutex_lock(&lc_pouch_process_lock_fd_cache_mutex);
+  while (lc_pouch_process_lock_fd_cache != NULL) {
+    entry = lc_pouch_process_lock_fd_cache;
+    lc_pouch_process_lock_fd_cache = entry->next;
+    lc_pouch_process_lock_fd_cache_count--;
+    if (entry->fd >= 0 && close(entry->fd) == 0) {
+      lc_pouch_process_lock_fd_cache_closes++;
+    }
+    lc_pouch_free(&entry->allocator, entry->path);
+    lc_pouch_free(&entry->allocator, entry);
+  }
+  if (lc_pouch_process_lock_fd_cache_count != 0U) {
+    lc_pouch_process_lock_fd_cache_count = 0U;
+  }
+  (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
+}
+
+static void lc_pouch_disk_lock_fd_cache_snapshot(
+    lc_pouch_lock_fd_cache_status *out) {
+  if (out == NULL) {
+    return;
+  }
+  memset(out, 0, sizeof(*out));
+  (void)pthread_mutex_lock(&lc_pouch_process_lock_fd_cache_mutex);
+  out->capacity = LC_POUCH_LOCK_FD_CACHE_CAPACITY;
+  out->entries = lc_pouch_process_lock_fd_cache_count;
+  out->hits = lc_pouch_process_lock_fd_cache_hits;
+  out->misses = lc_pouch_process_lock_fd_cache_misses;
+  out->evictions = lc_pouch_process_lock_fd_cache_evictions;
+  out->closes = lc_pouch_process_lock_fd_cache_closes;
+  (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
 }
 
 static void lc_pouch_disk_sleep_for_key_lock(void) {
@@ -8382,6 +8568,17 @@ static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_lock_fd_cache_status(
+    lc_pouch_store *self, lc_pouch_lock_fd_cache_status *out,
+    lc_error *error) {
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "lock_fd_cache_status requires store and output");
+  }
+  lc_pouch_disk_lock_fd_cache_snapshot(out);
+  return LC_OK;
+}
+
 static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key,
@@ -8435,11 +8632,11 @@ static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
     lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return LC_OK;
   }
-  fd = open(path, O_RDWR | O_CREAT, 0666);
-  if (fd < 0) {
+  rc = lc_pouch_disk_open_key_lock_fd(store, path, &fd, error);
+  if (rc != LC_OK) {
     lc_pouch_free(&store->allocator, path);
     lc_pouch_disk_unlock_key_stripes(store, stripe, error);
-    return lc_pouch_set_errno(error, "failed to open pouch key lock");
+    return rc;
   }
 
   memset(&fcntl_lock, 0, sizeof(fcntl_lock));
@@ -8530,11 +8727,11 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
   while (lc_pouch_disk_process_key_lock_held(path)) {
     lc_pouch_disk_sleep_for_key_lock();
   }
-  fd = open(path, O_RDWR | O_CREAT, 0666);
-  if (fd < 0) {
+  rc = lc_pouch_disk_open_key_lock_fd(store, path, &fd, error);
+  if (rc != LC_OK) {
     lc_pouch_free(&store->allocator, path);
     lc_pouch_disk_unlock_key_stripes(store, stripe, error);
-    return lc_pouch_set_errno(error, "failed to open pouch key lock");
+    return rc;
   }
 
   memset(&fcntl_lock, 0, sizeof(fcntl_lock));
@@ -8670,8 +8867,13 @@ static int lc_pouch_disk_unlock_key(lc_pouch_store *self,
   if (lock->fd >= 0 && fcntl(lock->fd, F_SETLK, &fcntl_lock) != 0) {
     rc = lc_pouch_set_errno(error, "failed to unlock pouch key lock");
   }
-  if (lock->fd >= 0 && close(lock->fd) != 0 && rc == LC_OK) {
-    rc = lc_pouch_set_errno(error, "failed to close pouch key lock");
+  if (lock->fd >= 0) {
+    if (rc == LC_OK) {
+      rc = lc_pouch_disk_cache_lock_fd(lock->store != NULL ? lock->store : store,
+                                       &lock->path, lock->fd, error);
+    } else if (close(lock->fd) != 0) {
+      (void)lc_pouch_set_errno(error, "failed to close pouch key lock");
+    }
   }
   lock->fd = -1;
   if ((lock->process_stripe_locked || lock->local_stripe_locked) &&
@@ -8882,6 +9084,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->query_summary_entries);
   lc_pouch_free(&allocator, store->object_entries);
   lc_pouch_free(&allocator, store->queue_entries);
+  lc_pouch_disk_close_lock_fd_cache(store);
   lc_pouch_free(&allocator, store->root_path);
   lc_pouch_free(&allocator, store->log_path);
   lc_pouch_free(&allocator, store->lock_path);
@@ -9047,6 +9250,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.lock_key_path = lc_pouch_disk_lock_key_path;
   store->pub.try_lock_key = lc_pouch_disk_try_lock_key;
   store->pub.unlock_key = lc_pouch_disk_unlock_key;
+  store->pub.lock_fd_cache_status = lc_pouch_disk_lock_fd_cache_status;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;

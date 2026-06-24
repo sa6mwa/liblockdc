@@ -8932,6 +8932,116 @@ static void test_try_lock_key_serializes_same_process_handles(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_lock_fd_cache_reuses_released_key_descriptors(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_store *second;
+  lc_pouch_key_lock *lock;
+  lc_pouch_lock_fd_cache_status status;
+  lc_pouch_lock_fd_cache_status baseline;
+  lc_error error;
+  char key[32];
+  size_t index;
+  int acquired;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "lock-fd-cache");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&status, 0, sizeof(status));
+  memset(&baseline, 0, sizeof(baseline));
+  store = NULL;
+  second = NULL;
+  lock = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->lock_fd_cache_status);
+
+  rc = store->lock_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.capacity, 32U);
+  assert_int_equal(status.entries, 0U);
+  baseline = status;
+
+  rc = store->try_lock_key(store, "default", "cached-key", &lock, &acquired,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(lock);
+  rc = store->lock_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.entries, 0U);
+  assert_int_equal(status.hits, baseline.hits);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+
+  rc = store->unlock_key(store, lock, &error);
+  assert_int_equal(rc, LC_OK);
+  lock = NULL;
+  rc = store->lock_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.entries, 1U);
+
+  rc = store->try_lock_key(store, "default", "cached-key", &lock, &acquired,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(lock);
+  rc = store->lock_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.entries, 0U);
+  assert_int_equal(status.hits, baseline.hits + 1UL);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+  rc = store->unlock_key(store, lock, &error);
+  assert_int_equal(rc, LC_OK);
+  lock = NULL;
+
+  rc = second->try_lock_key(second, "default", "cached-key", &lock, &acquired,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(lock);
+  rc = second->lock_fd_cache_status(second, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.entries, 0U);
+  assert_int_equal(status.hits, baseline.hits + 2UL);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+  rc = second->unlock_key(second, lock, &error);
+  assert_int_equal(rc, LC_OK);
+  lock = NULL;
+
+  for (index = 0U; index < 40U; ++index) {
+    snprintf(key, sizeof(key), "key-%02lu", (unsigned long)index);
+    rc = store->try_lock_key(store, "default", key, &lock, &acquired, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(acquired);
+    assert_non_null(lock);
+    rc = store->unlock_key(store, lock, &error);
+    assert_int_equal(rc, LC_OK);
+    lock = NULL;
+  }
+
+  rc = store->lock_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.capacity, 32U);
+  assert_int_equal(status.entries, 32U);
+  assert_true(status.evictions >= baseline.evictions + 9UL);
+  assert_true(status.closes >= status.evictions);
+
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_key_lock_wait_serializes_same_process_threads(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -10063,6 +10173,7 @@ int main(void) {
       cmocka_unit_test(test_lock_status_reports_global_writer_lock_counters),
       cmocka_unit_test(test_lock_key_path_escapes_namespace_and_key),
       cmocka_unit_test(test_try_lock_key_serializes_same_process_handles),
+      cmocka_unit_test(test_lock_fd_cache_reuses_released_key_descriptors),
       cmocka_unit_test(test_key_lock_wait_serializes_same_process_threads),
       cmocka_unit_test(test_try_lock_key_serializes_cross_process_handles),
       cmocka_unit_test(test_write_state_waits_for_cross_process_key_lock),
