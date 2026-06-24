@@ -275,11 +275,73 @@ static void test_remove_queue_wake_markers(const char *root) {
   closedir(dir);
 }
 
+static int test_join_path_buf(char *dst, size_t dst_size, const char *root,
+                              const char *leaf) {
+  size_t root_len;
+  size_t leaf_len;
+
+  root_len = strlen(root);
+  leaf_len = strlen(leaf);
+  if (root_len + 1U + leaf_len + 1U > dst_size) {
+    return 0;
+  }
+  memcpy(dst, root, root_len);
+  dst[root_len] = '/';
+  memcpy(dst + root_len + 1U, leaf, leaf_len + 1U);
+  return 1;
+}
+
+static void test_remove_lock_tree(const char *root) {
+  DIR *locks_dir;
+  DIR *namespace_dir;
+  struct dirent *namespace_entry;
+  struct dirent *lock_entry;
+  char locks_path[2048];
+  char namespace_path[2048];
+  char lock_path[2048];
+
+  if (!test_join_path_buf(locks_path, sizeof(locks_path), root, "locks")) {
+    return;
+  }
+  locks_dir = opendir(locks_path);
+  if (locks_dir == NULL) {
+    return;
+  }
+  while ((namespace_entry = readdir(locks_dir)) != NULL) {
+    if (strcmp(namespace_entry->d_name, ".") == 0 ||
+        strcmp(namespace_entry->d_name, "..") == 0) {
+      continue;
+    }
+    if (!test_join_path_buf(namespace_path, sizeof(namespace_path), locks_path,
+                            namespace_entry->d_name)) {
+      continue;
+    }
+    namespace_dir = opendir(namespace_path);
+    if (namespace_dir != NULL) {
+      while ((lock_entry = readdir(namespace_dir)) != NULL) {
+        if (strcmp(lock_entry->d_name, ".") == 0 ||
+            strcmp(lock_entry->d_name, "..") == 0) {
+          continue;
+        }
+        if (test_join_path_buf(lock_path, sizeof(lock_path), namespace_path,
+                               lock_entry->d_name)) {
+          unlink(lock_path);
+        }
+      }
+      closedir(namespace_dir);
+    }
+    rmdir(namespace_path);
+  }
+  closedir(locks_dir);
+  rmdir(locks_path);
+}
+
 static void test_cleanup_root(const char *root) {
   char path[512];
 
   test_remove_writer_markers(root);
   test_remove_queue_wake_markers(root);
+  test_remove_lock_tree(root);
   snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
@@ -8203,6 +8265,88 @@ static void test_lock_key_path_escapes_namespace_and_key(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_try_lock_key_serializes_same_process_handles(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_pouch_key_lock *first_lock;
+  lc_pouch_key_lock *second_lock;
+  lc_pouch_lock_status status;
+  lc_error error;
+  int acquired;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "key-lock-contention");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&status, 0, sizeof(status));
+  first = NULL;
+  second = NULL;
+  first_lock = NULL;
+  second_lock = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first->try_lock_key);
+  assert_non_null(first->unlock_key);
+  assert_non_null(second->try_lock_key);
+  assert_non_null(second->unlock_key);
+
+  rc = first->try_lock_key(first, "default", "alpha/beta", &first_lock,
+                           &acquired, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(first_lock);
+
+  acquired = 1;
+  rc = second->try_lock_key(second, "default", "alpha/beta", &second_lock,
+                            &acquired, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(acquired);
+  assert_null(second_lock);
+
+  rc = second->try_lock_key(second, "default", "alpha/gamma", &second_lock,
+                            &acquired, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(second_lock);
+
+  rc = second->unlock_key(second, second_lock, &error);
+  assert_int_equal(rc, LC_OK);
+  second_lock = NULL;
+  rc = first->unlock_key(first, first_lock, &error);
+  assert_int_equal(rc, LC_OK);
+  first_lock = NULL;
+
+  rc = second->try_lock_key(second, "default", "alpha/beta", &second_lock,
+                            &acquired, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(second_lock);
+
+  rc = second->lock_status(second, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(status.mode, "global-writer-fcntl");
+  assert_true(status.lock_acquisitions >= 2UL);
+  lc_pouch_lock_status_cleanup(&allocator, &status);
+
+  rc = second->unlock_key(second, second_lock, &error);
+  assert_int_equal(rc, LC_OK);
+  second_lock = NULL;
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
   char root[256];
   char marker_path[512];
@@ -8441,6 +8585,7 @@ int main(void) {
       cmocka_unit_test(test_writer_status_classifies_stale_markers),
       cmocka_unit_test(test_lock_status_reports_global_writer_lock_counters),
       cmocka_unit_test(test_lock_key_path_escapes_namespace_and_key),
+      cmocka_unit_test(test_try_lock_key_serializes_same_process_handles),
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),

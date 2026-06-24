@@ -277,6 +277,8 @@ typedef struct lc_pouch_queue_wake_status {
   int uses_filesystem_notifications;
 } lc_pouch_queue_wake_status;
 
+typedef struct lc_pouch_key_lock lc_pouch_key_lock;
+
 typedef struct lc_pouch_fsync_stats {
   unsigned long attempted_fsyncs;
   unsigned long failed_fsyncs;
@@ -435,6 +437,11 @@ struct lc_pouch_store {
                      lc_error *error);
   int (*lock_key_path)(lc_pouch_store *self, const char *namespace_name,
                        const char *key, char **out, lc_error *error);
+  int (*try_lock_key)(lc_pouch_store *self, const char *namespace_name,
+                      const char *key, lc_pouch_key_lock **lock,
+                      int *acquired, lc_error *error);
+  int (*unlock_key)(lc_pouch_store *self, lc_pouch_key_lock *lock,
+                    lc_error *error);
   int (*query_config)(lc_pouch_store *self, const char *namespace_name,
                       lc_pouch_query_config *out, lc_error *error);
   int (*backend_capabilities)(lc_pouch_store *self,

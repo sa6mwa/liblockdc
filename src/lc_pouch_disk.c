@@ -176,6 +176,15 @@ typedef struct lc_pouch_disk_store {
   int defer_record_fsync;
 } lc_pouch_disk_store;
 
+struct lc_pouch_key_lock {
+  lc_pouch_allocator allocator;
+  char *path;
+  int fd;
+  struct lc_pouch_key_lock *process_next;
+};
+
+static lc_pouch_key_lock *lc_pouch_process_key_locks;
+
 typedef struct lc_pouch_file_source {
   lc_pouch_allocator allocator;
   int fd;
@@ -399,6 +408,8 @@ static int lc_pouch_disk_fsync_stats(lc_pouch_store *self,
 static int lc_pouch_disk_writer_status(lc_pouch_store *self,
                                        lc_pouch_writer_status *out,
                                        lc_error *error);
+static char *lc_pouch_join_path(const lc_pouch_allocator *allocator,
+                                const char *root, const char *leaf);
 static int lc_pouch_disk_lock_status(lc_pouch_store *self,
                                      lc_pouch_lock_status *out,
                                      lc_error *error);
@@ -406,6 +417,13 @@ static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
                                        const char *namespace_name,
                                        const char *key, char **out,
                                        lc_error *error);
+static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
+                                      const char *namespace_name,
+                                      const char *key,
+                                      lc_pouch_key_lock **lock,
+                                      int *acquired, lc_error *error);
+static int lc_pouch_disk_unlock_key(lc_pouch_store *self,
+                                    lc_pouch_key_lock *lock, lc_error *error);
 static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       const char *namespace_name,
                                       lc_pouch_query_config *out,
@@ -590,6 +608,119 @@ static char *lc_pouch_disk_make_lock_key_path(lc_pouch_disk_store *store,
   *cursor++ = '/';
   lc_pouch_disk_lock_escape(cursor, key);
   return path;
+}
+
+static char *lc_pouch_disk_make_lock_namespace_path(
+    lc_pouch_disk_store *store, const char *namespace_name) {
+  const char lock_dir[] = "locks";
+  size_t root_len;
+  size_t dir_len;
+  size_t ns_len;
+  size_t total_len;
+  char *path;
+  char *cursor;
+
+  root_len = strlen(store->root_path);
+  dir_len = strlen(lock_dir);
+  ns_len = lc_pouch_disk_lock_escaped_length(namespace_name);
+  total_len = root_len + 1U + dir_len + 1U + ns_len;
+  path = (char *)lc_pouch_alloc(&store->allocator, total_len + 1U);
+  if (path == NULL) {
+    return NULL;
+  }
+  cursor = path;
+  memcpy(cursor, store->root_path, root_len);
+  cursor += root_len;
+  *cursor++ = '/';
+  memcpy(cursor, lock_dir, dir_len);
+  cursor += dir_len;
+  *cursor++ = '/';
+  lc_pouch_disk_lock_escape(cursor, namespace_name);
+  return path;
+}
+
+static int lc_pouch_disk_ensure_directory(const char *path,
+                                          const char *message,
+                                          lc_error *error) {
+  struct stat st;
+
+  if (mkdir(path, 0777) == 0) {
+    return LC_OK;
+  }
+  if (errno != EEXIST) {
+    return lc_pouch_set_errno(error, message);
+  }
+  if (stat(path, &st) != 0) {
+    return lc_pouch_set_errno(error, message);
+  }
+  if (!S_ISDIR(st.st_mode)) {
+    return lc_pouch_set_invalid(error, message);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_ensure_lock_namespace(lc_pouch_disk_store *store,
+                                               const char *namespace_name,
+                                               lc_error *error) {
+  char *lock_root;
+  char *namespace_path;
+  int rc;
+
+  lock_root = lc_pouch_join_path(&store->allocator, store->root_path, "locks");
+  if (lock_root == NULL) {
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch lock directory path");
+  }
+  rc = lc_pouch_disk_ensure_directory(lock_root,
+                                      "failed to create pouch lock directory",
+                                      error);
+  lc_pouch_free(&store->allocator, lock_root);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  namespace_path =
+      lc_pouch_disk_make_lock_namespace_path(store, namespace_name);
+  if (namespace_path == NULL) {
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch lock namespace path");
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      namespace_path, "failed to create pouch lock namespace directory", error);
+  lc_pouch_free(&store->allocator, namespace_path);
+  return rc;
+}
+
+static int lc_pouch_disk_process_key_lock_held(const char *path) {
+  lc_pouch_key_lock *cursor;
+
+  cursor = lc_pouch_process_key_locks;
+  while (cursor != NULL) {
+    if (cursor->path != NULL && strcmp(cursor->path, path) == 0) {
+      return 1;
+    }
+    cursor = cursor->process_next;
+  }
+  return 0;
+}
+
+static void lc_pouch_disk_process_key_lock_add(lc_pouch_key_lock *lock) {
+  lock->process_next = lc_pouch_process_key_locks;
+  lc_pouch_process_key_locks = lock;
+}
+
+static void lc_pouch_disk_process_key_lock_remove(lc_pouch_key_lock *lock) {
+  lc_pouch_key_lock **cursor;
+
+  cursor = &lc_pouch_process_key_locks;
+  while (*cursor != NULL) {
+    if (*cursor == lock) {
+      *cursor = lock->process_next;
+      lock->process_next = NULL;
+      return;
+    }
+    cursor = &(*cursor)->process_next;
+  }
 }
 
 static int lc_pouch_disk_query_engine_supported(const char *value,
@@ -7851,6 +7982,116 @@ static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
+                                      const char *namespace_name,
+                                      const char *key,
+                                      lc_pouch_key_lock **lock,
+                                      int *acquired, lc_error *error) {
+  lc_pouch_disk_store *store;
+  lc_pouch_key_lock *key_lock;
+  struct flock fcntl_lock;
+  char *path;
+  int fd;
+  int rc;
+
+  if (lock != NULL) {
+    *lock = NULL;
+  }
+  if (acquired != NULL) {
+    *acquired = 0;
+  }
+  if (self == NULL || namespace_name == NULL || key == NULL || lock == NULL ||
+      acquired == NULL) {
+    return lc_pouch_set_invalid(
+        error, "try_lock_key requires store, namespace, key, lock, and output");
+  }
+  rc = lc_pouch_disk_validate_namespace_key(error, "try_lock_key",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  rc = lc_pouch_disk_ensure_lock_namespace(store, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  path = lc_pouch_disk_make_lock_key_path(store, namespace_name, key);
+  if (path == NULL) {
+    return lc_pouch_set_nomem(error, "failed to allocate pouch lock key path");
+  }
+  if (lc_pouch_disk_process_key_lock_held(path)) {
+    lc_pouch_free(&store->allocator, path);
+    return LC_OK;
+  }
+  fd = open(path, O_RDWR | O_CREAT, 0666);
+  if (fd < 0) {
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_errno(error, "failed to open pouch key lock");
+  }
+
+  memset(&fcntl_lock, 0, sizeof(fcntl_lock));
+  fcntl_lock.l_type = F_WRLCK;
+  fcntl_lock.l_whence = SEEK_SET;
+  if (fcntl(fd, F_SETLK, &fcntl_lock) != 0) {
+    if (errno == EACCES || errno == EAGAIN) {
+      close(fd);
+      lc_pouch_free(&store->allocator, path);
+      return LC_OK;
+    }
+    close(fd);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_errno(error, "failed to lock pouch key lock");
+  }
+
+  key_lock = (lc_pouch_key_lock *)lc_pouch_calloc(
+      &store->allocator, 1U, sizeof(*key_lock));
+  if (key_lock == NULL) {
+    fcntl_lock.l_type = F_UNLCK;
+    (void)fcntl(fd, F_SETLK, &fcntl_lock);
+    close(fd);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_nomem(error, "failed to allocate pouch key lock");
+  }
+  key_lock->allocator = store->allocator;
+  key_lock->path = path;
+  key_lock->fd = fd;
+  lc_pouch_disk_process_key_lock_add(key_lock);
+  store->lock_acquisitions++;
+  *lock = key_lock;
+  *acquired = 1;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_unlock_key(lc_pouch_store *self,
+                                    lc_pouch_key_lock *lock, lc_error *error) {
+  lc_pouch_disk_store *store;
+  struct flock fcntl_lock;
+  int rc;
+
+  if (self == NULL || lock == NULL) {
+    return lc_pouch_set_invalid(error, "unlock_key requires store and lock");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  rc = LC_OK;
+  memset(&fcntl_lock, 0, sizeof(fcntl_lock));
+  fcntl_lock.l_type = F_UNLCK;
+  fcntl_lock.l_whence = SEEK_SET;
+  lc_pouch_disk_process_key_lock_remove(lock);
+  if (lock->fd >= 0 && fcntl(lock->fd, F_SETLK, &fcntl_lock) != 0) {
+    rc = lc_pouch_set_errno(error, "failed to unlock pouch key lock");
+  }
+  if (lock->fd >= 0 && close(lock->fd) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch key lock");
+  }
+  lock->fd = -1;
+  lc_pouch_free(&lock->allocator, lock->path);
+  lc_pouch_free(&lock->allocator, lock);
+  if (rc == LC_OK) {
+    store->lock_releases++;
+  }
+  return rc;
+}
+
 static int lc_pouch_disk_backend_capabilities(
     lc_pouch_store *self, lc_pouch_backend_capabilities *out,
     lc_error *error) {
@@ -8199,6 +8440,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.writer_status = lc_pouch_disk_writer_status;
   store->pub.lock_status = lc_pouch_disk_lock_status;
   store->pub.lock_key_path = lc_pouch_disk_lock_key_path;
+  store->pub.try_lock_key = lc_pouch_disk_try_lock_key;
+  store->pub.unlock_key = lc_pouch_disk_unlock_key;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;

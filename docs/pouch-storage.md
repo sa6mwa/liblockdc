@@ -475,9 +475,15 @@ whether the implementation uses a root-level writer lock or per-key lock cache,
 and counters for lock acquisitions, releases, replay refreshes, and log reopens.
 The current implementation is intentionally observable as a global writer-lock
 model; future per-key lock caching should change these diagnostics as part of
-the cutover. The private disk vtable also exposes the lock-key path normalizer:
-lock paths live under `locks/<namespace>/<key>`, with key bytes percent-escaped
-so slash-separated user keys do not become filesystem path components.
+the cutover. The private disk vtable also exposes the lock-key path normalizer
+and a nonblocking per-key advisory lock primitive: lock paths live under
+`locks/<namespace>/<key>`, with key bytes percent-escaped so slash-separated
+user keys do not become filesystem path components. The current per-key
+primitive creates those lock files, uses `fcntl` byte-range locks for
+cross-process contention, and adds a process-local held-lock registry so two
+store handles in the same process contend before the full striped lock cache
+lands. Main mutation paths still use the global writer lock until the cutover
+is completed and diagnostics are updated.
 
 ## Performance Model
 
