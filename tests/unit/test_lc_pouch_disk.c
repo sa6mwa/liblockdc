@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "lc_pouch_store.h"
@@ -3427,6 +3428,158 @@ static void test_independent_handles_refresh_before_operations(void **state) {
   test_cleanup_root(root);
 }
 
+static void child_process_cas_update(const char *root, const char *expected_etag,
+                                     int start_fd, const char *payload) {
+  lc_pouch_store *store;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_source *source;
+  lc_error error;
+  char ready;
+  int rc;
+
+  store = NULL;
+  source = NULL;
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&error, 0, sizeof(error));
+  if (read(start_fd, &ready, 1U) != 1) {
+    _exit(20);
+  }
+  close(start_fd);
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(21);
+  }
+  opts.content_type = "application/json";
+  opts.if_state_etag = expected_etag;
+  rc = lc_source_from_memory(payload, strlen(payload), &source, &error);
+  if (rc != LC_OK) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(22);
+  }
+  rc = store->write_state(store, "default", "process-key", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  lc_pouch_put_state_res_cleanup(NULL, &put_res);
+  store->close(store, NULL);
+  if (rc == LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(0);
+  }
+  if (rc == LC_ERR_SERVER && error.http_status == 412L) {
+    lc_error_cleanup(&error);
+    _exit(2);
+  }
+  lc_error_cleanup(&error);
+  _exit(23);
+}
+
+static int child_exit_code(pid_t pid) {
+  int status;
+  int rc;
+
+  status = 0;
+  rc = waitpid(pid, &status, 0);
+  assert_int_equal(rc, pid);
+  assert_true(WIFEXITED(status));
+  return WEXITSTATUS(status);
+}
+
+static void test_independent_processes_contend_with_cas(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res initial_put;
+  lc_pouch_state_info state_info;
+  lc_error error;
+  char *text;
+  int start_pipe[2];
+  int first_code;
+  int second_code;
+  int rc;
+  pid_t first_pid;
+  pid_t second_pid;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "process-cas");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&initial_put, 0, sizeof(initial_put));
+  memset(&state_info, 0, sizeof(state_info));
+  store = NULL;
+  body = NULL;
+  start_pipe[0] = -1;
+  start_pipe[1] = -1;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  opts.content_type = "application/json";
+  source = source_from_text("{\"owner\":\"initial\"}");
+  rc = store->write_state(store, "default", "process-key", source, &opts,
+                          &initial_put, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = pipe(start_pipe);
+  assert_int_equal(rc, 0);
+  first_pid = fork();
+  assert_true(first_pid >= 0);
+  if (first_pid == 0) {
+    close(start_pipe[1]);
+    child_process_cas_update(root, initial_put.new_state_etag, start_pipe[0],
+                             "{\"owner\":\"first-process\"}");
+  }
+  second_pid = fork();
+  assert_true(second_pid >= 0);
+  if (second_pid == 0) {
+    close(start_pipe[1]);
+    child_process_cas_update(root, initial_put.new_state_etag, start_pipe[0],
+                             "{\"owner\":\"second-process\"}");
+  }
+  close(start_pipe[0]);
+  start_pipe[0] = -1;
+  assert_int_equal(write(start_pipe[1], "xx", 2U), 2);
+  close(start_pipe[1]);
+  start_pipe[1] = -1;
+
+  first_code = child_exit_code(first_pid);
+  second_code = child_exit_code(second_pid);
+  assert_true((first_code == 0 && second_code == 2) ||
+              (first_code == 2 && second_code == 0));
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "process-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  assert_int_equal(state_info.version, initial_put.new_version + 1L);
+  text = read_source_text(body);
+  assert_true(strcmp(text, "{\"owner\":\"first-process\"}") == 0 ||
+              strcmp(text, "{\"owner\":\"second-process\"}") == 0);
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+  lc_pouch_put_state_res_cleanup(&allocator, &initial_put);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -3467,6 +3620,7 @@ int main(void) {
       cmocka_unit_test(
           test_queue_retry_exhaustion_is_not_pending_after_replay),
       cmocka_unit_test(test_independent_handles_refresh_before_operations),
+      cmocka_unit_test(test_independent_processes_contend_with_cas),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
   };
 

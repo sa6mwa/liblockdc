@@ -1544,9 +1544,10 @@ redelivery, and cross-client CAS. The optional e2e shard still covers broader
 consumer-service behavior.
 
 Current disk unit coverage includes queue nack and extend allocator-failure
-paths, TTL expiry, and retry-exhaustion replay paths that prove failed
+paths, TTL expiry, retry-exhaustion replay paths that prove failed
 redelivery-control mutations leave the active lease ackable and terminal queue
-states remain terminal after reopen.
+states remain terminal after reopen, and forked cross-process CAS contention
+that proves exactly one independent process can update a stale state ETag.
 
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a
