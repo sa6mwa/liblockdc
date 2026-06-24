@@ -2460,6 +2460,107 @@ static void test_pouch_public_client_level_attachment_apis(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_attachment_read_after_release(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list attachments;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_release_req release_req;
+  lc_lease_ref released_ref;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "public-attachment-after-release");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachments, 0, sizeof(attachments));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&released_ref, 0, sizeof(released_ref));
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/public-attachment-after-release";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  rc = lc_acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "released.txt";
+  attach_req.content_type = "text/plain";
+  source = source_from_text("released-body", &error);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_non_null(attach_res.attachment.id);
+
+  released_ref.namespace_name = strdup(lease->namespace_name);
+  released_ref.key = strdup(lease->key);
+  released_ref.lease_id = strdup(lease->lease_id);
+  released_ref.txn_id = strdup(lease->txn_id);
+  released_ref.fencing_token = lease->fencing_token;
+  assert_non_null(released_ref.namespace_name);
+  assert_non_null(released_ref.key);
+  assert_non_null(released_ref.lease_id);
+  assert_non_null(released_ref.txn_id);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  lc_attachment_list_req_init(&list_req);
+  list_req.lease = released_ref;
+  list_req.public_read = 1;
+  rc = lc_list_attachments(client, &list_req, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 1U);
+  assert_string_equal(attachments.items[0].name, "released.txt");
+  assert_string_equal(attachments.items[0].id, attach_res.attachment.id);
+  lc_attachment_list_cleanup(&attachments);
+
+  lc_attachment_get_op_init(&get_op);
+  get_op.lease = released_ref;
+  get_op.selector.id = attach_res.attachment.id;
+  get_op.public_read = 1;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(get_res.attachment.name, "released.txt");
+  assert_string_equal(get_res.attachment.content_type, "text/plain");
+  assert_sink_text(sink, "released-body", &error);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  client->close(client);
+  client = NULL;
+  free((char *)released_ref.namespace_name);
+  free((char *)released_ref.key);
+  free((char *)released_ref.lease_id);
+  free((char *)released_ref.txn_id);
+  lc_attach_res_cleanup(&attach_res);
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_shared_handles(void **state) {
   char root[256];
   char endpoint[320];
@@ -4306,6 +4407,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
       cmocka_unit_test(test_pouch_public_attachment_prevent_overwrite),
       cmocka_unit_test(test_pouch_public_client_level_attachment_apis),
+      cmocka_unit_test(test_pouch_public_attachment_read_after_release),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(test_pouch_public_queue_nack_delay_redelivery),
