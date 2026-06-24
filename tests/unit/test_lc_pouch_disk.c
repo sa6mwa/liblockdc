@@ -3620,7 +3620,7 @@ static void test_index_flush_recovers_from_corrupt_sidecar_tail(void **state) {
   assert_true(flushed.flushed);
   assert_false(flushed.pending);
   assert_true(flushed.index_seq >= 3UL);
-  assert_true(test_query_index_size(root) < original_query_index_size);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
   lc_pouch_index_flush_res_cleanup(&allocator, &flushed);
 
   req.namespace_name = "default";
@@ -3862,7 +3862,7 @@ static void test_query_index_keys_recovers_from_corrupt_sidecar_tail(
   assert_string_equal(row_capture.keys[2], "later");
   assert_int_equal(row_capture.versions[2], 3L);
   assert_false(scan.truncated);
-  assert_true(test_query_index_size(root) < original_query_index_size);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
@@ -3987,6 +3987,7 @@ static void test_query_index_keys_truncates_partial_sidecar_field(
   lc_pouch_query_index_scan_res scan;
   key_capture capture;
   lc_error error;
+  off_t original_query_index_size;
   off_t truncated_query_index_size;
   int rc;
 
@@ -4022,7 +4023,8 @@ static void test_query_index_keys_truncates_partial_sidecar_field(
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
-  truncated_query_index_size = test_query_index_size(root) - 2;
+  original_query_index_size = test_query_index_size(root);
+  truncated_query_index_size = original_query_index_size - 2;
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
@@ -4039,7 +4041,7 @@ static void test_query_index_keys_truncates_partial_sidecar_field(
   assert_int_equal(capture.count, 2U);
   assert_string_equal(capture.keys[0], "alpha");
   assert_string_equal(capture.keys[1], "bravo");
-  assert_true(test_query_index_size(root) < truncated_query_index_size);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   rc = store->close(store, &error);

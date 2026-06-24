@@ -5864,13 +5864,13 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
   }
 
   if ((unsigned long)st.st_size != offset) {
-    if (lseek(store->query_index_fd, (off_t)offset, SEEK_SET) < 0) {
-      return lc_pouch_set_errno(error, "failed to seek pouch query index tail");
+    int rc;
+
+    rc = lc_pouch_disk_rebuild_query_index(store, error);
+    if (rc != LC_OK) {
+      return rc;
     }
-    if (ftruncate(store->query_index_fd, (off_t)offset) != 0) {
-      return lc_pouch_set_errno(error,
-                                "failed to truncate pouch query index tail");
-    }
+    return lc_pouch_disk_replay_query_index(store, error);
   }
   store->replayed_query_index_size = offset;
   return LC_OK;
