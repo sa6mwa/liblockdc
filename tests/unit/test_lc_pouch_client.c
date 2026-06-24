@@ -170,6 +170,7 @@ typedef struct watch_test_state {
   char head_message_id[128];
   char correlation_id[64];
   int fail;
+  int fail_without_error;
 } watch_test_state;
 
 typedef struct consumer_service_test_state {
@@ -288,6 +289,9 @@ static int watch_test_handle(void *context, const lc_watch_event *event,
         (char *)malloc(strlen("watch callback stopped") + 1U);
     assert_non_null(error->message);
     strcpy(error->message, "watch callback stopped");
+    return LC_ERR_TRANSPORT;
+  }
+  if (state->fail_without_error) {
     return LC_ERR_TRANSPORT;
   }
   return LC_OK;
@@ -1912,6 +1916,14 @@ static void test_pouch_endpoint_watch_queue_snapshots(void **state) {
   rc = client->watch_queue(client, &watch_req, &handler, &error);
   assert_int_equal(rc, LC_ERR_TRANSPORT);
   assert_string_equal(error.message, "watch callback stopped");
+  assert_int_equal(watch_state.handled, 1U);
+  lc_error_cleanup(&error);
+
+  memset(&watch_state, 0, sizeof(watch_state));
+  watch_state.fail_without_error = 1;
+  rc = client->watch_queue(client, &watch_req, &handler, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "queue watch handler failed");
   assert_int_equal(watch_state.handled, 1U);
   lc_error_cleanup(&error);
 

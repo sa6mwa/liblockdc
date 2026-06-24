@@ -2207,7 +2207,10 @@ int lc_pouch_client_watch_queue_method(lc_client *self,
     return rc;
   }
   lc_error_cleanup(&handler_error);
-  (void)handler_rc;
+  if (handler_rc != LC_OK) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "queue watch handler failed", NULL, NULL, NULL);
+  }
   return LC_OK;
 }
 
