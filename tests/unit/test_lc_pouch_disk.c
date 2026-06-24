@@ -8037,6 +8037,106 @@ static void test_writer_status_classifies_stale_markers(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_lock_status_reports_global_writer_lock_counters(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_lock_status status;
+  lc_pouch_compaction_res compact;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "lock-status");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&status, 0, sizeof(status));
+  memset(&compact, 0, sizeof(compact));
+  first = NULL;
+  second = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first->lock_status);
+
+  rc = first->lock_status(first, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(status.mode, "global-writer-fcntl");
+  assert_non_null(strstr(status.path, "writer.lock"));
+  assert_true(status.uses_fcntl_byte_range_lock);
+  assert_true(status.uses_global_writer_lock);
+  assert_false(status.uses_per_key_lock_cache);
+  assert_true(status.lock_acquisitions >= 1UL);
+  assert_true(status.lock_releases <= status.lock_acquisitions);
+  lc_pouch_lock_status_cleanup(&allocator, &status);
+
+  opts.content_type = "text/plain";
+  source = source_from_text("lock-status");
+  rc = first->write_state(first, "default", "lock-key", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+
+  rc = first->lock_status(first, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.lock_acquisitions >= 2UL);
+  assert_true(status.lock_releases >= 2UL);
+  assert_true(status.replay_refreshes >= 1UL);
+  assert_int_equal(status.log_reopens, 0UL);
+  lc_pouch_lock_status_cleanup(&allocator, &status);
+
+  rc = first->compact(first, "force", &compact, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_compaction_res_cleanup(&allocator, &compact);
+
+  rc = second->read_state(second, "default", "lock-key", &body, &state_info,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  assert_non_null(body);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = second->lock_status(second, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.log_reopens >= 1UL);
+  assert_true(status.replay_refreshes >= 1UL);
+  lc_pouch_lock_status_cleanup(&allocator, &status);
+
+  tracked.fail_malloc_size = strlen("global-writer-fcntl") + 1U;
+  rc = first->lock_status(first, &status, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to copy pouch lock status");
+  assert_null(status.mode);
+  assert_null(status.path);
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
   char root[256];
   char marker_path[512];
@@ -8273,6 +8373,7 @@ int main(void) {
       cmocka_unit_test(test_abort_preserves_writer_marker),
       cmocka_unit_test(test_writer_status_reports_marker_presence),
       cmocka_unit_test(test_writer_status_classifies_stale_markers),
+      cmocka_unit_test(test_lock_status_reports_global_writer_lock_counters),
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),

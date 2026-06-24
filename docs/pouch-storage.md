@@ -470,6 +470,12 @@ handle's heartbeat sequence, whether its marker is present, how many active peer
 markers are currently visible in the store root, and how many markers are stale.
 New marker files carry an `updated_at_unix` heartbeat; legacy marker files
 without that field fall back to mtime.
+Lock diagnostics report the current `global-writer-fcntl` mode, lock path,
+whether the implementation uses a root-level writer lock or per-key lock cache,
+and counters for lock acquisitions, releases, replay refreshes, and log reopens.
+The current implementation is intentionally observable as a global writer-lock
+model; future per-key lock caching should change these diagnostics as part of
+the cutover.
 
 ## Performance Model
 

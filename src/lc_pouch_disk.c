@@ -145,6 +145,10 @@ typedef struct lc_pouch_disk_store {
   int query_index_fd;
   unsigned long writer_marker_seq;
   unsigned long queue_wake_seq;
+  unsigned long lock_acquisitions;
+  unsigned long lock_releases;
+  unsigned long lock_replay_refreshes;
+  unsigned long lock_log_reopens;
   lc_pouch_disk_state_entry *state_entries;
   size_t state_entry_count;
   size_t state_entry_capacity;
@@ -395,6 +399,9 @@ static int lc_pouch_disk_fsync_stats(lc_pouch_store *self,
 static int lc_pouch_disk_writer_status(lc_pouch_store *self,
                                        lc_pouch_writer_status *out,
                                        lc_error *error);
+static int lc_pouch_disk_lock_status(lc_pouch_store *self,
+                                     lc_pouch_lock_status *out,
+                                     lc_error *error);
 static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       const char *namespace_name,
                                       lc_pouch_query_config *out,
@@ -839,6 +846,7 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
   if (fcntl(store->lock_fd, F_SETLKW, &lock) != 0) {
     return lc_pouch_set_errno(error, "failed to lock pouch writer lock");
   }
+  store->lock_acquisitions++;
   if (fstat(store->log_fd, &st) != 0) {
     lock.l_type = F_UNLCK;
     (void)fcntl(store->lock_fd, F_SETLK, &lock);
@@ -859,6 +867,7 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
     close(store->log_fd);
     store->log_fd = new_fd;
     store->replayed_log_size = (unsigned long)-1;
+    store->lock_log_reopens++;
     if (fstat(store->log_fd, &st) != 0) {
       lock.l_type = F_UNLCK;
       (void)fcntl(store->lock_fd, F_SETLK, &lock);
@@ -868,6 +877,7 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
   if ((unsigned long)st.st_size == store->replayed_log_size) {
     return LC_OK;
   }
+  store->lock_replay_refreshes++;
   rc = lc_pouch_disk_replay(store, error);
   if (rc != LC_OK) {
     lock.l_type = F_UNLCK;
@@ -947,6 +957,7 @@ static int lc_pouch_disk_unlock(lc_pouch_disk_store *store, lc_error *error) {
   if (fcntl(store->lock_fd, F_SETLK, &lock) != 0) {
     return lc_pouch_set_errno(error, "failed to unlock pouch writer lock");
   }
+  store->lock_releases++;
   return LC_OK;
 }
 
@@ -7710,6 +7721,32 @@ static int lc_pouch_disk_query_config(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_lock_status(lc_pouch_store *self,
+                                     lc_pouch_lock_status *out,
+                                     lc_error *error) {
+  lc_pouch_disk_store *store;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error, "lock_status requires store and out");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  out->mode = lc_pouch_strdup(&store->allocator, "global-writer-fcntl");
+  out->path = lc_pouch_strdup(&store->allocator, store->lock_path);
+  if (out->mode == NULL || out->path == NULL) {
+    lc_pouch_lock_status_cleanup(&store->allocator, out);
+    return lc_pouch_set_nomem(error, "failed to copy pouch lock status");
+  }
+  out->uses_fcntl_byte_range_lock = 1;
+  out->uses_global_writer_lock = 1;
+  out->uses_per_key_lock_cache = 0;
+  out->lock_acquisitions = store->lock_acquisitions;
+  out->lock_releases = store->lock_releases;
+  out->replay_refreshes = store->lock_replay_refreshes;
+  out->log_reopens = store->lock_log_reopens;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_backend_capabilities(
     lc_pouch_store *self, lc_pouch_backend_capabilities *out,
     lc_error *error) {
@@ -8056,6 +8093,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.queue_wake_status = lc_pouch_disk_queue_wake_status;
   store->pub.fsync_stats = lc_pouch_disk_fsync_stats;
   store->pub.writer_status = lc_pouch_disk_writer_status;
+  store->pub.lock_status = lc_pouch_disk_lock_status;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;

@@ -297,6 +297,18 @@ typedef struct lc_pouch_writer_status {
   unsigned long heartbeat_sequence;
 } lc_pouch_writer_status;
 
+typedef struct lc_pouch_lock_status {
+  char *mode;
+  char *path;
+  int uses_fcntl_byte_range_lock;
+  int uses_global_writer_lock;
+  int uses_per_key_lock_cache;
+  unsigned long lock_acquisitions;
+  unsigned long lock_releases;
+  unsigned long replay_refreshes;
+  unsigned long log_reopens;
+} lc_pouch_lock_status;
+
 typedef struct lc_pouch_backend_capabilities {
   char *backend_kind;
   char *write_coordination;
@@ -419,6 +431,8 @@ struct lc_pouch_store {
                      lc_error *error);
   int (*writer_status)(lc_pouch_store *self, lc_pouch_writer_status *out,
                        lc_error *error);
+  int (*lock_status)(lc_pouch_store *self, lc_pouch_lock_status *out,
+                     lc_error *error);
   int (*query_config)(lc_pouch_store *self, const char *namespace_name,
                       lc_pouch_query_config *out, lc_error *error);
   int (*backend_capabilities)(lc_pouch_store *self,
@@ -467,6 +481,8 @@ void lc_pouch_queue_wake_status_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_queue_wake_status *status);
 void lc_pouch_writer_status_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_writer_status *status);
+void lc_pouch_lock_status_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_lock_status *status);
 void lc_pouch_backend_capabilities_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_backend_capabilities *caps);
 void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,

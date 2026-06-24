@@ -252,6 +252,16 @@ void lc_pouch_writer_status_cleanup(const lc_pouch_allocator *allocator,
   memset(status, 0, sizeof(*status));
 }
 
+void lc_pouch_lock_status_cleanup(const lc_pouch_allocator *allocator,
+                                  lc_pouch_lock_status *status) {
+  if (status == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, status->mode);
+  lc_pouch_free(allocator, status->path);
+  memset(status, 0, sizeof(*status));
+}
+
 void lc_pouch_backend_capabilities_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_backend_capabilities *caps) {
   if (caps == NULL) {
