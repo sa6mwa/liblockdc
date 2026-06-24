@@ -4280,6 +4280,87 @@ static void test_independent_handles_refresh_before_operations(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_independent_handles_refresh_index_projection(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res first_meta;
+  lc_pouch_store_meta_res second_meta;
+  lc_pouch_query_index_scan_req scan_req;
+  lc_pouch_query_index_scan_res scan_res;
+  scan_capture row_capture;
+  key_capture key_rows;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "shared-index-refresh");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&first_meta, 0, sizeof(first_meta));
+  memset(&second_meta, 0, sizeof(second_meta));
+  memset(&scan_req, 0, sizeof(scan_req));
+  memset(&scan_res, 0, sizeof(scan_res));
+  memset(&row_capture, 0, sizeof(row_capture));
+  memset(&key_rows, 0, sizeof(key_rows));
+  first = NULL;
+  second = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "writer-one";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 10L;
+  rc = first->store_meta(first, "default", "alpha", &meta, NULL, &first_meta,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+
+  scan_req.namespace_name = "default";
+  rc = second->query_index_scan(second, &scan_req, capture_scan_row,
+                                &row_capture, &scan_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(row_capture.count, 1U);
+  assert_string_equal(row_capture.keys[0], "alpha");
+  assert_int_equal(row_capture.versions[0], 10L);
+  assert_true(scan_res.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan_res);
+
+  meta.owner = "writer-two";
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 20L;
+  rc = second->store_meta(second, "default", "bravo", &meta, NULL,
+                          &second_meta, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = first->query_index_keys_scan(first, &scan_req, capture_query_key,
+                                    &key_rows, &scan_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(key_rows.count, 2U);
+  assert_string_equal(key_rows.keys[0], "alpha");
+  assert_string_equal(key_rows.keys[1], "bravo");
+  assert_true(scan_res.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan_res);
+
+  lc_pouch_store_meta_res_cleanup(&allocator, &first_meta);
+  lc_pouch_store_meta_res_cleanup(&allocator, &second_meta);
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void child_process_cas_update(const char *root, const char *expected_etag,
                                      int start_fd, const char *payload) {
   lc_pouch_store *store;
@@ -4701,6 +4782,7 @@ int main(void) {
       cmocka_unit_test(
           test_queue_retry_exhaustion_is_not_pending_after_replay),
       cmocka_unit_test(test_independent_handles_refresh_before_operations),
+      cmocka_unit_test(test_independent_handles_refresh_index_projection),
       cmocka_unit_test(test_independent_processes_contend_with_cas),
       cmocka_unit_test(test_independent_processes_dequeue_single_message_once),
       cmocka_unit_test(test_query_config_defaults_and_configured_options),
