@@ -1176,6 +1176,165 @@ static int bench_pouch_queue_roundtrip(long iterations) {
   return rc == LC_OK ? 0 : 1;
 }
 
+static int bench_pouch_queue_txn_rollback(long iterations) {
+  char root[256];
+  char txn_id[80];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_message_info redelivered;
+  lc_pouch_queue_ref ref;
+  lc_error error;
+  long i;
+  int acked;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "queue-txn-rollback");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  bench_pouch_allocator(&allocator);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+
+  for (i = 0; i < iterations; ++i) {
+    memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+    memset(&enqueued, 0, sizeof(enqueued));
+    memset(&dequeued, 0, sizeof(dequeued));
+    memset(&redelivered, 0, sizeof(redelivered));
+    memset(&ref, 0, sizeof(ref));
+    read_body = NULL;
+    snprintf(txn_id, sizeof(txn_id), "bench-queue-txn-%ld", i);
+
+    source = bench_source_from_text("queue-transaction-payload", &error);
+    if (source == NULL) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    rc = store->enqueue_message(store, "bench", "txn-jobs", source,
+                                &enqueue_opts, &enqueued, &error);
+    lc_source_close(source);
+
+    dequeue_opts.owner = "bench-worker";
+    dequeue_opts.txn_id = txn_id;
+    dequeue_opts.visibility_timeout_seconds = 30L;
+    if (rc == LC_OK) {
+      rc = store->dequeue_message(store, "bench", "txn-jobs", &dequeue_opts,
+                                  &read_body, &dequeued, &error);
+    }
+    if (rc != LC_OK || read_body == NULL ||
+        bench_pouch_read_and_check(read_body, "queue-transaction-payload",
+                                   &error) != 0) {
+      fprintf(stderr,
+              "pouch-queue-txn-rollback failed during transactional dequeue "
+              "at iteration %ld rc=%d error=%d message=%s\n",
+              i, rc, error.code,
+              error.message != NULL ? error.message : "(none)");
+      if (read_body != NULL) {
+        lc_source_close(read_body);
+      }
+      lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+      lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    lc_source_close(read_body);
+    read_body = NULL;
+
+    ref.namespace_name = dequeued.namespace_name;
+    ref.queue = dequeued.queue;
+    ref.message_id = dequeued.message_id;
+    ref.lease_id = dequeued.lease_id;
+    ref.txn_id = dequeued.txn_id;
+    ref.fencing_token = dequeued.fencing_token;
+    ref.meta_etag = dequeued.meta_etag;
+    acked = 0;
+    rc = store->ack_message(store, &ref, &acked, &error);
+    if (rc == LC_OK && !acked) {
+      rc = LC_ERR_PROTOCOL;
+    }
+    if (rc == LC_OK) {
+      rc = store->apply_queue_txn(store, txn_id, 0, &error);
+    }
+
+    memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+    dequeue_opts.owner = "bench-worker-redelivery";
+    dequeue_opts.visibility_timeout_seconds = 30L;
+    if (rc == LC_OK) {
+      rc = store->dequeue_message(store, "bench", "txn-jobs", &dequeue_opts,
+                                  &read_body, &redelivered, &error);
+    }
+    if (rc != LC_OK || read_body == NULL ||
+        bench_pouch_read_and_check(read_body, "queue-transaction-payload",
+                                   &error) != 0 ||
+        redelivered.message_id == NULL ||
+        strcmp(redelivered.message_id, enqueued.message_id) != 0) {
+      fprintf(stderr,
+              "pouch-queue-txn-rollback failed during redelivery at "
+              "iteration %ld rc=%d error=%d message=%s\n",
+              i, rc, error.code,
+              error.message != NULL ? error.message : "(none)");
+      if (read_body != NULL) {
+        lc_source_close(read_body);
+      }
+      lc_pouch_queue_message_info_cleanup(&allocator, &redelivered);
+      lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+      lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+    lc_source_close(read_body);
+
+    ref.namespace_name = redelivered.namespace_name;
+    ref.queue = redelivered.queue;
+    ref.message_id = redelivered.message_id;
+    ref.lease_id = redelivered.lease_id;
+    ref.txn_id = redelivered.txn_id;
+    ref.fencing_token = redelivered.fencing_token;
+    ref.meta_etag = redelivered.meta_etag;
+    acked = 0;
+    rc = store->ack_message(store, &ref, &acked, &error);
+    lc_pouch_queue_message_info_cleanup(&allocator, &redelivered);
+    lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+    lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+    if (rc != LC_OK || !acked) {
+      fprintf(stderr,
+              "pouch-queue-txn-rollback failed during final ack at "
+              "iteration %ld rc=%d acked=%d error=%d message=%s\n",
+              i, rc, acked, error.code,
+              error.message != NULL ? error.message : "(none)");
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+  }
+
+  rc = store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int bench_pouch_compaction(long iterations) {
   char root[256];
   unsigned char payload[4096];
@@ -1733,19 +1892,18 @@ static int run_case(const bench_case *test_case, long iterations) {
 }
 
 static void print_usage(const char *argv0) {
-  fprintf(
-      stderr,
-      "usage: %s [iterations] "
-      "[all|streams|json|mutate-parse|mutate-apply|pouch-state|"
-      "pouch-state-write-1k|pouch-state-write-64k|"
-      "pouch-state-write-1m|pouch-state-write-16m|pouch-state-read-1k|"
-      "pouch-state-read-64k|pouch-state-read-1m|pouch-state-read-16m|"
-      "pouch-staged|pouch-public-mutate|pouch-object|pouch-queue|"
-      "pouch-compaction|"
-      "pouch-retention|pouch-scan-meta|pouch-open-rebuild|pouch-index-scan|"
-      "pouch-index-keys|pouch-scan-query|pouch-index-query|"
-      "pouch-scan-query-keys|pouch-index-query-keys]\n",
-      argv0);
+  fprintf(stderr, "usage: %s [iterations] [all|streams|json|", argv0);
+  fprintf(stderr, "mutate-parse|mutate-apply|pouch-state|");
+  fprintf(stderr, "pouch-state-write-1k|pouch-state-write-64k|");
+  fprintf(stderr, "pouch-state-write-1m|pouch-state-write-16m|");
+  fprintf(stderr, "pouch-state-read-1k|pouch-state-read-64k|");
+  fprintf(stderr, "pouch-state-read-1m|pouch-state-read-16m|");
+  fprintf(stderr, "pouch-staged|pouch-public-mutate|pouch-object|");
+  fprintf(stderr, "pouch-queue|pouch-queue-txn-rollback|");
+  fprintf(stderr, "pouch-compaction|pouch-retention|pouch-scan-meta|");
+  fprintf(stderr, "pouch-open-rebuild|pouch-index-scan|");
+  fprintf(stderr, "pouch-index-keys|pouch-scan-query|pouch-index-query|");
+  fprintf(stderr, "pouch-scan-query-keys|pouch-index-query-keys]\n");
 }
 
 int main(int argc, char **argv) {
@@ -1767,6 +1925,7 @@ int main(int argc, char **argv) {
       {"pouch-public-mutate", 1000L, bench_pouch_public_mutate},
       {"pouch-object", 1000L, bench_pouch_object_roundtrip},
       {"pouch-queue", 1000L, bench_pouch_queue_roundtrip},
+      {"pouch-queue-txn-rollback", 1000L, bench_pouch_queue_txn_rollback},
       {"pouch-compaction", 120L, bench_pouch_compaction},
       {"pouch-retention", 1000L, bench_pouch_retention_sweep},
       {"pouch-scan-meta", 1000L, bench_pouch_scan_meta},
