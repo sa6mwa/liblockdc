@@ -951,6 +951,142 @@ static void test_pouch_public_attachment_prevent_overwrite(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_client_level_attachment_apis(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_attach_op attach_op;
+  lc_attach_res first_attach;
+  lc_attach_res second_attach;
+  lc_attachment_list_req list_req;
+  lc_attachment_list attachments;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_attachment_delete_op delete_op;
+  lc_attachment_delete_all_op delete_all_op;
+  lc_error error;
+  long version_after_second;
+  int deleted;
+  int deleted_count;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "client-attachment-apis");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&first_attach, 0, sizeof(first_attach));
+  memset(&second_attach, 0, sizeof(second_attach));
+  memset(&attachments, 0, sizeof(attachments));
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/client-attachments";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  rc = lc_acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  lc_attach_op_init(&attach_op);
+  lease_ref_from_lease(lease, &attach_op.lease);
+  attach_op.name = "client-one.txt";
+  attach_op.content_type = "text/plain";
+  source = source_from_text("client-one", &error);
+  rc = lc_attach(client, &attach_op, source, &first_attach, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(first_attach.attachment.name, "client-one.txt");
+  assert_int_equal(first_attach.version, 1L);
+
+  lc_attach_op_init(&attach_op);
+  lease_ref_from_lease(lease, &attach_op.lease);
+  attach_op.name = "client-two.txt";
+  attach_op.content_type = "text/plain";
+  source = source_from_text("client-two", &error);
+  rc = lc_attach(client, &attach_op, source, &second_attach, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(second_attach.attachment.name, "client-two.txt");
+  assert_int_equal(second_attach.version, 2L);
+  version_after_second = second_attach.version;
+
+  lc_attachment_list_req_init(&list_req);
+  lease_ref_from_lease(lease, &list_req.lease);
+  rc = lc_list_attachments(client, &list_req, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 2U);
+  assert_string_equal(attachments.items[0].name, "client-one.txt");
+  assert_string_equal(attachments.items[1].name, "client-two.txt");
+  lc_attachment_list_cleanup(&attachments);
+
+  lc_attachment_get_op_init(&get_op);
+  lease_ref_from_lease(lease, &get_op.lease);
+  get_op.selector.id = first_attach.attachment.id;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(get_res.attachment.name, "client-one.txt");
+  assert_sink_text(sink, "client-one", &error);
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_attachment_get_res_cleanup(&get_res);
+
+  lc_attachment_delete_op_init(&delete_op);
+  lease_ref_from_lease(lease, &delete_op.lease);
+  delete_op.selector.name = "client-one.txt";
+  deleted = 0;
+  rc = lc_delete_attachment(client, &delete_op, &deleted, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(deleted, 1);
+
+  memset(&attachments, 0, sizeof(attachments));
+  rc = lc_list_attachments(client, &list_req, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 1U);
+  assert_string_equal(attachments.items[0].name, "client-two.txt");
+  lc_attachment_list_cleanup(&attachments);
+
+  lc_attachment_delete_all_op_init(&delete_all_op);
+  lease_ref_from_lease(lease, &delete_all_op.lease);
+  deleted_count = 0;
+  rc = lc_delete_all_attachments(client, &delete_all_op, &deleted_count,
+                                 &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(deleted_count, 1);
+
+  memset(&attachments, 0, sizeof(attachments));
+  rc = lc_list_attachments(client, &list_req, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 0U);
+  lc_attachment_list_cleanup(&attachments);
+
+  lc_release_req_init(&release_req);
+  rc = lc_lease_release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  client->close(client);
+  client = NULL;
+
+  lc_attach_res_cleanup(&first_attach);
+  lc_attach_res_cleanup(&second_attach);
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+  assert_int_equal(version_after_second, 2L);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_shared_handles(void **state) {
   char root[256];
   char endpoint[320];
@@ -2218,6 +2354,7 @@ int main(void) {
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
       cmocka_unit_test(test_pouch_public_attachment_prevent_overwrite),
+      cmocka_unit_test(test_pouch_public_client_level_attachment_apis),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(test_pouch_public_queue_nack_delay_redelivery),

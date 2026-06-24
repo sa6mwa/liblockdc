@@ -1513,9 +1513,10 @@ Current default local integration coverage in `tests/integration` exercises
 public `pouch://` clients sharing one disk root for state and attachment
 persistence, query-hidden metadata versioning and persistence, attachment
 prevent-overwrite and overwrite semantics, attachment delete/delete-all
-semantics, queue visibility handoff, stale delivery fencing, nack redelivery,
-delayed nack redelivery, client-level nack retry exhaustion terminal behavior
-across reopen, read-only queue stats while a delivery is invisible,
+semantics, client-level attachment APIs, queue visibility handoff, stale
+delivery fencing, nack redelivery, delayed nack redelivery, client-level nack
+retry exhaustion terminal behavior across reopen, read-only queue stats while a
+delivery is invisible,
 acknowledgement, watch snapshots, direct subscribe-with-state, batch dequeue
 without duplicate acked delivery, managed consumer state-save, managed failure
 redelivery, and cross-client CAS. The optional e2e shard still covers broader
