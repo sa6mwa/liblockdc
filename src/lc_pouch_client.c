@@ -2215,6 +2215,27 @@ static int lc_pouch_client_unsupported(lc_error *error, const char *message) {
   return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
 }
 
+static long lc_pouch_now_millis(void) {
+  struct timespec ts;
+
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+    return 0L;
+  }
+  return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static void lc_pouch_sleep_millis(long millis) {
+  struct timespec req;
+
+  if (millis <= 0L) {
+    return;
+  }
+  req.tv_sec = millis / 1000L;
+  req.tv_nsec = (millis % 1000L) * 1000000L;
+  while (nanosleep(&req, &req) != 0 && errno == EINTR) {
+  }
+}
+
 static int lc_pouch_query_engine_supported(const char *value) {
   return value == NULL || value[0] == '\0' || strcmp(value, "index") == 0 ||
          strcmp(value, "scan") == 0;
@@ -3443,6 +3464,10 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
   int index;
   int terminal;
   int rc;
+  long deadline_ms;
+  long now_ms;
+  long remaining_ms;
+  long sleep_ms;
 
   if (self == NULL || req == NULL || req->queue == NULL || consumer == NULL ||
       consumer->handle == NULL) {
@@ -3459,7 +3484,15 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
   single_req = *req;
   single_req.page_size = 1;
   limit = req->page_size > 0 ? req->page_size : 1;
-  for (index = 0; index < limit; ++index) {
+  deadline_ms = 0L;
+  if (req->wait_seconds > 0L) {
+    now_ms = lc_pouch_now_millis();
+    if (now_ms > 0L) {
+      deadline_ms = now_ms + req->wait_seconds * 1000L;
+    }
+  }
+  index = 0;
+  while (index < limit) {
     terminal = 0;
     message = NULL;
     rc = lc_pouch_client_dequeue_one(self, &single_req, with_state, &message,
@@ -3468,6 +3501,15 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
       return rc;
     }
     if (message == NULL) {
+      if (deadline_ms > 0L) {
+        now_ms = lc_pouch_now_millis();
+        if (now_ms > 0L && now_ms < deadline_ms) {
+          remaining_ms = deadline_ms - now_ms;
+          sleep_ms = remaining_ms < 100L ? remaining_ms : 100L;
+          lc_pouch_sleep_millis(sleep_ms);
+          continue;
+        }
+      }
       return LC_OK;
     }
     rc = consumer->handle(consumer->context, message, error);
@@ -3498,6 +3540,7 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
     if (rc != LC_OK) {
       return error != NULL && error->code != LC_OK ? error->code : rc;
     }
+    ++index;
   }
   return LC_OK;
 }

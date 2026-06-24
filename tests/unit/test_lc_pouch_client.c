@@ -8,6 +8,7 @@
 #include <cmocka.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "lc/lc.h"
@@ -212,6 +213,49 @@ static int subscribe_test_handle(void *context, lc_message *message,
   rc = message->ack(message, error);
   assert_int_equal(rc, LC_OK);
   return LC_OK;
+}
+
+static void child_enqueue_after_delay(const char *endpoint, const char *queue,
+                                      const char *payload) {
+  lc_client_config config;
+  lc_client *client;
+  lc_enqueue_req req;
+  lc_enqueue_res res;
+  lc_source *source;
+  lc_error error;
+  const char *endpoints[1];
+  int rc;
+
+  sleep(1U);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  lc_client_config_init(&config);
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "default";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(21);
+  }
+  lc_enqueue_req_init(&req);
+  req.queue = queue;
+  req.content_type = "text/plain";
+  req.visibility_timeout_seconds = 30L;
+  req.ttl_seconds = 60L;
+  req.max_attempts = 3;
+  source = NULL;
+  rc = lc_source_from_memory(payload, strlen(payload), &source, &error);
+  if (rc == LC_OK) {
+    rc = client->enqueue(client, &req, source, &res, &error);
+    lc_source_close(source);
+  }
+  lc_enqueue_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  _exit(rc == LC_OK ? 0 : 22);
 }
 
 static int watch_test_handle(void *context, const lc_watch_event *event,
@@ -2432,6 +2476,67 @@ static void test_pouch_endpoint_subscribe_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_subscribe_waits_for_shared_message(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_dequeue_req subscribe_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_consumer consumer;
+  subscribe_test_state subscribe_state;
+  lc_error error;
+  pid_t child;
+  int child_status;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "subscribe-wait");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&stats_res, 0, sizeof(stats_res));
+  memset(&consumer, 0, sizeof(consumer));
+  memset(&subscribe_state, 0, sizeof(subscribe_state));
+  subscribe_state.expected[0] = "delayed";
+  client = open_pouch_client(endpoint);
+
+  child = fork();
+  assert_true(child >= 0);
+  if (child == 0) {
+    child_enqueue_after_delay(endpoint, "jobs", "delayed");
+  }
+
+  lc_dequeue_req_init(&subscribe_req);
+  subscribe_req.queue = "jobs";
+  subscribe_req.owner = "waiting-subscriber";
+  subscribe_req.visibility_timeout_seconds = 30L;
+  subscribe_req.wait_seconds = 3L;
+  subscribe_req.page_size = 1;
+  consumer.handle = subscribe_test_handle;
+  consumer.context = &subscribe_state;
+  rc = client->subscribe(client, &subscribe_req, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(subscribe_state.handled, 1U);
+
+  child_status = 0;
+  assert_int_equal(waitpid(child, &child_status, 0), child);
+  assert_true(WIFEXITED(child_status));
+  assert_int_equal(WEXITSTATUS(child_status), 0);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+
+  lc_queue_stats_res_cleanup(&stats_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_consumer_service_auto_ack(void **state) {
   char root[256];
   char endpoint[320];
@@ -3919,6 +4024,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_dequeue_with_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_subscribe_waits_for_shared_message),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_auto_ack),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_with_state),
       cmocka_unit_test(test_pouch_endpoint_reports_query_mode_defaults),
