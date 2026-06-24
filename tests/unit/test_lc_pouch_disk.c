@@ -30,6 +30,7 @@
 #define TEST_POUCH_RECORD_STATE_LINK 10U
 #define TEST_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
 #define TEST_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
+#define TEST_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
 
 typedef struct tracked_allocator {
   size_t malloc_calls;
@@ -114,6 +115,49 @@ static int test_is_writer_marker(const char *name) {
          strcmp(name + name_len - marker_len, ".marker") == 0;
 }
 
+static int test_is_queue_wake_marker(const char *name) {
+  size_t prefix_len;
+  size_t name_len;
+  size_t marker_len;
+
+  prefix_len = strlen(TEST_POUCH_QUEUE_WAKE_PREFIX);
+  marker_len = strlen(".marker");
+  name_len = strlen(name);
+  return name_len > prefix_len + marker_len &&
+         strncmp(name, TEST_POUCH_QUEUE_WAKE_PREFIX, prefix_len) == 0 &&
+         strcmp(name + name_len - marker_len, ".marker") == 0;
+}
+
+static unsigned long test_queue_wake_hash(const char *namespace_name,
+                                          const char *queue) {
+  const unsigned char *cursor;
+  unsigned long hash;
+
+  hash = 2166136261UL;
+  cursor = (const unsigned char *)namespace_name;
+  while (*cursor != '\0') {
+    hash ^= (unsigned long)*cursor++;
+    hash *= 16777619UL;
+  }
+  hash ^= 0xffUL;
+  hash *= 16777619UL;
+  cursor = (const unsigned char *)queue;
+  while (*cursor != '\0') {
+    hash ^= (unsigned long)*cursor++;
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
+static void test_queue_wake_marker_path(const char *root,
+                                        const char *namespace_name,
+                                        const char *queue, char *path,
+                                        size_t path_size) {
+  snprintf(path, path_size, "%s/%s%08lx.marker", root,
+           TEST_POUCH_QUEUE_WAKE_PREFIX,
+           test_queue_wake_hash(namespace_name, queue));
+}
+
 static size_t test_count_writer_markers(const char *root) {
   DIR *dir;
   struct dirent *entry;
@@ -126,6 +170,25 @@ static size_t test_count_writer_markers(const char *root) {
   count = 0U;
   while ((entry = readdir(dir)) != NULL) {
     if (test_is_writer_marker(entry->d_name)) {
+      count++;
+    }
+  }
+  closedir(dir);
+  return count;
+}
+
+static size_t test_count_queue_wake_markers(const char *root) {
+  DIR *dir;
+  struct dirent *entry;
+  size_t count;
+
+  dir = opendir(root);
+  if (dir == NULL) {
+    return 0U;
+  }
+  count = 0U;
+  while ((entry = readdir(dir)) != NULL) {
+    if (test_is_queue_wake_marker(entry->d_name)) {
       count++;
     }
   }
@@ -189,10 +252,31 @@ static void test_remove_writer_markers(const char *root) {
   closedir(dir);
 }
 
+static void test_remove_queue_wake_markers(const char *root) {
+  DIR *dir;
+  struct dirent *entry;
+  char path[512];
+
+  dir = opendir(root);
+  if (dir == NULL) {
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    if (test_is_queue_wake_marker(entry->d_name)) {
+      snprintf(path, sizeof(path), "%s/%s", root, entry->d_name);
+      if (unlink(path) != 0) {
+        rmdir(path);
+      }
+    }
+  }
+  closedir(dir);
+}
+
 static void test_cleanup_root(const char *root) {
   char path[512];
 
   test_remove_writer_markers(root);
+  test_remove_queue_wake_markers(root);
   snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
@@ -5179,6 +5263,189 @@ static void test_pathlike_identifiers_are_rejected_before_append(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_queue_mutations_touch_wake_marker(void **state) {
+  char root[256];
+  char marker_path[512];
+  char marker_text[512];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_message_info nacked;
+  lc_pouch_queue_ref ref;
+  lc_error error;
+  int acked;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-wake-marker");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&nacked, 0, sizeof(nacked));
+  memset(&ref, 0, sizeof(ref));
+  store = NULL;
+  payload = NULL;
+
+  test_queue_wake_marker_path(root, "default", "jobs/high", marker_path,
+                              sizeof(marker_path));
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_count_queue_wake_markers(root), 0U);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("wake-payload");
+  rc = store->enqueue_message(store, "default", "jobs/high", source,
+                              &enqueue_opts, &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_count_queue_wake_markers(root), 1U);
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "namespace=default\n"));
+  assert_non_null(strstr(marker_text, "queue=jobs/high\n"));
+  assert_non_null(strstr(marker_text, "sequence=1\n"));
+
+  dequeue_opts.owner = "worker";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs/high", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  lc_source_close(payload);
+  payload = NULL;
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "sequence=2\n"));
+
+  ref.namespace_name = dequeued.namespace_name;
+  ref.queue = dequeued.queue;
+  ref.message_id = dequeued.message_id;
+  ref.lease_id = dequeued.lease_id;
+  ref.txn_id = dequeued.txn_id;
+  ref.fencing_token = dequeued.fencing_token;
+  ref.meta_etag = dequeued.meta_etag;
+  rc = store->nack_message(store, &ref, 0L, 0, &nacked, &error);
+  assert_int_equal(rc, LC_OK);
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "sequence=3\n"));
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  memset(&dequeued, 0, sizeof(dequeued));
+  rc = store->dequeue_message(store, "default", "jobs/high", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  lc_source_close(payload);
+  payload = NULL;
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "sequence=4\n"));
+
+  ref.namespace_name = dequeued.namespace_name;
+  ref.queue = dequeued.queue;
+  ref.message_id = dequeued.message_id;
+  ref.lease_id = dequeued.lease_id;
+  ref.txn_id = dequeued.txn_id;
+  ref.fencing_token = dequeued.fencing_token;
+  ref.meta_etag = dequeued.meta_etag;
+  acked = 0;
+  rc = store->ack_message(store, &ref, &acked, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acked);
+  test_read_file_text(marker_path, marker_text, sizeof(marker_text));
+  assert_non_null(strstr(marker_text, "sequence=5\n"));
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &nacked);
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_queue_wake_marker_failure_does_not_rollback_enqueue(
+    void **state) {
+  char root[256];
+  char marker_path[512];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-wake-marker-failure");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  store = NULL;
+  payload = NULL;
+
+  test_queue_wake_marker_path(root, "default", "jobs", marker_path,
+                              sizeof(marker_path));
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(mkdir(marker_path, 0777), 0);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queued despite wake failure");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  assert_int_equal(rmdir(marker_path), 0);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  dequeue_opts.owner = "worker";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  assert_string_equal(dequeued.message_id, enqueued.message_id);
+  text = read_source_text(payload);
+  assert_string_equal(text, "queued despite wake failure");
+  free(text);
+  lc_source_close(payload);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -7084,6 +7351,9 @@ int main(void) {
       cmocka_unit_test(
           test_independent_handle_refreshes_after_log_replacement),
       cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
+      cmocka_unit_test(test_queue_mutations_touch_wake_marker),
+      cmocka_unit_test(
+          test_queue_wake_marker_failure_does_not_rollback_enqueue),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(
           test_pathlike_identifiers_are_rejected_before_append),

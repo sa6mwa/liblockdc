@@ -48,6 +48,7 @@
 #define LC_POUCH_COMPACT_MIN_LOG_BYTES (64UL * 1024UL)
 #define LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER 2UL
 #define LC_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
+#define LC_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -134,6 +135,7 @@ typedef struct lc_pouch_disk_store {
   int lock_fd;
   int query_index_fd;
   unsigned long writer_marker_seq;
+  unsigned long queue_wake_seq;
   lc_pouch_disk_state_entry *state_entries;
   size_t state_entry_count;
   size_t state_entry_capacity;
@@ -644,6 +646,60 @@ static char *lc_pouch_disk_make_writer_marker_path(lc_pouch_disk_store *store) {
   snprintf(leaf, sizeof(leaf), "%s%ld-%p.marker", LC_POUCH_WRITER_MARKER_PREFIX,
            (long)getpid(), (void *)store);
   return lc_pouch_join_path(&store->allocator, store->root_path, leaf);
+}
+
+static unsigned long lc_pouch_disk_wake_hash(const char *namespace_name,
+                                             const char *queue) {
+  const unsigned char *cursor;
+  unsigned long hash;
+
+  hash = 2166136261UL;
+  cursor = (const unsigned char *)namespace_name;
+  while (*cursor != '\0') {
+    hash ^= (unsigned long)*cursor++;
+    hash *= 16777619UL;
+  }
+  hash ^= 0xffUL;
+  hash *= 16777619UL;
+  cursor = (const unsigned char *)queue;
+  while (*cursor != '\0') {
+    hash ^= (unsigned long)*cursor++;
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
+static void lc_pouch_disk_touch_queue_wake(lc_pouch_disk_store *store,
+                                           const char *namespace_name,
+                                           const char *queue) {
+  char leaf[128];
+  char body[256];
+  char *path;
+  int fd;
+  size_t body_len;
+
+  store->queue_wake_seq++;
+  snprintf(leaf, sizeof(leaf), "%s%08lx.marker", LC_POUCH_QUEUE_WAKE_PREFIX,
+           lc_pouch_disk_wake_hash(namespace_name, queue));
+  path = lc_pouch_join_path(&store->allocator, store->root_path, leaf);
+  if (path == NULL) {
+    return;
+  }
+  snprintf(body, sizeof(body),
+           "namespace=%s\nqueue=%s\nsequence=%lu\nlog_size=%lu\n",
+           namespace_name, queue, store->queue_wake_seq,
+           store->replayed_log_size != (unsigned long)-1
+               ? store->replayed_log_size
+               : 0UL);
+  body_len = strlen(body);
+  fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd >= 0) {
+    if (lc_pouch_write_all(fd, body, body_len)) {
+      (void)fsync(fd);
+    }
+    (void)close(fd);
+  }
+  lc_pouch_free(&store->allocator, path);
 }
 
 static int lc_pouch_disk_write_writer_marker(lc_pouch_disk_store *store,
@@ -6534,6 +6590,9 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
+  if (rc == LC_OK) {
+    lc_pouch_disk_touch_queue_wake(store, namespace_name, queue);
+  }
   lc_pouch_free(&store->allocator, entry.message_id);
   lc_pouch_free(&store->allocator, entry.meta_etag);
   close(temp_fd);
@@ -6649,6 +6708,9 @@ static int lc_pouch_disk_dequeue_message(
   lc_pouch_free(&store->allocator, meta_etag);
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_disk_touch_queue_wake(store, namespace_name, queue);
   }
   if (rc == LC_OK) {
     found = lc_pouch_disk_find_queue_entry(store, namespace_name, queue,
@@ -6770,6 +6832,9 @@ static int lc_pouch_disk_ack_message(lc_pouch_store *self,
   if (rc == LC_OK && *acked) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
+  if (rc == LC_OK && *acked) {
+    lc_pouch_disk_touch_queue_wake(store, ref->namespace_name, ref->queue);
+  }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -6843,6 +6908,9 @@ static int lc_pouch_disk_nack_message(lc_pouch_store *self,
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
+  if (rc == LC_OK) {
+    lc_pouch_disk_touch_queue_wake(store, ref->namespace_name, ref->queue);
+  }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -6914,6 +6982,9 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
   }
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_disk_touch_queue_wake(store, ref->namespace_name, ref->queue);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
