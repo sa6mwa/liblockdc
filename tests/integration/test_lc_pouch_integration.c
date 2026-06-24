@@ -139,6 +139,59 @@ static char *sink_text(lc_sink *sink, lc_error *error) {
   return text;
 }
 
+typedef struct query_key_capture {
+  char keys[4][256];
+  size_t key_count;
+  size_t current_length;
+  unsigned int begin_calls;
+  unsigned int chunk_calls;
+  unsigned int end_calls;
+} query_key_capture;
+
+static int query_key_capture_begin(void *context, lc_error *error) {
+  query_key_capture *capture;
+
+  (void)error;
+  capture = (query_key_capture *)context;
+  assert_non_null(capture);
+  assert_true(capture->key_count < 4U);
+  capture->begin_calls++;
+  capture->current_length = 0U;
+  capture->keys[capture->key_count][0] = '\0';
+  return 1;
+}
+
+static int query_key_capture_chunk(void *context, const char *bytes,
+                                   size_t len, lc_error *error) {
+  query_key_capture *capture;
+
+  (void)error;
+  capture = (query_key_capture *)context;
+  assert_non_null(capture);
+  assert_non_null(bytes);
+  assert_true(capture->key_count < 4U);
+  assert_true(capture->current_length + len <
+              sizeof(capture->keys[capture->key_count]));
+  memcpy(capture->keys[capture->key_count] + capture->current_length, bytes,
+         len);
+  capture->current_length += len;
+  capture->keys[capture->key_count][capture->current_length] = '\0';
+  capture->chunk_calls++;
+  return 1;
+}
+
+static int query_key_capture_end(void *context, lc_error *error) {
+  query_key_capture *capture;
+
+  (void)error;
+  capture = (query_key_capture *)context;
+  assert_non_null(capture);
+  assert_true(capture->key_count < 4U);
+  capture->key_count++;
+  capture->end_calls++;
+  return 1;
+}
+
 static void assert_client_state_text(lc_client *client, const char *key,
                                      const char *expected, lc_error *error) {
   lc_sink *sink;
@@ -1134,6 +1187,112 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   free(text);
   lc_query_res_cleanup(&query_res);
   lc_sink_close(sink);
+  writer->close(writer);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_index_query_keys_refreshes_open_reader(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *hidden;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_metadata_req metadata_req;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "index-query-keys-open-reader");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  alpha = NULL;
+  bravo = NULL;
+  hidden = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_client(endpoint, &reader, &error);
+  open_pouch_client(endpoint, &writer, &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = reader->query_keys(reader, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 0U);
+  assert_int_equal(capture.begin_calls, 0U);
+  assert_int_equal(capture.chunk_calls, 0U);
+  assert_int_equal(capture.end_calls, 0U);
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  lc_query_res_cleanup(&query_res);
+
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "index-key-open-writer";
+  acquire.ttl_seconds = 60L;
+
+  acquire.key = "integration/index-key-open/bravo";
+  rc = writer->acquire(writer, &acquire, &bravo, &error);
+  assert_lc_ok(rc, &error);
+  acquire.key = "integration/index-key-open/hidden";
+  rc = writer->acquire(writer, &acquire, &hidden, &error);
+  assert_lc_ok(rc, &error);
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  rc = hidden->metadata(hidden, &metadata_req, &error);
+  assert_lc_ok(rc, &error);
+  acquire.key = "integration/index-key-open/alpha";
+  rc = writer->acquire(writer, &acquire, &alpha, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = alpha->release(alpha, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  alpha = NULL;
+  rc = bravo->release(bravo, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  bravo = NULL;
+  rc = hidden->release(hidden, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  hidden = NULL;
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 2L;
+  rc = reader->query_keys(reader, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "integration/index-key-open/alpha");
+  assert_string_equal(capture.keys[1], "integration/index-key-open/bravo");
+  assert_int_equal(capture.begin_calls, 2U);
+  assert_int_equal(capture.end_calls, 2U);
+  assert_true(capture.chunk_calls >= 2U);
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_true(query_res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&query_res);
   writer->close(writer);
   reader->close(reader);
   lc_error_cleanup(&error);
@@ -3148,6 +3307,8 @@ int main(void) {
           test_pouch_public_index_query_documents_replays_after_reopen),
       cmocka_unit_test(
           test_pouch_public_index_query_documents_refreshes_open_reader),
+      cmocka_unit_test(
+          test_pouch_public_index_query_keys_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
