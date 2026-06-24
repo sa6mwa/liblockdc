@@ -47,6 +47,7 @@
 #define LC_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
 #define LC_POUCH_COMPACT_MIN_LOG_BYTES (64UL * 1024UL)
 #define LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER 2UL
+#define LC_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -126,6 +127,7 @@ typedef struct lc_pouch_disk_store {
   char *log_path;
   char *lock_path;
   char *query_index_path;
+  char *writer_marker_path;
   char *query_engine;
   char *query_fallback_engine;
   int log_fd;
@@ -633,6 +635,43 @@ static char *lc_pouch_join_path(const lc_pouch_allocator *allocator,
     memcpy(path + root_len, leaf, leaf_len + 1U);
   }
   return path;
+}
+
+static char *lc_pouch_disk_make_writer_marker_path(lc_pouch_disk_store *store) {
+  char leaf[128];
+
+  snprintf(leaf, sizeof(leaf), "%s%ld-%p.marker", LC_POUCH_WRITER_MARKER_PREFIX,
+           (long)getpid(), (void *)store);
+  return lc_pouch_join_path(&store->allocator, store->root_path, leaf);
+}
+
+static int lc_pouch_disk_write_writer_marker(lc_pouch_disk_store *store,
+                                             lc_error *error) {
+  char body[128];
+  int fd;
+  size_t body_len;
+
+  if (store->writer_marker_path == NULL) {
+    return LC_OK;
+  }
+  snprintf(body, sizeof(body), "pid=%ld\n", (long)getpid());
+  body_len = strlen(body);
+  fd = open(store->writer_marker_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd < 0) {
+    return lc_pouch_set_errno(error, "failed to create pouch writer marker");
+  }
+  if (!lc_pouch_write_all(fd, body, body_len)) {
+    close(fd);
+    return lc_pouch_set_errno(error, "failed to write pouch writer marker");
+  }
+  if (fsync(fd) != 0) {
+    close(fd);
+    return lc_pouch_set_errno(error, "failed to fsync pouch writer marker");
+  }
+  if (close(fd) != 0) {
+    return lc_pouch_set_errno(error, "failed to close pouch writer marker");
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
@@ -7062,7 +7101,9 @@ static int lc_pouch_disk_backend_hash(lc_pouch_store *self, char **out,
   return rc;
 }
 
-static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
+static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
+                                            int preserve_writer_marker,
+                                            lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_allocator allocator;
   size_t index;
@@ -7087,6 +7128,9 @@ static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
   if (store->query_index_fd >= 0) {
     close(store->query_index_fd);
     store->query_index_fd = -1;
+  }
+  if (!preserve_writer_marker && store->writer_marker_path != NULL) {
+    (void)unlink(store->writer_marker_path);
   }
   for (index = 0U; index < store->state_entry_count; ++index) {
     lc_pouch_disk_entry_cleanup(store, &store->state_entries[index]);
@@ -7114,14 +7158,19 @@ static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
   lc_pouch_free(&allocator, store->log_path);
   lc_pouch_free(&allocator, store->lock_path);
   lc_pouch_free(&allocator, store->query_index_path);
+  lc_pouch_free(&allocator, store->writer_marker_path);
   lc_pouch_free(&allocator, store->query_engine);
   lc_pouch_free(&allocator, store->query_fallback_engine);
   lc_pouch_free(&allocator, store);
   return LC_OK;
 }
 
+static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
+  return lc_pouch_disk_close_with_options(self, 0, error);
+}
+
 static int lc_pouch_disk_abort(lc_pouch_store *self, lc_error *error) {
-  return lc_pouch_disk_close(self, error);
+  return lc_pouch_disk_close_with_options(self, 1, error);
 }
 
 int lc_pouch_disk_open(const char *root_path,
@@ -7182,14 +7231,21 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       lc_pouch_join_path(&store->allocator, root_path, "writer.lock");
   store->query_index_path =
       lc_pouch_join_path(&store->allocator, root_path, "query.index");
+  store->writer_marker_path = lc_pouch_disk_make_writer_marker_path(store);
   store->query_engine = lc_pouch_strdup(&store->allocator, query_engine);
   store->query_fallback_engine =
       lc_pouch_strdup(&store->allocator, query_fallback_engine);
   if (store->root_path == NULL || store->log_path == NULL ||
       store->lock_path == NULL || store->query_index_path == NULL ||
-      store->query_engine == NULL || store->query_fallback_engine == NULL) {
+      store->writer_marker_path == NULL || store->query_engine == NULL ||
+      store->query_fallback_engine == NULL) {
     lc_pouch_disk_close(&store->pub, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch disk options");
+  }
+  rc = lc_pouch_disk_write_writer_marker(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_close(&store->pub, error);
+    return rc;
   }
   store->lock_fd = open(store->lock_path, O_RDWR | O_CREAT, 0666);
   if (store->lock_fd < 0) {

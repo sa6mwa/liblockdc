@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include <cmocka.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -28,6 +29,7 @@
 #define TEST_POUCH_RECORD_QUEUE_PUT 7U
 #define TEST_POUCH_RECORD_STATE_LINK 10U
 #define TEST_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
+#define TEST_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
 
 typedef struct tracked_allocator {
   size_t malloc_calls;
@@ -99,9 +101,60 @@ static void test_root_path(char *buffer, size_t buffer_size,
            suffix);
 }
 
+static int test_is_writer_marker(const char *name) {
+  size_t prefix_len;
+  size_t name_len;
+  size_t marker_len;
+
+  prefix_len = strlen(TEST_POUCH_WRITER_MARKER_PREFIX);
+  marker_len = strlen(".marker");
+  name_len = strlen(name);
+  return name_len > prefix_len + marker_len &&
+         strncmp(name, TEST_POUCH_WRITER_MARKER_PREFIX, prefix_len) == 0 &&
+         strcmp(name + name_len - marker_len, ".marker") == 0;
+}
+
+static size_t test_count_writer_markers(const char *root) {
+  DIR *dir;
+  struct dirent *entry;
+  size_t count;
+
+  dir = opendir(root);
+  if (dir == NULL) {
+    return 0U;
+  }
+  count = 0U;
+  while ((entry = readdir(dir)) != NULL) {
+    if (test_is_writer_marker(entry->d_name)) {
+      count++;
+    }
+  }
+  closedir(dir);
+  return count;
+}
+
+static void test_remove_writer_markers(const char *root) {
+  DIR *dir;
+  struct dirent *entry;
+  char path[512];
+
+  dir = opendir(root);
+  if (dir == NULL) {
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    if (test_is_writer_marker(entry->d_name)) {
+      snprintf(path, sizeof(path), "%s/%s", root, entry->d_name);
+      unlink(path);
+    }
+  }
+  closedir(dir);
+}
+
 static void test_cleanup_root(const char *root) {
   char path[512];
 
+  test_remove_writer_markers(root);
   snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
@@ -6741,6 +6794,63 @@ static void test_open_removes_stale_compaction_temps(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_close_removes_writer_marker(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "close-writer-marker");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_count_writer_markers(root), 1U);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_count_writer_markers(root), 0U);
+
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_abort_preserves_writer_marker(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "abort-writer-marker");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_count_writer_markers(root), 1U);
+
+  rc = store->abort(store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_count_writer_markers(root), 1U);
+
+  test_remove_writer_markers(root);
+  assert_int_equal(test_count_writer_markers(root), 0U);
+
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -6829,6 +6939,8 @@ int main(void) {
       cmocka_unit_test(test_query_config_defaults_and_configured_options),
       cmocka_unit_test(test_query_config_rejects_invalid_options),
       cmocka_unit_test(test_open_removes_stale_compaction_temps),
+      cmocka_unit_test(test_close_removes_writer_marker),
+      cmocka_unit_test(test_abort_preserves_writer_marker),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
       cmocka_unit_test(
           test_backend_hash_create_race_publishes_single_identity),
