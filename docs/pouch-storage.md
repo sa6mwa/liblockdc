@@ -1535,7 +1535,8 @@ Current native benchmark coverage in `bench/lockdc_bench` includes pouch
 state roundtrip, staged promotion, attachment put/get, enqueue/dequeue/ack, and
 hot-key compaction churn, metadata summary scans, open/replay index rebuild,
 direct indexed summary scans, direct key-only indexed scans, public indexed
-document query streaming, and public scan-mode document query streaming.
+document query streaming, public scan-mode document query streaming, public
+indexed key streaming, and public scan-mode key streaming.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local
 benchmarks rather than performance gates; the larger matrix above remains the
