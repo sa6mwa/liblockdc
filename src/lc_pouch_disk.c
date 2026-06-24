@@ -5070,6 +5070,9 @@ static int lc_pouch_disk_dequeue_message(
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   *body = NULL;
+  fd = -1;
+  source_pub = NULL;
+  source = NULL;
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
     return rc;
@@ -5147,43 +5150,73 @@ static int lc_pouch_disk_dequeue_message(
       entry = &store->queue_entries[found];
     }
   }
+  if (rc == LC_OK) {
+    fd = open(store->log_path, O_RDONLY);
+    if (fd < 0) {
+      rc = lc_pouch_set_errno(error,
+                              "failed to open pouch log for queue read");
+    }
+  }
+  if (rc == LC_OK && lseek(fd, (off_t)entry->body_offset, SEEK_SET) < 0) {
+    close(fd);
+    fd = -1;
+    rc = lc_pouch_set_errno(error, "failed to seek pouch queue payload");
+  }
+  if (rc == LC_OK) {
+    source_pub =
+        (lc_source *)lc_pouch_calloc(&store->allocator, 1U, sizeof(*source_pub));
+    source = (lc_pouch_file_source *)lc_pouch_calloc(&store->allocator, 1U,
+                                                     sizeof(*source));
+    if (source_pub == NULL || source == NULL) {
+      close(fd);
+      fd = -1;
+      lc_pouch_free(&store->allocator, source_pub);
+      lc_pouch_free(&store->allocator, source);
+      source_pub = NULL;
+      source = NULL;
+      rc = lc_pouch_set_nomem(error, "failed to allocate pouch queue source");
+    }
+  }
+  if (rc == LC_OK) {
+    source->allocator = store->allocator;
+    source->fd = fd;
+    source->remaining = entry->body_length;
+    source_pub->read = lc_pouch_file_source_read;
+    source_pub->reset = lc_pouch_file_source_reset;
+    source_pub->close = lc_pouch_file_source_close;
+    source_pub->impl = source;
+    fd = -1;
+    source = NULL;
+    if (!lc_pouch_queue_info_from_entry(&store->allocator, out, entry)) {
+      source_pub->close(source_pub);
+      source_pub = NULL;
+      rc = lc_pouch_set_nomem(error, "failed to copy pouch queue message");
+    } else {
+      *body = source_pub;
+      source_pub = NULL;
+    }
+  }
   lc_pouch_free(&store->allocator, message_id);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    if (*body != NULL) {
+      (*body)->close(*body);
+      *body = NULL;
+    }
+    lc_pouch_queue_message_info_cleanup(&store->allocator, out);
     rc = LC_ERR_TRANSPORT;
+  }
+  if (fd >= 0) {
+    close(fd);
+  }
+  if (source_pub != NULL) {
+    source_pub->close(source_pub);
+  } else {
+    lc_pouch_free(&store->allocator, source_pub);
+    lc_pouch_free(&store->allocator, source);
   }
   if (rc != LC_OK) {
     return rc;
   }
-  fd = open(store->log_path, O_RDONLY);
-  if (fd < 0) {
-    return lc_pouch_set_errno(error, "failed to open pouch log for queue read");
-  }
-  if (lseek(fd, (off_t)entry->body_offset, SEEK_SET) < 0) {
-    close(fd);
-    return lc_pouch_set_errno(error, "failed to seek pouch queue payload");
-  }
-  source_pub =
-      (lc_source *)lc_pouch_calloc(&store->allocator, 1U, sizeof(*source_pub));
-  source = (lc_pouch_file_source *)lc_pouch_calloc(&store->allocator, 1U,
-                                                   sizeof(*source));
-  if (source_pub == NULL || source == NULL) {
-    close(fd);
-    lc_pouch_free(&store->allocator, source_pub);
-    lc_pouch_free(&store->allocator, source);
-    return lc_pouch_set_nomem(error, "failed to allocate pouch queue source");
-  }
-  source->allocator = store->allocator;
-  source->fd = fd;
-  source->remaining = entry->body_length;
-  source_pub->read = lc_pouch_file_source_read;
-  source_pub->reset = lc_pouch_file_source_reset;
-  source_pub->close = lc_pouch_file_source_close;
-  source_pub->impl = source;
-  if (!lc_pouch_queue_info_from_entry(&store->allocator, out, entry)) {
-    source_pub->close(source_pub);
-    return lc_pouch_set_nomem(error, "failed to copy pouch queue message");
-  }
-  *body = source_pub;
   return LC_OK;
 }
 

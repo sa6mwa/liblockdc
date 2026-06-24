@@ -1230,6 +1230,10 @@ Queue delivery invariants:
 - visibility timeout handoff must reject a stale ack from the old owner after a
   different owner successfully claims and acks the message;
 - ack removes the message from available and in-flight views;
+- dequeue returns a payload stream pinned to the log file that was indexed while
+  the queue lease was claimed; the backend must open and position that stream
+  before releasing the storage lock so a concurrent compaction/rename cannot
+  make the queued payload offset refer to a different file generation;
 - observability/stat calls must be read-only and must not perturb delivery
   state;
 - subscribe and start-consumer must preserve auto-ack, explicit ack/nack,
