@@ -5136,6 +5136,82 @@ static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_queue_enqueue_index_allocation_failure_replays_cleanly(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_stats stats;
+  lc_error error;
+  char *text;
+  const char *content_type;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-enqueue-index-nomem");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&stats, 0, sizeof(stats));
+  store = NULL;
+  payload = NULL;
+  content_type = "application/x-pouch-queue-index-replay";
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_opts.content_type = content_type;
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  tracked.fail_malloc_size = strlen(content_type) + 1U;
+  source = source_from_text("queued-after-index-failure");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 1);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_non_null(stats.head_message_id);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  assert_string_equal(dequeued.payload_content_type, content_type);
+  text = read_source_text(payload);
+  assert_string_equal(text, "queued-after-index-failure");
+  free(text);
+  lc_source_close(payload);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_ref_requires_current_meta_etag(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -6658,6 +6734,8 @@ int main(void) {
       cmocka_unit_test(
           test_pathlike_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
+      cmocka_unit_test(
+          test_queue_enqueue_index_allocation_failure_replays_cleanly),
       cmocka_unit_test(test_queue_ref_requires_current_meta_etag),
       cmocka_unit_test(test_queue_delay_hides_until_visible),
       cmocka_unit_test(

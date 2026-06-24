@@ -1843,10 +1843,12 @@ static int lc_pouch_disk_upsert_queue_entry(
     unsigned long body_length, int has_body, int deleted) {
   lc_pouch_disk_queue_entry *entry;
   lc_pouch_disk_queue_entry *grown;
+  lc_pouch_disk_queue_entry staged;
   int existing;
 
   existing =
       lc_pouch_disk_find_queue_entry(store, namespace_name, queue, message_id);
+  memset(&staged, 0, sizeof(staged));
   if (existing >= 0) {
     char *new_content_type;
     char *new_lease_id;
@@ -1877,6 +1879,23 @@ static int lc_pouch_disk_upsert_queue_entry(
     entry->txn_id = new_txn_id;
     entry->meta_etag = new_meta_etag;
   } else {
+    staged.namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
+    staged.queue = lc_pouch_strdup(&store->allocator, queue);
+    staged.message_id = lc_pouch_strdup(&store->allocator, message_id);
+    staged.payload_content_type =
+        lc_pouch_strdup(&store->allocator, content_type);
+    staged.lease_id = lc_pouch_strdup(&store->allocator, lease_id);
+    staged.txn_id = lc_pouch_strdup(&store->allocator, txn_id);
+    staged.meta_etag = lc_pouch_strdup(&store->allocator, meta_etag);
+    if (staged.namespace_name == NULL || staged.queue == NULL ||
+        staged.message_id == NULL ||
+        (content_type != NULL && staged.payload_content_type == NULL) ||
+        (lease_id != NULL && staged.lease_id == NULL) ||
+        (txn_id != NULL && staged.txn_id == NULL) ||
+        (meta_etag != NULL && staged.meta_etag == NULL)) {
+      lc_pouch_disk_queue_entry_cleanup(store, &staged);
+      return 0;
+    }
     if (store->queue_entry_count == store->queue_entry_capacity) {
       size_t new_capacity;
 
@@ -1887,6 +1906,7 @@ static int lc_pouch_disk_upsert_queue_entry(
           &store->allocator, store->queue_entries,
           new_capacity * sizeof(store->queue_entries[0]));
       if (grown == NULL) {
+        lc_pouch_disk_queue_entry_cleanup(store, &staged);
         return 0;
       }
       memset(grown + store->queue_entry_capacity, 0,
@@ -1895,24 +1915,8 @@ static int lc_pouch_disk_upsert_queue_entry(
       store->queue_entry_capacity = new_capacity;
     }
     entry = &store->queue_entries[store->queue_entry_count++];
-    entry->namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
-    entry->queue = lc_pouch_strdup(&store->allocator, queue);
-    entry->message_id = lc_pouch_strdup(&store->allocator, message_id);
-    if (entry->namespace_name == NULL || entry->queue == NULL ||
-        entry->message_id == NULL) {
-      return 0;
-    }
-    entry->payload_content_type =
-        lc_pouch_strdup(&store->allocator, content_type);
-    entry->lease_id = lc_pouch_strdup(&store->allocator, lease_id);
-    entry->txn_id = lc_pouch_strdup(&store->allocator, txn_id);
-    entry->meta_etag = lc_pouch_strdup(&store->allocator, meta_etag);
-    if ((content_type != NULL && entry->payload_content_type == NULL) ||
-        (lease_id != NULL && entry->lease_id == NULL) ||
-        (txn_id != NULL && entry->txn_id == NULL) ||
-        (meta_etag != NULL && entry->meta_etag == NULL)) {
-      return 0;
-    }
+    *entry = staged;
+    memset(&staged, 0, sizeof(staged));
   }
   entry->attempts = attempts;
   entry->max_attempts = max_attempts;
