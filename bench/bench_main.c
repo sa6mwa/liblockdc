@@ -351,6 +351,12 @@ static void bench_pouch_cleanup_root(const char *root) {
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
   unlink(path);
+  snprintf(path, sizeof(path), "%s/locks/bench/hot-key", root);
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/locks/bench", root);
+  rmdir(path);
+  snprintf(path, sizeof(path), "%s/locks", root);
+  rmdir(path);
   rmdir(root);
 }
 
@@ -1857,6 +1863,139 @@ static int bench_pouch_index_query_keys(long iterations) {
   return rc == LC_OK ? 0 : 1;
 }
 
+static int bench_pouch_key_lock_contention(long iterations) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_pouch_key_lock *first_lock;
+  lc_pouch_key_lock *second_lock;
+  lc_pouch_lock_status baseline;
+  lc_pouch_lock_status status;
+  lc_error error;
+  unsigned long baseline_contentions;
+  long i;
+  int acquired;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "key-lock-contention");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  bench_pouch_allocator(&allocator);
+  first = NULL;
+  second = NULL;
+  first_lock = NULL;
+  second_lock = NULL;
+  memset(&baseline, 0, sizeof(baseline));
+  memset(&status, 0, sizeof(status));
+  baseline_contentions = 0UL;
+  rc = LC_OK;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  if (first->try_lock_key == NULL || first->unlock_key == NULL ||
+      second->try_lock_key == NULL || second->unlock_key == NULL ||
+      second->lock_status == NULL) {
+    fprintf(stderr, "pouch key lock benchmark requires lock methods\n");
+    rc = LC_ERR_INVALID;
+    goto cleanup;
+  }
+
+  rc = second->lock_status(second, &baseline, &error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  baseline_contentions = baseline.process_key_lock_contentions;
+  lc_pouch_lock_status_cleanup(&allocator, &baseline);
+
+  for (i = 0; i < iterations; ++i) {
+    acquired = 0;
+    rc = first->try_lock_key(first, "bench", "hot-key", &first_lock, &acquired,
+                             &error);
+    if (rc != LC_OK || !acquired || first_lock == NULL) {
+      fprintf(stderr, "pouch key lock benchmark failed first acquisition\n");
+      rc = rc == LC_OK ? LC_ERR_PROTOCOL : rc;
+      goto cleanup;
+    }
+
+    acquired = 1;
+    rc = second->try_lock_key(second, "bench", "hot-key", &second_lock,
+                              &acquired, &error);
+    if (rc != LC_OK || acquired || second_lock != NULL) {
+      fprintf(stderr, "pouch key lock benchmark failed contention check\n");
+      rc = rc == LC_OK ? LC_ERR_PROTOCOL : rc;
+      goto cleanup;
+    }
+
+    rc = first->unlock_key(first, first_lock, &error);
+    first_lock = NULL;
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+
+    acquired = 0;
+    rc = second->try_lock_key(second, "bench", "hot-key", &second_lock,
+                              &acquired, &error);
+    if (rc != LC_OK || !acquired || second_lock == NULL) {
+      fprintf(stderr, "pouch key lock benchmark failed second acquisition\n");
+      rc = rc == LC_OK ? LC_ERR_PROTOCOL : rc;
+      goto cleanup;
+    }
+
+    rc = second->unlock_key(second, second_lock, &error);
+    second_lock = NULL;
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+  }
+
+  rc = second->lock_status(second, &status, &error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  if (status.process_key_lock_contentions < baseline_contentions ||
+      status.process_key_lock_contentions - baseline_contentions <
+          (unsigned long)iterations) {
+    fprintf(stderr,
+            "pouch key lock benchmark observed %lu contentions, expected at "
+            "least %ld\n",
+            status.process_key_lock_contentions - baseline_contentions,
+            iterations);
+    rc = LC_ERR_PROTOCOL;
+    goto cleanup;
+  }
+  if (status.process_active_key_locks != 0U) {
+    fprintf(stderr, "pouch key lock benchmark leaked active locks\n");
+    rc = LC_ERR_PROTOCOL;
+    goto cleanup;
+  }
+
+cleanup:
+  lc_pouch_lock_status_cleanup(&allocator, &baseline);
+  lc_pouch_lock_status_cleanup(&allocator, &status);
+  if (second_lock != NULL && second != NULL) {
+    (void)second->unlock_key(second, second_lock, &error);
+  }
+  if (first_lock != NULL && first != NULL) {
+    (void)first->unlock_key(first, first_lock, &error);
+  }
+  if (second != NULL) {
+    (void)second->close(second, &error);
+  }
+  if (first != NULL) {
+    (void)first->close(first, &error);
+  }
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int run_case(const bench_case *test_case, long iterations) {
   double start_seconds;
   double end_seconds;
@@ -1903,7 +2042,8 @@ static void print_usage(const char *argv0) {
   fprintf(stderr, "pouch-compaction|pouch-retention|pouch-scan-meta|");
   fprintf(stderr, "pouch-open-rebuild|pouch-index-scan|");
   fprintf(stderr, "pouch-index-keys|pouch-scan-query|pouch-index-query|");
-  fprintf(stderr, "pouch-scan-query-keys|pouch-index-query-keys]\n");
+  fprintf(stderr, "pouch-scan-query-keys|pouch-index-query-keys|");
+  fprintf(stderr, "pouch-key-lock-contention]\n");
 }
 
 int main(int argc, char **argv) {
@@ -1935,7 +2075,9 @@ int main(int argc, char **argv) {
       {"pouch-scan-query", 1000L, bench_pouch_scan_query},
       {"pouch-index-query", 1000L, bench_pouch_index_query},
       {"pouch-scan-query-keys", 1000L, bench_pouch_scan_query_keys},
-      {"pouch-index-query-keys", 1000L, bench_pouch_index_query_keys}};
+      {"pouch-index-query-keys", 1000L, bench_pouch_index_query_keys},
+      {"pouch-key-lock-contention", 1000L,
+       bench_pouch_key_lock_contention}};
   const char *scenario;
   long iterations;
   size_t i;
