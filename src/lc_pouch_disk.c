@@ -2516,16 +2516,6 @@ static int lc_pouch_disk_commit_meta_upsert(
   return 1;
 }
 
-static int lc_pouch_disk_meta_entry_ptr_compare(const void *left,
-                                                const void *right) {
-  const lc_pouch_disk_meta_entry *const *left_entry;
-  const lc_pouch_disk_meta_entry *const *right_entry;
-
-  left_entry = (const lc_pouch_disk_meta_entry *const *)left;
-  right_entry = (const lc_pouch_disk_meta_entry *const *)right;
-  return strcmp((*left_entry)->key, (*right_entry)->key);
-}
-
 static int lc_pouch_disk_namespace_ptr_compare(const void *left,
                                                const void *right) {
   const char *const *left_name;
@@ -4087,9 +4077,9 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
                                    lc_pouch_scan_meta_res *out,
                                    lc_error *error) {
   lc_pouch_disk_store *store;
-  lc_pouch_disk_meta_entry **matches;
   lc_pouch_disk_scan_meta_copy *rows;
-  size_t match_count;
+  const char *start_key;
+  size_t start_index;
   size_t visit_count;
   size_t index;
   size_t row_index;
@@ -4108,9 +4098,8 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
-  matches = NULL;
   rows = NULL;
-  match_count = 0U;
+  start_index = 0U;
   visit_count = 0U;
 
   rc = lc_pouch_disk_lock(store, error);
@@ -4123,63 +4112,75 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
     return rc;
   }
 
-  if (store->meta_entry_count > 0U) {
-    matches = (lc_pouch_disk_meta_entry **)lc_pouch_alloc(
-        &store->allocator,
-        store->meta_entry_count * sizeof(lc_pouch_disk_meta_entry *));
-    if (matches == NULL) {
-      lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to allocate pouch metadata scan");
-    }
+  start_key = req->start_after != NULL ? req->start_after : "";
+  if (lc_pouch_disk_query_index_find(store, req->namespace_name, start_key,
+                                     &start_index) &&
+      req->start_after != NULL) {
+    start_index++;
   }
-  for (index = 0U; index < store->meta_entry_count; ++index) {
-    lc_pouch_disk_meta_entry *entry;
 
-    entry = &store->meta_entries[index];
+  for (index = start_index; index < store->query_meta_index_count; ++index) {
+    lc_pouch_disk_meta_entry *entry;
+    int namespace_cmp;
+
+    entry = &store->meta_entries[store->query_meta_indices[index]];
+    namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
+    if (namespace_cmp > 0) {
+      break;
+    }
+    if (namespace_cmp < 0) {
+      continue;
+    }
     if (entry->deleted ||
-        strcmp(entry->namespace_name, req->namespace_name) != 0 ||
         (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
       continue;
     }
-    if (req->start_after != NULL &&
-        strcmp(entry->key, req->start_after) <= 0) {
-      continue;
+    if (req->limit > 0U && visit_count == req->limit) {
+      out->truncated = 1;
+      break;
     }
-    matches[match_count++] = entry;
-  }
-  if (match_count > 1U) {
-    qsort(matches, match_count, sizeof(matches[0]),
-          lc_pouch_disk_meta_entry_ptr_compare);
+    visit_count++;
   }
 
-  visit_count = match_count;
-  if (req->limit > 0U && visit_count > req->limit) {
-    visit_count = req->limit;
-    out->truncated = 1;
-  }
   if (visit_count > 0U) {
     rows = (lc_pouch_disk_scan_meta_copy *)lc_pouch_calloc(
         &store->allocator, visit_count, sizeof(rows[0]));
     if (rows == NULL) {
-      lc_pouch_free(&store->allocator, matches);
       lc_pouch_disk_unlock(store, error);
       return lc_pouch_set_nomem(error,
                                 "failed to allocate pouch metadata scan rows");
     }
   }
-  for (row_index = 0U; row_index < visit_count; ++row_index) {
+  row_index = 0U;
+  for (index = start_index; index < store->query_meta_index_count &&
+                        row_index < visit_count;
+       ++index) {
+    lc_pouch_disk_meta_entry *entry;
+    int namespace_cmp;
+
+    entry = &store->meta_entries[store->query_meta_indices[index]];
+    namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
+    if (namespace_cmp > 0) {
+      break;
+    }
+    if (namespace_cmp < 0) {
+      continue;
+    }
+    if (entry->deleted ||
+        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
+      continue;
+    }
     if (!lc_pouch_disk_copy_meta_for_scan(store, &rows[row_index],
-                                          matches[row_index])) {
+                                          entry)) {
       for (index = 0U; index < row_index; ++index) {
         lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
       }
       lc_pouch_free(&store->allocator, rows);
-      lc_pouch_free(&store->allocator, matches);
       lc_pouch_disk_unlock(store, error);
       return lc_pouch_set_nomem(error,
                                 "failed to copy pouch metadata scan row");
     }
+    row_index++;
   }
   if (out->truncated && visit_count > 0U) {
     out->next_start_after =
@@ -4189,13 +4190,11 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
         lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
       }
       lc_pouch_free(&store->allocator, rows);
-      lc_pouch_free(&store->allocator, matches);
       lc_pouch_disk_unlock(store, error);
       return lc_pouch_set_nomem(error,
                                 "failed to allocate pouch scan cursor");
     }
   }
-  lc_pouch_free(&store->allocator, matches);
   rc = lc_pouch_disk_unlock(store, error);
   if (rc != LC_OK) {
     for (index = 0U; index < visit_count; ++index) {
