@@ -6337,6 +6337,23 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
   if (rc != LC_OK) {
     return rc;
   }
+  if (opts->delay_seconds < 0L) {
+    return lc_pouch_set_invalid(
+        error, "enqueue_message delay_seconds must be non-negative");
+  }
+  if (opts->visibility_timeout_seconds < 0L) {
+    return lc_pouch_set_invalid(
+        error,
+        "enqueue_message visibility_timeout_seconds must be non-negative");
+  }
+  if (opts->ttl_seconds < 0L) {
+    return lc_pouch_set_invalid(
+        error, "enqueue_message ttl_seconds must be non-negative");
+  }
+  if (opts->max_attempts < 0) {
+    return lc_pouch_set_invalid(
+        error, "enqueue_message max_attempts must be non-negative");
+  }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   memset(&entry, 0, sizeof(entry));
@@ -6440,6 +6457,11 @@ static int lc_pouch_disk_dequeue_message(
                                               namespace_name, queue);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (opts->visibility_timeout_seconds < 0L) {
+    return lc_pouch_set_invalid(
+        error,
+        "dequeue_message visibility_timeout_seconds must be non-negative");
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
@@ -6658,6 +6680,10 @@ static int lc_pouch_disk_nack_message(lc_pouch_store *self,
   if (rc != LC_OK) {
     return rc;
   }
+  if (delay_seconds < 0L) {
+    return lc_pouch_set_invalid(
+        error, "nack_message delay_seconds must be non-negative");
+  }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   rc = lc_pouch_disk_lock(store, error);
@@ -6726,6 +6752,10 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
   rc = lc_pouch_disk_validate_queue_ref(error, "extend_message", ref);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (extend_by_seconds < 0L) {
+    return lc_pouch_set_invalid(
+        error, "extend_message extend_by_seconds must be non-negative");
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));

@@ -3437,6 +3437,153 @@ static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
   test_cleanup_root(root);
 }
 
+static void test_queue_rejects_negative_timing_options(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_message_info updated;
+  lc_pouch_queue_ref ref;
+  lc_error error;
+  int acked;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-negative-options");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&updated, 0, sizeof(updated));
+  memset(&ref, 0, sizeof(ref));
+  store = NULL;
+  payload = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.delay_seconds = -1L;
+  source = source_from_text("bad-delay");
+  rc = store->enqueue_message(store, "default", "jobs", source,
+                              &enqueue_opts, &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "enqueue_message delay_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = -1L;
+  source = source_from_text("bad-visibility");
+  rc = store->enqueue_message(store, "default", "jobs", source,
+                              &enqueue_opts, &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "enqueue_message visibility_timeout_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.ttl_seconds = -1L;
+  source = source_from_text("bad-ttl");
+  rc = store->enqueue_message(store, "default", "jobs", source,
+                              &enqueue_opts, &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "enqueue_message ttl_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.max_attempts = -1;
+  source = source_from_text("bad-attempts");
+  rc = store->enqueue_message(store, "default", "jobs", source,
+                              &enqueue_opts, &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "enqueue_message max_attempts must be non-negative");
+  lc_error_cleanup(&error);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_QUEUE_PUT),
+                   0U);
+
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("valid");
+  rc = store->enqueue_message(store, "default", "jobs", source,
+                              &enqueue_opts, &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = -1L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(payload);
+  assert_string_equal(
+      error.message,
+      "dequeue_message visibility_timeout_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+
+  ref.namespace_name = dequeued.namespace_name;
+  ref.queue = dequeued.queue;
+  ref.message_id = dequeued.message_id;
+  ref.lease_id = dequeued.lease_id;
+  ref.txn_id = dequeued.txn_id;
+  ref.fencing_token = dequeued.fencing_token;
+  ref.meta_etag = dequeued.meta_etag;
+
+  rc = store->nack_message(store, &ref, -1L, 1, &updated, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "nack_message delay_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  rc = store->extend_message(store, &ref, -1L, &updated, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "extend_message extend_by_seconds must be non-negative");
+  lc_error_cleanup(&error);
+
+  acked = 0;
+  rc = store->ack_message(store, &ref, &acked, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acked);
+
+  lc_source_close(payload);
+  lc_pouch_queue_message_info_cleanup(&allocator, &updated);
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_replay_streams_large_bodies_without_large_alloc(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -5752,6 +5899,7 @@ int main(void) {
           test_object_copy_streams_existing_payload_without_large_alloc),
       cmocka_unit_test(
           test_queue_dequeue_skips_replay_after_same_handle_enqueue),
+      cmocka_unit_test(test_queue_rejects_negative_timing_options),
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
       cmocka_unit_test(
           test_auto_compaction_preserves_live_heads_and_tokens),
