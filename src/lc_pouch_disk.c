@@ -133,6 +133,7 @@ typedef struct lc_pouch_disk_store {
   int log_fd;
   int lock_fd;
   int query_index_fd;
+  unsigned long writer_marker_seq;
   lc_pouch_disk_state_entry *state_entries;
   size_t state_entry_count;
   size_t state_entry_capacity;
@@ -647,14 +648,21 @@ static char *lc_pouch_disk_make_writer_marker_path(lc_pouch_disk_store *store) {
 
 static int lc_pouch_disk_write_writer_marker(lc_pouch_disk_store *store,
                                              lc_error *error) {
-  char body[128];
+  char body[192];
   int fd;
   size_t body_len;
+  unsigned long log_size;
 
   if (store->writer_marker_path == NULL) {
     return LC_OK;
   }
-  snprintf(body, sizeof(body), "pid=%ld\n", (long)getpid());
+  store->writer_marker_seq++;
+  log_size = store->replayed_log_size != (unsigned long)-1
+                 ? store->replayed_log_size
+                 : 0UL;
+  snprintf(body, sizeof(body), "pid=%ld\nsequence=%lu\nlog_size=%lu\n%s",
+           (long)getpid(), store->writer_marker_seq, log_size,
+           (store->writer_marker_seq % 2UL) != 0UL ? "pad=x\n" : "");
   body_len = strlen(body);
   fd = open(store->writer_marker_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd < 0) {
@@ -672,6 +680,14 @@ static int lc_pouch_disk_write_writer_marker(lc_pouch_disk_store *store,
     return lc_pouch_set_errno(error, "failed to close pouch writer marker");
   }
   return LC_OK;
+}
+
+static void lc_pouch_disk_touch_writer_marker(lc_pouch_disk_store *store) {
+  lc_error ignored_error;
+
+  memset(&ignored_error, 0, sizeof(ignored_error));
+  (void)lc_pouch_disk_write_writer_marker(store, &ignored_error);
+  lc_error_cleanup(&ignored_error);
 }
 
 static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
@@ -727,13 +743,19 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
 static int lc_pouch_disk_mark_replayed_to_current_size(
     lc_pouch_disk_store *store, lc_error *error) {
   struct stat st;
+  int rc;
 
   if (fstat(store->log_fd, &st) != 0) {
     return lc_pouch_set_errno(error, "failed to stat pouch log");
   }
   store->replayed_log_size = (unsigned long)st.st_size;
-  return lc_pouch_disk_maybe_compact_locked(store, (unsigned long)st.st_size,
-                                            error);
+  rc = lc_pouch_disk_maybe_compact_locked(store, (unsigned long)st.st_size,
+                                          error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  lc_pouch_disk_touch_writer_marker(store);
+  return LC_OK;
 }
 
 static int lc_pouch_disk_force_replay_locked(lc_pouch_disk_store *store,

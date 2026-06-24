@@ -133,6 +133,42 @@ static size_t test_count_writer_markers(const char *root) {
   return count;
 }
 
+static int test_first_writer_marker_path(const char *root, char *path,
+                                         size_t path_size) {
+  DIR *dir;
+  struct dirent *entry;
+  int found;
+
+  dir = opendir(root);
+  if (dir == NULL) {
+    return 0;
+  }
+  found = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    if (test_is_writer_marker(entry->d_name)) {
+      snprintf(path, path_size, "%s/%s", root, entry->d_name);
+      found = 1;
+      break;
+    }
+  }
+  closedir(dir);
+  return found;
+}
+
+static void test_read_file_text(const char *path, char *buffer,
+                                size_t buffer_size) {
+  int fd;
+  ssize_t got;
+
+  assert_true(buffer_size > 0U);
+  fd = open(path, O_RDONLY);
+  assert_true(fd >= 0);
+  got = read(fd, buffer, buffer_size - 1U);
+  assert_true(got >= 0);
+  buffer[(size_t)got] = '\0';
+  assert_int_equal(close(fd), 0);
+}
+
 static void test_remove_writer_markers(const char *root) {
   DIR *dir;
   struct dirent *entry;
@@ -145,7 +181,9 @@ static void test_remove_writer_markers(const char *root) {
   while ((entry = readdir(dir)) != NULL) {
     if (test_is_writer_marker(entry->d_name)) {
       snprintf(path, sizeof(path), "%s/%s", root, entry->d_name);
-      unlink(path);
+      if (unlink(path) != 0) {
+        rmdir(path);
+      }
     }
   }
   closedir(dir);
@@ -6851,6 +6889,138 @@ static void test_abort_preserves_writer_marker(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
+  char root[256];
+  char marker_path[512];
+  char before[256];
+  char after_state[256];
+  char after_meta[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res state_res;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "writer-marker-heartbeat");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&state_res, 0, sizeof(state_res));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(test_first_writer_marker_path(root, marker_path,
+                                            sizeof(marker_path)));
+  test_read_file_text(marker_path, before, sizeof(before));
+  assert_non_null(strstr(before, "sequence=1\n"));
+
+  state_opts.content_type = "text/plain";
+  source = source_from_text("marker heartbeat");
+  rc = store->write_state(store, "default", "heartbeat-key", source,
+                          &state_opts, &state_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  test_read_file_text(marker_path, after_state, sizeof(after_state));
+  assert_non_null(strstr(after_state, "sequence=2\n"));
+  assert_string_not_equal(before, after_state);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease";
+  meta.state_etag = state_res.new_state_etag;
+  meta.version = state_res.version;
+  rc = store->store_meta(store, "default", "heartbeat-key", &meta, NULL,
+                         &meta_res, &error);
+  assert_int_equal(rc, LC_OK);
+  test_read_file_text(marker_path, after_meta, sizeof(after_meta));
+  assert_non_null(strstr(after_meta, "sequence=3\n"));
+  assert_string_not_equal(after_state, after_meta);
+
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_writer_marker_touch_failure_does_not_rollback_commit(
+    void **state) {
+  char root[256];
+  char marker_path[512];
+  char body_text[64];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "writer-marker-touch-failure");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  store = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(test_first_writer_marker_path(root, marker_path,
+                                            sizeof(marker_path)));
+  assert_int_equal(unlink(marker_path), 0);
+  assert_int_equal(mkdir(marker_path, 0777), 0);
+
+  opts.content_type = "text/plain";
+  source = source_from_text("durable despite marker failure");
+  rc = store->write_state(store, "default", "durable-key", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  assert_int_equal(rmdir(marker_path), 0);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "durable-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  assert_non_null(body);
+  memset(body_text, 0, sizeof(body_text));
+  assert_int_equal(body->read(body, body_text, sizeof(body_text) - 1U, &error),
+                   strlen("durable despite marker failure"));
+  assert_string_equal(body_text, "durable despite marker failure");
+  body->close(body);
+  body = NULL;
+
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
@@ -6941,6 +7111,9 @@ int main(void) {
       cmocka_unit_test(test_open_removes_stale_compaction_temps),
       cmocka_unit_test(test_close_removes_writer_marker),
       cmocka_unit_test(test_abort_preserves_writer_marker),
+      cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
+      cmocka_unit_test(
+          test_writer_marker_touch_failure_does_not_rollback_commit),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
       cmocka_unit_test(
           test_backend_hash_create_race_publishes_single_identity),
