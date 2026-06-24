@@ -1388,12 +1388,12 @@ Integration tests:
 
 Current default local integration coverage in `tests/integration` exercises
 public `pouch://` clients sharing one disk root for state and attachment
-persistence, queue visibility handoff, stale delivery fencing, nack redelivery,
-delayed nack redelivery, read-only queue stats while a delivery is invisible,
-acknowledgement, watch snapshots, direct subscribe-with-state, batch dequeue
-without duplicate acked delivery, managed consumer state-save, managed failure
-redelivery, and cross-client CAS. The optional e2e shard still covers broader
-consumer-service behavior.
+persistence, attachment delete/delete-all semantics, queue visibility handoff,
+stale delivery fencing, nack redelivery, delayed nack redelivery, read-only
+queue stats while a delivery is invisible, acknowledgement, watch snapshots,
+direct subscribe-with-state, batch dequeue without duplicate acked delivery,
+managed consumer state-save, managed failure redelivery, and cross-client CAS.
+The optional e2e shard still covers broader consumer-service behavior.
 
 Current disk unit coverage includes queue nack and extend allocator-failure
 paths, TTL expiry, and retry-exhaustion replay paths that prove failed
