@@ -235,6 +235,47 @@ static void seed_pouch_staged_state(lc_client *client, lc_lease *lease,
   lc_pouch_put_state_res_cleanup(&handle->pouch_allocator, &res);
 }
 
+static void partial_pouch_rollback_participant(lc_client *client,
+                                               const char *namespace_name,
+                                               const char *key,
+                                               const char *txn_id,
+                                               lc_error *error) {
+  lc_client_handle *handle;
+  lc_pouch_meta_record record;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_discard_staged_opts discard_opts;
+  lc_pouch_meta next_meta;
+  int rc;
+
+  handle = (lc_client_handle *)client;
+  memset(&record, 0, sizeof(record));
+  memset(&stored, 0, sizeof(stored));
+  memset(&discard_opts, 0, sizeof(discard_opts));
+  rc = handle->pouch_store->load_meta(handle->pouch_store, namespace_name, key,
+                                      &record, error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(record.found);
+  assert_string_equal(record.meta.txn_id, txn_id);
+
+  discard_opts.ignore_not_found = 1;
+  rc = handle->pouch_store->discard_staged_state(
+      handle->pouch_store, namespace_name, key, txn_id, &discard_opts, error);
+  assert_int_equal(rc, LC_OK);
+
+  next_meta = record.meta;
+  next_meta.owner = NULL;
+  next_meta.lease_id = NULL;
+  next_meta.txn_id = NULL;
+  next_meta.lease_expires_at_unix = 0L;
+  rc = handle->pouch_store->store_meta(handle->pouch_store, namespace_name, key,
+                                       &next_meta, record.etag, &stored,
+                                       error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_pouch_store_meta_res_cleanup(&handle->pouch_allocator, &stored);
+  lc_pouch_meta_record_cleanup(&handle->pouch_allocator, &record);
+}
+
 static lc_client *open_pouch_client_with_namespace(const char *endpoint,
                                                    const char *namespace_name) {
   lc_client_config config;
@@ -6439,6 +6480,113 @@ static void test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen(
   test_cleanup_root(root);
 }
 
+static void
+test_pouch_endpoint_txn_recovery_continues_after_partial_rollback(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *first_lease;
+  lc_lease *second_lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "txn-recovery-partial-rollback");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+  client = open_pouch_client(endpoint);
+  first_lease = NULL;
+  second_lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  acquire.key = "txn/partial-a";
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":\"a1\"}");
+  rc = first_lease->update(first_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = first_lease->release(first_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  first_lease = NULL;
+
+  acquire.key = "txn/partial-b";
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":\"b1\"}");
+  rc = second_lease->update(second_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = second_lease->release(second_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  second_lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "txn-partial-rollback-1";
+  acquire.key = "txn/partial-a";
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, first_lease, "{\"value\":\"a2\"}", &error);
+  acquire.key = "txn/partial-b";
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, second_lease, "{\"value\":\"b2\"}", &error);
+
+  memset(participants, 0, sizeof(participants));
+  participants[0].namespace_name = "default";
+  participants[0].key = "txn/partial-a";
+  participants[1].namespace_name = "default";
+  participants[1].key = "txn/partial-b";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "txn-partial-rollback-1";
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
+  decision_req.expires_at_unix = 1L;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "prepared");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  partial_pouch_rollback_participant(client, "default", "txn/partial-a",
+                                     "txn-partial-rollback-1", &error);
+  lc_lease_close(first_lease);
+  lc_lease_close(second_lease);
+  first_lease = NULL;
+  second_lease = NULL;
+  client->close(client);
+
+  client = open_pouch_client(endpoint);
+  assert_pouch_client_state_text(client, "txn/partial-a", "{\"value\":\"a1\"}",
+                                 &error);
+  assert_pouch_client_state_text(client, "txn/partial-b", "{\"value\":\"b1\"}",
+                                 &error);
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "txn-partial-rollback-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 404L);
+  lc_error_cleanup(&error);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
@@ -6561,6 +6709,8 @@ int main(void) {
           test_pouch_endpoint_txn_rollback_discards_staged_state),
       cmocka_unit_test(
           test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen),
+      cmocka_unit_test(
+          test_pouch_endpoint_txn_recovery_continues_after_partial_rollback),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

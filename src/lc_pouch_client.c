@@ -376,6 +376,40 @@ static int lc_pouch_txn_validate_decision_req(lc_client_handle *client,
   return LC_OK;
 }
 
+static int lc_pouch_txn_validate_pending_participants(
+    lc_client_handle *client, const lc_txn_decision_req *req,
+    lc_error *error) {
+  size_t index;
+  int rc;
+
+  for (index = 0U; index < req->participant_count; ++index) {
+    const char *namespace_name;
+    lc_pouch_meta_record record;
+
+    memset(&record, 0, sizeof(record));
+    rc = lc_pouch_public_namespace(client,
+                                   req->participants[index].namespace_name,
+                                   &namespace_name, error);
+    if (rc == LC_OK) {
+      rc = client->pouch_store->load_meta(client->pouch_store, namespace_name,
+                                          req->participants[index].key, &record,
+                                          error);
+    }
+    if (rc == LC_OK &&
+        (!record.found || record.meta.txn_id == NULL ||
+         strcmp(record.meta.txn_id, req->txn_id) != 0)) {
+      rc = lc_error_set(error, LC_ERR_SERVER, 409L,
+                        "pouch transaction participant is not pending", NULL,
+                        "txn_not_pending", NULL);
+    }
+    lc_pouch_meta_record_cleanup(&client->pouch_allocator, &record);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_txn_encode(lc_client_handle *client,
                                const lc_txn_decision_req *req,
                                unsigned long state, unsigned char **out,
@@ -652,22 +686,79 @@ static int lc_pouch_txn_delete_record(lc_client_handle *client,
       &selector, &deleted, error);
 }
 
+static int lc_pouch_txn_clear_participant_meta(
+    lc_client_handle *client, const char *namespace_name,
+    const lc_txn_participant *participant, const lc_pouch_meta_record *record,
+    const char *state_etag, long state_version, lc_error *error) {
+  lc_pouch_store_meta_res stored;
+  lc_pouch_meta next_meta;
+  int rc;
+
+  memset(&stored, 0, sizeof(stored));
+  next_meta = record->meta;
+  next_meta.owner = NULL;
+  next_meta.lease_id = NULL;
+  next_meta.txn_id = NULL;
+  next_meta.lease_expires_at_unix = 0L;
+  if (state_etag != NULL) {
+    next_meta.state_etag = (char *)state_etag;
+  }
+  if (state_version > 0L) {
+    next_meta.version = state_version;
+  }
+  rc = client->pouch_store->store_meta(client->pouch_store, namespace_name,
+                                       participant->key, &next_meta,
+                                       record->etag, &stored, error);
+  lc_pouch_store_meta_res_cleanup(&client->pouch_allocator, &stored);
+  return rc;
+}
+
+static int lc_pouch_txn_finish_already_promoted_commit(
+    lc_client_handle *client, const char *namespace_name,
+    const lc_txn_participant *participant, const lc_pouch_meta_record *record,
+    lc_error *error) {
+  lc_pouch_state_info state;
+  lc_source *body;
+  int rc;
+
+  memset(&state, 0, sizeof(state));
+  body = NULL;
+  rc = client->pouch_store->read_state(client->pouch_store, namespace_name,
+                                       participant->key, &body, &state, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (body != NULL) {
+    body->close(body);
+  }
+  if (record->meta.state_etag == NULL || state.etag == NULL ||
+      strcmp(record->meta.state_etag, state.etag) == 0) {
+    lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
+    return lc_error_set(error, LC_ERR_SERVER, 404L,
+                        "pouch staged state was not found", NULL, "not_found",
+                        NULL);
+  }
+  rc = lc_pouch_txn_clear_participant_meta(
+      client, namespace_name, participant, record, state.etag, state.version,
+      error);
+  lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
+  return rc;
+}
+
 static int lc_pouch_txn_apply_participant(lc_client_handle *client,
                                           const char *txn_id,
                                           const lc_txn_participant *participant,
                                           unsigned long state,
+                                          int allow_already_applied,
                                           lc_error *error) {
   const char *namespace_name;
   lc_pouch_meta_record record;
-  lc_pouch_store_meta_res stored;
   lc_pouch_put_state_res promoted;
   lc_pouch_promote_staged_opts promote_opts;
   lc_pouch_discard_staged_opts discard_opts;
-  lc_pouch_meta next_meta;
   int rc;
 
   memset(&record, 0, sizeof(record));
-  memset(&stored, 0, sizeof(stored));
   memset(&promoted, 0, sizeof(promoted));
   memset(&promote_opts, 0, sizeof(promote_opts));
   memset(&discard_opts, 0, sizeof(discard_opts));
@@ -684,6 +775,9 @@ static int lc_pouch_txn_apply_participant(lc_client_handle *client,
   if (!record.found || record.meta.txn_id == NULL ||
       strcmp(record.meta.txn_id, txn_id) != 0) {
     lc_pouch_meta_record_cleanup(&client->pouch_allocator, &record);
+    if (allow_already_applied) {
+      return LC_OK;
+    }
     return lc_error_set(error, LC_ERR_SERVER, 409L,
                         "pouch transaction participant is not pending", NULL,
                         "txn_not_pending", NULL);
@@ -693,17 +787,16 @@ static int lc_pouch_txn_apply_participant(lc_client_handle *client,
     rc = client->pouch_store->promote_staged_state(
         client->pouch_store, namespace_name, participant->key, txn_id,
         &promote_opts, &promoted, error);
+    if (rc == LC_ERR_SERVER && allow_already_applied && error != NULL &&
+        error->http_status == 404L) {
+      lc_error_cleanup(error);
+      rc = lc_pouch_txn_finish_already_promoted_commit(
+          client, namespace_name, participant, &record, error);
+    }
     if (rc == LC_OK) {
-      next_meta = record.meta;
-      next_meta.owner = NULL;
-      next_meta.lease_id = NULL;
-      next_meta.txn_id = NULL;
-      next_meta.lease_expires_at_unix = 0L;
-      next_meta.version = promoted.new_version;
-      next_meta.state_etag = promoted.new_state_etag;
-      rc = client->pouch_store->store_meta(client->pouch_store, namespace_name,
-                                           participant->key, &next_meta,
-                                           record.etag, &stored, error);
+      rc = lc_pouch_txn_clear_participant_meta(
+          client, namespace_name, participant, &record,
+          promoted.new_state_etag, promoted.new_version, error);
     }
   } else if (state == LC_POUCH_TXN_STATE_ROLLED_BACK) {
     discard_opts.ignore_not_found = 1;
@@ -711,26 +804,20 @@ static int lc_pouch_txn_apply_participant(lc_client_handle *client,
         client->pouch_store, namespace_name, participant->key, txn_id,
         &discard_opts, error);
     if (rc == LC_OK) {
-      next_meta = record.meta;
-      next_meta.owner = NULL;
-      next_meta.lease_id = NULL;
-      next_meta.txn_id = NULL;
-      next_meta.lease_expires_at_unix = 0L;
-      rc = client->pouch_store->store_meta(client->pouch_store, namespace_name,
-                                           participant->key, &next_meta,
-                                           record.etag, &stored, error);
+      rc = lc_pouch_txn_clear_participant_meta(
+          client, namespace_name, participant, &record, NULL, 0L, error);
     }
   } else {
     rc = LC_OK;
   }
   lc_pouch_put_state_res_cleanup(&client->pouch_allocator, &promoted);
-  lc_pouch_store_meta_res_cleanup(&client->pouch_allocator, &stored);
   lc_pouch_meta_record_cleanup(&client->pouch_allocator, &record);
   return rc;
 }
 
 static int lc_pouch_txn_apply_record(lc_client_handle *client,
                                      const lc_pouch_txn_record *record,
+                                     int allow_already_applied,
                                      lc_error *error) {
   size_t index;
   int rc;
@@ -741,7 +828,7 @@ static int lc_pouch_txn_apply_record(lc_client_handle *client,
       for (index = 0U; index < record->participant_count; ++index) {
         rc = lc_pouch_txn_apply_participant(
             client, record->txn_id, &record->participants[index],
-            LC_POUCH_TXN_STATE_ROLLED_BACK, error);
+            LC_POUCH_TXN_STATE_ROLLED_BACK, allow_already_applied, error);
         if (rc != LC_OK) {
           return rc;
         }
@@ -759,7 +846,8 @@ static int lc_pouch_txn_apply_record(lc_client_handle *client,
   for (index = 0U; index < record->participant_count; ++index) {
     rc = lc_pouch_txn_apply_participant(client, record->txn_id,
                                         &record->participants[index],
-                                        record->state, error);
+                                        record->state, allow_already_applied,
+                                        error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -4152,7 +4240,7 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_txn_apply_record(client, &record, error);
+  rc = lc_pouch_txn_apply_record(client, &record, 1, error);
   if (rc == LC_OK) {
     out->txn_id = lc_strdup_local(record.txn_id);
     out->state = lc_strdup_local(lc_pouch_txn_state_name(record.state));
@@ -4184,6 +4272,10 @@ int lc_pouch_client_txn_prepare_method(lc_client *self,
   client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
   rc = lc_pouch_txn_validate_decision_req(client, req, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_txn_validate_pending_participants(client, req, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4225,6 +4317,10 @@ int lc_pouch_client_txn_commit_method(lc_client *self,
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_txn_validate_pending_participants(client, req, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_txn_store_record(client, req, LC_POUCH_TXN_STATE_COMMITTED,
                                  error);
   if (rc != LC_OK) {
@@ -4232,7 +4328,7 @@ int lc_pouch_client_txn_commit_method(lc_client *self,
   }
   rc = lc_pouch_txn_load_record(client, req->txn_id, &record, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_apply_record(client, &record, error);
+    rc = lc_pouch_txn_apply_record(client, &record, 0, error);
   }
   if (rc == LC_OK) {
     out->txn_id = lc_strdup_local(req->txn_id);
@@ -4270,6 +4366,10 @@ int lc_pouch_client_txn_rollback_method(lc_client *self,
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_txn_validate_pending_participants(client, req, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_txn_store_record(client, req, LC_POUCH_TXN_STATE_ROLLED_BACK,
                                  error);
   if (rc != LC_OK) {
@@ -4277,7 +4377,7 @@ int lc_pouch_client_txn_rollback_method(lc_client *self,
   }
   rc = lc_pouch_txn_load_record(client, req->txn_id, &record, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_apply_record(client, &record, error);
+    rc = lc_pouch_txn_apply_record(client, &record, 0, error);
   }
   if (rc == LC_OK) {
     out->txn_id = lc_strdup_local(req->txn_id);
