@@ -1560,6 +1560,7 @@ static void test_pouch_public_scan_query_keys_can_be_configured_by_endpoint(
   assert_string_equal(capture.keys[0], "integration/query-keys-endpoint/alpha");
   assert_string_equal(capture.keys[1], "integration/query-keys-endpoint/bravo");
   assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
   assert_null(query_res.cursor);
   assert_int_equal(query_res.index_seq, 0UL);
 
@@ -1754,6 +1755,7 @@ static void test_pouch_public_scan_query_keys_refreshes_open_reader(
   assert_int_equal(capture.end_calls, 0U);
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
   assert_int_equal(query_res.index_seq, 0UL);
   lc_query_res_cleanup(&query_res);
 
@@ -1802,6 +1804,7 @@ static void test_pouch_public_scan_query_keys_refreshes_open_reader(
   assert_true(capture.chunk_calls >= 2U);
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
   assert_int_equal(query_res.index_seq, 0UL);
 
   lc_query_res_cleanup(&query_res);
@@ -2091,6 +2094,7 @@ static void test_pouch_public_index_query_keys_refreshes_open_reader(
   assert_int_equal(capture.end_calls, 0U);
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
   lc_query_res_cleanup(&query_res);
 
   lc_acquire_req_init(&acquire);
@@ -2138,6 +2142,7 @@ static void test_pouch_public_index_query_keys_refreshes_open_reader(
   assert_true(capture.chunk_calls >= 2U);
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
   assert_true(query_res.index_seq > 0UL);
 
   lc_query_res_cleanup(&query_res);
