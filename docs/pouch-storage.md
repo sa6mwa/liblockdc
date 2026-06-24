@@ -1352,6 +1352,10 @@ acknowledgement, watch snapshots, direct subscribe-with-state, managed consumer
 state-save, managed failure redelivery, and cross-client CAS. The optional e2e
 shard still covers broader consumer-service behavior.
 
+Current disk unit coverage includes queue nack and extend allocator-failure
+paths that prove failed redelivery-control mutations leave the active lease
+ackable.
+
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a
 fresh store and rebuilding indexes from disk, not only by observing in-memory
