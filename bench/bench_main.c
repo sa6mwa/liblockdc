@@ -273,6 +273,84 @@ static int bench_pouch_read_and_check(lc_source *source, const char *expected,
   return strcmp(buffer, expected) == 0 ? 0 : 1;
 }
 
+static int bench_pouch_store_row(lc_pouch_store *store, const char *key,
+                                 const char *json, lc_error *error) {
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  int rc;
+
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  opts.content_type = "application/json";
+  source = bench_source_from_text(json, error);
+  if (source == NULL) {
+    return 1;
+  }
+  rc = store->write_state(store, "bench", key, source, &opts, &put_res, error);
+  lc_source_close(source);
+  if (rc != LC_OK) {
+    lc_pouch_put_state_res_cleanup(NULL, &put_res);
+    return 1;
+  }
+  meta.owner = "bench-owner";
+  meta.lease_id = "bench-lease";
+  meta.txn_id = "bench-txn";
+  meta.state_etag = put_res.new_state_etag;
+  meta.version = put_res.new_version;
+  meta.lease_expires_at_unix = 3600L;
+  meta.fencing_token = put_res.new_version;
+  rc = store->store_meta(store, "bench", key, &meta, NULL, &meta_res, error);
+  lc_pouch_store_meta_res_cleanup(NULL, &meta_res);
+  lc_pouch_put_state_res_cleanup(NULL, &put_res);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_seed_query_rows(const char *root, long rows,
+                                       lc_error *error) {
+  lc_pouch_store *store;
+  char key[96];
+  char json[96];
+  long i;
+  int rc;
+
+  store = NULL;
+  rc = lc_pouch_disk_open(root, NULL, &store, error);
+  if (rc != LC_OK) {
+    return 1;
+  }
+  for (i = 0; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/query/%08ld", i);
+    snprintf(json, sizeof(json), "{\"value\":%ld}", i);
+    if (bench_pouch_store_row(store, key, json, error) != 0) {
+      store->close(store, error);
+      return 1;
+    }
+  }
+  rc = store->close(store, error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+typedef struct bench_scan_count {
+  long rows;
+} bench_scan_count;
+
+static int bench_scan_count_visit(void *context,
+                                  const lc_pouch_scan_meta_row *row,
+                                  lc_error *error) {
+  bench_scan_count *count;
+
+  (void)row;
+  (void)error;
+  count = (bench_scan_count *)context;
+  count->rows += 1L;
+  return LC_OK;
+}
+
 static int bench_pouch_state_roundtrip(long iterations) {
   char root[256];
   char key[80];
@@ -623,6 +701,101 @@ static int bench_pouch_compaction(long iterations) {
   return rc == LC_OK ? 0 : 1;
 }
 
+static int bench_pouch_scan_meta(long iterations) {
+  char root[256];
+  lc_pouch_store *store;
+  lc_pouch_scan_meta_req req;
+  lc_pouch_scan_meta_res res;
+  bench_scan_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "scan-meta");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_query_rows(root, iterations, &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  store = NULL;
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&count, 0, sizeof(count));
+  req.namespace_name = "bench";
+  req.limit = (size_t)iterations;
+  rc = store->scan_meta(store, &req, bench_scan_count_visit, &count, &res,
+                        &error);
+  lc_pouch_scan_meta_res_cleanup(NULL, &res);
+  store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK && count.rows == iterations ? 0 : 1;
+}
+
+static int bench_pouch_scan_query(long iterations) {
+  char root[256];
+  char endpoint[320];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_sink *sink;
+  lc_query_req req;
+  lc_query_res res;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "scan-query");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_query_rows(root, iterations, &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  config.pouch_query_engine = "scan";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  sink = NULL;
+  rc = lc_sink_to_file("/dev/null", &sink, &error);
+  if (rc != LC_OK) {
+    client->close(client);
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.selector_json = "{}";
+  req.limit = iterations;
+  rc = client->query(client, &req, sink, &res, &error);
+  lc_query_res_cleanup(&res);
+  lc_sink_close(sink);
+  client->close(client);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int run_case(const bench_case *test_case, long iterations) {
   double start_seconds;
   double end_seconds;
@@ -657,7 +830,8 @@ static void print_usage(const char *argv0) {
       stderr,
       "usage: %s [iterations] "
       "[all|streams|json|mutate-parse|mutate-apply|pouch-state|"
-      "pouch-staged|pouch-object|pouch-queue|pouch-compaction]\n",
+      "pouch-staged|pouch-object|pouch-queue|pouch-compaction|"
+      "pouch-scan-meta|pouch-scan-query]\n",
       argv0);
 }
 
@@ -671,7 +845,9 @@ int main(int argc, char **argv) {
       {"pouch-staged", 1000L, bench_pouch_staged_promote},
       {"pouch-object", 1000L, bench_pouch_object_roundtrip},
       {"pouch-queue", 1000L, bench_pouch_queue_roundtrip},
-      {"pouch-compaction", 120L, bench_pouch_compaction}};
+      {"pouch-compaction", 120L, bench_pouch_compaction},
+      {"pouch-scan-meta", 1000L, bench_pouch_scan_meta},
+      {"pouch-scan-query", 1000L, bench_pouch_scan_query}};
   const char *scenario;
   long iterations;
   size_t i;

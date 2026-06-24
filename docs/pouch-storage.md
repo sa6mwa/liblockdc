@@ -1479,9 +1479,10 @@ Benchmarks are required alongside implementation. Initial benchmark targets:
 
 Current native benchmark coverage in `bench/lockdc_bench` includes pouch
 state roundtrip, staged promotion, attachment put/get, enqueue/dequeue/ack, and
-hot-key compaction churn. These are smoke-sized local benchmarks rather than
-performance gates; the larger matrix above remains the target coverage for
-regression thresholds.
+hot-key compaction churn, metadata summary scans, and public scan-mode document
+query streaming. These are smoke-sized local benchmarks rather than performance
+gates; the larger matrix above remains the target coverage for regression
+thresholds.
 
 Benchmarks should report:
 
