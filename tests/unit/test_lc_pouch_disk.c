@@ -2491,6 +2491,106 @@ static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_queue_delay_hides_until_visible(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *payload;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_pouch_queue_stats stats;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-delay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&stats, 0, sizeof(stats));
+  store = NULL;
+  payload = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.delay_seconds = 1L;
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("delayed-payload");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_true(enqueued.not_visible_until_unix > enqueued.enqueued_at_unix);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 0);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_null(stats.head_message_id);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_null(payload);
+  assert_null(dequeued.message_id);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 0);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_null(stats.head_message_id);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  sleep(2U);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 1);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_string_equal(stats.head_message_id, enqueued.message_id);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &payload, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(payload);
+  assert_string_equal(dequeued.message_id, enqueued.message_id);
+  assert_int_equal(dequeued.attempts, 1);
+  text = read_source_text(payload);
+  assert_string_equal(text, "delayed-payload");
+  free(text);
+  lc_source_close(payload);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_nack_allocation_failure_preserves_active_lease(
     void **state) {
   char root[256];
@@ -2906,6 +3006,7 @@ int main(void) {
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
+      cmocka_unit_test(test_queue_delay_hides_until_visible),
       cmocka_unit_test(
           test_queue_nack_allocation_failure_preserves_active_lease),
       cmocka_unit_test(
