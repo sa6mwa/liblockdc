@@ -48,6 +48,11 @@
 #define LC_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
 #define LC_POUCH_COMPACT_MIN_LOG_BYTES (64UL * 1024UL)
 #define LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER 2UL
+#define LC_POUCH_FSYNC_LOG 1
+#define LC_POUCH_FSYNC_QUERY_INDEX 2
+#define LC_POUCH_FSYNC_ROOT 3
+#define LC_POUCH_FSYNC_WRITER_MARKER 4
+#define LC_POUCH_FSYNC_QUEUE_WAKE 5
 #define LC_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
 #define LC_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
 
@@ -160,6 +165,7 @@ typedef struct lc_pouch_disk_store {
   unsigned long replayed_query_index_size;
   unsigned long replayed_record_count;
   unsigned long replayed_query_index_record_count;
+  lc_pouch_fsync_stats fsync_stats;
   int defer_record_fsync;
 } lc_pouch_disk_store;
 
@@ -371,6 +377,9 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
 static int lc_pouch_disk_queue_wake_status(
     lc_pouch_store *self, const char *namespace_name, const char *queue,
     lc_pouch_queue_wake_status *out, lc_error *error);
+static int lc_pouch_disk_fsync_stats(lc_pouch_store *self,
+                                     lc_pouch_fsync_stats *out,
+                                     lc_error *error);
 static int lc_pouch_disk_writer_status(lc_pouch_store *self,
                                        lc_pouch_writer_status *out,
                                        lc_error *error);
@@ -624,12 +633,48 @@ static int lc_pouch_read_all(int fd, void *bytes, size_t count,
   return 1;
 }
 
+static int lc_pouch_disk_fsync(lc_pouch_disk_store *store, int fd, int kind) {
+  int rc;
+
+  if (store != NULL) {
+    store->fsync_stats.attempted_fsyncs++;
+  }
+  rc = fsync(fd);
+  if (store == NULL) {
+    return rc;
+  }
+  if (rc != 0) {
+    store->fsync_stats.failed_fsyncs++;
+    return rc;
+  }
+  switch (kind) {
+  case LC_POUCH_FSYNC_LOG:
+    store->fsync_stats.log_fsyncs++;
+    break;
+  case LC_POUCH_FSYNC_QUERY_INDEX:
+    store->fsync_stats.query_index_fsyncs++;
+    break;
+  case LC_POUCH_FSYNC_ROOT:
+    store->fsync_stats.root_fsyncs++;
+    break;
+  case LC_POUCH_FSYNC_WRITER_MARKER:
+    store->fsync_stats.writer_marker_fsyncs++;
+    break;
+  case LC_POUCH_FSYNC_QUEUE_WAKE:
+    store->fsync_stats.queue_wake_fsyncs++;
+    break;
+  default:
+    break;
+  }
+  return rc;
+}
+
 static int lc_pouch_disk_fsync_record(lc_pouch_disk_store *store,
                                       const char *message, lc_error *error) {
   if (store->defer_record_fsync) {
     return LC_OK;
   }
-  if (fsync(store->log_fd) != 0) {
+  if (lc_pouch_disk_fsync(store, store->log_fd, LC_POUCH_FSYNC_LOG) != 0) {
     return lc_pouch_set_errno(error, message);
   }
   return LC_OK;
@@ -715,7 +760,7 @@ static void lc_pouch_disk_touch_queue_wake(lc_pouch_disk_store *store,
   fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd >= 0) {
     if (lc_pouch_write_all(fd, body, body_len)) {
-      (void)fsync(fd);
+      (void)lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_QUEUE_WAKE);
     }
     (void)close(fd);
   }
@@ -748,7 +793,7 @@ static int lc_pouch_disk_write_writer_marker(lc_pouch_disk_store *store,
     close(fd);
     return lc_pouch_set_errno(error, "failed to write pouch writer marker");
   }
-  if (fsync(fd) != 0) {
+  if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_WRITER_MARKER) != 0) {
     close(fd);
     return lc_pouch_set_errno(error, "failed to fsync pouch writer marker");
   }
@@ -1585,7 +1630,8 @@ static int lc_pouch_disk_append_query_index_record(
     return lc_pouch_set_errno(error,
                               "failed to append pouch query index record");
   }
-  if (fsync(store->query_index_fd) != 0) {
+  if (lc_pouch_disk_fsync(store, store->query_index_fd,
+                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
     return lc_pouch_set_errno(error, "failed to fsync pouch query index");
   }
   return LC_OK;
@@ -3698,7 +3744,7 @@ static int lc_pouch_disk_fsync_root(lc_pouch_disk_store *store) {
   if (fd < 0) {
     return 0;
   }
-  rc = fsync(fd) == 0;
+  rc = lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_ROOT) == 0;
   close(fd);
   return rc;
 }
@@ -3825,10 +3871,13 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
                                                  entry->body_offset,
                                                  entry->body_length, error);
   }
-  if (rc == LC_OK && fsync(temp_fd) != 0) {
+  if (rc == LC_OK &&
+      lc_pouch_disk_fsync(store, temp_fd, LC_POUCH_FSYNC_LOG) != 0) {
     rc = lc_pouch_set_errno(error, "failed to fsync pouch compact log");
   }
-  if (rc == LC_OK && fsync(temp_query_fd) != 0) {
+  if (rc == LC_OK &&
+      lc_pouch_disk_fsync(store, temp_query_fd,
+                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
     rc = lc_pouch_set_errno(error,
                             "failed to fsync pouch compact query index");
   }
@@ -7350,6 +7399,20 @@ static int lc_pouch_disk_queue_wake_status(
   return LC_OK;
 }
 
+static int lc_pouch_disk_fsync_stats(lc_pouch_store *self,
+                                     lc_pouch_fsync_stats *out,
+                                     lc_error *error) {
+  lc_pouch_disk_store *store;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error, "fsync_stats requires store and out");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  *out = store->fsync_stats;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_writer_status(lc_pouch_store *self,
                                        lc_pouch_writer_status *out,
                                        lc_error *error) {
@@ -7772,6 +7835,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.extend_message = lc_pouch_disk_extend_message;
   store->pub.queue_stats = lc_pouch_disk_queue_stats;
   store->pub.queue_wake_status = lc_pouch_disk_queue_wake_status;
+  store->pub.fsync_stats = lc_pouch_disk_fsync_stats;
   store->pub.writer_status = lc_pouch_disk_writer_status;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;

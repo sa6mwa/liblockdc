@@ -264,6 +264,16 @@ typedef struct lc_pouch_queue_wake_status {
   int uses_filesystem_notifications;
 } lc_pouch_queue_wake_status;
 
+typedef struct lc_pouch_fsync_stats {
+  unsigned long attempted_fsyncs;
+  unsigned long failed_fsyncs;
+  unsigned long log_fsyncs;
+  unsigned long query_index_fsyncs;
+  unsigned long root_fsyncs;
+  unsigned long writer_marker_fsyncs;
+  unsigned long queue_wake_fsyncs;
+} lc_pouch_fsync_stats;
+
 typedef struct lc_pouch_writer_status {
   char *mode;
   char *marker_prefix;
@@ -388,6 +398,8 @@ struct lc_pouch_store {
   int (*queue_wake_status)(lc_pouch_store *self, const char *namespace_name,
                            const char *queue,
                            lc_pouch_queue_wake_status *out, lc_error *error);
+  int (*fsync_stats)(lc_pouch_store *self, lc_pouch_fsync_stats *out,
+                     lc_error *error);
   int (*writer_status)(lc_pouch_store *self, lc_pouch_writer_status *out,
                        lc_error *error);
   int (*query_config)(lc_pouch_store *self, const char *namespace_name,

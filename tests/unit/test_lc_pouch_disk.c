@@ -6739,6 +6739,114 @@ static void test_backend_capabilities_report_disk_writer_model(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_fsync_stats_report_disk_sync_targets(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_fsync_stats before;
+  lc_pouch_fsync_stats after;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_compaction_res compacted;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "fsync-stats");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&before, 0, sizeof(before));
+  memset(&after, 0, sizeof(after));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&compacted, 0, sizeof(compacted));
+  store = NULL;
+  source = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->fsync_stats);
+
+  rc = store->fsync_stats(store, &before, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(before.attempted_fsyncs >= 1UL);
+  assert_int_equal(before.failed_fsyncs, 0UL);
+  assert_true(before.writer_marker_fsyncs >= 1UL);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-a";
+  meta.txn_id = "txn-a";
+  meta.state_etag = "state-a";
+  meta.version = 1L;
+  meta.fencing_token = 2L;
+  rc = store->store_meta(store, "default", "fsync-key", &meta, NULL,
+                         &meta_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  rc = store->fsync_stats(store, &after, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(after.log_fsyncs > before.log_fsyncs);
+  assert_true(after.query_index_fsyncs > before.query_index_fsyncs);
+  assert_true(after.writer_marker_fsyncs > before.writer_marker_fsyncs);
+  assert_int_equal(after.failed_fsyncs, 0UL);
+  before = after;
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.ttl_seconds = 60L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queue-body");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+
+  rc = store->fsync_stats(store, &after, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(after.log_fsyncs > before.log_fsyncs);
+  assert_true(after.queue_wake_fsyncs > before.queue_wake_fsyncs);
+  assert_true(after.writer_marker_fsyncs > before.writer_marker_fsyncs);
+  assert_int_equal(after.failed_fsyncs, 0UL);
+  before = after;
+
+  rc = store->compact(store, "force", &compacted, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_compaction_res_cleanup(&allocator, &compacted);
+
+  rc = store->fsync_stats(store, &after, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(after.log_fsyncs > before.log_fsyncs);
+  assert_true(after.query_index_fsyncs > before.query_index_fsyncs);
+  assert_true(after.root_fsyncs > before.root_fsyncs);
+  assert_true(after.writer_marker_fsyncs > before.writer_marker_fsyncs);
+  assert_int_equal(after.failed_fsyncs, 0UL);
+  assert_true(after.attempted_fsyncs >= after.log_fsyncs +
+                                         after.query_index_fsyncs +
+                                         after.root_fsyncs +
+                                         after.writer_marker_fsyncs +
+                                         after.queue_wake_fsyncs);
+
+  rc = store->fsync_stats(NULL, &after, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "fsync_stats requires store and out");
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static int child_exit_code(pid_t pid);
 static void child_process_backend_hash(const char *root, int start_fd);
 
@@ -7926,6 +8034,7 @@ int main(void) {
           test_writer_marker_touch_failure_does_not_rollback_commit),
       cmocka_unit_test(test_list_namespaces_reports_live_projection_names),
       cmocka_unit_test(test_backend_capabilities_report_disk_writer_model),
+      cmocka_unit_test(test_fsync_stats_report_disk_sync_targets),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
       cmocka_unit_test(
           test_backend_hash_create_race_publishes_single_identity),

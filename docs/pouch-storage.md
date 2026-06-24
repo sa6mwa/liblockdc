@@ -436,7 +436,9 @@ The interface should also expose optional capability functions or flags:
 - exclusive writer probing
 - single-writer optimization mode
 - whether the backend is safe for concurrent writers to the same root
-- fsync statistics
+- fsync statistics; the current private disk hook reports attempted and failed
+  fsync calls plus successful log, query-index, root-directory,
+  writer-marker, and queue-wake marker fsync counts
 - compaction statistics and explicit compaction trigger; the current private
   disk hook supports `force` and threshold-gated `if_needed`, returning
   before/after log and query-index byte counts, before/after record counts,
