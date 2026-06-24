@@ -7504,6 +7504,7 @@ static void test_independent_handles_refresh_before_operations(void **state) {
   lc_pouch_put_state_opts state_opts;
   lc_pouch_put_state_res first_put;
   lc_pouch_put_state_res second_put;
+  lc_pouch_put_state_res stale_put;
   lc_pouch_state_info state_info;
   lc_pouch_meta meta;
   lc_pouch_store_meta_res first_meta;
@@ -7511,6 +7512,7 @@ static void test_independent_handles_refresh_before_operations(void **state) {
   lc_pouch_meta_record loaded_meta;
   lc_error error;
   char *text;
+  int removed;
   int rc;
 
   (void)state;
@@ -7521,6 +7523,7 @@ static void test_independent_handles_refresh_before_operations(void **state) {
   memset(&state_opts, 0, sizeof(state_opts));
   memset(&first_put, 0, sizeof(first_put));
   memset(&second_put, 0, sizeof(second_put));
+  memset(&stale_put, 0, sizeof(stale_put));
   memset(&state_info, 0, sizeof(state_info));
   memset(&meta, 0, sizeof(meta));
   memset(&first_meta, 0, sizeof(first_meta));
@@ -7529,6 +7532,7 @@ static void test_independent_handles_refresh_before_operations(void **state) {
   first = NULL;
   second = NULL;
   body = NULL;
+  removed = 0;
 
   rc = lc_pouch_disk_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
@@ -7604,11 +7608,41 @@ static void test_independent_handles_refresh_before_operations(void **state) {
   assert_string_equal(loaded_meta.etag, second_meta.etag);
   assert_string_equal(loaded_meta.meta.owner, "second-owner");
 
+  state_opts.if_state_etag = first_put.new_state_etag;
+  source = source_from_text("{\"owner\":\"stale\"}");
+  rc = first->write_state(first, "default", "shared-key", source,
+                          &state_opts, &stale_put, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  rc = second->remove_state(second, "default", "shared-key",
+                            second_put.new_state_etag, &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(removed);
+
+  rc = first->read_state(first, "default", "shared-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_info.no_content);
+  assert_null(body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = first->remove_state(first, "default", "shared-key",
+                           second_put.new_state_etag, &removed, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
   lc_pouch_meta_record_cleanup(&allocator, &loaded_meta);
   lc_pouch_store_meta_res_cleanup(&allocator, &first_meta);
   lc_pouch_store_meta_res_cleanup(&allocator, &second_meta);
   lc_pouch_put_state_res_cleanup(&allocator, &first_put);
   lc_pouch_put_state_res_cleanup(&allocator, &second_put);
+  lc_pouch_put_state_res_cleanup(&allocator, &stale_put);
   rc = second->close(second, &error);
   assert_int_equal(rc, LC_OK);
   rc = first->close(first, &error);
