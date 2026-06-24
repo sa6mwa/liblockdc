@@ -4050,6 +4050,8 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   lc_pouch_copy_object_opts copy_opts;
   lc_error error;
   char *text;
+  const char *payload_one_sha256;
+  const char *payload_two_sha256;
   int deleted;
   int deleted_count;
   int rc;
@@ -4068,6 +4070,10 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   memset(&copy_opts, 0, sizeof(copy_opts));
   store = NULL;
   read_body = NULL;
+  payload_one_sha256 =
+      "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398";
+  payload_two_sha256 =
+      "1dcb0ea8c6e918ead74f08603000abd242de543722b49ff7b0e843a8edc5a2a1";
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
@@ -4085,6 +4091,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   assert_non_null(first.id);
   assert_string_equal(first.name, "result.txt");
   assert_string_equal(first.content_type, "text/plain");
+  assert_string_equal(first.plaintext_sha256, payload_one_sha256);
   assert_int_equal(first.size, 11L);
 
   source = source_from_text("payload-two");
@@ -4101,6 +4108,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   assert_int_equal(list.count, 1U);
   assert_string_equal(list.items[0].id, first.id);
   assert_string_equal(list.items[0].name, "result.txt");
+  assert_string_equal(list.items[0].plaintext_sha256, payload_one_sha256);
   lc_pouch_object_list_cleanup(&allocator, &list);
 
   rc = store->close(store, &error);
@@ -4114,6 +4122,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
                          &fetched, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(fetched.id, first.id);
+  assert_string_equal(fetched.plaintext_sha256, payload_one_sha256);
   text = read_source_text(read_body);
   assert_string_equal(text, "payload-one");
   free(text);
@@ -4128,6 +4137,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   assert_string_equal(copied.name, "result.txt");
   assert_string_equal(copied.id, first.id);
   assert_string_equal(copied.content_type, "text/plain");
+  assert_string_equal(copied.plaintext_sha256, payload_one_sha256);
   assert_int_equal(copied.size, 11L);
 
   rc = store->copy_object(store, "default", "lease-key", "copy-key",
@@ -4143,6 +4153,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(fetched.id, first.id);
   assert_string_equal(fetched.content_type, "text/plain");
+  assert_string_equal(fetched.plaintext_sha256, payload_one_sha256);
   text = read_source_text(read_body);
   assert_string_equal(text, "payload-one");
   free(text);
@@ -4168,6 +4179,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
+  assert_string_equal(fetched.plaintext_sha256, payload_two_sha256);
   lc_pouch_object_info_cleanup(&allocator, &fetched);
   rc = store->delete_all_objects(store, "default", "lease-key", &deleted_count,
                                  &error);

@@ -62,6 +62,15 @@
 #define LC_POUCH_KEY_LOCK_STRIPES 64U
 #define LC_POUCH_LOCK_FD_CACHE_CAPACITY 32U
 #define LC_POUCH_READ_FD_CACHE_CAPACITY 32U
+#define LC_POUCH_SHA256_HEX_SIZE 65U
+
+typedef struct lc_pouch_sha256 {
+  unsigned long state[8];
+  unsigned long bit_count_hi;
+  unsigned long bit_count_lo;
+  unsigned char buffer[64];
+  size_t buffer_len;
+} lc_pouch_sha256;
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -103,6 +112,7 @@ typedef struct lc_pouch_disk_object_entry {
   char *key;
   char *id;
   char *name;
+  char *plaintext_sha256;
   char *content_type;
   long size;
   long created_at_unix;
@@ -1582,6 +1592,229 @@ static unsigned long lc_pouch_get_u64(const unsigned char *src) {
   return lc_pouch_get_u32(src) | (lc_pouch_get_u32(src + 4) << 32);
 }
 
+static unsigned long lc_pouch_sha256_u32(unsigned long value) {
+  return value & 0xffffffffUL;
+}
+
+static unsigned long lc_pouch_sha256_rotr(unsigned long value,
+                                          unsigned int bits) {
+  value &= 0xffffffffUL;
+  return ((value >> bits) | (value << (32U - bits))) & 0xffffffffUL;
+}
+
+static unsigned long lc_pouch_sha256_ch(unsigned long x, unsigned long y,
+                                        unsigned long z) {
+  return (x & y) ^ ((~x) & z);
+}
+
+static unsigned long lc_pouch_sha256_maj(unsigned long x, unsigned long y,
+                                         unsigned long z) {
+  return (x & y) ^ (x & z) ^ (y & z);
+}
+
+static unsigned long lc_pouch_sha256_big0(unsigned long x) {
+  return lc_pouch_sha256_rotr(x, 2U) ^ lc_pouch_sha256_rotr(x, 13U) ^
+         lc_pouch_sha256_rotr(x, 22U);
+}
+
+static unsigned long lc_pouch_sha256_big1(unsigned long x) {
+  return lc_pouch_sha256_rotr(x, 6U) ^ lc_pouch_sha256_rotr(x, 11U) ^
+         lc_pouch_sha256_rotr(x, 25U);
+}
+
+static unsigned long lc_pouch_sha256_small0(unsigned long x) {
+  return lc_pouch_sha256_rotr(x, 7U) ^ lc_pouch_sha256_rotr(x, 18U) ^
+         ((x & 0xffffffffUL) >> 3);
+}
+
+static unsigned long lc_pouch_sha256_small1(unsigned long x) {
+  return lc_pouch_sha256_rotr(x, 17U) ^ lc_pouch_sha256_rotr(x, 19U) ^
+         ((x & 0xffffffffUL) >> 10);
+}
+
+static unsigned long lc_pouch_sha256_get_be32(const unsigned char *src) {
+  return (((unsigned long)src[0]) << 24) | (((unsigned long)src[1]) << 16) |
+         (((unsigned long)src[2]) << 8) | ((unsigned long)src[3]);
+}
+
+static void lc_pouch_sha256_put_be32(unsigned char *dst, unsigned long value) {
+  value &= 0xffffffffUL;
+  dst[0] = (unsigned char)((value >> 24) & 0xffU);
+  dst[1] = (unsigned char)((value >> 16) & 0xffU);
+  dst[2] = (unsigned char)((value >> 8) & 0xffU);
+  dst[3] = (unsigned char)(value & 0xffU);
+}
+
+static void lc_pouch_sha256_transform(lc_pouch_sha256 *ctx,
+                                      const unsigned char block[64]) {
+  static const unsigned long k[64] = {
+      0x428a2f98UL, 0x71374491UL, 0xb5c0fbcfUL, 0xe9b5dba5UL,
+      0x3956c25bUL, 0x59f111f1UL, 0x923f82a4UL, 0xab1c5ed5UL,
+      0xd807aa98UL, 0x12835b01UL, 0x243185beUL, 0x550c7dc3UL,
+      0x72be5d74UL, 0x80deb1feUL, 0x9bdc06a7UL, 0xc19bf174UL,
+      0xe49b69c1UL, 0xefbe4786UL, 0x0fc19dc6UL, 0x240ca1ccUL,
+      0x2de92c6fUL, 0x4a7484aaUL, 0x5cb0a9dcUL, 0x76f988daUL,
+      0x983e5152UL, 0xa831c66dUL, 0xb00327c8UL, 0xbf597fc7UL,
+      0xc6e00bf3UL, 0xd5a79147UL, 0x06ca6351UL, 0x14292967UL,
+      0x27b70a85UL, 0x2e1b2138UL, 0x4d2c6dfcUL, 0x53380d13UL,
+      0x650a7354UL, 0x766a0abbUL, 0x81c2c92eUL, 0x92722c85UL,
+      0xa2bfe8a1UL, 0xa81a664bUL, 0xc24b8b70UL, 0xc76c51a3UL,
+      0xd192e819UL, 0xd6990624UL, 0xf40e3585UL, 0x106aa070UL,
+      0x19a4c116UL, 0x1e376c08UL, 0x2748774cUL, 0x34b0bcb5UL,
+      0x391c0cb3UL, 0x4ed8aa4aUL, 0x5b9cca4fUL, 0x682e6ff3UL,
+      0x748f82eeUL, 0x78a5636fUL, 0x84c87814UL, 0x8cc70208UL,
+      0x90befffaUL, 0xa4506cebUL, 0xbef9a3f7UL, 0xc67178f2UL};
+  unsigned long w[64];
+  unsigned long a;
+  unsigned long b;
+  unsigned long c;
+  unsigned long d;
+  unsigned long e;
+  unsigned long f;
+  unsigned long g;
+  unsigned long h;
+  unsigned long t1;
+  unsigned long t2;
+  size_t index;
+
+  for (index = 0U; index < 16U; ++index) {
+    w[index] = lc_pouch_sha256_get_be32(block + (index * 4U));
+  }
+  for (index = 16U; index < 64U; ++index) {
+    w[index] = lc_pouch_sha256_u32(
+        lc_pouch_sha256_small1(w[index - 2U]) + w[index - 7U] +
+        lc_pouch_sha256_small0(w[index - 15U]) + w[index - 16U]);
+  }
+
+  a = ctx->state[0];
+  b = ctx->state[1];
+  c = ctx->state[2];
+  d = ctx->state[3];
+  e = ctx->state[4];
+  f = ctx->state[5];
+  g = ctx->state[6];
+  h = ctx->state[7];
+
+  for (index = 0U; index < 64U; ++index) {
+    t1 = lc_pouch_sha256_u32(h + lc_pouch_sha256_big1(e) +
+                             lc_pouch_sha256_ch(e, f, g) + k[index] +
+                             w[index]);
+    t2 = lc_pouch_sha256_u32(lc_pouch_sha256_big0(a) +
+                             lc_pouch_sha256_maj(a, b, c));
+    h = g;
+    g = f;
+    f = e;
+    e = lc_pouch_sha256_u32(d + t1);
+    d = c;
+    c = b;
+    b = a;
+    a = lc_pouch_sha256_u32(t1 + t2);
+  }
+
+  ctx->state[0] = lc_pouch_sha256_u32(ctx->state[0] + a);
+  ctx->state[1] = lc_pouch_sha256_u32(ctx->state[1] + b);
+  ctx->state[2] = lc_pouch_sha256_u32(ctx->state[2] + c);
+  ctx->state[3] = lc_pouch_sha256_u32(ctx->state[3] + d);
+  ctx->state[4] = lc_pouch_sha256_u32(ctx->state[4] + e);
+  ctx->state[5] = lc_pouch_sha256_u32(ctx->state[5] + f);
+  ctx->state[6] = lc_pouch_sha256_u32(ctx->state[6] + g);
+  ctx->state[7] = lc_pouch_sha256_u32(ctx->state[7] + h);
+}
+
+static void lc_pouch_sha256_init(lc_pouch_sha256 *ctx) {
+  ctx->state[0] = 0x6a09e667UL;
+  ctx->state[1] = 0xbb67ae85UL;
+  ctx->state[2] = 0x3c6ef372UL;
+  ctx->state[3] = 0xa54ff53aUL;
+  ctx->state[4] = 0x510e527fUL;
+  ctx->state[5] = 0x9b05688cUL;
+  ctx->state[6] = 0x1f83d9abUL;
+  ctx->state[7] = 0x5be0cd19UL;
+  ctx->bit_count_hi = 0UL;
+  ctx->bit_count_lo = 0UL;
+  ctx->buffer_len = 0U;
+}
+
+static void lc_pouch_sha256_add_bits(lc_pouch_sha256 *ctx, size_t count) {
+  unsigned long bits_hi;
+  unsigned long bits_lo;
+  unsigned long old_lo;
+
+  bits_lo = (((unsigned long)count) << 3) & 0xffffffffUL;
+  bits_hi = ((unsigned long)count) >> 29;
+  old_lo = ctx->bit_count_lo;
+  ctx->bit_count_lo = (ctx->bit_count_lo + bits_lo) & 0xffffffffUL;
+  if (ctx->bit_count_lo < old_lo) {
+    ctx->bit_count_hi = (ctx->bit_count_hi + 1UL) & 0xffffffffUL;
+  }
+  ctx->bit_count_hi = (ctx->bit_count_hi + bits_hi) & 0xffffffffUL;
+}
+
+static void lc_pouch_sha256_update(lc_pouch_sha256 *ctx,
+                                   const unsigned char *bytes, size_t count) {
+  size_t copied;
+  size_t want;
+
+  if (count == 0U) {
+    return;
+  }
+  lc_pouch_sha256_add_bits(ctx, count);
+  copied = 0U;
+  while (copied < count) {
+    want = 64U - ctx->buffer_len;
+    if (want > count - copied) {
+      want = count - copied;
+    }
+    memcpy(ctx->buffer + ctx->buffer_len, bytes + copied, want);
+    ctx->buffer_len += want;
+    copied += want;
+    if (ctx->buffer_len == 64U) {
+      lc_pouch_sha256_transform(ctx, ctx->buffer);
+      ctx->buffer_len = 0U;
+    }
+  }
+}
+
+static void lc_pouch_sha256_finish(lc_pouch_sha256 *ctx,
+                                   unsigned char digest[32]) {
+  unsigned char length[8];
+  unsigned char pad[64];
+  size_t pad_len;
+  size_t index;
+
+  lc_pouch_sha256_put_be32(length, ctx->bit_count_hi);
+  lc_pouch_sha256_put_be32(length + 4, ctx->bit_count_lo);
+  memset(pad, 0, sizeof(pad));
+  pad[0] = 0x80U;
+  pad_len = ctx->buffer_len < 56U ? 56U - ctx->buffer_len
+                                  : 120U - ctx->buffer_len;
+  lc_pouch_sha256_update(ctx, pad, pad_len);
+  lc_pouch_sha256_update(ctx, length, sizeof(length));
+  for (index = 0U; index < 8U; ++index) {
+    lc_pouch_sha256_put_be32(digest + (index * 4U), ctx->state[index]);
+  }
+}
+
+static void lc_pouch_sha256_hex(const unsigned char digest[32],
+                                char out[LC_POUCH_SHA256_HEX_SIZE]) {
+  static const char hex[] = "0123456789abcdef";
+  size_t index;
+
+  for (index = 0U; index < 32U; ++index) {
+    out[index * 2U] = hex[(digest[index] >> 4) & 0x0fU];
+    out[index * 2U + 1U] = hex[digest[index] & 0x0fU];
+  }
+  out[64] = '\0';
+}
+
+static void lc_pouch_sha256_finish_hex(lc_pouch_sha256 *ctx,
+                                       char out[LC_POUCH_SHA256_HEX_SIZE]) {
+  unsigned char digest[32];
+
+  lc_pouch_sha256_finish(ctx, digest);
+  lc_pouch_sha256_hex(digest, out);
+}
+
 static int lc_pouch_write_all(int fd, const void *bytes, size_t count) {
   const unsigned char *cursor;
   ssize_t written;
@@ -2902,6 +3135,7 @@ lc_pouch_disk_object_entry_cleanup(lc_pouch_disk_store *store,
   lc_pouch_free(&store->allocator, entry->key);
   lc_pouch_free(&store->allocator, entry->id);
   lc_pouch_free(&store->allocator, entry->name);
+  lc_pouch_free(&store->allocator, entry->plaintext_sha256);
   lc_pouch_free(&store->allocator, entry->content_type);
   memset(entry, 0, sizeof(*entry));
 }
@@ -2914,11 +3148,11 @@ lc_pouch_object_info_from_entry(const lc_pouch_allocator *allocator,
   dst->id = lc_pouch_strdup(allocator, entry->id);
   dst->name = lc_pouch_strdup(allocator, entry->name);
   dst->content_type = lc_pouch_strdup(allocator, entry->content_type);
-  dst->plaintext_sha256 = lc_pouch_strdup(allocator, entry->id);
+  dst->plaintext_sha256 = lc_pouch_strdup(allocator, entry->plaintext_sha256);
   if ((entry->id != NULL && dst->id == NULL) ||
       (entry->name != NULL && dst->name == NULL) ||
       (entry->content_type != NULL && dst->content_type == NULL) ||
-      (entry->id != NULL && dst->plaintext_sha256 == NULL)) {
+      (entry->plaintext_sha256 != NULL && dst->plaintext_sha256 == NULL)) {
     lc_pouch_object_info_cleanup(allocator, dst);
     return 0;
   }
@@ -2930,13 +3164,15 @@ lc_pouch_object_info_from_entry(const lc_pouch_allocator *allocator,
 
 static int lc_pouch_disk_upsert_object_entry(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
-    const char *id, const char *name, const char *content_type, long size,
-    long created_at_unix, long updated_at_unix, unsigned long body_offset,
+    const char *id, const char *name, const char *plaintext_sha256,
+    const char *content_type, long size, long created_at_unix,
+    long updated_at_unix, unsigned long body_offset,
     unsigned long body_length, int deleted) {
   lc_pouch_disk_object_entry *entry;
   lc_pouch_disk_object_entry *grown;
   lc_pouch_disk_object_entry staged;
   char *new_id;
+  char *new_plaintext_sha256;
   char *new_content_type;
   int existing;
 
@@ -2944,16 +3180,21 @@ static int lc_pouch_disk_upsert_object_entry(
       lc_pouch_disk_find_object_by_name(store, namespace_name, key, name);
   memset(&staged, 0, sizeof(staged));
   new_id = lc_pouch_strdup(&store->allocator, id);
+  new_plaintext_sha256 =
+      lc_pouch_strdup(&store->allocator, plaintext_sha256);
   new_content_type = lc_pouch_strdup(&store->allocator, content_type);
   if ((id != NULL && new_id == NULL) ||
+      (plaintext_sha256 != NULL && new_plaintext_sha256 == NULL) ||
       (content_type != NULL && new_content_type == NULL)) {
     lc_pouch_free(&store->allocator, new_id);
+    lc_pouch_free(&store->allocator, new_plaintext_sha256);
     lc_pouch_free(&store->allocator, new_content_type);
     return 0;
   }
   if (existing >= 0) {
     entry = &store->object_entries[existing];
     lc_pouch_free(&store->allocator, entry->id);
+    lc_pouch_free(&store->allocator, entry->plaintext_sha256);
     lc_pouch_free(&store->allocator, entry->content_type);
   } else {
     staged.namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
@@ -2962,6 +3203,7 @@ static int lc_pouch_disk_upsert_object_entry(
     if (staged.namespace_name == NULL || staged.key == NULL ||
         staged.name == NULL) {
       lc_pouch_free(&store->allocator, new_id);
+      lc_pouch_free(&store->allocator, new_plaintext_sha256);
       lc_pouch_free(&store->allocator, new_content_type);
       lc_pouch_disk_object_entry_cleanup(store, &staged);
       return 0;
@@ -2977,6 +3219,7 @@ static int lc_pouch_disk_upsert_object_entry(
           new_capacity * sizeof(store->object_entries[0]));
       if (grown == NULL) {
         lc_pouch_free(&store->allocator, new_id);
+        lc_pouch_free(&store->allocator, new_plaintext_sha256);
         lc_pouch_free(&store->allocator, new_content_type);
         lc_pouch_disk_object_entry_cleanup(store, &staged);
         return 0;
@@ -2995,6 +3238,7 @@ static int lc_pouch_disk_upsert_object_entry(
     staged.name = NULL;
   }
   entry->id = new_id;
+  entry->plaintext_sha256 = new_plaintext_sha256;
   entry->content_type = new_content_type;
   entry->size = size;
   entry->created_at_unix = created_at_unix;
@@ -4779,9 +5023,10 @@ static int lc_pouch_disk_append_fd_record(
 static int lc_pouch_disk_spool_source_to_temp(
     lc_pouch_disk_store *store, lc_source *source, int has_max_bytes,
     size_t max_bytes, int *fd_out, unsigned long *length_out,
-    unsigned long *crc_out, lc_error *error) {
+    unsigned long *crc_out, char *sha256_hex_out, lc_error *error) {
   const char suffix[] = "/payload-XXXXXX";
   unsigned char buffer[8192];
+  lc_pouch_sha256 sha256;
   char *template_path;
   size_t root_len;
   size_t suffix_len;
@@ -4795,6 +5040,10 @@ static int lc_pouch_disk_spool_source_to_temp(
   *fd_out = -1;
   *length_out = 0UL;
   *crc_out = 0UL;
+  if (sha256_hex_out != NULL) {
+    sha256_hex_out[0] = '\0';
+    lc_pouch_sha256_init(&sha256);
+  }
   root_len = strlen(store->root_path);
   suffix_len = sizeof(suffix) - 1U;
   template_path =
@@ -4850,6 +5099,9 @@ static int lc_pouch_disk_spool_source_to_temp(
       return lc_pouch_set_errno(error, "failed to write pouch temp payload");
     }
     crc = lc_pouch_crc32_update(crc, buffer, got);
+    if (sha256_hex_out != NULL) {
+      lc_pouch_sha256_update(&sha256, buffer, got);
+    }
     length += (unsigned long)got;
   }
   if (lseek(fd, 0, SEEK_SET) < 0) {
@@ -4859,6 +5111,9 @@ static int lc_pouch_disk_spool_source_to_temp(
   *fd_out = fd;
   *length_out = length;
   *crc_out = crc ^ 0xffffffffUL;
+  if (sha256_hex_out != NULL) {
+    lc_pouch_sha256_finish_hex(&sha256, sha256_hex_out);
+  }
   return LC_OK;
 }
 
@@ -5257,6 +5512,29 @@ static int lc_pouch_disk_replay_skip_crc(int fd, unsigned long length,
   return LC_OK;
 }
 
+static int lc_pouch_disk_replay_skip_crc_sha256(
+    int fd, unsigned long length, unsigned long *crc, lc_pouch_sha256 *sha256,
+    int *short_read, lc_error *error) {
+  unsigned char buffer[8192];
+  unsigned long remaining;
+  size_t want;
+  int rc;
+
+  remaining = length;
+  while (remaining > 0UL) {
+    want = remaining < (unsigned long)sizeof(buffer) ? (size_t)remaining
+                                                     : sizeof(buffer);
+    rc = lc_pouch_disk_replay_read_crc(fd, buffer, want, crc, short_read,
+                                       error);
+    if (rc != LC_OK || *short_read) {
+      return rc;
+    }
+    lc_pouch_sha256_update(sha256, buffer, want);
+    remaining -= (unsigned long)want;
+  }
+  return LC_OK;
+}
+
 static char *lc_pouch_disk_replay_read_string(lc_pouch_disk_store *store,
                                               unsigned long length,
                                               unsigned long *crc,
@@ -5529,6 +5807,8 @@ static int lc_pouch_disk_replay_stream_index_record(
   unsigned char link_body[16];
   unsigned char object_meta[LC_POUCH_OBJECT_META_SIZE];
   unsigned char queue_meta[LC_POUCH_QUEUE_META_SIZE];
+  lc_pouch_sha256 object_sha256;
+  char object_sha256_hex[LC_POUCH_SHA256_HEX_SIZE];
   char *ns_copy;
   char *key_copy;
   char *ct_copy;
@@ -5722,8 +6002,10 @@ static int lc_pouch_disk_replay_stream_index_record(
                                ? error->code
                                : LC_ERR_NOMEM);
     }
-    rc = lc_pouch_disk_replay_skip_crc(store->log_fd, object_body_len, &crc,
-                                       &short_read, error);
+    lc_pouch_sha256_init(&object_sha256);
+    rc = lc_pouch_disk_replay_skip_crc_sha256(
+        store->log_fd, object_body_len, &crc, &object_sha256, &short_read,
+        error);
     if (rc != LC_OK || short_read) {
       lc_pouch_free(&store->allocator, object_ct_copy);
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
@@ -5738,9 +6020,11 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
+    lc_pouch_sha256_finish_hex(&object_sha256, object_sha256_hex);
     if (!lc_pouch_disk_upsert_object_entry(
-            store, ns_copy, key_copy, etag_copy, ct_copy, object_ct_copy,
-            (long)object_body_len, (long)created_at, (long)updated_at,
+            store, ns_copy, key_copy, etag_copy, ct_copy, object_sha256_hex,
+            object_ct_copy, (long)object_body_len, (long)created_at,
+            (long)updated_at,
             offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
                 etag_len + LC_POUCH_OBJECT_META_SIZE + object_ct_len,
             object_body_len, 0)) {
@@ -6209,20 +6493,32 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
           return lc_pouch_set_nomem(
               error, "failed to decode pouch object replay record");
         }
-        if (!lc_pouch_disk_upsert_object_entry(
-                store, ns_copy, key_copy, etag_copy, ct_copy, object_ct_copy,
-                (long)object_body_len, (long)created_at, (long)updated_at,
-                offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
-                    etag_len + LC_POUCH_OBJECT_META_SIZE + object_ct_len,
-                object_body_len, 0)) {
-          lc_pouch_free(&store->allocator, object_ct_copy);
-          lc_pouch_free(&store->allocator, ns_copy);
-          lc_pouch_free(&store->allocator, key_copy);
-          lc_pouch_free(&store->allocator, ct_copy);
-          lc_pouch_free(&store->allocator, etag_copy);
-          lc_pouch_free(&store->allocator, payload);
-          return lc_pouch_set_nomem(error,
-                                    "failed to index pouch object replay");
+        {
+          lc_pouch_sha256 object_sha256;
+          char object_sha256_hex[LC_POUCH_SHA256_HEX_SIZE];
+
+          lc_pouch_sha256_init(&object_sha256);
+          lc_pouch_sha256_update(
+              &object_sha256,
+              body_begin + LC_POUCH_OBJECT_META_SIZE + object_ct_len,
+              (size_t)object_body_len);
+          lc_pouch_sha256_finish_hex(&object_sha256, object_sha256_hex);
+          if (!lc_pouch_disk_upsert_object_entry(
+                  store, ns_copy, key_copy, etag_copy, ct_copy,
+                  object_sha256_hex, object_ct_copy, (long)object_body_len,
+                  (long)created_at, (long)updated_at,
+                  offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
+                      etag_len + LC_POUCH_OBJECT_META_SIZE + object_ct_len,
+                  object_body_len, 0)) {
+            lc_pouch_free(&store->allocator, object_ct_copy);
+            lc_pouch_free(&store->allocator, ns_copy);
+            lc_pouch_free(&store->allocator, key_copy);
+            lc_pouch_free(&store->allocator, ct_copy);
+            lc_pouch_free(&store->allocator, etag_copy);
+            lc_pouch_free(&store->allocator, payload);
+            return lc_pouch_set_nomem(error,
+                                      "failed to index pouch object replay");
+          }
         }
         lc_pouch_free(&store->allocator, object_ct_copy);
       } else if (type == LC_POUCH_RECORD_OBJECT_REMOVE) {
@@ -6522,7 +6818,8 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
   }
   temp_fd = -1;
   rc = lc_pouch_disk_spool_source_to_temp(
-      store, body, 0, 0U, &temp_fd, &payload_length, &payload_crc, error);
+      store, body, 0, 0U, &temp_fd, &payload_length, &payload_crc, NULL,
+      error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key(self, key_lock, error);
@@ -7234,6 +7531,7 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
   unsigned long payload_length;
   unsigned long payload_crc;
   unsigned long payload_offset;
+  char payload_sha256[LC_POUCH_SHA256_HEX_SIZE];
   long now_unix;
   int existing;
   int temp_fd;
@@ -7285,7 +7583,7 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
   temp_fd = -1;
   rc = lc_pouch_disk_spool_source_to_temp(
       store, body, opts->has_max_bytes, (size_t)opts->max_bytes, &temp_fd,
-      &payload_length, &payload_crc, error);
+      &payload_length, &payload_crc, payload_sha256, error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key(self, key_lock, error);
@@ -7305,7 +7603,7 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
   close(temp_fd);
   if (rc == LC_OK &&
       !lc_pouch_disk_upsert_object_entry(
-          store, namespace_name, key, id, name, content_type,
+          store, namespace_name, key, id, name, payload_sha256, content_type,
           (long)payload_length, now_unix, now_unix,
           payload_offset, payload_length, 0)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch object index");
@@ -7486,6 +7784,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   lc_pouch_disk_object_entry *src_entry;
   lc_pouch_disk_key_lock_set key_locks;
   char *id;
+  char *src_plaintext_sha256;
   char *src_content_type;
   const char *name;
   unsigned long payload_crc;
@@ -7530,6 +7829,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   memset(&key_locks, 0, sizeof(key_locks));
   store = (lc_pouch_disk_store *)self->impl;
   id = NULL;
+  src_plaintext_sha256 = NULL;
   src_content_type = NULL;
   payload_offset = 0UL;
   read_fd = -1;
@@ -7555,19 +7855,22 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   }
   src_entry = &store->object_entries[existing];
   name = opts->name != NULL ? opts->name : src_entry->name;
-  src_content_type = lc_pouch_strdup(&store->allocator,
-                                     src_entry->content_type);
-  if (src_content_type == NULL) {
+  src_plaintext_sha256 =
+      lc_pouch_strdup(&store->allocator, src_entry->plaintext_sha256);
+  src_content_type = lc_pouch_strdup(&store->allocator, src_entry->content_type);
+  if (src_plaintext_sha256 == NULL || src_content_type == NULL) {
+    lc_pouch_free(&store->allocator, src_plaintext_sha256);
+    lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key_set(self, &key_locks, error);
-    return lc_pouch_set_nomem(error,
-                              "failed to copy pouch object content type");
+    return lc_pouch_set_nomem(error, "failed to copy pouch object metadata");
   }
   src_body_offset = src_entry->body_offset;
   src_body_length = src_entry->body_length;
   src_size = src_entry->size;
   read_fd = open(store->log_path, O_RDONLY);
   if (read_fd < 0) {
+    lc_pouch_free(&store->allocator, src_plaintext_sha256);
     lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key_set(self, &key_locks, error);
@@ -7579,6 +7882,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                                  &payload_crc, error);
   if (rc != LC_OK) {
     close(read_fd);
+    lc_pouch_free(&store->allocator, src_plaintext_sha256);
     lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key_set(self, &key_locks, error);
@@ -7589,6 +7893,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                                                name);
   if (existing >= 0 && opts->prevent_overwrite) {
     close(read_fd);
+    lc_pouch_free(&store->allocator, src_plaintext_sha256);
     lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key_set(self, &key_locks, error);
@@ -7599,6 +7904,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   id = lc_pouch_make_object_id_from_crc(store, name, payload_crc);
   if (id == NULL) {
     close(read_fd);
+    lc_pouch_free(&store->allocator, src_plaintext_sha256);
     lc_pouch_free(&store->allocator, src_content_type);
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key_set(self, &key_locks, error);
@@ -7612,8 +7918,9 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   close(read_fd);
   if (rc == LC_OK &&
       !lc_pouch_disk_upsert_object_entry(
-          store, namespace_name, dst_key, id, name, src_content_type, src_size,
-          now_unix, now_unix, payload_offset, src_body_length, 0)) {
+          store, namespace_name, dst_key, id, name, src_plaintext_sha256,
+          src_content_type, src_size, now_unix, now_unix, payload_offset,
+          src_body_length, 0)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch object index");
   }
   if (rc == LC_OK) {
@@ -7629,6 +7936,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   lc_pouch_free(&store->allocator, id);
+  lc_pouch_free(&store->allocator, src_plaintext_sha256);
   lc_pouch_free(&store->allocator, src_content_type);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
@@ -8075,7 +8383,8 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
   payload_length = 0UL;
   payload_crc = 0UL;
   rc = lc_pouch_disk_spool_source_to_temp(store, body, 0, 0U, &temp_fd,
-                                          &payload_length, &payload_crc, error);
+                                          &payload_length, &payload_crc, NULL,
+                                          error);
   if (rc != LC_OK) {
     return rc;
   }
