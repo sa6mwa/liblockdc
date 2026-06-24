@@ -915,6 +915,78 @@ static void test_cas_and_remove_semantics(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_state_write_index_allocation_failure_replays_cleanly(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res first;
+  lc_pouch_put_state_res second;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  const char *replacement_type;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "state-write-nomem");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  read_body = NULL;
+  replacement_type = "application/x-pouch-state-index-replay";
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "text/plain";
+  source = source_from_text("payload-one");
+  rc = store->write_state(store, "default", "state-key", source, &opts,
+                          &first, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = replacement_type;
+  tracked.fail_malloc_size = strlen(replacement_type) + 1U;
+  source = source_from_text("payload-two");
+  rc = store->write_state(store, "default", "state-key", source, &opts,
+                          &second, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  rc = store->read_state(store, "default", "state-key", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_int_equal(info.version, 2L);
+  assert_string_equal(info.content_type, replacement_type);
+  assert_string_not_equal(info.etag, first.new_state_etag);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "payload-two");
+  free(text);
+  lc_source_close(read_body);
+
+  lc_pouch_state_info_cleanup(&allocator, &info);
+  lc_pouch_put_state_res_cleanup(&allocator, &second);
+  lc_pouch_put_state_res_cleanup(&allocator, &first);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_staged_state_promote_discard_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -6674,6 +6746,8 @@ int main(void) {
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
       cmocka_unit_test(test_cas_and_remove_semantics),
+      cmocka_unit_test(
+          test_state_write_index_allocation_failure_replays_cleanly),
       cmocka_unit_test(test_staged_state_promote_discard_and_reopen),
       cmocka_unit_test(test_staged_state_listing_orders_paginates_and_replays),
       cmocka_unit_test(test_staged_state_rejects_pathlike_transaction_ids),

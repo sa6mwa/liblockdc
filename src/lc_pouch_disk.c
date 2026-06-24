@@ -785,16 +785,43 @@ static int lc_pouch_disk_upsert_entry(lc_pouch_disk_store *store,
                                       unsigned long body_length, int deleted) {
   lc_pouch_disk_state_entry *entry;
   lc_pouch_disk_state_entry *grown;
+  lc_pouch_disk_state_entry staged;
+  char *new_content_type;
+  char *new_etag;
   int existing;
 
   existing = lc_pouch_disk_find_entry(store, namespace_name, key);
+  memset(&staged, 0, sizeof(staged));
+  new_content_type = lc_pouch_strdup(&store->allocator, content_type);
+  new_etag = lc_pouch_strdup(&store->allocator, etag);
+  if ((content_type != NULL && new_content_type == NULL) ||
+      (etag != NULL && new_etag == NULL)) {
+    lc_pouch_free(&store->allocator, new_content_type);
+    lc_pouch_free(&store->allocator, new_etag);
+    return 0;
+  }
+
   if (existing >= 0) {
     entry = &store->state_entries[existing];
     lc_pouch_free(&store->allocator, entry->content_type);
     lc_pouch_free(&store->allocator, entry->etag);
-    entry->content_type = NULL;
-    entry->etag = NULL;
+    entry->content_type = new_content_type;
+    entry->etag = new_etag;
+    new_content_type = NULL;
+    new_etag = NULL;
   } else {
+    staged.namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
+    staged.key = lc_pouch_strdup(&store->allocator, key);
+    if (staged.namespace_name == NULL || staged.key == NULL) {
+      lc_pouch_free(&store->allocator, new_content_type);
+      lc_pouch_free(&store->allocator, new_etag);
+      lc_pouch_disk_entry_cleanup(store, &staged);
+      return 0;
+    }
+    staged.content_type = new_content_type;
+    staged.etag = new_etag;
+    new_content_type = NULL;
+    new_etag = NULL;
     if (store->state_entry_count == store->state_entry_capacity) {
       size_t new_capacity;
 
@@ -805,6 +832,7 @@ static int lc_pouch_disk_upsert_entry(lc_pouch_disk_store *store,
           &store->allocator, store->state_entries,
           new_capacity * sizeof(store->state_entries[0]));
       if (grown == NULL) {
+        lc_pouch_disk_entry_cleanup(store, &staged);
         return 0;
       }
       memset(grown + store->state_entry_capacity, 0,
@@ -813,17 +841,8 @@ static int lc_pouch_disk_upsert_entry(lc_pouch_disk_store *store,
       store->state_entry_capacity = new_capacity;
     }
     entry = &store->state_entries[store->state_entry_count++];
-    entry->namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
-    entry->key = lc_pouch_strdup(&store->allocator, key);
-    if (entry->namespace_name == NULL || entry->key == NULL) {
-      return 0;
-    }
-  }
-  entry->content_type = lc_pouch_strdup(&store->allocator, content_type);
-  entry->etag = lc_pouch_strdup(&store->allocator, etag);
-  if ((content_type != NULL && entry->content_type == NULL) ||
-      (etag != NULL && entry->etag == NULL)) {
-    return 0;
+    *entry = staged;
+    memset(&staged, 0, sizeof(staged));
   }
   entry->version = version;
   entry->body_offset = body_offset;
