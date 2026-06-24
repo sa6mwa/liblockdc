@@ -6343,7 +6343,7 @@ static void test_pouch_endpoint_txn_rollback_discards_staged_state(
   test_cleanup_root(root);
 }
 
-static void test_pouch_endpoint_txn_replay_expired_prepare_after_reopen(
+static void test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen(
     void **state) {
   char root[256];
   char endpoint[320];
@@ -6352,6 +6352,7 @@ static void test_pouch_endpoint_txn_replay_expired_prepare_after_reopen(
   lc_source *source;
   lc_acquire_req acquire;
   lc_release_req release_req;
+  lc_metadata_req metadata_req;
   lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
@@ -6389,6 +6390,13 @@ static void test_pouch_endpoint_txn_replay_expired_prepare_after_reopen(
   acquire.txn_id = "txn-replay-expired-1";
   rc = client->acquire(client, &acquire, &lease, &error);
   assert_int_equal(rc, LC_OK);
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lease->has_query_hidden);
+  assert_true(lease->query_hidden);
   seed_pouch_staged_state(client, lease, "{\"value\":99}", &error);
 
   memset(&participant, 0, sizeof(participant));
@@ -6408,19 +6416,21 @@ static void test_pouch_endpoint_txn_replay_expired_prepare_after_reopen(
   client->close(client);
 
   client = open_pouch_client(endpoint);
+  assert_pouch_client_state_text(client, "txn/replay-key", "{\"value\":1}",
+                                 &error);
   lc_txn_replay_req_init(&replay_req);
   replay_req.txn_id = "txn-replay-expired-1";
   rc = client->txn_replay(client, &replay_req, &replay_res, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_string_equal(replay_res.state, "prepared");
-  lc_txn_replay_res_cleanup(&replay_res);
-  assert_pouch_client_state_text(client, "txn/replay-key", "{\"value\":1}",
-                                 &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 404L);
+  lc_error_cleanup(&error);
 
   acquire.owner = "after-replay";
   acquire.txn_id = NULL;
   rc = client->acquire(client, &acquire, &lease, &error);
   assert_int_equal(rc, LC_OK);
+  assert_true(lease->has_query_hidden);
+  assert_true(lease->query_hidden);
   rc = lease->release(lease, &release_req, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -6550,7 +6560,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_txn_rollback_discards_staged_state),
       cmocka_unit_test(
-          test_pouch_endpoint_txn_replay_expired_prepare_after_reopen),
+          test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

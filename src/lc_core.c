@@ -1636,6 +1636,12 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.tc_rm_register = lc_pouch_client_tc_rm_register_method;
     client->pub.tc_rm_unregister = lc_pouch_client_tc_rm_unregister_method;
     client->pub.tc_rm_list = lc_pouch_client_tc_rm_list_method;
+    rc = lc_pouch_client_recover_transactions(&client->pub, error);
+    if (rc != LC_OK) {
+      lc_client_close_method(&client->pub);
+      lc_engine_error_cleanup(&engine_error);
+      return rc;
+    }
   }
   client->pub.default_namespace = client->default_namespace;
   *out = &client->pub;

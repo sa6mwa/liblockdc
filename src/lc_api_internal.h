@@ -308,6 +308,7 @@ int lc_pouch_client_txn_rollback_method(lc_client *self,
                                         const lc_txn_decision_req *req,
                                         lc_txn_decision_res *out,
                                         lc_error *error);
+int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error);
 int lc_pouch_client_tc_lease_acquire_method(
     lc_client *self, const lc_tc_lease_acquire_req *req,
     lc_tc_lease_acquire_res *out, lc_error *error);
