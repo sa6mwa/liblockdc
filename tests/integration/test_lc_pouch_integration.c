@@ -132,7 +132,9 @@ static char *sink_text(lc_sink *sink, lc_error *error) {
   assert_lc_ok(rc, error);
   text = (char *)malloc(length + 1U);
   assert_non_null(text);
-  memcpy(text, bytes, length);
+  if (length > 0U) {
+    memcpy(text, bytes, length);
+  }
   text[length] = '\0';
   return text;
 }
@@ -813,6 +815,119 @@ static void test_pouch_public_scan_query_documents_replays_after_reopen(
 
   lc_query_res_cleanup(&query_res);
   lc_sink_close(sink);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_scan_query_documents_refreshes_open_reader(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "scan-query-open-reader");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  alpha = NULL;
+  bravo = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+
+  open_pouch_scan_client(endpoint, &reader, &error);
+  open_pouch_client(endpoint, &writer, &error);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_string_equal(text, "");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "scan-open-writer";
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+
+  acquire.key = "integration/query-open/alpha";
+  rc = writer->acquire(writer, &acquire, &alpha, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"kind\":\"scan-open\",\"ordinal\":1}", &error);
+  rc = alpha->update(alpha, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/query-open/bravo";
+  rc = writer->acquire(writer, &acquire, &bravo, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"kind\":\"scan-open\",\"ordinal\":2}", &error);
+  rc = bravo->update(bravo, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = alpha->release(alpha, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  alpha = NULL;
+  rc = bravo->release(bravo, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  bravo = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 2L;
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/query-open/alpha\""));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"scan-open\",\"ordinal\":1}"));
+  assert_non_null(strstr(text, "\"key\":\"integration/query-open/bravo\""));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"scan-open\",\"ordinal\":2}"));
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
+  assert_int_equal(query_res.index_seq, 0UL);
+
+  free(text);
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  writer->close(writer);
   reader->close(reader);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
@@ -2914,6 +3029,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_metadata_query_hidden_persists),
       cmocka_unit_test(
           test_pouch_public_scan_query_documents_replays_after_reopen),
+      cmocka_unit_test(
+          test_pouch_public_scan_query_documents_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_index_query_documents_replays_after_reopen),
       cmocka_unit_test(
