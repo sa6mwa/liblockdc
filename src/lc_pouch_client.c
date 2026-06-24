@@ -2069,6 +2069,179 @@ static int lc_pouch_validate_query_engine(const lc_query_req *req,
   return LC_OK;
 }
 
+static const char *lc_pouch_effective_query_keys_engine(
+    lc_client_handle *client, const lc_query_req *req) {
+  if (req != NULL && req->engine != NULL && req->engine[0] != '\0') {
+    return req->engine;
+  }
+  if (client != NULL && client->pouch_query_engine != NULL &&
+      strcmp(client->pouch_query_engine, "scan") == 0) {
+    return "scan";
+  }
+  if (client != NULL && client->pouch_query_fallback_engine != NULL &&
+      strcmp(client->pouch_query_fallback_engine, "scan") == 0) {
+    return "scan";
+  }
+  return "index";
+}
+
+static int lc_pouch_query_selector_is_match_all(const char *selector_json) {
+  const char *p;
+
+  if (selector_json == NULL) {
+    return 0;
+  }
+  p = selector_json;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+    ++p;
+  }
+  if (*p++ != '{') {
+    return 0;
+  }
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+    ++p;
+  }
+  if (*p++ != '}') {
+    return 0;
+  }
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+    ++p;
+  }
+  return *p == '\0';
+}
+
+typedef struct lc_pouch_query_keys_scan_context {
+  const lc_query_key_handler *handler;
+  void *handler_context;
+} lc_pouch_query_keys_scan_context;
+
+static int lc_pouch_query_keys_callback_failed(lc_error *error,
+                                               const char *fallback) {
+  if (error != NULL && error->code != LC_OK) {
+    return error->code;
+  }
+  return lc_error_set(error, LC_ERR_TRANSPORT, 0L, fallback, NULL, NULL, NULL);
+}
+
+static int lc_pouch_query_keys_scan_visit(void *context,
+                                          const lc_pouch_scan_meta_row *row,
+                                          lc_error *error) {
+  lc_pouch_query_keys_scan_context *scan;
+  size_t key_len;
+
+  (void)row;
+  scan = (lc_pouch_query_keys_scan_context *)context;
+  if (scan == NULL || scan->handler == NULL || row == NULL ||
+      row->key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query_keys scan visitor requires context and "
+                        "row",
+                        NULL, NULL, NULL);
+  }
+  if (scan->handler->begin != NULL &&
+      !scan->handler->begin(scan->handler_context, error)) {
+    return lc_pouch_query_keys_callback_failed(
+        error, "pouch query_keys begin callback failed");
+  }
+  key_len = strlen(row->key);
+  if (scan->handler->chunk != NULL &&
+      !scan->handler->chunk(scan->handler_context, row->key, key_len, error)) {
+    return lc_pouch_query_keys_callback_failed(
+        error, "pouch query_keys chunk callback failed");
+  }
+  if (scan->handler->end != NULL &&
+      !scan->handler->end(scan->handler_context, error)) {
+    return lc_pouch_query_keys_callback_failed(
+        error, "pouch query_keys end callback failed");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
+                                           const lc_query_req *req,
+                                           const lc_query_key_handler *handler,
+                                           void *context, lc_query_res *out,
+                                           lc_error *error) {
+  lc_pouch_scan_meta_req scan_req;
+  lc_pouch_scan_meta_res scan_res;
+  lc_pouch_query_keys_scan_context scan_context;
+  const char *namespace_name;
+  int rc;
+
+  if (client == NULL || req == NULL || handler == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "query_keys requires self, req, handler, and out", NULL,
+                        NULL, NULL);
+  }
+  if (!lc_pouch_query_selector_is_match_all(req->selector_json)) {
+    return lc_pouch_client_unsupported(
+        error, "pouch scan query_keys supports only match-all selector");
+  }
+  if (req->fields_json != NULL && req->fields_json[0] != '\0') {
+    return lc_pouch_client_unsupported(
+        error, "pouch scan query_keys does not support fields");
+  }
+  if (req->return_mode != NULL && req->return_mode[0] != '\0' &&
+      strcmp(req->return_mode, "keys") != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query_keys return_mode must be keys", NULL,
+                        NULL, NULL);
+  }
+  if (req->refresh != NULL && req->refresh[0] != '\0') {
+    return lc_pouch_client_unsupported(
+        error, "pouch scan query_keys does not support refresh");
+  }
+  if (req->limit < 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query_keys limit must be non-negative", NULL,
+                        NULL, NULL);
+  }
+
+  rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
+                                 error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  memset(&scan_req, 0, sizeof(scan_req));
+  memset(&scan_res, 0, sizeof(scan_res));
+  memset(&scan_context, 0, sizeof(scan_context));
+  memset(out, 0, sizeof(*out));
+  scan_req.namespace_name = namespace_name;
+  scan_req.start_after = req->cursor;
+  scan_req.limit = (size_t)req->limit;
+  scan_context.handler = handler;
+  scan_context.handler_context = context;
+
+  rc = client->pouch_store->scan_meta(client->pouch_store, &scan_req,
+                                      lc_pouch_query_keys_scan_visit,
+                                      &scan_context, &scan_res, error);
+  if (rc != LC_OK) {
+    lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
+    return rc;
+  }
+
+  if (scan_res.next_start_after != NULL) {
+    out->cursor = lc_strdup_local(scan_res.next_start_after);
+    if (out->cursor == NULL) {
+      lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch query_keys cursor", NULL,
+                          NULL, NULL);
+    }
+  }
+  out->return_mode = lc_strdup_local("keys");
+  if (out->return_mode == NULL) {
+    lc_query_res_cleanup(out);
+    lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query_keys return_mode", NULL,
+                        NULL, NULL);
+  }
+  lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
+  return LC_OK;
+}
+
 int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                                  lc_sink *dst, lc_query_res *out,
                                  lc_error *error) {
@@ -2092,10 +2265,12 @@ int lc_pouch_client_query_keys_method(lc_client *self,
                                       const lc_query_key_handler *handler,
                                       void *context, lc_query_res *out,
                                       lc_error *error) {
-  (void)self;
-  (void)handler;
-  (void)context;
-  (void)out;
+  lc_client_handle *client;
+  if (self == NULL || req == NULL || handler == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "query_keys requires self, req, handler, and out", NULL,
+                        NULL, NULL);
+  }
   {
     int rc;
 
@@ -2103,6 +2278,11 @@ int lc_pouch_client_query_keys_method(lc_client *self,
     if (rc != LC_OK) {
       return rc;
     }
+  }
+  client = (lc_client_handle *)self;
+  if (strcmp(lc_pouch_effective_query_keys_engine(client, req), "scan") == 0) {
+    return lc_pouch_client_query_keys_scan(client, req, handler, context, out,
+                                           error);
   }
   return lc_pouch_client_unsupported(error,
                                      "pouch query_keys requires the LQL slice");

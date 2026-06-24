@@ -171,6 +171,17 @@ typedef struct consumer_service_stateful_test_state {
   const char *expected;
 } consumer_service_stateful_test_state;
 
+typedef struct query_key_capture_state {
+  char keys[8][64];
+  char current[64];
+  size_t key_count;
+  size_t begin_calls;
+  size_t chunk_calls;
+  size_t end_calls;
+  size_t current_length;
+  int fail_on_chunk;
+} query_key_capture_state;
+
 static int subscribe_test_handle(void *context, lc_message *message,
                                  lc_error *error) {
   subscribe_test_state *state;
@@ -248,6 +259,59 @@ static int query_key_end_unexpected(void *context, lc_error *error) {
   (void)error;
   fail_msg("pouch query_keys handler must not be called");
   return LC_ERR_INVALID;
+}
+
+static int query_key_capture_begin(void *context, lc_error *error) {
+  query_key_capture_state *state;
+
+  (void)error;
+  state = (query_key_capture_state *)context;
+  state->begin_calls += 1U;
+  state->current_length = 0U;
+  state->current[0] = '\0';
+  return 1;
+}
+
+static int query_key_capture_chunk(void *context, const char *bytes,
+                                   size_t len, lc_error *error) {
+  query_key_capture_state *state;
+  size_t available;
+
+  state = (query_key_capture_state *)context;
+  state->chunk_calls += 1U;
+  if (state->fail_on_chunk) {
+    error->code = LC_ERR_TRANSPORT;
+    error->message =
+        (char *)malloc(strlen("query key capture rejected chunk") + 1U);
+    assert_non_null(error->message);
+    strcpy(error->message, "query key capture rejected chunk");
+    return 0;
+  }
+  available = sizeof(state->current) - state->current_length - 1U;
+  if (len > available) {
+    len = available;
+  }
+  if (len > 0U) {
+    memcpy(state->current + state->current_length, bytes, len);
+    state->current_length += len;
+    state->current[state->current_length] = '\0';
+  }
+  return 1;
+}
+
+static int query_key_capture_end(void *context, lc_error *error) {
+  query_key_capture_state *state;
+
+  (void)error;
+  state = (query_key_capture_state *)context;
+  assert_true(state->key_count < 8U);
+  snprintf(state->keys[state->key_count], sizeof(state->keys[0]), "%s",
+           state->current);
+  state->key_count += 1U;
+  state->end_calls += 1U;
+  state->current_length = 0U;
+  state->current[0] = '\0';
+  return 1;
 }
 
 static int consumer_service_test_handle(void *context,
@@ -2443,6 +2507,36 @@ static void assert_pouch_unsupported(int rc, lc_error *error,
   lc_error_cleanup(error);
 }
 
+static lc_lease *pouch_acquire_query_key(lc_client *client, const char *key,
+                                         lc_error *error) {
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  int rc;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = key;
+  acquire.owner = "query-owner";
+  acquire.ttl_seconds = 60L;
+  lease = NULL;
+  rc = client->acquire(client, &acquire, &lease, error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  return lease;
+}
+
+static void pouch_hide_query_key(lc_lease *lease, lc_error *error) {
+  lc_metadata_req metadata_req;
+  int rc;
+
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  metadata_req.has_if_version = 1;
+  metadata_req.if_version = lease->version;
+  rc = lease->metadata(lease, &metadata_req, error);
+  assert_int_equal(rc, LC_OK);
+}
+
 static void test_pouch_endpoint_reports_query_mode_defaults(void **state) {
   char root[256];
   char endpoint[320];
@@ -2530,6 +2624,240 @@ static void test_pouch_endpoint_reports_configured_scan_fallback(
   assert_string_equal(res.fallback_engine, "scan");
 
   lc_namespace_config_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_lease *delta;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-keys-scan-pages");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+
+  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  delta = pouch_acquire_query_key(client, "delta", &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_hide_query_key(delta, &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  req.engine = "scan";
+  req.limit = 2L;
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(res.cursor, "bravo");
+  assert_string_equal(res.return_mode, "keys");
+  assert_int_equal(res.index_seq, 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.cursor = "bravo";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "charlie");
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "keys");
+  lc_query_res_cleanup(&res);
+
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  delta->close(delta);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_configured_scan_query_keys_without_hint(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-keys-configured-scan");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client_with_query_config(endpoint, "scan", NULL);
+  lease = pouch_acquire_query_key(client, "configured", &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "configured");
+  assert_string_equal(res.return_mode, "keys");
+
+  lc_query_res_cleanup(&res);
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_configured_scan_fallback_query_keys(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-keys-configured-fallback");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client_with_query_config(endpoint, "index", "scan");
+  lease = pouch_acquire_query_key(client, "fallback", &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "fallback");
+
+  lc_query_res_cleanup(&res);
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_scan_query_keys_rejects_lql_selector(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-keys-scan-selector");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"alpha\"}";
+  req.engine = "scan";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch scan query_keys supports only match-all selector");
+  assert_int_equal(capture.key_count, 0U);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_scan_query_keys_propagates_handler_error(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-keys-scan-handler-error");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+  lease = pouch_acquire_query_key(client, "handler-error", &error);
+
+  capture.fail_on_chunk = 1;
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  req.engine = "scan";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "query key capture rejected chunk");
+  assert_int_equal(capture.begin_calls, 1U);
+  assert_int_equal(capture.chunk_calls, 1U);
+  assert_int_equal(capture.end_calls, 0U);
+
+  lc_query_res_cleanup(&res);
+  lease->close(lease);
   client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -2751,6 +3079,16 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_reports_query_mode_defaults),
       cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_mode),
       cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_fallback),
+      cmocka_unit_test(
+          test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys),
+      cmocka_unit_test(
+          test_pouch_endpoint_configured_scan_query_keys_without_hint),
+      cmocka_unit_test(
+          test_pouch_endpoint_configured_scan_fallback_query_keys),
+      cmocka_unit_test(
+          test_pouch_endpoint_scan_query_keys_rejects_lql_selector),
+      cmocka_unit_test(
+          test_pouch_endpoint_scan_query_keys_propagates_handler_error),
       cmocka_unit_test(
           test_pouch_endpoint_rejects_invalid_query_mode_config),
       cmocka_unit_test(
