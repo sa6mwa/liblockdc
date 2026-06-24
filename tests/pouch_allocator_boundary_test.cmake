@@ -1,7 +1,14 @@
-set(pouch_sources
-    "${LOCKDC_ROOT}/src/lc_pouch_client.c"
-    "${LOCKDC_ROOT}/src/lc_pouch_disk.c"
+file(GLOB pouch_sources
+    "${LOCKDC_ROOT}/src/lc_pouch_*.c"
 )
+list(REMOVE_ITEM pouch_sources
+    "${LOCKDC_ROOT}/src/lc_pouch_allocator.c"
+)
+list(SORT pouch_sources)
+
+if(NOT pouch_sources)
+    message(FATAL_ERROR "missing pouch implementation source files")
+endif()
 
 set(raw_alloc_pattern "(^|[^A-Za-z0-9_])(malloc|calloc|realloc|free)[ \t\r\n]*\\(")
 
