@@ -906,6 +906,107 @@ static int bench_pouch_staged_promote(long iterations) {
   return rc == LC_OK ? 0 : 1;
 }
 
+static int bench_pouch_public_mutate(long iterations) {
+  char root[256];
+  char endpoint[320];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_mutate_req mutate_req;
+  const char *mutations[1];
+  lc_error error;
+  long expected_version;
+  long i;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "public-mutate");
+  bench_pouch_cleanup_root(root);
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "bench/public-mutate";
+  acquire.owner = "bench";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  if (rc != LC_OK) {
+    client->close(client);
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  source = bench_source_from_text("{\"counter\":0,\"owner\":\"bench\"}",
+                                  &error);
+  if (source == NULL) {
+    lease->close(lease);
+    client->close(client);
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  if (rc != LC_OK) {
+    lease->close(lease);
+    client->close(client);
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  mutations[0] = "/counter++";
+  lc_mutate_req_init(&mutate_req);
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 1U;
+  for (i = 0; i < iterations; ++i) {
+    rc = lease->mutate(lease, &mutate_req, &error);
+    if (rc != LC_OK) {
+      lease->close(lease);
+      client->close(client);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+  }
+
+  expected_version = iterations + 1L;
+  if (lease->version != expected_version) {
+    fprintf(stderr,
+            "pouch-public-mutate final version was %ld, expected %ld\n",
+            lease->version, expected_version);
+    rc = LC_ERR_PROTOCOL;
+  }
+
+  lease->close(lease);
+  client->close(client);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int bench_pouch_object_roundtrip(long iterations) {
   char root[256];
   char key[80];
@@ -1639,7 +1740,8 @@ static void print_usage(const char *argv0) {
       "pouch-state-write-1k|pouch-state-write-64k|"
       "pouch-state-write-1m|pouch-state-write-16m|pouch-state-read-1k|"
       "pouch-state-read-64k|pouch-state-read-1m|pouch-state-read-16m|"
-      "pouch-staged|pouch-object|pouch-queue|pouch-compaction|"
+      "pouch-staged|pouch-public-mutate|pouch-object|pouch-queue|"
+      "pouch-compaction|"
       "pouch-retention|pouch-scan-meta|pouch-open-rebuild|pouch-index-scan|"
       "pouch-index-keys|pouch-scan-query|pouch-index-query|"
       "pouch-scan-query-keys|pouch-index-query-keys]\n",
@@ -1662,6 +1764,7 @@ int main(int argc, char **argv) {
       {"pouch-state-read-1m", 30L, bench_pouch_state_read_1m},
       {"pouch-state-read-16m", 2L, bench_pouch_state_read_16m},
       {"pouch-staged", 1000L, bench_pouch_staged_promote},
+      {"pouch-public-mutate", 1000L, bench_pouch_public_mutate},
       {"pouch-object", 1000L, bench_pouch_object_roundtrip},
       {"pouch-queue", 1000L, bench_pouch_queue_roundtrip},
       {"pouch-compaction", 120L, bench_pouch_compaction},
