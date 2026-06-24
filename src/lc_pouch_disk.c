@@ -2220,7 +2220,6 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
   unsigned long old_replayed_size;
   int old_fd;
   int temp_fd;
-  int new_fd;
   int rc;
   size_t index;
 
@@ -2306,37 +2305,33 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
   if (rc == LC_OK && fsync(temp_fd) != 0) {
     rc = lc_pouch_set_errno(error, "failed to fsync pouch compact log");
   }
-
   store->defer_record_fsync = 0;
-  store->log_fd = old_fd;
-  close(temp_fd);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_replay(store, error);
+  }
+
   if (rc != LC_OK) {
+    store->log_fd = old_fd;
     store->replayed_record_count = old_record_count;
     store->replayed_log_size = old_replayed_size;
     (void)lc_pouch_disk_replay(store, NULL);
+    close(temp_fd);
     unlink(temp_path);
     lc_pouch_free(&store->allocator, temp_path);
     return rc;
   }
   if (rename(temp_path, store->log_path) != 0) {
+    store->log_fd = old_fd;
     store->replayed_record_count = old_record_count;
     store->replayed_log_size = old_replayed_size;
     (void)lc_pouch_disk_replay(store, NULL);
+    close(temp_fd);
     unlink(temp_path);
     lc_pouch_free(&store->allocator, temp_path);
     return lc_pouch_set_errno(error, "failed to install pouch compact log");
   }
   lc_pouch_free(&store->allocator, temp_path);
-  new_fd = open(store->log_path, O_RDWR);
-  if (new_fd < 0) {
-    return lc_pouch_set_errno(error, "failed to reopen pouch compact log");
-  }
   close(old_fd);
-  store->log_fd = new_fd;
-  rc = lc_pouch_disk_replay(store, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
   if (!lc_pouch_disk_fsync_root(store)) {
     return lc_pouch_set_errno(error, "failed to fsync pouch root directory");
   }

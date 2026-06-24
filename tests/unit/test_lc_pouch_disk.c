@@ -2407,6 +2407,17 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   assert_true(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT) <
               25U);
 
+  rc = store->read_state(store, "default", "hot-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(state_info.version, last_version);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, sizeof(payload));
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
