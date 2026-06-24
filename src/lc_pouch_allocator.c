@@ -218,6 +218,16 @@ void lc_pouch_queue_wake_status_cleanup(
   memset(status, 0, sizeof(*status));
 }
 
+void lc_pouch_backend_capabilities_cleanup(
+    const lc_pouch_allocator *allocator, lc_pouch_backend_capabilities *caps) {
+  if (caps == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, caps->backend_kind);
+  lc_pouch_free(allocator, caps->write_coordination);
+  memset(caps, 0, sizeof(*caps));
+}
+
 void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
                                         lc_pouch_staged_state_info *info) {
   if (info == NULL) {

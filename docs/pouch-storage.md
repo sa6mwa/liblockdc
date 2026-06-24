@@ -448,6 +448,11 @@ multiple client instances can coordinate through the same store, but the log is
 still append-serialized by key-level critical sections and commit ordering, not
 by a multi-writer database protocol.
 
+Current disk backend milestone: the private backend capability hook reports a
+`disk-log` backend, advisory file-lock write coordination, same-root writer
+serialization support, crash-abort marker support, backend identity support,
+and explicitly reports that it is not a general concurrent-writer database.
+
 ## Performance Model
 
 The disk store is conceived as an append-first system where expensive work is

@@ -364,6 +364,9 @@ static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       const char *namespace_name,
                                       lc_pouch_query_config *out,
                                       lc_error *error);
+static int lc_pouch_disk_backend_capabilities(
+    lc_pouch_store *self, lc_pouch_backend_capabilities *out,
+    lc_error *error);
 static int lc_pouch_disk_backend_hash(lc_pouch_store *self, char **out,
                                       lc_error *error);
 static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error);
@@ -7116,6 +7119,32 @@ static int lc_pouch_disk_query_config(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_backend_capabilities(
+    lc_pouch_store *self, lc_pouch_backend_capabilities *out,
+    lc_error *error) {
+  lc_pouch_disk_store *store;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "backend_capabilities requires store and output");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  out->backend_kind = lc_pouch_strdup(&store->allocator, "disk-log");
+  out->write_coordination =
+      lc_pouch_strdup(&store->allocator, "advisory-file-lock");
+  if (out->backend_kind == NULL || out->write_coordination == NULL) {
+    lc_pouch_backend_capabilities_cleanup(&store->allocator, out);
+    return lc_pouch_set_nomem(error,
+                              "failed to copy pouch backend capabilities");
+  }
+  out->serializes_same_root_writers = 1;
+  out->general_concurrent_writer_backend = 0;
+  out->supports_crash_abort_marker = 1;
+  out->supports_backend_hash = 1;
+  return LC_OK;
+}
+
 static char *lc_pouch_disk_make_backend_hash(lc_pouch_disk_store *store) {
   unsigned long crc;
   char stack[96];
@@ -7432,6 +7461,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.queue_stats = lc_pouch_disk_queue_stats;
   store->pub.queue_wake_status = lc_pouch_disk_queue_wake_status;
   store->pub.query_config = lc_pouch_disk_query_config;
+  store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;
   store->pub.close = lc_pouch_disk_close;
   store->pub.abort = lc_pouch_disk_abort;

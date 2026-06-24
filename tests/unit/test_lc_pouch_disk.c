@@ -6401,6 +6401,57 @@ static void test_backend_hash_persists_across_handles(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_backend_capabilities_report_disk_writer_model(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_backend_capabilities caps;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "backend-capabilities");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&caps, 0, sizeof(caps));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->backend_capabilities);
+
+  rc = store->backend_capabilities(store, &caps, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(caps.backend_kind, "disk-log");
+  assert_string_equal(caps.write_coordination, "advisory-file-lock");
+  assert_true(caps.serializes_same_root_writers);
+  assert_false(caps.general_concurrent_writer_backend);
+  assert_true(caps.supports_crash_abort_marker);
+  assert_true(caps.supports_backend_hash);
+  lc_pouch_backend_capabilities_cleanup(&allocator, &caps);
+
+  tracked.fail_malloc_size = strlen("disk-log") + 1U;
+  rc = store->backend_capabilities(store, &caps, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_string_equal(error.message,
+                      "failed to copy pouch backend capabilities");
+  assert_null(caps.backend_kind);
+  assert_null(caps.write_coordination);
+  assert_false(caps.serializes_same_root_writers);
+  assert_false(caps.general_concurrent_writer_backend);
+  assert_false(caps.supports_crash_abort_marker);
+  assert_false(caps.supports_backend_hash);
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static int child_exit_code(pid_t pid);
 static void child_process_backend_hash(const char *root, int start_fd);
 
@@ -7519,6 +7570,7 @@ int main(void) {
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),
+      cmocka_unit_test(test_backend_capabilities_report_disk_writer_model),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
       cmocka_unit_test(
           test_backend_hash_create_race_publishes_single_identity),
