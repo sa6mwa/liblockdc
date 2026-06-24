@@ -2964,6 +2964,45 @@ static void test_pouch_endpoint_query_options_configure_scan_mode(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_decodes_percent_encoded_path_and_options(
+    void **state) {
+  char root[256];
+  char endpoint[384];
+  char log_path[512];
+  lc_client *client;
+  lc_namespace_config_req req;
+  lc_namespace_config_res res;
+  lc_error error;
+  struct stat st;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-mode-url encoded");
+  test_cleanup_root(root);
+  snprintf(endpoint, sizeof(endpoint),
+           "pouch:///tmp/liblockdc-pouch-client-%ld-query-mode-url%%20encoded"
+           "?query_engine=sc%%61n&query_fallback_engine=in%%64ex",
+           (long)getpid());
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  assert_int_equal(stat(log_path, &st), 0);
+
+  lc_namespace_config_req_init(&req);
+  req.namespace_name = "default";
+  rc = client->get_namespace_config(client, &req, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(res.preferred_engine, "scan");
+  assert_string_equal(res.fallback_engine, "index");
+
+  lc_namespace_config_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_rejects_invalid_query_options(void **state) {
   char root[256];
   char endpoint[384];
@@ -3000,6 +3039,31 @@ static void test_pouch_endpoint_rejects_invalid_query_options(void **state) {
   assert_null(client);
   assert_string_equal(error.message,
                       "unsupported pouch endpoint query option");
+  lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s%%XX", root);
+  endpoints[0] = endpoint;
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "invalid percent escape in pouch endpoint");
+  assert_string_equal(error.detail, "path");
+  lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  test_endpoint_with_query(endpoint, sizeof(endpoint), root,
+                           "query_engine=sc%XXn");
+  endpoints[0] = endpoint;
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "invalid percent escape in pouch endpoint");
+  assert_string_equal(error.detail, "query_engine");
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
@@ -4233,6 +4297,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_fallback),
       cmocka_unit_test(
           test_pouch_endpoint_query_options_configure_scan_mode),
+      cmocka_unit_test(
+          test_pouch_endpoint_decodes_percent_encoded_path_and_options),
       cmocka_unit_test(test_pouch_endpoint_rejects_invalid_query_options),
       cmocka_unit_test(
           test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys),

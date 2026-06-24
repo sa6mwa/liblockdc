@@ -994,44 +994,128 @@ static int lc_query_part_equal(const char *part, size_t part_len,
   return part_len == expected_len && strncmp(part, expected, part_len) == 0;
 }
 
+static int lc_uri_hex_value(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return ch - 'a' + 10;
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return ch - 'A' + 10;
+  }
+  return -1;
+}
+
+static char *lc_pouch_endpoint_decode_component(const lc_allocator *allocator,
+                                                const char *src,
+                                                size_t src_len,
+                                                const char *component,
+                                                lc_error *error) {
+  char *decoded;
+  size_t src_index;
+  size_t dst_index;
+
+  decoded = (char *)lc_alloc_with_allocator(allocator, src_len + 1U);
+  if (decoded == NULL) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to allocate pouch endpoint component", NULL, NULL,
+                 NULL);
+    return NULL;
+  }
+  src_index = 0U;
+  dst_index = 0U;
+  while (src_index < src_len) {
+    if (src[src_index] == '%') {
+      int high;
+      int low;
+      unsigned char value;
+
+      if (src_index + 2U >= src_len) {
+        lc_free_with_allocator(allocator, decoded);
+        lc_error_set(error, LC_ERR_INVALID, 0L,
+                     "invalid percent escape in pouch endpoint", component,
+                     NULL, NULL);
+        return NULL;
+      }
+      high = lc_uri_hex_value(src[src_index + 1U]);
+      low = lc_uri_hex_value(src[src_index + 2U]);
+      if (high < 0 || low < 0) {
+        lc_free_with_allocator(allocator, decoded);
+        lc_error_set(error, LC_ERR_INVALID, 0L,
+                     "invalid percent escape in pouch endpoint", component,
+                     NULL, NULL);
+        return NULL;
+      }
+      value = (unsigned char)((high << 4) | low);
+      if (value == '\0') {
+        lc_free_with_allocator(allocator, decoded);
+        lc_error_set(error, LC_ERR_INVALID, 0L,
+                     "pouch endpoint component must not contain NUL",
+                     component, NULL, NULL);
+        return NULL;
+      }
+      decoded[dst_index++] = (char)value;
+      src_index += 3U;
+    } else {
+      decoded[dst_index++] = src[src_index++];
+    }
+  }
+  decoded[dst_index] = '\0';
+  return decoded;
+}
+
 static int lc_pouch_endpoint_parse_option(
     const lc_allocator *allocator, const char *key, size_t key_len,
     const char *value, size_t value_len, lc_pouch_endpoint_options *options,
     lc_error *error) {
+  char *decoded_key;
   char *copy;
 
   if (key_len == 0U) {
     return LC_OK;
   }
-  if (lc_query_part_equal(key, key_len, "query_engine") ||
-      lc_query_part_equal(key, key_len, "pouch_query_engine")) {
-    copy = lc_dup_bytes_with_allocator(allocator, value, value_len);
+  decoded_key = lc_pouch_endpoint_decode_component(allocator, key, key_len,
+                                                   "query option", error);
+  if (decoded_key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "query_engine") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_query_engine")) {
+    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                              "query_engine", error);
     if (copy == NULL) {
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch endpoint query_engine",
-                          NULL, NULL, NULL);
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
     }
     if (!lc_pouch_query_engine_supported(copy, 0)) {
       lc_free_with_allocator(allocator, copy);
+      lc_free_with_allocator(allocator, decoded_key);
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch endpoint query_engine must be index or scan",
                           NULL, NULL, NULL);
     }
     lc_free_with_allocator(allocator, options->query_engine);
     options->query_engine = copy;
+    lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(key, key_len, "query_fallback_engine") ||
-      lc_query_part_equal(key, key_len, "pouch_query_fallback_engine")) {
-    copy = lc_dup_bytes_with_allocator(allocator, value, value_len);
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "query_fallback_engine") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_query_fallback_engine")) {
+    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                              "query_fallback_engine", error);
     if (copy == NULL) {
-      return lc_error_set(
-          error, LC_ERR_NOMEM, 0L,
-          "failed to allocate pouch endpoint query_fallback_engine", NULL, NULL,
-          NULL);
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
     }
     if (!lc_pouch_query_engine_supported(copy, 1)) {
       lc_free_with_allocator(allocator, copy);
+      lc_free_with_allocator(allocator, decoded_key);
       return lc_error_set(
           error, LC_ERR_INVALID, 0L,
           "pouch endpoint query_fallback_engine must be none, index, or scan",
@@ -1039,8 +1123,10 @@ static int lc_pouch_endpoint_parse_option(
     }
     lc_free_with_allocator(allocator, options->query_fallback_engine);
     options->query_fallback_engine = copy;
+    lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
+  lc_free_with_allocator(allocator, decoded_key);
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "unsupported pouch endpoint query option", NULL, NULL,
                       NULL);
@@ -1059,11 +1145,10 @@ static int lc_pouch_endpoint_options_parse(
   path = lc_pouch_endpoint_path(endpoint);
   query = path != NULL ? strchr(path, '?') : NULL;
   path_len = query != NULL ? (size_t)(query - path) : strlen(path);
-  options->root_path = lc_dup_bytes_with_allocator(allocator, path, path_len);
+  options->root_path = lc_pouch_endpoint_decode_component(
+      allocator, path, path_len, "path", error);
   if (options->root_path == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch endpoint path", NULL, NULL,
-                        NULL);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   if (query == NULL) {
     return LC_OK;
