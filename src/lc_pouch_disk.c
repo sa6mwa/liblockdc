@@ -587,6 +587,12 @@ static int lc_pouch_disk_mark_replayed_to_current_size(
                                             error);
 }
 
+static int lc_pouch_disk_force_replay_locked(lc_pouch_disk_store *store,
+                                             lc_error *error) {
+  store->replayed_log_size = (unsigned long)-1;
+  return lc_pouch_disk_replay(store, error);
+}
+
 static int lc_pouch_disk_unlock(lc_pouch_disk_store *store, lc_error *error) {
   struct flock lock;
 
@@ -1356,6 +1362,7 @@ static void lc_pouch_disk_reset_indexes(lc_pouch_disk_store *store) {
     lc_pouch_disk_meta_entry_cleanup(store, &store->meta_entries[index]);
   }
   store->meta_entry_count = 0U;
+  store->query_meta_index_count = 0U;
   for (index = 0U; index < store->object_entry_count; ++index) {
     lc_pouch_disk_object_entry_cleanup(store, &store->object_entries[index]);
   }
@@ -1968,6 +1975,11 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
 
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_force_replay_locked(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
     return rc;
   }
 

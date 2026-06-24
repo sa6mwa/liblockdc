@@ -1708,6 +1708,65 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_metadata_scan_forces_full_log_replay(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_scan_meta_req req;
+  lc_pouch_scan_meta_res scan;
+  scan_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "meta-scan-full-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease";
+  meta.state_etag = "state";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  req.namespace_name = "default";
+  tracked.fail_malloc_size = strlen("default") + 1U;
+  rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to decode pouch replay key");
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+
+  memset(&capture, 0, sizeof(capture));
+  rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_int_equal(capture.versions[0], 1L);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_query_index_scan_orders_paginates_and_reports_seq(
     void **state) {
   char root[256];
@@ -4257,6 +4316,7 @@ int main(void) {
           test_replay_stops_at_oversized_record_without_allocating_payload),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
+      cmocka_unit_test(test_metadata_scan_forces_full_log_replay),
       cmocka_unit_test(
           test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(

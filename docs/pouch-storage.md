@@ -499,8 +499,10 @@ with `pouch:///path?query_engine=scan&query_fallback_engine=index`. Endpoint
 settings override the client defaults for that opened store. Scan mode is
 useful for tiny stores, diagnostics, index rebuild validation, and early
 deployments before a particular index feature exists. It is the explicit
-full-scan route and must preserve stable key ordering while avoiding payload
-materialization until a surviving query row needs its document body.
+full-scan route: the disk backend must rebuild the scan projection from the
+authoritative log before serving the scan page, preserve stable key ordering,
+and avoid payload materialization until a surviving query row needs its document
+body.
 
 The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index
