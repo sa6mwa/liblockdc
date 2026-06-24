@@ -658,18 +658,20 @@ rather than falling back to a single full-log scan. Scan-mode key-only queries
 should use a storage key-scan primitive when the backend provides one, so
 configured scan mode does not copy full metadata rows for `query_keys`.
 Key-only indexed scans have their own storage primitive and copy only visible
-keys before invoking callbacks, so `query_keys` does not pay for metadata row
-copies that only document scans need. Large-namespace low-match indexed
-searches must be able to walk the relevant posting/candidate sets without
-loading every metadata summary or every document payload in the namespace.
+keys before invoking callbacks. The current disk backend serves that primitive
+from the query-summary projection rather than the full metadata row array, so
+`query_keys` does not pay for metadata row copies that only document scans need.
+Large-namespace low-match indexed searches must be able to walk the relevant
+posting/candidate sets without loading every metadata summary or every document
+payload in the namespace.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
 returns `keys` as the return mode. Both `query_keys` and `query` report local
 metadata such as `query_candidates`. `query` streams NDJSON document rows in the
 same ordered page, embeds JSON state payloads as `document`, emits `null` for
-non-JSON or empty state payloads, and returns `documents`. Pouch `flush_index` is
-synchronous for the
+non-JSON or empty state payloads, and returns `documents`. Pouch `flush_index`
+is synchronous for the
 current local projection: it returns accepted/flushed/not-pending and the
 latest index sequence. That sequence is a logical monotonic token derived from
 the storage high-water mark, not a physical log record count, so compaction and
