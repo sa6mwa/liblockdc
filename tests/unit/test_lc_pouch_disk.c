@@ -2527,7 +2527,7 @@ static void test_query_index_sidecar_appends_metadata_records(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_keys_replays_sidecar_without_metadata_log(
+static void test_query_index_keys_ignores_sidecar_without_metadata_log(
     void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -2608,11 +2608,8 @@ static void test_query_index_keys_replays_sidecar_without_metadata_log(
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(capture.count, 2U);
-  assert_string_equal(capture.keys[0], "alpha");
-  assert_string_equal(capture.keys[1], "bravo");
+  assert_int_equal(capture.count, 0U);
   assert_false(scan.truncated);
-  assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   rc = store->close(store, &error);
@@ -5215,7 +5212,7 @@ int main(void) {
       cmocka_unit_test(test_index_flush_reports_current_projection),
       cmocka_unit_test(test_query_index_sidecar_appends_metadata_records),
       cmocka_unit_test(
-          test_query_index_keys_replays_sidecar_without_metadata_log),
+          test_query_index_keys_ignores_sidecar_without_metadata_log),
       cmocka_unit_test(test_query_index_sidecar_compacts_with_store_log),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),

@@ -3582,6 +3582,31 @@ static char *lc_pouch_disk_replay_query_index_string(
   return copy;
 }
 
+static int lc_pouch_disk_query_index_matches_meta(lc_pouch_disk_store *store,
+                                                  const char *namespace_name,
+                                                  const char *key,
+                                                  const char *etag,
+                                                  long version, int deleted) {
+  lc_pouch_disk_meta_entry *entry;
+  int index;
+
+  index = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
+  if (index < 0) {
+    return 0;
+  }
+  entry = &store->meta_entries[index];
+  if (entry->deleted != deleted) {
+    return 0;
+  }
+  if (entry->etag == NULL || etag == NULL || strcmp(entry->etag, etag) != 0) {
+    return 0;
+  }
+  if (!deleted && entry->meta.version != version) {
+    return 0;
+  }
+  return 1;
+}
+
 static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
                                             lc_error *error) {
   unsigned char header[LC_POUCH_QUERY_INDEX_HEADER_SIZE];
@@ -3729,7 +3754,9 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
     meta.query_hidden =
         (flags & LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN) != 0UL;
     deleted = (flags & LC_POUCH_QUERY_INDEX_FLAG_DELETED) != 0UL;
-    if (!lc_pouch_disk_query_summary_upsert(store, namespace_name, key, etag,
+    if (lc_pouch_disk_query_index_matches_meta(store, namespace_name, key, etag,
+                                               (long)version, deleted) &&
+        !lc_pouch_disk_query_summary_upsert(store, namespace_name, key, etag,
                                             (long)version, &meta, deleted)) {
       lc_pouch_free(&store->allocator, namespace_name);
       lc_pouch_free(&store->allocator, key);
