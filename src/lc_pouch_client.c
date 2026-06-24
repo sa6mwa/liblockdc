@@ -2208,6 +2208,37 @@ static int lc_pouch_query_keys_scan_visit(void *context,
   return LC_OK;
 }
 
+static int lc_pouch_query_keys_index_visit(void *context, const char *key,
+                                           lc_error *error) {
+  lc_pouch_query_keys_scan_context *scan;
+  size_t key_len;
+
+  scan = (lc_pouch_query_keys_scan_context *)context;
+  if (scan == NULL || scan->handler == NULL || key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query_keys index visitor requires context and "
+                        "key",
+                        NULL, NULL, NULL);
+  }
+  if (scan->handler->begin != NULL &&
+      !scan->handler->begin(scan->handler_context, error)) {
+    return lc_pouch_query_keys_callback_failed(
+        error, "pouch query_keys begin callback failed");
+  }
+  key_len = strlen(key);
+  if (scan->handler->chunk != NULL &&
+      !scan->handler->chunk(scan->handler_context, key, key_len, error)) {
+    return lc_pouch_query_keys_callback_failed(
+        error, "pouch query_keys chunk callback failed");
+  }
+  if (scan->handler->end != NULL &&
+      !scan->handler->end(scan->handler_context, error)) {
+    return lc_pouch_query_keys_callback_failed(
+        error, "pouch query_keys end callback failed");
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_sink_write_all(lc_sink *dst, const void *bytes,
                                    size_t length, lc_error *error) {
   if (dst == NULL) {
@@ -2648,7 +2679,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
                         NULL, NULL);
   }
   if (client->pouch_store == NULL ||
-      client->pouch_store->query_index_scan == NULL) {
+      client->pouch_store->query_index_keys_scan == NULL) {
     return lc_pouch_client_unsupported(
         error, "pouch indexed query_keys is not available");
   }
@@ -2699,8 +2730,8 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   scan_context.handler = handler;
   scan_context.handler_context = context;
 
-  rc = client->pouch_store->query_index_scan(
-      client->pouch_store, &scan_req, lc_pouch_query_keys_scan_visit,
+  rc = client->pouch_store->query_index_keys_scan(
+      client->pouch_store, &scan_req, lc_pouch_query_keys_index_visit,
       &scan_context, &scan_res, error);
   if (rc != LC_OK) {
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);

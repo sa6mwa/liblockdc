@@ -517,6 +517,9 @@ indexed match-all scans do not allocate and sort the general metadata table on
 every request. This projection is rebuilt from the authoritative log on open and
 updated on metadata put/delete; later field postings and `liblql` predicates
 must extend this boundary rather than falling back to a single full-log scan.
+Key-only indexed scans have their own storage primitive and copy only visible
+keys before invoking callbacks, so `query_keys` does not pay for metadata row
+copies that only document scans need.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and

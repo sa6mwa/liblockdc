@@ -114,6 +114,10 @@ typedef struct lc_pouch_scan_meta_res {
 typedef int (*lc_pouch_scan_meta_visit_fn)(
     void *context, const lc_pouch_scan_meta_row *row, lc_error *error);
 
+typedef int (*lc_pouch_query_index_key_visit_fn)(void *context,
+                                                 const char *key,
+                                                 lc_error *error);
+
 typedef struct lc_pouch_query_index_scan_req {
   const char *namespace_name;
   const char *start_after;
@@ -253,6 +257,12 @@ struct lc_pouch_store {
                           void *visit_context,
                           lc_pouch_query_index_scan_res *out,
                           lc_error *error);
+  int (*query_index_keys_scan)(lc_pouch_store *self,
+                               const lc_pouch_query_index_scan_req *req,
+                               lc_pouch_query_index_key_visit_fn visit,
+                               void *visit_context,
+                               lc_pouch_query_index_scan_res *out,
+                               lc_error *error);
   int (*flush_index)(lc_pouch_store *self, const char *namespace_name,
                      const char *mode, lc_pouch_index_flush_res *out,
                      lc_error *error);

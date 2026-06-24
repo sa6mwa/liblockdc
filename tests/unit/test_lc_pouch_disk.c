@@ -460,6 +460,11 @@ typedef struct scan_capture {
   size_t count;
 } scan_capture;
 
+typedef struct key_capture {
+  char keys[8][64];
+  size_t count;
+} key_capture;
+
 static int capture_scan_row(void *context, const lc_pouch_scan_meta_row *row,
                             lc_error *error) {
   scan_capture *capture;
@@ -475,6 +480,19 @@ static int capture_scan_row(void *context, const lc_pouch_scan_meta_row *row,
            sizeof(capture->keys[capture->count]), "%s", row->key);
   capture->versions[capture->count] = row->meta->version;
   capture->query_hidden[capture->count] = row->meta->query_hidden;
+  capture->count++;
+  return LC_OK;
+}
+
+static int capture_query_key(void *context, const char *key, lc_error *error) {
+  key_capture *capture;
+
+  (void)error;
+  capture = (key_capture *)context;
+  assert_non_null(key);
+  assert_true(capture->count < sizeof(capture->keys) / sizeof(capture->keys[0]));
+  snprintf(capture->keys[capture->count],
+           sizeof(capture->keys[capture->count]), "%s", key);
   capture->count++;
   return LC_OK;
 }
@@ -1884,6 +1902,85 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 1U);
   assert_string_equal(capture.keys[0], "charlie");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_index_keys_scan_avoids_metadata_row_copies(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-key-only");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->query_index_keys_scan);
+
+  meta.owner = "owner-key-only-allocation-sentinel";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  tracked.fail_malloc_size = strlen(meta.owner) + 1U;
+  req.namespace_name = "default";
+  req.limit = 1U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "alpha");
+  assert_true(scan.index_seq > 0UL);
+  tracked.fail_malloc_size = 0U;
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = "alpha";
+  req.limit = 8U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
   assert_false(scan.truncated);
   assert_null(scan.next_start_after);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
@@ -4319,6 +4416,8 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_forces_full_log_replay),
       cmocka_unit_test(
           test_query_index_scan_orders_paginates_and_reports_seq),
+      cmocka_unit_test(
+          test_query_index_keys_scan_avoids_metadata_row_copies),
       cmocka_unit_test(
           test_query_index_projection_replays_updates_and_deletes),
       cmocka_unit_test(
