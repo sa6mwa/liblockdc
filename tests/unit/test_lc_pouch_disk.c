@@ -2835,6 +2835,13 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   lc_pouch_meta meta;
   lc_pouch_store_meta_res meta_res;
   lc_pouch_meta_record loaded_meta;
+  lc_pouch_query_index_scan_req query_req;
+  lc_pouch_query_index_scan_res before_query;
+  lc_pouch_query_index_scan_res after_query;
+  lc_pouch_query_index_scan_res reopened_query;
+  scan_capture before_capture;
+  scan_capture after_capture;
+  scan_capture reopened_capture;
   lc_pouch_put_object_opts object_opts;
   lc_pouch_object_selector selector;
   lc_pouch_object_info object_info;
@@ -2861,6 +2868,13 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   memset(&meta, 0, sizeof(meta));
   memset(&meta_res, 0, sizeof(meta_res));
   memset(&loaded_meta, 0, sizeof(loaded_meta));
+  memset(&query_req, 0, sizeof(query_req));
+  memset(&before_query, 0, sizeof(before_query));
+  memset(&after_query, 0, sizeof(after_query));
+  memset(&reopened_query, 0, sizeof(reopened_query));
+  memset(&before_capture, 0, sizeof(before_capture));
+  memset(&after_capture, 0, sizeof(after_capture));
+  memset(&reopened_capture, 0, sizeof(reopened_capture));
   memset(&object_opts, 0, sizeof(object_opts));
   memset(&selector, 0, sizeof(selector));
   memset(&object_info, 0, sizeof(object_info));
@@ -2885,6 +2899,14 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   rc = store->store_meta(store, "default", "lease-key", &meta, NULL,
                          &meta_res, &error);
   assert_int_equal(rc, LC_OK);
+
+  query_req.namespace_name = "default";
+  rc = store->query_index_scan(store, &query_req, capture_scan_row,
+                               &before_capture, &before_query, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(before_capture.count, 1U);
+  assert_string_equal(before_capture.keys[0], "lease-key");
+  assert_true(before_query.index_seq >= 10UL);
 
   object_opts.name = "live.txt";
   object_opts.content_type = "text/plain";
@@ -2923,6 +2945,13 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   assert_true(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT) <
               25U);
 
+  rc = store->query_index_scan(store, &query_req, capture_scan_row,
+                               &after_capture, &after_query, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(after_capture.count, 1U);
+  assert_string_equal(after_capture.keys[0], "lease-key");
+  assert_true(after_query.index_seq >= before_query.index_seq);
+
   rc = store->read_state(store, "default", "hot-key", &body, &state_info,
                          &error);
   assert_int_equal(rc, LC_OK);
@@ -2940,6 +2969,13 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
+
+  rc = store->query_index_scan(store, &query_req, capture_scan_row,
+                               &reopened_capture, &reopened_query, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reopened_capture.count, 1U);
+  assert_string_equal(reopened_capture.keys[0], "lease-key");
+  assert_true(reopened_query.index_seq >= after_query.index_seq);
 
   rc = store->read_state(store, "default", "hot-key", &body, &state_info,
                          &error);
@@ -2993,6 +3029,9 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   assert_true(after_res.new_version > last_version);
 
   lc_pouch_put_state_res_cleanup(&allocator, &after_res);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &before_query);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &after_query);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &reopened_query);
   lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
   lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
   rc = store->close(store, &error);

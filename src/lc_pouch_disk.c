@@ -212,6 +212,8 @@ static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
 static int lc_pouch_disk_query_index_reserve(lc_pouch_disk_store *store);
 static int lc_pouch_disk_query_index_insert(lc_pouch_disk_store *store,
                                             size_t meta_index);
+static unsigned long lc_pouch_disk_index_sequence(
+    const lc_pouch_disk_store *store);
 static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
                                               unsigned long log_size,
                                               lc_error *error);
@@ -996,6 +998,21 @@ static int lc_pouch_disk_query_index_insert(lc_pouch_disk_store *store,
   store->query_meta_indices[position] = meta_index;
   store->query_meta_index_count++;
   return 1;
+}
+
+static unsigned long lc_pouch_disk_index_sequence(
+    const lc_pouch_disk_store *store) {
+  unsigned long version_seq;
+
+  if (store == NULL) {
+    return 0UL;
+  }
+  version_seq = store->next_version > 1L
+                    ? (unsigned long)(store->next_version - 1L)
+                    : 0UL;
+  return version_seq > store->replayed_record_count
+             ? version_seq
+             : store->replayed_record_count;
 }
 
 static int lc_pouch_disk_object_entry_ptr_compare(const void *left,
@@ -2213,7 +2230,7 @@ static int lc_pouch_disk_query_index_scan(
                                 "failed to allocate pouch query index cursor");
     }
   }
-  out->index_seq = store->replayed_record_count;
+  out->index_seq = lc_pouch_disk_index_sequence(store);
 
   rc = lc_pouch_disk_unlock(store, error);
   if (rc != LC_OK) {
@@ -2370,7 +2387,7 @@ static int lc_pouch_disk_query_index_keys_scan(
                                 "failed to allocate pouch query index cursor");
     }
   }
-  out->index_seq = store->replayed_record_count;
+  out->index_seq = lc_pouch_disk_index_sequence(store);
 
   rc = lc_pouch_disk_unlock(store, error);
   if (rc != LC_OK) {
@@ -2440,7 +2457,7 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
   out->accepted = 1;
   out->flushed = 1;
   out->pending = 0;
-  out->index_seq = store->replayed_record_count;
+  out->index_seq = lc_pouch_disk_index_sequence(store);
   if (out->namespace_name == NULL || out->mode == NULL ||
       out->flush_id == NULL) {
     lc_pouch_index_flush_res_cleanup(&store->allocator, out);
