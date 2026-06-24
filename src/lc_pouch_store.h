@@ -322,8 +322,11 @@ typedef struct lc_pouch_lock_status {
   int uses_fcntl_byte_range_lock;
   int uses_global_writer_lock;
   int uses_per_key_lock_cache;
+  size_t key_lock_stripe_count;
+  size_t process_active_key_locks;
   unsigned long lock_acquisitions;
   unsigned long lock_releases;
+  unsigned long process_key_lock_contentions;
   unsigned long replay_refreshes;
   unsigned long log_reopens;
 } lc_pouch_lock_status;

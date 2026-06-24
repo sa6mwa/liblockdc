@@ -239,8 +239,10 @@ struct lc_pouch_key_lock {
 static lc_pouch_key_lock *lc_pouch_process_key_locks;
 static lc_pouch_lock_fd_cache_entry *lc_pouch_process_lock_fd_cache;
 static lc_pouch_read_fd_cache_entry *lc_pouch_process_read_fd_cache;
+static size_t lc_pouch_process_key_lock_count;
 static size_t lc_pouch_process_lock_fd_cache_count;
 static size_t lc_pouch_process_read_fd_cache_count;
+static unsigned long lc_pouch_process_key_lock_contentions;
 static unsigned long lc_pouch_process_lock_fd_cache_clock;
 static unsigned long lc_pouch_process_read_fd_cache_clock;
 static unsigned long lc_pouch_process_lock_fd_cache_hits;
@@ -963,10 +965,17 @@ static int lc_pouch_disk_process_key_lock_held(const char *path) {
   return held;
 }
 
+static void lc_pouch_disk_process_key_lock_contention(void) {
+  (void)pthread_mutex_lock(&lc_pouch_process_key_registry_mutex);
+  lc_pouch_process_key_lock_contentions++;
+  (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
+}
+
 static void lc_pouch_disk_process_key_lock_add(lc_pouch_key_lock *lock) {
   (void)pthread_mutex_lock(&lc_pouch_process_key_registry_mutex);
   lock->process_next = lc_pouch_process_key_locks;
   lc_pouch_process_key_locks = lock;
+  lc_pouch_process_key_lock_count++;
   (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
 }
 
@@ -979,6 +988,9 @@ static void lc_pouch_disk_process_key_lock_remove(lc_pouch_key_lock *lock) {
     if (*cursor == lock) {
       *cursor = lock->process_next;
       lock->process_next = NULL;
+      if (lc_pouch_process_key_lock_count > 0U) {
+        lc_pouch_process_key_lock_count--;
+      }
       (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
       return;
     }
@@ -1150,6 +1162,24 @@ static void lc_pouch_disk_lock_fd_cache_snapshot(
   out->evictions = lc_pouch_process_lock_fd_cache_evictions;
   out->closes = lc_pouch_process_lock_fd_cache_closes;
   (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
+}
+
+static void lc_pouch_disk_process_key_lock_snapshot(
+    size_t *active_key_locks, unsigned long *contentions) {
+  if (active_key_locks != NULL) {
+    *active_key_locks = 0U;
+  }
+  if (contentions != NULL) {
+    *contentions = 0UL;
+  }
+  (void)pthread_mutex_lock(&lc_pouch_process_key_registry_mutex);
+  if (active_key_locks != NULL) {
+    *active_key_locks = lc_pouch_process_key_lock_count;
+  }
+  if (contentions != NULL) {
+    *contentions = lc_pouch_process_key_lock_contentions;
+  }
+  (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
 }
 
 static lc_pouch_read_cache_owner *lc_pouch_read_cache_owner_create(
@@ -9743,6 +9773,9 @@ static int lc_pouch_disk_lock_status(lc_pouch_store *self,
   out->uses_fcntl_byte_range_lock = 1;
   out->uses_global_writer_lock = 1;
   out->uses_per_key_lock_cache = 1;
+  out->key_lock_stripe_count = LC_POUCH_KEY_LOCK_STRIPES;
+  lc_pouch_disk_process_key_lock_snapshot(&out->process_active_key_locks,
+                                          &out->process_key_lock_contentions);
   out->lock_acquisitions = store->lock_acquisitions;
   out->lock_releases = store->lock_releases;
   out->replay_refreshes = store->lock_replay_refreshes;
@@ -9848,6 +9881,7 @@ static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
   }
   stripes_locked = 1;
   if (lc_pouch_disk_process_key_lock_held(path)) {
+    lc_pouch_disk_process_key_lock_contention();
     lc_pouch_free(&store->allocator, path);
     lc_pouch_disk_unlock_key_stripes(store, stripe, error);
     return LC_OK;
@@ -9945,6 +9979,7 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
   }
   stripes_locked = 1;
   while (lc_pouch_disk_process_key_lock_held(path)) {
+    lc_pouch_disk_process_key_lock_contention();
     lc_pouch_disk_sleep_for_key_lock();
   }
   rc = lc_pouch_disk_open_key_lock_fd(store, path, &fd, error);

@@ -10264,6 +10264,14 @@ static void test_try_lock_key_serializes_same_process_handles(void **state) {
   assert_false(acquired);
   assert_null(second_lock);
 
+  rc = second->lock_status(second, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(status.mode, "key-striped-fcntl");
+  assert_true(status.key_lock_stripe_count > 0U);
+  assert_true(status.process_active_key_locks >= 1U);
+  assert_true(status.process_key_lock_contentions >= 1UL);
+  lc_pouch_lock_status_cleanup(&allocator, &status);
+
   rc = second->try_lock_key(second, "default", "alpha/gamma", &second_lock,
                             &acquired, &error);
   assert_int_equal(rc, LC_OK);
@@ -10286,7 +10294,10 @@ static void test_try_lock_key_serializes_same_process_handles(void **state) {
   rc = second->lock_status(second, &status, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(status.mode, "key-striped-fcntl");
+  assert_true(status.key_lock_stripe_count > 0U);
+  assert_true(status.process_active_key_locks >= 1U);
   assert_true(status.lock_acquisitions >= 2UL);
+  assert_true(status.process_key_lock_contentions >= 1UL);
   lc_pouch_lock_status_cleanup(&allocator, &status);
 
   rc = second->unlock_key(second, second_lock, &error);
