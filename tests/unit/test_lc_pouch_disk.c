@@ -8581,6 +8581,113 @@ static void child_process_copy_object_after_ready(const char *root,
   _exit(0);
 }
 
+static void child_process_enqueue_after_ready(const char *root, int start_fd,
+                                              int ready_fd) {
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_enqueue_opts opts;
+  lc_pouch_queue_message_info info;
+  lc_error error;
+  char start;
+  int rc;
+
+  store = NULL;
+  source = NULL;
+  memset(&opts, 0, sizeof(opts));
+  memset(&info, 0, sizeof(info));
+  memset(&error, 0, sizeof(error));
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(120);
+  }
+  opts.content_type = "text/plain";
+  opts.visibility_timeout_seconds = 30L;
+  opts.ttl_seconds = 3600L;
+  opts.max_attempts = 3;
+  rc = lc_source_from_memory("queued-blocked",
+                             strlen("queued-blocked"), &source, &error);
+  if (rc != LC_OK) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(121);
+  }
+  if (read(start_fd, &start, 1U) != 1) {
+    lc_source_close(source);
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(122);
+  }
+  close(start_fd);
+  if (write(ready_fd, "r", 1U) != 1) {
+    lc_source_close(source);
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(123);
+  }
+  close(ready_fd);
+  rc = store->enqueue_message(store, "default", "jobs", source, &opts, &info,
+                              &error);
+  lc_source_close(source);
+  lc_pouch_queue_message_info_cleanup(NULL, &info);
+  store->close(store, NULL);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(124);
+  }
+  lc_error_cleanup(&error);
+  _exit(0);
+}
+
+static void child_process_dequeue_after_ready(const char *root, int start_fd,
+                                              int ready_fd) {
+  lc_pouch_store *store;
+  lc_source *body;
+  lc_pouch_dequeue_opts opts;
+  lc_pouch_queue_message_info info;
+  lc_error error;
+  char start;
+  int rc;
+
+  store = NULL;
+  body = NULL;
+  memset(&opts, 0, sizeof(opts));
+  memset(&info, 0, sizeof(info));
+  memset(&error, 0, sizeof(error));
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(130);
+  }
+  opts.owner = "blocked-worker";
+  opts.visibility_timeout_seconds = 30L;
+  if (read(start_fd, &start, 1U) != 1) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(131);
+  }
+  close(start_fd);
+  if (write(ready_fd, "r", 1U) != 1) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(132);
+  }
+  close(ready_fd);
+  rc = store->dequeue_message(store, "default", "jobs", &opts, &body, &info,
+                              &error);
+  if (body != NULL) {
+    lc_source_close(body);
+  }
+  lc_pouch_queue_message_info_cleanup(NULL, &info);
+  store->close(store, NULL);
+  if (rc != LC_OK || body == NULL) {
+    lc_error_cleanup(&error);
+    _exit(133);
+  }
+  lc_error_cleanup(&error);
+  _exit(0);
+}
+
 static void test_try_lock_key_serializes_same_process_handles(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -9062,6 +9169,193 @@ static void test_copy_object_waits_for_cross_process_key_lock(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_enqueue_message_waits_for_cross_process_queue_lock(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_key_lock *lock;
+  lc_pouch_queue_stats stats;
+  lc_error error;
+  int start_pipe[2];
+  int ready_pipe[2];
+  char ready;
+  int acquired;
+  int status;
+  int child_code;
+  int rc;
+  pid_t pid;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "enqueue-queue-lock-wait");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&stats, 0, sizeof(stats));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  lock = NULL;
+  start_pipe[0] = -1;
+  start_pipe[1] = -1;
+  ready_pipe[0] = -1;
+  ready_pipe[1] = -1;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = pipe(start_pipe);
+  assert_int_equal(rc, 0);
+  rc = pipe(ready_pipe);
+  assert_int_equal(rc, 0);
+  pid = fork();
+  assert_true(pid >= 0);
+  if (pid == 0) {
+    close(start_pipe[1]);
+    close(ready_pipe[0]);
+    child_process_enqueue_after_ready(root, start_pipe[0], ready_pipe[1]);
+  }
+  close(start_pipe[0]);
+  start_pipe[0] = -1;
+  close(ready_pipe[1]);
+  ready_pipe[1] = -1;
+
+  rc = store->try_lock_key(store, "default", "jobs", &lock, &acquired,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(lock);
+  assert_int_equal(write(start_pipe[1], "x", 1U), 1);
+  close(start_pipe[1]);
+  start_pipe[1] = -1;
+  assert_int_equal(read(ready_pipe[0], &ready, 1U), 1);
+  close(ready_pipe[0]);
+  ready_pipe[0] = -1;
+
+  test_sleep_for_lock_wait();
+  status = 0;
+  rc = waitpid(pid, &status, WNOHANG);
+  assert_int_equal(rc, 0);
+
+  rc = store->unlock_key(store, lock, &error);
+  assert_int_equal(rc, LC_OK);
+  lock = NULL;
+  child_code = child_exit_code(pid);
+  assert_int_equal(child_code, 0);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 1);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_non_null(stats.head_message_id);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_dequeue_message_waits_for_cross_process_queue_lock(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_key_lock *lock;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_stats stats;
+  lc_error error;
+  int start_pipe[2];
+  int ready_pipe[2];
+  char ready;
+  int acquired;
+  int status;
+  int child_code;
+  int rc;
+  pid_t pid;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "dequeue-queue-lock-wait");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&stats, 0, sizeof(stats));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  source = NULL;
+  lock = NULL;
+  start_pipe[0] = -1;
+  start_pipe[1] = -1;
+  ready_pipe[0] = -1;
+  ready_pipe[1] = -1;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queue-lock-payload");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+
+  rc = pipe(start_pipe);
+  assert_int_equal(rc, 0);
+  rc = pipe(ready_pipe);
+  assert_int_equal(rc, 0);
+  pid = fork();
+  assert_true(pid >= 0);
+  if (pid == 0) {
+    close(start_pipe[1]);
+    close(ready_pipe[0]);
+    child_process_dequeue_after_ready(root, start_pipe[0], ready_pipe[1]);
+  }
+  close(start_pipe[0]);
+  start_pipe[0] = -1;
+  close(ready_pipe[1]);
+  ready_pipe[1] = -1;
+
+  rc = store->try_lock_key(store, "default", "jobs", &lock, &acquired,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(lock);
+  assert_int_equal(write(start_pipe[1], "x", 1U), 1);
+  close(start_pipe[1]);
+  start_pipe[1] = -1;
+  assert_int_equal(read(ready_pipe[0], &ready, 1U), 1);
+  close(ready_pipe[0]);
+  ready_pipe[0] = -1;
+
+  test_sleep_for_lock_wait();
+  status = 0;
+  rc = waitpid(pid, &status, WNOHANG);
+  assert_int_equal(rc, 0);
+
+  rc = store->unlock_key(store, lock, &error);
+  assert_int_equal(rc, LC_OK);
+  lock = NULL;
+  child_code = child_exit_code(pid);
+  assert_int_equal(child_code, 0);
+
+  rc = store->queue_stats(store, "default", "jobs", &stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats.available, 0);
+  assert_int_equal(stats.pending_candidates, 1);
+  lc_pouch_queue_stats_cleanup(&allocator, &stats);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
   char root[256];
   char marker_path[512];
@@ -9306,6 +9600,8 @@ int main(void) {
       cmocka_unit_test(test_store_meta_waits_for_cross_process_key_lock),
       cmocka_unit_test(test_put_object_waits_for_cross_process_key_lock),
       cmocka_unit_test(test_copy_object_waits_for_cross_process_key_lock),
+      cmocka_unit_test(test_enqueue_message_waits_for_cross_process_queue_lock),
+      cmocka_unit_test(test_dequeue_message_waits_for_cross_process_queue_lock),
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),

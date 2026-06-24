@@ -485,9 +485,11 @@ store handles in the same process contend before the full striped lock cache
 lands. State write/remove, metadata store/delete, and single-key object
 put/delete paths now acquire the per-key guard before the global append-log
 lock. Multi-key object copy acquires source and destination key guards in
-lexicographic order before the global append-log lock; queue mutation families
-still use the global writer lock until the cutover is completed and diagnostics
-are updated.
+lexicographic order before the global append-log lock. Queue enqueue, dequeue,
+ack, nack, and extend acquire the queue-name key guard before the global
+append-log lock. The remaining cutover work is the full striped lock cache and
+diagnostic updates that distinguish the per-operation guards from the global
+writer lock.
 
 ## Performance Model
 
