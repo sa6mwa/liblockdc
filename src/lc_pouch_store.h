@@ -320,6 +320,16 @@ typedef struct lc_pouch_lock_fd_cache_status {
   unsigned long closes;
 } lc_pouch_lock_fd_cache_status;
 
+typedef struct lc_pouch_read_fd_cache_status {
+  size_t capacity;
+  size_t entries;
+  unsigned long hits;
+  unsigned long misses;
+  unsigned long stale;
+  unsigned long evictions;
+  unsigned long closes;
+} lc_pouch_read_fd_cache_status;
+
 typedef struct lc_pouch_backend_capabilities {
   char *backend_kind;
   char *write_coordination;
@@ -453,6 +463,9 @@ struct lc_pouch_store {
                     lc_error *error);
   int (*lock_fd_cache_status)(lc_pouch_store *self,
                               lc_pouch_lock_fd_cache_status *out,
+                              lc_error *error);
+  int (*read_fd_cache_status)(lc_pouch_store *self,
+                              lc_pouch_read_fd_cache_status *out,
                               lc_error *error);
   int (*query_config)(lc_pouch_store *self, const char *namespace_name,
                       lc_pouch_query_config *out, lc_error *error);

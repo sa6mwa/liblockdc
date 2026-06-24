@@ -493,6 +493,15 @@ lexicographic order before the global append-log lock. Queue enqueue, dequeue,
 ack, nack, and extend acquire the queue-name key guard before the global
 append-log lock. The remaining cutover work is deeper diagnostics for
 stripe/cache utilization.
+Read diagnostics expose a bounded process-wide read-file descriptor cache for
+the current single-log store. State reads, object reads, and queue dequeue
+payload reads borrow an idle descriptor when possible, seek it to the live
+payload span, and return it to the cache when the `lc_source` closes. Active
+read sources keep their own descriptor and are never closed by cache eviction.
+Before reusing a cached descriptor, the backend validates that its device/inode
+still matches the current `store.log` path, so compaction or log replacement
+cannot route a new reader to obsolete bytes while older active readers continue
+to read from their original descriptor.
 
 ## Performance Model
 
@@ -525,6 +534,10 @@ invariants: payload spans are copied with bounded buffers, existing read
 sources keep their old file descriptor alive across rename, foreground writers
 stay serialized, corrupt tails remain replay-truncated, and monotonic tokens
 survive compaction through a private high-water record.
+Idle read descriptors are cached separately from active read sources. The cache
+is a performance artifact only: entries are bounded, allocator-backed, reusable
+across state/object/queue payload reads, and discarded when their descriptor no
+longer names the active log file.
 Opening a store also removes stale `store.compact.tmp` and
 `query.index.compact.tmp` files while holding the writer lock, so crash leftovers
 from an interrupted compaction do not accumulate or confuse later runs.

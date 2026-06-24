@@ -61,6 +61,7 @@
 #define LC_POUCH_WRITER_MARKER_TTL_SECONDS 60L
 #define LC_POUCH_KEY_LOCK_STRIPES 64U
 #define LC_POUCH_LOCK_FD_CACHE_CAPACITY 32U
+#define LC_POUCH_READ_FD_CACHE_CAPACITY 32U
 
 typedef struct lc_pouch_disk_state_entry {
   char *namespace_name;
@@ -123,6 +124,14 @@ typedef struct lc_pouch_lock_fd_cache_entry {
   unsigned long used_at;
   struct lc_pouch_lock_fd_cache_entry *next;
 } lc_pouch_lock_fd_cache_entry;
+
+typedef struct lc_pouch_read_fd_cache_entry {
+  lc_pouch_allocator allocator;
+  char *path;
+  int fd;
+  unsigned long used_at;
+  struct lc_pouch_read_fd_cache_entry *next;
+} lc_pouch_read_fd_cache_entry;
 
 typedef struct lc_pouch_disk_queue_entry {
   char *namespace_name;
@@ -208,21 +217,33 @@ struct lc_pouch_key_lock {
 
 static lc_pouch_key_lock *lc_pouch_process_key_locks;
 static lc_pouch_lock_fd_cache_entry *lc_pouch_process_lock_fd_cache;
+static lc_pouch_read_fd_cache_entry *lc_pouch_process_read_fd_cache;
 static size_t lc_pouch_process_lock_fd_cache_count;
+static size_t lc_pouch_process_read_fd_cache_count;
 static unsigned long lc_pouch_process_lock_fd_cache_clock;
+static unsigned long lc_pouch_process_read_fd_cache_clock;
 static unsigned long lc_pouch_process_lock_fd_cache_hits;
 static unsigned long lc_pouch_process_lock_fd_cache_misses;
 static unsigned long lc_pouch_process_lock_fd_cache_evictions;
 static unsigned long lc_pouch_process_lock_fd_cache_closes;
+static unsigned long lc_pouch_process_read_fd_cache_hits;
+static unsigned long lc_pouch_process_read_fd_cache_misses;
+static unsigned long lc_pouch_process_read_fd_cache_stale;
+static unsigned long lc_pouch_process_read_fd_cache_evictions;
+static unsigned long lc_pouch_process_read_fd_cache_closes;
 static pthread_once_t lc_pouch_process_key_stripes_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t lc_pouch_process_key_stripes[LC_POUCH_KEY_LOCK_STRIPES];
 static pthread_mutex_t lc_pouch_process_key_registry_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_process_lock_fd_cache_mutex =
     PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t lc_pouch_process_read_fd_cache_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct lc_pouch_file_source {
   lc_pouch_allocator allocator;
+  lc_pouch_disk_store *store;
+  char *path;
   int fd;
   unsigned long remaining;
 } lc_pouch_file_source;
@@ -331,6 +352,10 @@ static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
                                               unsigned long log_size,
                                               lc_error *error);
 static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error);
+static size_t lc_pouch_file_source_read(lc_source *self, void *buffer,
+                                        size_t count, lc_error *error);
+static int lc_pouch_file_source_reset(lc_source *self, lc_error *error);
+static void lc_pouch_file_source_close(lc_source *self);
 static int lc_pouch_disk_read_state(lc_pouch_store *self,
                                     const char *namespace_name, const char *key,
                                     lc_source **body, lc_pouch_state_info *out,
@@ -455,6 +480,9 @@ static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
                                        lc_error *error);
 static int lc_pouch_disk_lock_fd_cache_status(
     lc_pouch_store *self, lc_pouch_lock_fd_cache_status *out,
+    lc_error *error);
+static int lc_pouch_disk_read_fd_cache_status(
+    lc_pouch_store *self, lc_pouch_read_fd_cache_status *out,
     lc_error *error);
 static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
                                       const char *namespace_name,
@@ -1086,6 +1114,270 @@ static void lc_pouch_disk_lock_fd_cache_snapshot(
   out->evictions = lc_pouch_process_lock_fd_cache_evictions;
   out->closes = lc_pouch_process_lock_fd_cache_closes;
   (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
+}
+
+static int lc_pouch_disk_cached_read_fd_current(const char *path, int fd) {
+  struct stat path_st;
+  struct stat fd_st;
+
+  if (path == NULL || fd < 0) {
+    return 0;
+  }
+  if (stat(path, &path_st) != 0 || fstat(fd, &fd_st) != 0) {
+    return 0;
+  }
+  return path_st.st_dev == fd_st.st_dev && path_st.st_ino == fd_st.st_ino;
+}
+
+static int lc_pouch_disk_take_cached_read_fd(lc_pouch_disk_store *store,
+                                             const char *path, int *fd_out) {
+  lc_pouch_read_fd_cache_entry **cursor;
+  lc_pouch_read_fd_cache_entry *entry;
+  int fd;
+
+  if (fd_out != NULL) {
+    *fd_out = -1;
+  }
+  if (store == NULL || path == NULL || fd_out == NULL) {
+    return 0;
+  }
+  while (1) {
+    fd = -1;
+    entry = NULL;
+    (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+    cursor = &lc_pouch_process_read_fd_cache;
+    while (*cursor != NULL) {
+      entry = *cursor;
+      if (entry->path != NULL && strcmp(entry->path, path) == 0) {
+        fd = entry->fd;
+        *cursor = entry->next;
+        lc_pouch_process_read_fd_cache_count--;
+        break;
+      }
+      cursor = &(*cursor)->next;
+    }
+    (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+    if (entry == NULL) {
+      (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+      lc_pouch_process_read_fd_cache_misses++;
+      (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+      return 0;
+    }
+    if (lc_pouch_disk_cached_read_fd_current(path, fd)) {
+      (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+      lc_pouch_process_read_fd_cache_hits++;
+      (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+      *fd_out = fd;
+      lc_pouch_free(&entry->allocator, entry->path);
+      lc_pouch_free(&entry->allocator, entry);
+      return 1;
+    }
+    if (fd >= 0 && close(fd) == 0) {
+      (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+      lc_pouch_process_read_fd_cache_closes++;
+      (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+    }
+    (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+    lc_pouch_process_read_fd_cache_stale++;
+    (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+    lc_pouch_free(&entry->allocator, entry->path);
+    lc_pouch_free(&entry->allocator, entry);
+  }
+}
+
+static int lc_pouch_disk_open_read_fd(lc_pouch_disk_store *store,
+                                      const char *path, int *fd_out,
+                                      lc_error *error) {
+  int fd;
+
+  if (fd_out != NULL) {
+    *fd_out = -1;
+  }
+  if (store == NULL || path == NULL || fd_out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "open_read_fd requires store, path, and output");
+  }
+  if (lc_pouch_disk_take_cached_read_fd(store, path, fd_out)) {
+    return LC_OK;
+  }
+  fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    return lc_pouch_set_errno(error, "failed to open pouch log for read");
+  }
+  *fd_out = fd;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_cache_read_fd(lc_pouch_disk_store *store,
+                                       char **path, int fd, lc_error *error) {
+  lc_pouch_read_fd_cache_entry *entry;
+  lc_pouch_read_fd_cache_entry **cursor;
+  lc_pouch_read_fd_cache_entry **evict_cursor;
+  lc_pouch_read_fd_cache_entry *evicted;
+  unsigned long oldest;
+  int rc;
+
+  if (store == NULL || path == NULL || *path == NULL || fd < 0) {
+    if (fd >= 0 && close(fd) != 0) {
+      return lc_pouch_set_errno(error, "failed to close pouch read fd");
+    }
+    return LC_OK;
+  }
+  entry = (lc_pouch_read_fd_cache_entry *)lc_pouch_calloc(
+      &store->allocator, 1U, sizeof(*entry));
+  if (entry == NULL) {
+    if (close(fd) != 0) {
+      return lc_pouch_set_errno(error, "failed to close pouch read fd");
+    }
+    (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+    lc_pouch_process_read_fd_cache_closes++;
+    (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+    return LC_OK;
+  }
+  entry->allocator = store->allocator;
+  entry->path = *path;
+  entry->fd = fd;
+
+  (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+  if (lc_pouch_process_read_fd_cache_count >=
+      LC_POUCH_READ_FD_CACHE_CAPACITY) {
+    evict_cursor = &lc_pouch_process_read_fd_cache;
+    oldest = (*evict_cursor)->used_at;
+    cursor = &(*evict_cursor)->next;
+    while (*cursor != NULL) {
+      if ((*cursor)->used_at < oldest) {
+        oldest = (*cursor)->used_at;
+        evict_cursor = cursor;
+      }
+      cursor = &(*cursor)->next;
+    }
+    evicted = *evict_cursor;
+    *evict_cursor = evicted->next;
+    lc_pouch_process_read_fd_cache_count--;
+    rc = LC_OK;
+    if (evicted->fd >= 0 && close(evicted->fd) != 0) {
+      rc = lc_pouch_set_errno(error, "failed to close cached pouch read fd");
+    } else {
+      lc_pouch_process_read_fd_cache_closes++;
+    }
+    lc_pouch_free(&evicted->allocator, evicted->path);
+    lc_pouch_free(&evicted->allocator, evicted);
+    lc_pouch_process_read_fd_cache_evictions++;
+    if (rc != LC_OK) {
+      if (close(fd) == 0) {
+        lc_pouch_process_read_fd_cache_closes++;
+      }
+      (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+      lc_pouch_free(&entry->allocator, entry);
+      return rc;
+    }
+  }
+  entry->used_at = ++lc_pouch_process_read_fd_cache_clock;
+  entry->next = lc_pouch_process_read_fd_cache;
+  lc_pouch_process_read_fd_cache = entry;
+  lc_pouch_process_read_fd_cache_count++;
+  (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+  *path = NULL;
+  return LC_OK;
+}
+
+static void lc_pouch_disk_close_read_fd_cache(lc_pouch_disk_store *store) {
+  lc_pouch_read_fd_cache_entry *entry;
+
+  (void)store;
+  (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+  while (lc_pouch_process_read_fd_cache != NULL) {
+    entry = lc_pouch_process_read_fd_cache;
+    lc_pouch_process_read_fd_cache = entry->next;
+    lc_pouch_process_read_fd_cache_count--;
+    if (entry->fd >= 0 && close(entry->fd) == 0) {
+      lc_pouch_process_read_fd_cache_closes++;
+    }
+    lc_pouch_free(&entry->allocator, entry->path);
+    lc_pouch_free(&entry->allocator, entry);
+  }
+  if (lc_pouch_process_read_fd_cache_count != 0U) {
+    lc_pouch_process_read_fd_cache_count = 0U;
+  }
+  (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+}
+
+static void lc_pouch_disk_read_fd_cache_snapshot(
+    lc_pouch_read_fd_cache_status *out) {
+  if (out == NULL) {
+    return;
+  }
+  memset(out, 0, sizeof(*out));
+  (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
+  out->capacity = LC_POUCH_READ_FD_CACHE_CAPACITY;
+  out->entries = lc_pouch_process_read_fd_cache_count;
+  out->hits = lc_pouch_process_read_fd_cache_hits;
+  out->misses = lc_pouch_process_read_fd_cache_misses;
+  out->stale = lc_pouch_process_read_fd_cache_stale;
+  out->evictions = lc_pouch_process_read_fd_cache_evictions;
+  out->closes = lc_pouch_process_read_fd_cache_closes;
+  (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
+}
+
+static int lc_pouch_disk_make_file_source(lc_pouch_disk_store *store,
+                                          unsigned long body_offset,
+                                          unsigned long body_length,
+                                          const char *seek_error,
+                                          const char *alloc_error,
+                                          lc_source **out,
+                                          lc_error *error) {
+  lc_source *source_pub;
+  lc_pouch_file_source *source;
+  char *path;
+  int fd;
+  int rc;
+
+  if (out != NULL) {
+    *out = NULL;
+  }
+  if (store == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "make_file_source requires store and output");
+  }
+  fd = -1;
+  source_pub = NULL;
+  source = NULL;
+  path = lc_pouch_strdup(&store->allocator, store->log_path);
+  if (path == NULL) {
+    return lc_pouch_set_nomem(error, alloc_error);
+  }
+  rc = lc_pouch_disk_open_read_fd(store, path, &fd, error);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, path);
+    return rc;
+  }
+  if (lseek(fd, (off_t)body_offset, SEEK_SET) < 0) {
+    close(fd);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_errno(error, seek_error);
+  }
+  source_pub =
+      (lc_source *)lc_pouch_calloc(&store->allocator, 1U, sizeof(*source_pub));
+  source = (lc_pouch_file_source *)lc_pouch_calloc(&store->allocator, 1U,
+                                                   sizeof(*source));
+  if (source_pub == NULL || source == NULL) {
+    close(fd);
+    lc_pouch_free(&store->allocator, path);
+    lc_pouch_free(&store->allocator, source_pub);
+    lc_pouch_free(&store->allocator, source);
+    return lc_pouch_set_nomem(error, alloc_error);
+  }
+  source->allocator = store->allocator;
+  source->store = store;
+  source->path = path;
+  source->fd = fd;
+  source->remaining = body_length;
+  source_pub->read = lc_pouch_file_source_read;
+  source_pub->reset = lc_pouch_file_source_reset;
+  source_pub->close = lc_pouch_file_source_close;
+  source_pub->impl = source;
+  *out = source_pub;
+  return LC_OK;
 }
 
 static void lc_pouch_disk_sleep_for_key_lock(void) {
@@ -5995,9 +6287,15 @@ static void lc_pouch_file_source_close(lc_source *self) {
   if (source != NULL) {
     allocator = source->allocator;
     if (source->fd >= 0) {
-      close(source->fd);
+      if (source->store != NULL && source->path != NULL) {
+        (void)lc_pouch_disk_cache_read_fd(source->store, &source->path,
+                                          source->fd, NULL);
+      } else {
+        close(source->fd);
+      }
       source->fd = -1;
     }
+    lc_pouch_free(&allocator, source->path);
     lc_pouch_free(&allocator, source);
     lc_pouch_free(&allocator, self);
   }
@@ -6009,10 +6307,7 @@ static int lc_pouch_disk_read_state(lc_pouch_store *self,
                                     lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_state_entry *entry;
-  lc_source *source_pub;
-  lc_pouch_file_source *source;
   int index;
-  int fd;
 
   if (self == NULL || namespace_name == NULL || key == NULL || body == NULL ||
       out == NULL) {
@@ -6041,48 +6336,28 @@ static int lc_pouch_disk_read_state(lc_pouch_store *self,
     return LC_OK;
   }
   entry = &store->state_entries[index];
-  fd = open(store->log_path, O_RDONLY);
-  if (fd < 0) {
+  index = lc_pouch_disk_make_file_source(
+      store, entry->body_offset, entry->body_length,
+      "failed to seek pouch state body",
+      "failed to allocate pouch state source", body, error);
+  if (index != LC_OK) {
     lc_pouch_disk_unlock(store, error);
-    return lc_pouch_set_errno(error, "failed to open pouch log for state read");
+    return index;
   }
-  if (lseek(fd, (off_t)entry->body_offset, SEEK_SET) < 0) {
-    close(fd);
-    lc_pouch_disk_unlock(store, error);
-    return lc_pouch_set_errno(error, "failed to seek pouch state body");
-  }
-  source_pub =
-      (lc_source *)lc_pouch_calloc(&store->allocator, 1U, sizeof(*source_pub));
-  source = (lc_pouch_file_source *)lc_pouch_calloc(&store->allocator, 1U,
-                                                   sizeof(*source));
-  if (source_pub == NULL || source == NULL) {
-    close(fd);
-    lc_pouch_free(&store->allocator, source_pub);
-    lc_pouch_free(&store->allocator, source);
-    lc_pouch_disk_unlock(store, error);
-    return lc_pouch_set_nomem(error, "failed to allocate pouch state source");
-  }
-  source->allocator = store->allocator;
-  source->fd = fd;
-  source->remaining = entry->body_length;
-  source_pub->read = lc_pouch_file_source_read;
-  source_pub->reset = lc_pouch_file_source_reset;
-  source_pub->close = lc_pouch_file_source_close;
-  source_pub->impl = source;
   out->content_type = lc_pouch_strdup(&store->allocator, entry->content_type);
   out->etag = lc_pouch_strdup(&store->allocator, entry->etag);
   if ((entry->content_type != NULL && out->content_type == NULL) ||
       (entry->etag != NULL && out->etag == NULL)) {
-    source_pub->close(source_pub);
+    (*body)->close(*body);
+    *body = NULL;
     lc_pouch_state_info_cleanup(&store->allocator, out);
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to copy pouch state metadata");
   }
   out->version = entry->version;
   out->bytes = (long)entry->body_length;
-  *body = source_pub;
   if (lc_pouch_disk_unlock(store, error) != LC_OK) {
-    source_pub->close(source_pub);
+    (*body)->close(*body);
     *body = NULL;
     lc_pouch_state_info_cleanup(&store->allocator, out);
     return LC_ERR_TRANSPORT;
@@ -7048,10 +7323,7 @@ static int lc_pouch_disk_get_object(lc_pouch_store *self,
                                     lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_object_entry *entry;
-  lc_source *source_pub;
-  lc_pouch_file_source *source;
   int index;
-  int fd;
 
   if (self == NULL || namespace_name == NULL || key == NULL ||
       selector == NULL || body == NULL || out == NULL) {
@@ -7079,43 +7351,22 @@ static int lc_pouch_disk_get_object(lc_pouch_store *self,
                         NULL);
   }
   entry = &store->object_entries[index];
-  fd = open(store->log_path, O_RDONLY);
-  if (fd < 0) {
+  index = lc_pouch_disk_make_file_source(
+      store, entry->body_offset, entry->body_length,
+      "failed to seek pouch object body",
+      "failed to allocate pouch object source", body, error);
+  if (index != LC_OK) {
     lc_pouch_disk_unlock(store, error);
-    return lc_pouch_set_errno(error,
-                              "failed to open pouch log for object read");
+    return index;
   }
-  if (lseek(fd, (off_t)entry->body_offset, SEEK_SET) < 0) {
-    close(fd);
-    lc_pouch_disk_unlock(store, error);
-    return lc_pouch_set_errno(error, "failed to seek pouch object body");
-  }
-  source_pub =
-      (lc_source *)lc_pouch_calloc(&store->allocator, 1U, sizeof(*source_pub));
-  source = (lc_pouch_file_source *)lc_pouch_calloc(&store->allocator, 1U,
-                                                   sizeof(*source));
-  if (source_pub == NULL || source == NULL) {
-    close(fd);
-    lc_pouch_free(&store->allocator, source_pub);
-    lc_pouch_free(&store->allocator, source);
-    lc_pouch_disk_unlock(store, error);
-    return lc_pouch_set_nomem(error, "failed to allocate pouch object source");
-  }
-  source->allocator = store->allocator;
-  source->fd = fd;
-  source->remaining = entry->body_length;
-  source_pub->read = lc_pouch_file_source_read;
-  source_pub->reset = lc_pouch_file_source_reset;
-  source_pub->close = lc_pouch_file_source_close;
-  source_pub->impl = source;
   if (!lc_pouch_object_info_from_entry(&store->allocator, out, entry)) {
-    source_pub->close(source_pub);
+    (*body)->close(*body);
+    *body = NULL;
     lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to copy pouch object metadata");
   }
-  *body = source_pub;
   if (lc_pouch_disk_unlock(store, error) != LC_OK) {
-    source_pub->close(source_pub);
+    (*body)->close(*body);
     *body = NULL;
     lc_pouch_object_info_cleanup(&store->allocator, out);
     return LC_ERR_TRANSPORT;
@@ -7812,8 +8063,6 @@ static int lc_pouch_disk_dequeue_message(
   lc_pouch_disk_queue_entry *entry;
   lc_pouch_disk_queue_entry updated;
   lc_pouch_key_lock *queue_lock;
-  lc_source *source_pub;
-  lc_pouch_file_source *source;
   char *lease_id;
   char *message_id;
   char *meta_etag;
@@ -7821,7 +8070,6 @@ static int lc_pouch_disk_dequeue_message(
   long now_unix;
   size_t index;
   int found;
-  int fd;
   int rc;
 
   if (self == NULL || namespace_name == NULL || queue == NULL || opts == NULL ||
@@ -7844,9 +8092,6 @@ static int lc_pouch_disk_dequeue_message(
   memset(out, 0, sizeof(*out));
   *body = NULL;
   queue_lock = NULL;
-  fd = -1;
-  source_pub = NULL;
-  source = NULL;
   rc = lc_pouch_disk_lock_key_wait(self, namespace_name, queue, &queue_lock,
                                    error);
   if (rc != LC_OK) {
@@ -7938,49 +8183,16 @@ static int lc_pouch_disk_dequeue_message(
     }
   }
   if (rc == LC_OK) {
-    fd = open(store->log_path, O_RDONLY);
-    if (fd < 0) {
-      rc = lc_pouch_set_errno(error,
-                              "failed to open pouch log for queue read");
-    }
-  }
-  if (rc == LC_OK && lseek(fd, (off_t)entry->body_offset, SEEK_SET) < 0) {
-    close(fd);
-    fd = -1;
-    rc = lc_pouch_set_errno(error, "failed to seek pouch queue payload");
+    rc = lc_pouch_disk_make_file_source(
+        store, entry->body_offset, entry->body_length,
+        "failed to seek pouch queue payload",
+        "failed to allocate pouch queue source", body, error);
   }
   if (rc == LC_OK) {
-    source_pub =
-        (lc_source *)lc_pouch_calloc(&store->allocator, 1U, sizeof(*source_pub));
-    source = (lc_pouch_file_source *)lc_pouch_calloc(&store->allocator, 1U,
-                                                     sizeof(*source));
-    if (source_pub == NULL || source == NULL) {
-      close(fd);
-      fd = -1;
-      lc_pouch_free(&store->allocator, source_pub);
-      lc_pouch_free(&store->allocator, source);
-      source_pub = NULL;
-      source = NULL;
-      rc = lc_pouch_set_nomem(error, "failed to allocate pouch queue source");
-    }
-  }
-  if (rc == LC_OK) {
-    source->allocator = store->allocator;
-    source->fd = fd;
-    source->remaining = entry->body_length;
-    source_pub->read = lc_pouch_file_source_read;
-    source_pub->reset = lc_pouch_file_source_reset;
-    source_pub->close = lc_pouch_file_source_close;
-    source_pub->impl = source;
-    fd = -1;
-    source = NULL;
     if (!lc_pouch_queue_info_from_entry(&store->allocator, out, entry)) {
-      source_pub->close(source_pub);
-      source_pub = NULL;
+      (*body)->close(*body);
+      *body = NULL;
       rc = lc_pouch_set_nomem(error, "failed to copy pouch queue message");
-    } else {
-      *body = source_pub;
-      source_pub = NULL;
     }
   }
   lc_pouch_free(&store->allocator, message_id);
@@ -8000,15 +8212,6 @@ static int lc_pouch_disk_dequeue_message(
     }
     lc_pouch_queue_message_info_cleanup(&store->allocator, out);
     rc = LC_ERR_TRANSPORT;
-  }
-  if (fd >= 0) {
-    close(fd);
-  }
-  if (source_pub != NULL) {
-    source_pub->close(source_pub);
-  } else {
-    lc_pouch_free(&store->allocator, source_pub);
-    lc_pouch_free(&store->allocator, source);
   }
   if (rc != LC_OK) {
     return rc;
@@ -8579,6 +8782,17 @@ static int lc_pouch_disk_lock_fd_cache_status(
   return LC_OK;
 }
 
+static int lc_pouch_disk_read_fd_cache_status(
+    lc_pouch_store *self, lc_pouch_read_fd_cache_status *out,
+    lc_error *error) {
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "read_fd_cache_status requires store and output");
+  }
+  lc_pouch_disk_read_fd_cache_snapshot(out);
+  return LC_OK;
+}
+
 static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key,
@@ -9085,6 +9299,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->object_entries);
   lc_pouch_free(&allocator, store->queue_entries);
   lc_pouch_disk_close_lock_fd_cache(store);
+  lc_pouch_disk_close_read_fd_cache(store);
   lc_pouch_free(&allocator, store->root_path);
   lc_pouch_free(&allocator, store->log_path);
   lc_pouch_free(&allocator, store->lock_path);
@@ -9251,6 +9466,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.try_lock_key = lc_pouch_disk_try_lock_key;
   store->pub.unlock_key = lc_pouch_disk_unlock_key;
   store->pub.lock_fd_cache_status = lc_pouch_disk_lock_fd_cache_status;
+  store->pub.read_fd_cache_status = lc_pouch_disk_read_fd_cache_status;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;

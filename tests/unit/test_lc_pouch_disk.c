@@ -9042,6 +9042,138 @@ static void test_lock_fd_cache_reuses_released_key_descriptors(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_read_fd_cache_reuses_descriptors_without_closing_active_readers(
+    void **state) {
+  char root[256];
+  char key[32];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *active;
+  lc_source *sources[40];
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_compaction_res compact;
+  lc_pouch_read_fd_cache_status status;
+  lc_pouch_read_fd_cache_status baseline;
+  lc_pouch_read_fd_cache_status before_compact;
+  lc_error error;
+  char *text;
+  size_t index;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "read-fd-cache");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&compact, 0, sizeof(compact));
+  memset(&status, 0, sizeof(status));
+  memset(&baseline, 0, sizeof(baseline));
+  memset(&before_compact, 0, sizeof(before_compact));
+  memset(sources, 0, sizeof(sources));
+  store = NULL;
+  active = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->read_fd_cache_status);
+
+  source = source_from_text("active-payload");
+  rc = store->write_state(store, "default", "active", source, NULL, &put_res,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  for (index = 0U; index < 40U; ++index) {
+    snprintf(key, sizeof(key), "read-%02lu", (unsigned long)index);
+    source = source_from_text("cached-payload");
+    rc = store->write_state(store, "default", key, source, NULL, &put_res,
+                            &error);
+    lc_source_close(source);
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  }
+
+  rc = store->read_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.capacity, 32U);
+  assert_int_equal(status.entries, 0U);
+  baseline = status;
+
+  rc = store->read_state(store, "default", "active", &active, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(active);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  for (index = 0U; index < 40U; ++index) {
+    snprintf(key, sizeof(key), "read-%02lu", (unsigned long)index);
+    rc = store->read_state(store, "default", key, &sources[index],
+                           &state_info, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_non_null(sources[index]);
+    lc_pouch_state_info_cleanup(&allocator, &state_info);
+  }
+  rc = store->read_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.entries, 0U);
+  assert_int_equal(status.misses, baseline.misses + 41UL);
+
+  for (index = 0U; index < 40U; ++index) {
+    lc_source_close(sources[index]);
+    sources[index] = NULL;
+  }
+  rc = store->read_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.entries, 32U);
+  assert_true(status.evictions >= baseline.evictions + 8UL);
+  assert_true(status.closes >= status.evictions);
+
+  text = read_source_text(active);
+  assert_string_equal(text, "active-payload");
+  free(text);
+  lc_source_close(active);
+  active = NULL;
+
+  rc = store->read_state(store, "default", "read-00", &source, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(source);
+  rc = store->read_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.hits >= baseline.hits + 1UL);
+  lc_source_close(source);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->read_fd_cache_status(store, &before_compact, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->compact(store, "force", &compact, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_compaction_res_cleanup(&allocator, &compact);
+
+  rc = store->read_state(store, "default", "active", &source, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(source);
+  text = read_source_text(source);
+  assert_string_equal(text, "active-payload");
+  free(text);
+  lc_source_close(source);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+  rc = store->read_fd_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.stale > before_compact.stale);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_key_lock_wait_serializes_same_process_threads(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -10174,6 +10306,8 @@ int main(void) {
       cmocka_unit_test(test_lock_key_path_escapes_namespace_and_key),
       cmocka_unit_test(test_try_lock_key_serializes_same_process_handles),
       cmocka_unit_test(test_lock_fd_cache_reuses_released_key_descriptors),
+      cmocka_unit_test(
+          test_read_fd_cache_reuses_descriptors_without_closing_active_readers),
       cmocka_unit_test(test_key_lock_wait_serializes_same_process_threads),
       cmocka_unit_test(test_try_lock_key_serializes_cross_process_handles),
       cmocka_unit_test(test_write_state_waits_for_cross_process_key_lock),
