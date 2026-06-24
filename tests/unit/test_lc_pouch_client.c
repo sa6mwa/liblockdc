@@ -2159,6 +2159,10 @@ static void test_pouch_endpoint_queue_rejects_missing_or_wrong_txn_id(
   lc_dequeue_req dequeue_req;
   lc_ack_op ack_req;
   lc_ack_res ack_res;
+  lc_nack_op nack_req;
+  lc_nack_res nack_res;
+  lc_extend_op extend_req;
+  lc_extend_res extend_res;
   lc_message *message;
   lc_source *source;
   lc_error error;
@@ -2171,6 +2175,8 @@ static void test_pouch_endpoint_queue_rejects_missing_or_wrong_txn_id(
   memset(&error, 0, sizeof(error));
   memset(&enqueue_res, 0, sizeof(enqueue_res));
   memset(&ack_res, 0, sizeof(ack_res));
+  memset(&nack_res, 0, sizeof(nack_res));
+  memset(&extend_res, 0, sizeof(extend_res));
   client = open_pouch_client(endpoint);
   message = NULL;
 
@@ -2215,6 +2221,53 @@ static void test_pouch_endpoint_queue_rejects_missing_or_wrong_txn_id(
   assert_int_equal(error.http_status, 409L);
   assert_string_equal(error.server_code, "txn_mismatch");
   lc_ack_res_cleanup(&ack_res);
+  lc_error_cleanup(&error);
+
+  memset(&nack_req, 0, sizeof(nack_req));
+  nack_req.message.namespace_name = message->namespace_name;
+  nack_req.message.queue = message->queue;
+  nack_req.message.message_id = message->message_id;
+  nack_req.message.lease_id = message->lease_id;
+  nack_req.message.fencing_token = message->fencing_token;
+  nack_req.message.meta_etag = message->meta_etag;
+  nack_req.delay_seconds = 0L;
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  rc = client->queue_nack(client, &nack_req, &nack_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_txn");
+  lc_nack_res_cleanup(&nack_res);
+  lc_error_cleanup(&error);
+
+  nack_req.message.txn_id = "txn-b";
+  rc = client->queue_nack(client, &nack_req, &nack_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "txn_mismatch");
+  lc_nack_res_cleanup(&nack_res);
+  lc_error_cleanup(&error);
+
+  memset(&extend_req, 0, sizeof(extend_req));
+  extend_req.message.namespace_name = message->namespace_name;
+  extend_req.message.queue = message->queue;
+  extend_req.message.message_id = message->message_id;
+  extend_req.message.lease_id = message->lease_id;
+  extend_req.message.fencing_token = message->fencing_token;
+  extend_req.message.meta_etag = message->meta_etag;
+  extend_req.extend_by_seconds = 60L;
+  rc = client->queue_extend(client, &extend_req, &extend_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_txn");
+  lc_extend_res_cleanup(&extend_res);
+  lc_error_cleanup(&error);
+
+  extend_req.message.txn_id = "txn-b";
+  rc = client->queue_extend(client, &extend_req, &extend_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "txn_mismatch");
+  lc_extend_res_cleanup(&extend_res);
   lc_error_cleanup(&error);
 
   rc = message->ack(message, &error);
