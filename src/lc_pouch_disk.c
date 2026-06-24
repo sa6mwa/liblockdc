@@ -8099,6 +8099,15 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                         NULL);
   }
   src_entry = &store->object_entries[existing];
+  if (opts->expected_etag != NULL &&
+      (src_entry->id == NULL ||
+       strcmp(src_entry->id, opts->expected_etag) != 0)) {
+    lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
+    return lc_error_set(error, LC_ERR_SERVER, 412L,
+                        "pouch attachment etag precondition failed", NULL,
+                        "precondition_failed", NULL);
+  }
   name = opts->name != NULL ? opts->name : src_entry->name;
   src_plaintext_sha256 =
       lc_pouch_strdup(&store->allocator, src_entry->plaintext_sha256);

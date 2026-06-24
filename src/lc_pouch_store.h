@@ -215,6 +215,7 @@ typedef struct lc_pouch_object_selector {
 typedef struct lc_pouch_copy_object_opts {
   lc_pouch_object_selector source;
   const char *name;
+  const char *expected_etag;
   int prevent_overwrite;
 } lc_pouch_copy_object_opts;
 

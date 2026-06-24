@@ -5013,6 +5013,79 @@ static void test_object_copy_rename_preserves_payload_metadata(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_object_copy_enforces_expected_etag(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_object_opts put_opts;
+  lc_pouch_copy_object_opts copy_opts;
+  lc_pouch_object_info original;
+  lc_pouch_object_info copied;
+  lc_pouch_object_list list;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-copy-etag");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&copy_opts, 0, sizeof(copy_opts));
+  memset(&original, 0, sizeof(original));
+  memset(&copied, 0, sizeof(copied));
+  memset(&list, 0, sizeof(list));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  put_opts.name = "source.bin";
+  put_opts.content_type = "application/octet-stream";
+  put_opts.prevent_overwrite = 1;
+  source = source_from_text("copy-etag-payload");
+  rc = store->put_object(store, "default", "source-key", source, &put_opts,
+                         &original, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  copy_opts.source.name = "source.bin";
+  copy_opts.name = "dest.bin";
+  copy_opts.expected_etag = "wrong-etag";
+  copy_opts.prevent_overwrite = 1;
+  rc = store->copy_object(store, "default", "source-key", "dest-key",
+                          &copy_opts, &copied, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  assert_string_equal(error.server_code, "precondition_failed");
+  assert_null(copied.id);
+  lc_error_cleanup(&error);
+
+  rc = store->list_objects(store, "default", "dest-key", &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 0U);
+  lc_pouch_object_list_cleanup(&allocator, &list);
+
+  copy_opts.expected_etag = original.id;
+  rc = store->copy_object(store, "default", "source-key", "dest-key",
+                          &copy_opts, &copied, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(copied.name, "dest.bin");
+  assert_non_null(strstr(copied.id, "-dest.bin"));
+  assert_null(strstr(copied.id, "-source.bin"));
+  assert_string_equal(copied.plaintext_sha256, original.plaintext_sha256);
+  assert_int_equal(copied.size, original.size);
+
+  lc_pouch_object_info_cleanup(&allocator, &copied);
+  lc_pouch_object_info_cleanup(&allocator, &original);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_object_copy_source_open_failure_leaves_destination_unchanged(
     void **state) {
   char root[256];
@@ -11202,6 +11275,7 @@ int main(void) {
           test_object_source_survives_store_close_without_cache_owner),
       cmocka_unit_test(
           test_queue_source_survives_store_close_without_cache_owner),
+      cmocka_unit_test(test_object_copy_enforces_expected_etag),
       cmocka_unit_test(test_key_lock_wait_serializes_same_process_threads),
       cmocka_unit_test(test_try_lock_key_serializes_cross_process_handles),
       cmocka_unit_test(test_write_state_waits_for_cross_process_key_lock),
