@@ -3855,6 +3855,91 @@ static void test_pouch_endpoint_consumer_service_auto_ack(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_consumer_service_honors_start_after(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res[3];
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  consumer_service_test_state service_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "consumer-service-start-after");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats_res, 0, sizeof(stats_res));
+  memset(&service_state, 0, sizeof(service_state));
+  service_state.expected[0] = "second";
+  service_state.expected[1] = "third";
+  client = open_pouch_client(endpoint);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("first");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res[0], &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("second");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res[1], &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("third");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res[2], &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.request.queue = "jobs";
+  consumer_config.request.owner = "managed-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.request.start_after = enqueue_res[0].message_id;
+  consumer_config.handle = consumer_service_test_handle;
+  consumer_config.context = &service_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+  service = NULL;
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(service);
+  service_state.service = service;
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(service_state.handled, 2U);
+  service->close(service);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 1);
+  assert_string_equal(stats_res.head_message_id, enqueue_res[0].message_id);
+
+  lc_queue_stats_res_cleanup(&stats_res);
+  lc_enqueue_res_cleanup(&enqueue_res[0]);
+  lc_enqueue_res_cleanup(&enqueue_res[1]);
+  lc_enqueue_res_cleanup(&enqueue_res[2]);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_consumer_service_with_state(void **state) {
   char root[256];
   char endpoint[320];
@@ -5800,6 +5885,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_subscribe_honors_start_after),
       cmocka_unit_test(test_pouch_endpoint_subscribe_waits_for_shared_message),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_auto_ack),
+      cmocka_unit_test(
+          test_pouch_endpoint_consumer_service_honors_start_after),
       cmocka_unit_test(test_pouch_endpoint_consumer_service_with_state),
       cmocka_unit_test(test_pouch_endpoint_reports_query_mode_defaults),
       cmocka_unit_test(test_pouch_endpoint_reports_configured_scan_mode),
