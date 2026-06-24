@@ -2797,6 +2797,87 @@ static void test_query_index_keys_recovers_from_corrupt_sidecar_tail(
   test_cleanup_root(root);
 }
 
+static void test_scan_meta_ignores_corrupt_query_sidecar(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_scan_meta_req req;
+  lc_pouch_scan_meta_res scan;
+  scan_capture capture;
+  lc_error error;
+  off_t original_query_index_size;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "scan-meta-corrupt-query-sidecar");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-corrupt";
+  meta.state_etag = "state-corrupt";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "corrupt", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-later";
+  meta.state_etag = "state-later";
+  meta.version = 3L;
+  rc = store->store_meta(store, "default", "later", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  original_query_index_size = test_query_index_size(root);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  corrupt_first_query_index_match(root, "corrupt");
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  req.namespace_name = "default";
+  req.limit = 8U;
+  rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 3U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "corrupt");
+  assert_string_equal(capture.keys[2], "later");
+  assert_false(scan.truncated);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_query_index_sidecar_compacts_with_store_log(void **state) {
   char root[256];
   char owner[2048];
@@ -5646,6 +5727,7 @@ int main(void) {
           test_query_index_keys_ignores_sidecar_without_metadata_log),
       cmocka_unit_test(
           test_query_index_keys_recovers_from_corrupt_sidecar_tail),
+      cmocka_unit_test(test_scan_meta_ignores_corrupt_query_sidecar),
       cmocka_unit_test(test_query_index_sidecar_compacts_with_store_log),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
