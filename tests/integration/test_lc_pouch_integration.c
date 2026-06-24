@@ -139,6 +139,13 @@ typedef struct pouch_consumer_failure_test {
   int saw_delivery_error;
 } pouch_consumer_failure_test;
 
+typedef struct pouch_subscribe_state_test {
+  size_t handled;
+  char queue[64];
+  char message_id[128];
+  char state_key[256];
+} pouch_subscribe_state_test;
+
 static int pouch_consumer_state_handle(void *context,
                                        lc_consumer_message *message,
                                        lc_error *error) {
@@ -248,6 +255,54 @@ static int pouch_consumer_failure_on_error(
   assert_int_equal(event->cause->code, LC_ERR_TRANSPORT);
   state->errors += 1U;
   state->saw_delivery_error = 1;
+  return LC_OK;
+}
+
+static int pouch_subscribe_state_handle(void *context, lc_message *message,
+                                        lc_error *error) {
+  pouch_subscribe_state_test *state;
+  lc_update_opts update_opts;
+  lc_source *source;
+  lc_lease *queue_state;
+  lc_sink *sink;
+  size_t written;
+  int rc;
+
+  state = (pouch_subscribe_state_test *)context;
+  assert_non_null(state);
+  assert_non_null(message);
+  assert_int_equal(state->handled, 0U);
+  assert_string_equal(message->queue, "subscribe-state");
+  queue_state = message->state(message);
+  assert_non_null(queue_state);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  written = 0U;
+  rc = message->write_payload(message, sink, &written, error);
+  assert_lc_ok(rc, error);
+  assert_int_equal(written, strlen("subscribe-work"));
+  assert_sink_text(sink, "subscribe-work", error);
+  lc_sink_close(sink);
+
+  snprintf(state->queue, sizeof(state->queue), "%s", message->queue);
+  snprintf(state->message_id, sizeof(state->message_id), "%s",
+           message->message_id);
+  snprintf(state->state_key, sizeof(state->state_key), "q/%s/state/%s",
+           state->queue, state->message_id);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"subscribe\":\"stateful\",\"saved\":true}",
+                            error);
+  rc = queue_state->update(queue_state, source, &update_opts, error);
+  lc_source_close(source);
+  assert_lc_ok(rc, error);
+
+  state->handled += 1U;
+  rc = message->ack(message, error);
+  assert_lc_ok(rc, error);
   return LC_OK;
 }
 
@@ -708,6 +763,86 @@ static void test_pouch_public_queue_visibility_redelivery(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_subscribe_with_state(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *subscriber;
+  lc_client *verifier;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req subscribe_req;
+  lc_consumer consumer;
+  pouch_subscribe_state_test subscribe_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "subscribe-state");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  subscriber = NULL;
+  verifier = NULL;
+  source = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&consumer, 0, sizeof(consumer));
+  memset(&subscribe_state, 0, sizeof(subscribe_state));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &subscriber, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "subscribe-state";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("subscribe-work", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_dequeue_req_init(&subscribe_req);
+  subscribe_req.queue = "subscribe-state";
+  subscribe_req.owner = "state-subscriber";
+  subscribe_req.visibility_timeout_seconds = 30L;
+  subscribe_req.page_size = 1;
+  consumer.handle = pouch_subscribe_state_handle;
+  consumer.context = &subscribe_state;
+  rc = subscriber->subscribe_with_state(subscriber, &subscribe_req, &consumer,
+                                        &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(subscribe_state.handled, 1U);
+  assert_string_equal(subscribe_state.message_id, enqueue_res.message_id);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "subscribe-state";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats);
+
+  open_pouch_client(endpoint, &verifier, &error);
+  assert_client_state_text(
+      verifier, subscribe_state.state_key,
+      "{\"subscribe\":\"stateful\",\"saved\":true}", &error);
+  verifier->close(verifier);
+  verifier = NULL;
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  producer->close(producer);
+  subscriber->close(subscriber);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_consumer_service_with_state(void **state) {
   char root[256];
   char endpoint[320];
@@ -1099,6 +1234,7 @@ int main(void) {
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
+      cmocka_unit_test(test_pouch_public_subscribe_with_state),
       cmocka_unit_test(test_pouch_public_consumer_service_with_state),
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
