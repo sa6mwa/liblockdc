@@ -7278,6 +7278,120 @@ static void test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen(
 }
 
 static void
+test_pouch_endpoint_txn_recovery_expired_prepare_spans_namespaces(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *ns_a_client;
+  lc_client *ns_b_client;
+  lc_lease *first_lease;
+  lc_lease *second_lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "txn-replay-expired-namespaces");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+  client = open_pouch_client(endpoint);
+  ns_a_client = NULL;
+  ns_b_client = NULL;
+  first_lease = NULL;
+  second_lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "txn/replay-ns-key";
+  acquire.owner = "seed-a";
+  acquire.ttl_seconds = 60L;
+  acquire.namespace_name = "txn-replay-a";
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":\"a1\"}");
+  rc = first_lease->update(first_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = first_lease->release(first_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  first_lease = NULL;
+
+  acquire.owner = "seed-b";
+  acquire.namespace_name = "txn-replay-b";
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":\"b1\"}");
+  rc = second_lease->update(second_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = second_lease->release(second_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  second_lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "txn-replay-expired-ns-1";
+  acquire.namespace_name = "txn-replay-a";
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, first_lease, "{\"value\":\"a2\"}", &error);
+  acquire.namespace_name = "txn-replay-b";
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, second_lease, "{\"value\":\"b2\"}", &error);
+
+  memset(participants, 0, sizeof(participants));
+  participants[0].namespace_name = "txn-replay-a";
+  participants[0].key = "txn/replay-ns-key";
+  participants[1].namespace_name = "txn-replay-b";
+  participants[1].key = "txn/replay-ns-key";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "txn-replay-expired-ns-1";
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
+  decision_req.expires_at_unix = 1L;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "prepared");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(first_lease);
+  lc_lease_close(second_lease);
+  first_lease = NULL;
+  second_lease = NULL;
+  client->close(client);
+
+  client = open_pouch_client(endpoint);
+  ns_a_client = open_pouch_client_with_namespace(endpoint, "txn-replay-a");
+  ns_b_client = open_pouch_client_with_namespace(endpoint, "txn-replay-b");
+  assert_pouch_client_state_text(ns_a_client, "txn/replay-ns-key",
+                                 "{\"value\":\"a1\"}", &error);
+  assert_pouch_client_state_text(ns_b_client, "txn/replay-ns-key",
+                                 "{\"value\":\"b1\"}", &error);
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "txn-replay-expired-ns-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 404L);
+  lc_error_cleanup(&error);
+
+  ns_a_client->close(ns_a_client);
+  ns_b_client->close(ns_b_client);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_pouch_endpoint_txn_recovery_continues_after_partial_rollback(
     void **state) {
   char root[256];
@@ -7663,6 +7777,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_txn_rollback_spans_namespaces),
       cmocka_unit_test(
           test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen),
+      cmocka_unit_test(
+          test_pouch_endpoint_txn_recovery_expired_prepare_spans_namespaces),
       cmocka_unit_test(
           test_pouch_endpoint_txn_recovery_continues_after_partial_rollback),
       cmocka_unit_test(
