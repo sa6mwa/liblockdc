@@ -1376,6 +1376,7 @@ static void test_pouch_public_scan_query_documents_refreshes_open_reader(
   lc_client *reader;
   lc_lease *alpha;
   lc_lease *bravo;
+  lc_lease *hidden;
   lc_source *source;
   lc_sink *sink;
   lc_acquire_req acquire;
@@ -1383,6 +1384,7 @@ static void test_pouch_public_scan_query_documents_refreshes_open_reader(
   lc_release_req release_req;
   lc_query_req query_req;
   lc_query_res query_res;
+  lc_metadata_req metadata_req;
   lc_error error;
   char *text;
   int rc;
@@ -1445,6 +1447,21 @@ static void test_pouch_public_scan_query_documents_refreshes_open_reader(
   source = NULL;
   assert_lc_ok(rc, &error);
 
+  acquire.key = "integration/query-open/hidden";
+  rc = writer->acquire(writer, &acquire, &hidden, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"kind\":\"scan-open\",\"hidden\":true}",
+                            &error);
+  rc = hidden->update(hidden, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  rc = hidden->metadata(hidden, &metadata_req, &error);
+  assert_lc_ok(rc, &error);
+
   lc_release_req_init(&release_req);
   rc = alpha->release(alpha, &release_req, &error);
   assert_lc_ok(rc, &error);
@@ -1452,6 +1469,9 @@ static void test_pouch_public_scan_query_documents_refreshes_open_reader(
   rc = bravo->release(bravo, &release_req, &error);
   assert_lc_ok(rc, &error);
   bravo = NULL;
+  rc = hidden->release(hidden, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  hidden = NULL;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_lc_ok(rc, &error);
@@ -1467,6 +1487,8 @@ static void test_pouch_public_scan_query_documents_refreshes_open_reader(
   assert_non_null(strstr(text, "\"key\":\"integration/query-open/bravo\""));
   assert_non_null(
       strstr(text, "\"document\":{\"kind\":\"scan-open\",\"ordinal\":2}"));
+  assert_null(strstr(text, "integration/query-open/hidden"));
+  assert_null(strstr(text, "\"hidden\":true"));
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "documents");
   assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
@@ -1690,6 +1712,7 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   lc_client *reader;
   lc_lease *alpha;
   lc_lease *bravo;
+  lc_lease *hidden;
   lc_source *source;
   lc_sink *sink;
   lc_acquire_req acquire;
@@ -1697,6 +1720,7 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   lc_release_req release_req;
   lc_query_req query_req;
   lc_query_res query_res;
+  lc_metadata_req metadata_req;
   lc_error error;
   char *text;
   int rc;
@@ -1710,6 +1734,7 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   reader = NULL;
   alpha = NULL;
   bravo = NULL;
+  hidden = NULL;
   source = NULL;
   sink = NULL;
   text = NULL;
@@ -1759,6 +1784,21 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   source = NULL;
   assert_lc_ok(rc, &error);
 
+  acquire.key = "integration/index-open/hidden";
+  rc = writer->acquire(writer, &acquire, &hidden, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"kind\":\"index-open\",\"hidden\":true}",
+                            &error);
+  rc = hidden->update(hidden, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  rc = hidden->metadata(hidden, &metadata_req, &error);
+  assert_lc_ok(rc, &error);
+
   lc_release_req_init(&release_req);
   rc = alpha->release(alpha, &release_req, &error);
   assert_lc_ok(rc, &error);
@@ -1766,6 +1806,9 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   rc = bravo->release(bravo, &release_req, &error);
   assert_lc_ok(rc, &error);
   bravo = NULL;
+  rc = hidden->release(hidden, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  hidden = NULL;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_lc_ok(rc, &error);
@@ -1781,6 +1824,8 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   assert_non_null(strstr(text, "\"key\":\"integration/index-open/bravo\""));
   assert_non_null(
       strstr(text, "\"document\":{\"kind\":\"index-open\",\"ordinal\":2}"));
+  assert_null(strstr(text, "integration/index-open/hidden"));
+  assert_null(strstr(text, "\"hidden\":true"));
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "documents");
   assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
