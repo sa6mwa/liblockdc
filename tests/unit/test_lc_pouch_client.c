@@ -464,6 +464,83 @@ typedef struct attach_reject_store {
   char deleted_id[32];
 } attach_reject_store;
 
+typedef struct acquire_for_update_meta_fail_hook {
+  lc_pouch_store *store;
+  int (*original_store_meta)(lc_pouch_store *self, const char *namespace_name,
+                             const char *key, const lc_pouch_meta *meta,
+                             const char *expected_etag,
+                             lc_pouch_store_meta_res *out, lc_error *error);
+  int (*original_promote_staged_state)(
+      lc_pouch_store *self, const char *namespace_name, const char *key,
+      const char *txn_id, const lc_pouch_promote_staged_opts *opts,
+      lc_pouch_put_state_res *out, lc_error *error);
+  int promote_succeeded;
+  int failed_store_meta;
+} acquire_for_update_meta_fail_hook;
+
+static acquire_for_update_meta_fail_hook g_acquire_for_update_meta_fail_hook;
+
+static int acquire_for_update_fail_after_promote_store_meta(
+    lc_pouch_store *self, const char *namespace_name, const char *key,
+    const lc_pouch_meta *meta, const char *expected_etag,
+    lc_pouch_store_meta_res *out, lc_error *error) {
+  if (g_acquire_for_update_meta_fail_hook.promote_succeeded &&
+      !g_acquire_for_update_meta_fail_hook.failed_store_meta) {
+    (void)self;
+    (void)namespace_name;
+    (void)key;
+    (void)meta;
+    (void)expected_etag;
+    (void)out;
+    g_acquire_for_update_meta_fail_hook.failed_store_meta = 1;
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "intentional post-promotion metadata failure", NULL,
+                        NULL, NULL);
+  }
+  return g_acquire_for_update_meta_fail_hook.original_store_meta(
+      self, namespace_name, key, meta, expected_etag, out, error);
+}
+
+static int acquire_for_update_mark_successful_promote(
+    lc_pouch_store *self, const char *namespace_name, const char *key,
+    const char *txn_id, const lc_pouch_promote_staged_opts *opts,
+    lc_pouch_put_state_res *out, lc_error *error) {
+  int rc;
+
+  rc = g_acquire_for_update_meta_fail_hook.original_promote_staged_state(
+      self, namespace_name, key, txn_id, opts, out, error);
+  if (rc == LC_OK) {
+    g_acquire_for_update_meta_fail_hook.promote_succeeded = 1;
+  }
+  return rc;
+}
+
+static void acquire_for_update_meta_fail_hook_install(lc_client *client) {
+  lc_client_handle *handle;
+
+  handle = (lc_client_handle *)client;
+  memset(&g_acquire_for_update_meta_fail_hook, 0,
+         sizeof(g_acquire_for_update_meta_fail_hook));
+  g_acquire_for_update_meta_fail_hook.store = handle->pouch_store;
+  g_acquire_for_update_meta_fail_hook.original_store_meta =
+      handle->pouch_store->store_meta;
+  g_acquire_for_update_meta_fail_hook.original_promote_staged_state =
+      handle->pouch_store->promote_staged_state;
+  handle->pouch_store->store_meta =
+      acquire_for_update_fail_after_promote_store_meta;
+  handle->pouch_store->promote_staged_state =
+      acquire_for_update_mark_successful_promote;
+}
+
+static void acquire_for_update_meta_fail_hook_restore(void) {
+  if (g_acquire_for_update_meta_fail_hook.store != NULL) {
+    g_acquire_for_update_meta_fail_hook.store->store_meta =
+        g_acquire_for_update_meta_fail_hook.original_store_meta;
+    g_acquire_for_update_meta_fail_hook.store->promote_staged_state =
+        g_acquire_for_update_meta_fail_hook.original_promote_staged_state;
+  }
+}
+
 static int attach_reject_load_meta(lc_pouch_store *self,
                                    const char *namespace_name,
                                    const char *key,
@@ -600,6 +677,19 @@ static void test_pouch_endpoint_attach_rolls_back_object_on_meta_reject(
   lc_source_close(source);
   lc_attach_res_cleanup(&res);
   lc_error_cleanup(&error);
+}
+
+static int acquire_for_update_store_json_handler(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  lc_source *source;
+  int rc;
+
+  assert_non_null(update);
+  assert_non_null(update->lease);
+  source = source_from_text((const char *)context);
+  rc = update->lease->update(update->lease, source, NULL, error);
+  lc_source_close(source);
+  return rc;
 }
 
 typedef struct consumer_service_stateful_test_state {
@@ -2359,6 +2449,91 @@ static void test_pouch_endpoint_lease_load_respects_json_limit(void **state) {
   rc = lease->release(lease, &release_req, &error);
   assert_int_equal(rc, LC_OK);
   client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
+test_pouch_endpoint_acquire_for_update_repairs_post_promotion_meta_failure(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *reopened;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_get_res get_res;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "acquire-update-meta-repair");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&get_res, 0, sizeof(get_res));
+  client = NULL;
+  reopened = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+
+  client = open_pouch_client(endpoint);
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "acquire-update/repair-key";
+  acquire_req.owner = "seed";
+  acquire_req.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"value\":1}");
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  acquire_req.owner = "promote-meta-fail";
+  acquire_for_update_meta_fail_hook_install(client);
+  rc = lc_acquire_for_update(
+      client, &acquire_req, acquire_for_update_store_json_handler,
+      (void *)"{\"value\":2,\"durable\":true}", &error);
+  acquire_for_update_meta_fail_hook_restore();
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_true(g_acquire_for_update_meta_fail_hook.promote_succeeded);
+  assert_true(g_acquire_for_update_meta_fail_hook.failed_store_meta);
+  assert_string_equal(error.message,
+                      "intentional post-promotion metadata failure");
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+  client->close(client);
+  client = NULL;
+
+  reopened = open_pouch_client(endpoint);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reopened->get(reopened, "acquire-update/repair-key", NULL, sink,
+                     &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_true(get_res.version > 1L);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "{\"value\":2,\"durable\":true}");
+
+  free(text);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  reopened->close(reopened);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
@@ -6919,6 +7094,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_remove_without_state_is_noop),
       cmocka_unit_test(
           test_pouch_endpoint_release_preserves_state_for_reacquire),
+      cmocka_unit_test(
+          test_pouch_endpoint_acquire_for_update_repairs_post_promotion_meta_failure),
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_waits_for_later_enqueue),

@@ -1989,6 +1989,67 @@ static int lc_pouch_validate_active_lease(lc_client_handle *client,
   return LC_OK;
 }
 
+static int lc_pouch_repair_meta_state_gap(lc_client_handle *client,
+                                          const char *namespace_name,
+                                          const char *key,
+                                          lc_pouch_meta_record *record,
+                                          const lc_pouch_state_info *known_state,
+                                          lc_error *error) {
+  lc_pouch_state_info state;
+  const lc_pouch_state_info *state_ref;
+  lc_pouch_store_meta_res stored;
+  lc_source *body;
+  lc_pouch_meta next_meta;
+  int mismatch;
+  int rc;
+
+  if (client == NULL || namespace_name == NULL || key == NULL ||
+      record == NULL || !record->found) {
+    return LC_OK;
+  }
+  memset(&state, 0, sizeof(state));
+  memset(&stored, 0, sizeof(stored));
+  state_ref = known_state;
+  body = NULL;
+  if (state_ref == NULL) {
+    rc = client->pouch_store->read_state(
+        client->pouch_store, namespace_name, key, &body, &state, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (body != NULL) {
+      body->close(body);
+      body = NULL;
+    }
+    state_ref = &state;
+  }
+  if (state_ref->no_content || state_ref->etag == NULL ||
+      state_ref->etag[0] == '\0') {
+    lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
+    return LC_OK;
+  }
+  mismatch = record->meta.state_etag == NULL ||
+             strcmp(record->meta.state_etag, state_ref->etag) != 0;
+  if (!mismatch) {
+    lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
+    return LC_OK;
+  }
+  next_meta = record->meta;
+  next_meta.state_etag = state_ref->etag;
+  next_meta.version = state_ref->version;
+  rc = client->pouch_store->store_meta(client->pouch_store, namespace_name, key,
+                                       &next_meta, record->etag, &stored,
+                                       error);
+  lc_pouch_store_meta_res_cleanup(&client->pouch_allocator, &stored);
+  lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  lc_pouch_meta_record_cleanup(&client->pouch_allocator, record);
+  return client->pouch_store->load_meta(client->pouch_store, namespace_name,
+                                        key, record, error);
+}
+
 static int lc_pouch_refresh_lease(lc_lease_handle *lease,
                                   const lc_pouch_meta *meta, lc_error *error) {
   char *owner;
@@ -2124,6 +2185,12 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   rc = client->pouch_store->load_meta(client->pouch_store, namespace_name,
                                       req->key, &existing, error);
   if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_repair_meta_state_gap(client, namespace_name, req->key,
+                                      &existing, NULL, error);
+  if (rc != LC_OK) {
+    lc_pouch_meta_record_cleanup(allocator, &existing);
     return rc;
   }
   now_unix = lc_pouch_now_unix();
@@ -2546,6 +2613,14 @@ static int lc_pouch_client_get_in_namespace(
     lc_pouch_state_info_cleanup(allocator, &info);
     return rc;
   }
+  rc = lc_pouch_repair_meta_state_gap(client, namespace_name, key, &record,
+                                      &info, error);
+  if (rc != LC_OK) {
+    lc_get_res_cleanup(out);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    lc_pouch_state_info_cleanup(allocator, &info);
+    return rc;
+  }
   if (record.found) {
     out->version = record.meta.version;
     out->fencing_token = record.meta.fencing_token;
@@ -2669,6 +2744,14 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
   }
   rc = client->pouch_store->load_meta(client->pouch_store, namespace_name, key,
                                       &record, error);
+  if (rc != LC_OK) {
+    lc_get_res_cleanup(out);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    lc_pouch_state_info_cleanup(allocator, &info);
+    return rc;
+  }
+  rc = lc_pouch_repair_meta_state_gap(client, namespace_name, key, &record,
+                                      &info, error);
   if (rc != LC_OK) {
     lc_get_res_cleanup(out);
     lc_pouch_meta_record_cleanup(allocator, &record);
