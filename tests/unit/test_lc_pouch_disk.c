@@ -606,8 +606,11 @@ static void test_cas_and_remove_semantics(void **state) {
   lc_pouch_put_state_opts opts;
   lc_pouch_put_state_res first;
   lc_pouch_put_state_res second;
+  lc_pouch_put_state_res third;
+  lc_pouch_put_state_res stale;
   lc_pouch_state_info info;
   lc_error error;
+  char *text;
   int removed;
   int rc;
 
@@ -619,9 +622,12 @@ static void test_cas_and_remove_semantics(void **state) {
   memset(&opts, 0, sizeof(opts));
   memset(&first, 0, sizeof(first));
   memset(&second, 0, sizeof(second));
+  memset(&third, 0, sizeof(third));
+  memset(&stale, 0, sizeof(stale));
   memset(&info, 0, sizeof(info));
   store = NULL;
   read_body = NULL;
+  text = NULL;
   removed = 0;
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
@@ -679,8 +685,74 @@ static void test_cas_and_remove_semantics(void **state) {
   assert_true(info.no_content);
   assert_null(read_body);
 
+  memset(&opts, 0, sizeof(opts));
+  opts.has_if_version = 1;
+  opts.if_version = second.new_version;
+  source = source_from_text("stale");
+  rc = store->write_state(store, "default", "beta", source, &opts, &third,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+
+  memset(&opts, 0, sizeof(opts));
+  source = source_from_text("three");
+  rc = store->write_state(store, "default", "beta", source, &opts, &third,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(third.new_version, 4L);
+  assert_string_not_equal(third.new_state_etag, second.new_state_etag);
+
+  memset(&opts, 0, sizeof(opts));
+  opts.has_if_version = 1;
+  opts.if_version = second.new_version;
+  source = source_from_text("stale-after-recreate");
+  rc = store->write_state(store, "default", "beta", source, &opts, &stale,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  lc_error_cleanup(&error);
+
+  lc_pouch_state_info_cleanup(&allocator, &info);
+  memset(&info, 0, sizeof(info));
+  read_body = NULL;
+  rc = store->read_state(store, "default", "beta", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, third.new_state_etag);
+  assert_int_equal(info.version, third.new_version);
+  assert_non_null(read_body);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "three");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  read_body = NULL;
+  memset(&info, 0, sizeof(info));
+  rc = store->read_state(store, "default", "beta", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, third.new_state_etag);
+  assert_int_equal(info.version, third.new_version);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "three");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
   lc_pouch_put_state_res_cleanup(&allocator, &first);
   lc_pouch_put_state_res_cleanup(&allocator, &second);
+  lc_pouch_put_state_res_cleanup(&allocator, &third);
+  lc_pouch_put_state_res_cleanup(&allocator, &stale);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
