@@ -3070,6 +3070,107 @@ static void test_query_index_keys_scan_avoids_metadata_row_copies(
   test_cleanup_root(root);
 }
 
+static void test_query_index_scans_refresh_stale_reader_before_sidecar(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *reader_docs;
+  lc_pouch_store *reader_keys;
+  lc_pouch_store *writer;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture doc_capture;
+  key_capture key_capture_rows;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-stale-reader-refresh");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&doc_capture, 0, sizeof(doc_capture));
+  memset(&key_capture_rows, 0, sizeof(key_capture_rows));
+  reader_docs = NULL;
+  reader_keys = NULL;
+  writer = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &reader_docs, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &reader_keys, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+
+  req.namespace_name = "default";
+  rc = reader_docs->query_index_scan(reader_docs, &req, capture_scan_row,
+                                     &doc_capture, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(doc_capture.count, 0U);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = reader_keys->query_index_keys_scan(reader_keys, &req, capture_query_key,
+                                          &key_capture_rows, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(key_capture_rows.count, 0U);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  meta.owner = "writer";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = writer->store_meta(writer, "default", "alpha", &meta, NULL, &stored,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 2L;
+  rc = writer->store_meta(writer, "default", "bravo", &meta, NULL, &stored,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  memset(&doc_capture, 0, sizeof(doc_capture));
+  rc = reader_docs->query_index_scan(reader_docs, &req, capture_scan_row,
+                                     &doc_capture, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(doc_capture.count, 2U);
+  assert_string_equal(doc_capture.keys[0], "alpha");
+  assert_string_equal(doc_capture.keys[1], "bravo");
+  assert_int_equal(doc_capture.versions[0], 1L);
+  assert_int_equal(doc_capture.versions[1], 2L);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&key_capture_rows, 0, sizeof(key_capture_rows));
+  rc = reader_keys->query_index_keys_scan(reader_keys, &req, capture_query_key,
+                                          &key_capture_rows, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(key_capture_rows.count, 2U);
+  assert_string_equal(key_capture_rows.keys[0], "alpha");
+  assert_string_equal(key_capture_rows.keys[1], "bravo");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = writer->close(writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reader_keys->close(reader_keys, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reader_docs->close(reader_docs, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_query_index_projection_replays_updates_and_deletes(
     void **state) {
   char root[256];
@@ -10414,6 +10515,8 @@ int main(void) {
           test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(
           test_query_index_keys_scan_avoids_metadata_row_copies),
+      cmocka_unit_test(
+          test_query_index_scans_refresh_stale_reader_before_sidecar),
       cmocka_unit_test(
           test_query_index_projection_replays_updates_and_deletes),
       cmocka_unit_test(
