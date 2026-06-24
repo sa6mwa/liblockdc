@@ -490,7 +490,7 @@ typedef struct lc_query_res {
   char *return_mode;
   unsigned long index_seq;
   char *correlation_id;
-  /** Raw JSON metadata emitted by document query trailers, when present. */
+  /** Raw JSON metadata emitted by query responses, when present. */
   char *metadata_json;
 } lc_query_res;
 

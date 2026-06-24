@@ -5465,6 +5465,35 @@ static int lc_pouch_query_scan_visit_row(void *context,
                                        error);
 }
 
+static char *lc_pouch_query_candidates_metadata(unsigned long candidates,
+                                                lc_error *error) {
+  char metadata[96];
+  char *copy;
+
+  snprintf(metadata, sizeof(metadata), "{\"query_candidates\":%lu}",
+           candidates);
+  copy = lc_strdup_local(metadata);
+  if (copy == NULL) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch query metadata", NULL, NULL,
+                       NULL);
+  }
+  return copy;
+}
+
+static int lc_pouch_query_result_metadata_ready(const lc_query_res *out,
+                                                lc_error *error) {
+  if (out->return_mode != NULL && out->metadata_json != NULL) {
+    return LC_OK;
+  }
+  if (out->return_mode == NULL) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch query metadata", NULL, NULL,
+                       NULL);
+  }
+  return LC_ERR_NOMEM;
+}
+
 static int lc_pouch_client_query_scan(lc_client_handle *client,
                                       const lc_query_req *req, lc_sink *dst,
                                       lc_query_res *out, lc_error *error) {
@@ -5472,7 +5501,6 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
   lc_pouch_scan_meta_res scan_res;
   lc_pouch_query_scan_visit_context visit;
   const char *namespace_name;
-  char metadata[96];
   int rc;
 
   if (client == NULL || req == NULL || dst == NULL || out == NULL) {
@@ -5539,15 +5567,13 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
     }
   }
   out->return_mode = lc_strdup_local("documents");
-  snprintf(metadata, sizeof(metadata), "{\"query_candidates\":%lu}",
-           (unsigned long)scan_res.visited);
-  out->metadata_json = lc_strdup_local(metadata);
-  if (out->return_mode == NULL || out->metadata_json == NULL) {
+  out->metadata_json =
+      lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
+                                         error);
+  if (lc_pouch_query_result_metadata_ready(out, error) != LC_OK) {
     lc_query_res_cleanup(out);
     lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query metadata", NULL, NULL,
-                        NULL);
+    return LC_ERR_NOMEM;
   }
   lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
@@ -5560,7 +5586,6 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   lc_pouch_query_index_scan_res scan_res;
   lc_pouch_query_scan_visit_context visit;
   const char *namespace_name;
-  char metadata[96];
   int rc;
 
   if (client == NULL || req == NULL || dst == NULL || out == NULL) {
@@ -5641,15 +5666,13 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   }
   out->return_mode = lc_strdup_local("documents");
   out->index_seq = scan_res.index_seq;
-  snprintf(metadata, sizeof(metadata), "{\"query_candidates\":%lu}",
-           (unsigned long)scan_res.visited);
-  out->metadata_json = lc_strdup_local(metadata);
-  if (out->return_mode == NULL || out->metadata_json == NULL) {
+  out->metadata_json =
+      lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
+                                         error);
+  if (lc_pouch_query_result_metadata_ready(out, error) != LC_OK) {
     lc_query_res_cleanup(out);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query metadata", NULL, NULL,
-                        NULL);
+    return LC_ERR_NOMEM;
   }
   lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
@@ -5735,12 +5758,13 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
     }
   }
   out->return_mode = lc_strdup_local("keys");
-  if (out->return_mode == NULL) {
+  out->metadata_json =
+      lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
+                                         error);
+  if (lc_pouch_query_result_metadata_ready(out, error) != LC_OK) {
     lc_query_res_cleanup(out);
     lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query_keys return_mode", NULL,
-                        NULL, NULL);
+    return LC_ERR_NOMEM;
   }
   lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
@@ -5834,12 +5858,13 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   }
   out->return_mode = lc_strdup_local("keys");
   out->index_seq = scan_res.index_seq;
-  if (out->return_mode == NULL) {
+  out->metadata_json =
+      lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
+                                         error);
+  if (lc_pouch_query_result_metadata_ready(out, error) != LC_OK) {
     lc_query_res_cleanup(out);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query_keys return_mode", NULL,
-                        NULL, NULL);
+    return LC_ERR_NOMEM;
   }
   lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;

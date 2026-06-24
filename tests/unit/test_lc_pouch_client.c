@@ -5322,6 +5322,7 @@ static void test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys(
   assert_string_equal(capture.keys[1], "bravo");
   assert_string_equal(res.cursor, "bravo");
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_int_equal(res.index_seq, 0UL);
   lc_query_res_cleanup(&res);
 
@@ -5333,6 +5334,7 @@ static void test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys(
   assert_string_equal(capture.keys[0], "charlie");
   assert_null(res.cursor);
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   lc_query_res_cleanup(&res);
 
   alpha->close(alpha);
@@ -5622,6 +5624,7 @@ static void test_pouch_endpoint_default_index_query_keys_pages(
   assert_string_equal(capture.keys[0], "alpha");
   assert_string_equal(res.cursor, "alpha");
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
 
@@ -5633,6 +5636,7 @@ static void test_pouch_endpoint_default_index_query_keys_pages(
   assert_string_equal(capture.keys[0], "bravo");
   assert_null(res.cursor);
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
 
   lc_query_res_cleanup(&res);
@@ -6044,6 +6048,7 @@ static void test_pouch_endpoint_configured_scan_query_keys_without_hint(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "configured");
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
 
   lc_query_res_cleanup(&res);
   lease->close(lease);
@@ -6116,6 +6121,7 @@ static void test_pouch_endpoint_configured_scan_ignores_corrupt_query_sidecar(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "corrupt-sidecar-doc");
   assert_string_equal(key_res.return_mode, "keys");
+  assert_string_equal(key_res.metadata_json, "{\"query_candidates\":1}");
   assert_int_equal(key_res.index_seq, 0UL);
   assert_int_equal(test_query_index_size(root), corrupt_size);
 
@@ -6189,6 +6195,7 @@ static void test_pouch_endpoint_configured_scan_ignores_absent_or_future_sidecar
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "missing-sidecar-doc");
   assert_string_equal(key_res.return_mode, "keys");
+  assert_string_equal(key_res.metadata_json, "{\"query_candidates\":1}");
   assert_int_equal(key_res.index_seq, 0UL);
   assert_int_equal(stat(index_path, &st), 0);
   assert_int_equal(st.st_size, 0);
@@ -6230,6 +6237,7 @@ static void test_pouch_endpoint_configured_scan_ignores_absent_or_future_sidecar
   assert_string_equal(capture.keys[0], "future-sidecar-doc");
   assert_string_equal(capture.keys[1], "missing-sidecar-doc");
   assert_string_equal(key_res.return_mode, "keys");
+  assert_string_equal(key_res.metadata_json, "{\"query_candidates\":2}");
   assert_int_equal(key_res.index_seq, 0UL);
   assert_int_equal(test_query_index_size(root), future_size);
 
@@ -6304,6 +6312,7 @@ static void test_pouch_endpoint_configured_scan_refreshes_shared_log(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "shared-log-doc");
   assert_string_equal(key_res.return_mode, "keys");
+  assert_string_equal(key_res.metadata_json, "{\"query_candidates\":1}");
   assert_int_equal(key_res.index_seq, 0UL);
   assert_int_equal(test_query_index_size(root), corrupt_size);
 
@@ -6350,6 +6359,7 @@ static void test_pouch_endpoint_explicit_scan_query_keys_bypasses_fallback(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "explicit-scan-key");
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_int_equal(res.index_seq, 0UL);
 
   lc_query_res_cleanup(&res);
@@ -6404,6 +6414,9 @@ static void test_pouch_endpoint_configured_scan_fallback_query_keys(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "fallback");
+  assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
 
   lc_query_res_cleanup(&res);
   lease->close(lease);
@@ -6448,6 +6461,7 @@ test_pouch_endpoint_scan_primary_query_keys_uses_index_fallback_for_refresh(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "fallback-refresh-key");
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
 
   lc_query_res_cleanup(&res);

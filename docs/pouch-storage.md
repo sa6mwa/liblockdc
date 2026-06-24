@@ -665,10 +665,11 @@ loading every metadata summary or every document payload in the namespace.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
-returns `keys` as the return mode. `query` streams NDJSON document rows in the
+returns `keys` as the return mode. Both `query_keys` and `query` report local
+metadata such as `query_candidates`. `query` streams NDJSON document rows in the
 same ordered page, embeds JSON state payloads as `document`, emits `null` for
-non-JSON or empty state payloads, returns `documents`, and reports local
-metadata such as `query_candidates`. Pouch `flush_index` is synchronous for the
+non-JSON or empty state payloads, and returns `documents`. Pouch `flush_index` is
+synchronous for the
 current local projection: it returns accepted/flushed/not-pending and the
 latest index sequence. That sequence is a logical monotonic token derived from
 the storage high-water mark, not a physical log record count, so compaction and
