@@ -295,6 +295,16 @@ static off_t test_log_size(const char *root) {
   return st.st_size;
 }
 
+static void truncate_store_log(const char *root) {
+  char log_path[512];
+  int fd;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  fd = open(log_path, O_WRONLY | O_TRUNC);
+  assert_true(fd >= 0);
+  close(fd);
+}
+
 static void test_put_u32(unsigned char *dst, unsigned long value) {
   dst[0] = (unsigned char)(value & 255UL);
   dst[1] = (unsigned char)((value >> 8) & 255UL);
@@ -2511,6 +2521,100 @@ static void test_query_index_sidecar_appends_metadata_records(void **state) {
                    2U);
 
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_index_keys_replays_sidecar_without_metadata_log(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-sidecar-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-charlie";
+  meta.state_etag = "state-charlie";
+  meta.version = 3L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 1;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-delta";
+  meta.state_etag = "state-delta";
+  meta.version = 4L;
+  meta.has_query_hidden = 0;
+  meta.query_hidden = 0;
+  rc = store->store_meta(store, "default", "delta", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->delete_meta(store, "default", "delta", stored.etag, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  truncate_store_log(root);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  req.namespace_name = "default";
+  req.limit = 4U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -4942,6 +5046,8 @@ int main(void) {
           test_metadata_update_allocation_failure_preserves_indexes),
       cmocka_unit_test(test_index_flush_reports_current_projection),
       cmocka_unit_test(test_query_index_sidecar_appends_metadata_records),
+      cmocka_unit_test(
+          test_query_index_keys_replays_sidecar_without_metadata_log),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(test_object_listing_orders_by_name_after_replay),
       cmocka_unit_test(test_object_max_bytes_reads_only_limit_plus_one),

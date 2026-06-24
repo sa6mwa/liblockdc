@@ -151,7 +151,9 @@ typedef struct lc_pouch_disk_store {
   size_t queue_entry_capacity;
   long next_version;
   unsigned long replayed_log_size;
+  unsigned long replayed_query_index_size;
   unsigned long replayed_record_count;
+  unsigned long replayed_query_index_record_count;
   int defer_record_fsync;
 } lc_pouch_disk_store;
 
@@ -238,6 +240,8 @@ static int lc_pouch_disk_append_query_index_record(
 static int lc_pouch_disk_query_index_reserve(lc_pouch_disk_store *store);
 static int lc_pouch_disk_query_index_insert(lc_pouch_disk_store *store,
                                             size_t meta_index);
+static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
+                                            lc_error *error);
 static int lc_pouch_disk_query_summary_upsert(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *etag, long version, const lc_pouch_meta *meta, int deleted);
@@ -1220,8 +1224,13 @@ static unsigned long lc_pouch_disk_index_sequence(
                     ? (unsigned long)(store->next_version - 1L)
                     : 0UL;
   return version_seq > store->replayed_record_count
-             ? version_seq
-             : store->replayed_record_count;
+             ? (version_seq > store->replayed_query_index_record_count
+                    ? version_seq
+                    : store->replayed_query_index_record_count)
+             : (store->replayed_record_count >
+                        store->replayed_query_index_record_count
+                    ? store->replayed_record_count
+                    : store->replayed_query_index_record_count);
 }
 
 static int lc_pouch_disk_append_query_index_record(
@@ -2439,6 +2448,11 @@ static int lc_pouch_disk_query_index_scan(
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_disk_replay_query_index(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
+    return rc;
+  }
 
   start_key = req->start_after != NULL ? req->start_after : "";
   if (lc_pouch_disk_query_index_find(store, req->namespace_name, start_key,
@@ -2593,6 +2607,11 @@ static int lc_pouch_disk_query_index_keys_scan(
 
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_replay_query_index(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
     return rc;
   }
 
@@ -3472,6 +3491,179 @@ static char *lc_pouch_disk_replay_read_string(lc_pouch_disk_store *store,
   return copy;
 }
 
+static char *lc_pouch_disk_replay_query_index_string(
+    lc_pouch_disk_store *store, unsigned long length, unsigned long *crc,
+    int *short_read, lc_error *error) {
+  char *copy;
+
+  copy = (char *)lc_pouch_alloc(&store->allocator, (size_t)length + 1U);
+  if (copy == NULL) {
+    (void)lc_pouch_set_nomem(error, "failed to allocate query index field");
+    return NULL;
+  }
+  if (!lc_pouch_read_all(store->query_index_fd, copy, (size_t)length,
+                         short_read)) {
+    lc_pouch_free(&store->allocator, copy);
+    (void)lc_pouch_set_errno(error, "failed to read pouch query index");
+    return NULL;
+  }
+  if (*short_read) {
+    lc_pouch_free(&store->allocator, copy);
+    return NULL;
+  }
+  if (length > 0UL) {
+    *crc = lc_pouch_crc32_update(*crc, (const unsigned char *)copy,
+                                 (size_t)length);
+  }
+  copy[length] = '\0';
+  return copy;
+}
+
+static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
+                                            lc_error *error) {
+  unsigned char header[LC_POUCH_QUERY_INDEX_HEADER_SIZE];
+  struct stat st;
+  unsigned long offset;
+  unsigned long type;
+  unsigned long header_size;
+  unsigned long ns_len;
+  unsigned long key_len;
+  unsigned long ct_len;
+  unsigned long etag_len;
+  unsigned long body_len;
+  unsigned long version;
+  unsigned long payload_len;
+  unsigned long expected_crc;
+  unsigned long record_version;
+  unsigned long flags;
+  int short_read;
+
+  if (fstat(store->query_index_fd, &st) != 0) {
+    return lc_pouch_set_errno(error, "failed to stat pouch query index");
+  }
+  if ((unsigned long)st.st_size == store->replayed_query_index_size) {
+    return LC_OK;
+  }
+  if (lseek(store->query_index_fd, 0, SEEK_SET) < 0) {
+    return lc_pouch_set_errno(error, "failed to rewind pouch query index");
+  }
+
+  offset = 0UL;
+  store->replayed_query_index_record_count = 0UL;
+  while (1) {
+    char *namespace_name;
+    char *key;
+    char *etag;
+    lc_pouch_meta meta;
+    unsigned long crc;
+    int deleted;
+
+    if (!lc_pouch_read_all(store->query_index_fd, header, sizeof(header),
+                           &short_read)) {
+      return lc_pouch_set_errno(error, "failed to read pouch query index");
+    }
+    if (short_read) {
+      break;
+    }
+    if (memcmp(header, LC_POUCH_QUERY_INDEX_MAGIC, 4U) != 0) {
+      break;
+    }
+
+    header_size = lc_pouch_get_u32(header + 4);
+    type = lc_pouch_get_u32(header + 8);
+    ns_len = lc_pouch_get_u32(header + 12);
+    key_len = lc_pouch_get_u32(header + 16);
+    ct_len = lc_pouch_get_u32(header + 20);
+    etag_len = lc_pouch_get_u32(header + 24);
+    body_len = lc_pouch_get_u64(header + 28);
+    version = lc_pouch_get_u64(header + 36);
+    payload_len = lc_pouch_get_u64(header + 44);
+    expected_crc = lc_pouch_get_u32(header + 52);
+    record_version = lc_pouch_get_u32(header + 56);
+    flags = lc_pouch_get_u32(header + 60);
+
+    if (header_size != LC_POUCH_QUERY_INDEX_HEADER_SIZE ||
+        record_version != LC_POUCH_QUERY_INDEX_RECORD_VERSION ||
+        type != LC_POUCH_QUERY_INDEX_RECORD_META || ct_len != 0UL ||
+        body_len != 0UL ||
+        !lc_pouch_disk_validate_record_lengths(ns_len, key_len, 0UL, etag_len,
+                                               0UL, payload_len)) {
+      break;
+    }
+    if (payload_len != ns_len + key_len + etag_len) {
+      break;
+    }
+    if ((flags & ~(LC_POUCH_QUERY_INDEX_FLAG_DELETED |
+                   LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN_SET |
+                   LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN)) != 0UL) {
+      break;
+    }
+
+    namespace_name = NULL;
+    key = NULL;
+    etag = NULL;
+    memset(&meta, 0, sizeof(meta));
+    crc = 0xffffffffUL;
+    namespace_name = lc_pouch_disk_replay_query_index_string(
+        store, ns_len, &crc, &short_read, error);
+    if (namespace_name == NULL) {
+      return short_read ? LC_OK
+                        : (error != NULL && error->code != LC_OK
+                               ? error->code
+                               : LC_ERR_NOMEM);
+    }
+    key = lc_pouch_disk_replay_query_index_string(store, key_len, &crc,
+                                                  &short_read, error);
+    if (key == NULL) {
+      lc_pouch_free(&store->allocator, namespace_name);
+      return short_read ? LC_OK
+                        : (error != NULL && error->code != LC_OK
+                               ? error->code
+                               : LC_ERR_NOMEM);
+    }
+    if (etag_len > 0UL) {
+      etag = lc_pouch_disk_replay_query_index_string(
+          store, etag_len, &crc, &short_read, error);
+      if (etag == NULL) {
+        lc_pouch_free(&store->allocator, namespace_name);
+        lc_pouch_free(&store->allocator, key);
+        return short_read ? LC_OK
+                          : (error != NULL && error->code != LC_OK
+                                 ? error->code
+                                 : LC_ERR_NOMEM);
+      }
+    }
+    if ((crc ^ 0xffffffffUL) != expected_crc) {
+      lc_pouch_free(&store->allocator, namespace_name);
+      lc_pouch_free(&store->allocator, key);
+      lc_pouch_free(&store->allocator, etag);
+      break;
+    }
+
+    meta.version = (long)version;
+    meta.has_query_hidden =
+        (flags & LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN_SET) != 0UL;
+    meta.query_hidden =
+        (flags & LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN) != 0UL;
+    deleted = (flags & LC_POUCH_QUERY_INDEX_FLAG_DELETED) != 0UL;
+    if (!lc_pouch_disk_query_summary_upsert(store, namespace_name, key, etag,
+                                            (long)version, &meta, deleted)) {
+      lc_pouch_free(&store->allocator, namespace_name);
+      lc_pouch_free(&store->allocator, key);
+      lc_pouch_free(&store->allocator, etag);
+      return lc_pouch_set_nomem(error, "failed to replay pouch query index");
+    }
+    lc_pouch_free(&store->allocator, namespace_name);
+    lc_pouch_free(&store->allocator, key);
+    lc_pouch_free(&store->allocator, etag);
+    offset += LC_POUCH_QUERY_INDEX_HEADER_SIZE + payload_len;
+    store->replayed_query_index_record_count++;
+  }
+
+  store->replayed_query_index_size = offset;
+  return LC_OK;
+}
+
 static void lc_pouch_disk_replay_free_fields(lc_pouch_disk_store *store,
                                              char *ns_copy, char *key_copy,
                                              char *ct_copy, char *etag_copy) {
@@ -3905,6 +4097,8 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
 
   offset = 0UL;
   lc_pouch_disk_reset_indexes(store);
+  store->replayed_query_index_size = (unsigned long)-1;
+  store->replayed_query_index_record_count = 0UL;
   store->replayed_record_count = 0UL;
   if (lseek(store->log_fd, 0, SEEK_SET) < 0) {
     return lc_pouch_set_errno(error, "failed to rewind pouch log");
@@ -6677,6 +6871,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->log_fd = -1;
   store->lock_fd = -1;
   store->query_index_fd = -1;
+  store->replayed_log_size = (unsigned long)-1;
+  store->replayed_query_index_size = (unsigned long)-1;
   store->next_version = 1L;
   store->pub.impl = store;
   store->root_path = lc_pouch_strdup(&store->allocator, root_path);
