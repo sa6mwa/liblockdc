@@ -220,6 +220,23 @@ static void assert_client_state_text(lc_client *client, const char *key,
   lc_sink_close(sink);
 }
 
+static void assert_client_state_empty(lc_client *client, const char *key,
+                                      lc_error *error) {
+  lc_sink *sink;
+  lc_get_res get_res;
+  int rc;
+
+  sink = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  rc = client->get(client, key, NULL, sink, &get_res, error);
+  assert_lc_ok(rc, error);
+  assert_true(get_res.no_content);
+  lc_get_res_cleanup(&get_res);
+  lc_sink_close(sink);
+}
+
 typedef struct pouch_consumer_state_test {
   lc_consumer_service *service;
   size_t handled;
@@ -348,6 +365,32 @@ static int pouch_acquire_for_update_failing_handler(
     assert_non_null(error->message);
   }
   return LC_ERR_INVALID;
+}
+
+static int pouch_acquire_for_update_empty_handler(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  pouch_acquire_for_update_test *test;
+  lc_source *source;
+  int rc;
+
+  test = (pouch_acquire_for_update_test *)context;
+  source = NULL;
+  assert_non_null(test);
+  assert_non_null(update);
+  assert_non_null(update->lease);
+  assert_false(update->state.has_state);
+  assert_null(update->state.reader);
+  assert_int_equal(update->state.version, 0L);
+  test->saw_snapshot = 1;
+
+  source = source_from_text(test->next_state, error);
+  rc = update->lease->update(update->lease, source, NULL, error);
+  lc_source_close(source);
+  if (rc == LC_OK && test->observer != NULL) {
+    assert_client_state_empty(test->observer, test->key, error);
+    test->checked_staged_invisible = 1;
+  }
+  return rc;
 }
 
 static int pouch_consumer_state_handle(void *context,
@@ -3739,6 +3782,68 @@ static void test_pouch_public_acquire_for_update_stages_state(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_acquire_for_update_creates_empty_state(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *observer;
+  lc_acquire_req acquire;
+  lc_error error;
+  pouch_acquire_for_update_test handler_state;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "acquire-for-update-empty");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  observer = NULL;
+  memset(&handler_state, 0, sizeof(handler_state));
+
+  open_pouch_client(endpoint, &client, &error);
+  open_pouch_client(endpoint, &observer, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/acquire-for-update-empty-key";
+  acquire.owner = "empty-commit";
+  acquire.ttl_seconds = 60L;
+  handler_state.observer = observer;
+  handler_state.key = "integration/acquire-for-update-empty-key";
+  handler_state.next_state = "{\"value\":1,\"via\":\"empty-commit\"}";
+  rc = lc_acquire_for_update(client, &acquire,
+                             pouch_acquire_for_update_empty_handler,
+                             &handler_state, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(handler_state.saw_snapshot);
+  assert_true(handler_state.checked_staged_invisible);
+  assert_client_state_text(client, "integration/acquire-for-update-empty-key",
+                           "{\"value\":1,\"via\":\"empty-commit\"}", &error);
+
+  memset(&handler_state, 0, sizeof(handler_state));
+  acquire.key = "integration/acquire-for-update-empty-rollback-key";
+  acquire.owner = "empty-rollback";
+  rc = lc_acquire_for_update(client, &acquire,
+                             pouch_acquire_for_update_failing_handler, NULL,
+                             &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_non_null(error.message);
+  assert_string_equal(error.message,
+                      "intentional pouch acquire_for_update failure");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_client_state_empty(client,
+                            "integration/acquire-for-update-empty-rollback-key",
+                            &error);
+
+  client->close(client);
+  observer->close(observer);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_cas_across_clients(void **state) {
   char root[256];
   char endpoint[320];
@@ -4075,6 +4180,8 @@ int main(void) {
           test_pouch_public_consumer_service_polls_later_enqueue),
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
       cmocka_unit_test(test_pouch_public_acquire_for_update_stages_state),
+      cmocka_unit_test(
+          test_pouch_public_acquire_for_update_creates_empty_state),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
       cmocka_unit_test(test_pouch_public_mutate_local_shared_state),
