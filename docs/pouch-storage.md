@@ -1572,7 +1572,8 @@ state roundtrip, explicit state payload write/read sizes at 1 KiB, 64 KiB,
 and hot-key compaction churn, metadata summary scans, open/replay index
 rebuild, direct indexed summary scans, direct key-only indexed scans, public
 indexed document query streaming, public scan-mode document query streaming,
-public indexed key streaming, and public scan-mode key streaming.
+public indexed key streaming, public scan-mode key streaming, and retention
+sweep throughput over metadata/state rows.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local
 benchmarks rather than performance gates; the larger matrix above remains the

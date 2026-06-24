@@ -1126,6 +1126,73 @@ static int bench_pouch_compaction(long iterations) {
   return rc == LC_OK ? 0 : 1;
 }
 
+static int bench_pouch_retention_sweep(long iterations) {
+  char root[256];
+  char key[96];
+  char json[96];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_pouch_retention_sweep_req req;
+  lc_pouch_retention_sweep_res res;
+  lc_error error;
+  long i;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "retention");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
+
+  for (i = 0; i < iterations; ++i) {
+    snprintf(key, sizeof(key), "bench/retention/%08ld", i);
+    snprintf(json, sizeof(json), "{\"retention\":%ld}", i);
+    if (bench_pouch_store_row(store, NULL, key, json, &error) != 0) {
+      store->close(store, &error);
+      lc_error_cleanup(&error);
+      bench_pouch_cleanup_root(root);
+      return 1;
+    }
+  }
+
+  store->close(store, &error);
+  store = NULL;
+  bench_alloc_metrics_reset();
+  bench_pouch_allocator(&allocator);
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  req.updated_before_unix = (long)time(NULL) + 1L;
+  rc = store->retention_sweep(store, &req, &res, &error);
+  if (rc == LC_OK &&
+      (res.scanned_metadata != (unsigned long)iterations ||
+       res.expired_metadata != (unsigned long)iterations ||
+       res.deleted_metadata != (unsigned long)iterations ||
+       res.deleted_state != (unsigned long)iterations ||
+       res.failed_keys != 0UL)) {
+    fprintf(stderr,
+            "pouch-retention unexpected sweep counts: scanned=%lu "
+            "expired=%lu deleted_meta=%lu deleted_state=%lu failed=%lu\n",
+            res.scanned_metadata, res.expired_metadata, res.deleted_metadata,
+            res.deleted_state, res.failed_keys);
+    rc = LC_ERR_PROTOCOL;
+  }
+  store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int bench_pouch_scan_meta(long iterations) {
   char root[256];
   lc_pouch_store *store;
@@ -1573,7 +1640,7 @@ static void print_usage(const char *argv0) {
       "pouch-state-write-1m|pouch-state-write-16m|pouch-state-read-1k|"
       "pouch-state-read-64k|pouch-state-read-1m|pouch-state-read-16m|"
       "pouch-staged|pouch-object|pouch-queue|pouch-compaction|"
-      "pouch-scan-meta|pouch-open-rebuild|pouch-index-scan|"
+      "pouch-retention|pouch-scan-meta|pouch-open-rebuild|pouch-index-scan|"
       "pouch-index-keys|pouch-scan-query|pouch-index-query|"
       "pouch-scan-query-keys|pouch-index-query-keys]\n",
       argv0);
@@ -1598,6 +1665,7 @@ int main(int argc, char **argv) {
       {"pouch-object", 1000L, bench_pouch_object_roundtrip},
       {"pouch-queue", 1000L, bench_pouch_queue_roundtrip},
       {"pouch-compaction", 120L, bench_pouch_compaction},
+      {"pouch-retention", 1000L, bench_pouch_retention_sweep},
       {"pouch-scan-meta", 1000L, bench_pouch_scan_meta},
       {"pouch-open-rebuild", 1000L, bench_pouch_open_rebuild},
       {"pouch-index-scan", 1000L, bench_pouch_index_scan},
