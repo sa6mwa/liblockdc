@@ -3917,6 +3917,64 @@ static void test_query_index_keys_recovers_from_corrupt_sidecar_tail(
   test_cleanup_root(root);
 }
 
+static void test_query_index_keys_recreates_missing_sidecar(void **state) {
+  char root[256];
+  char index_path[512];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-sidecar-missing");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  assert_true(test_query_index_size(root) > 0);
+
+  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  assert_int_equal(unlink(index_path), 0);
+
+  req.namespace_name = "default";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_false(scan.truncated);
+  assert_true(test_query_index_size(root) > 0);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_query_index_keys_truncates_partial_sidecar_field(
     void **state) {
   char root[256];
@@ -10529,6 +10587,7 @@ int main(void) {
           test_query_index_keys_ignores_sidecar_without_metadata_log),
       cmocka_unit_test(
           test_query_index_keys_recovers_from_corrupt_sidecar_tail),
+      cmocka_unit_test(test_query_index_keys_recreates_missing_sidecar),
       cmocka_unit_test(
           test_query_index_keys_truncates_partial_sidecar_field),
       cmocka_unit_test(test_scan_meta_ignores_corrupt_query_sidecar),

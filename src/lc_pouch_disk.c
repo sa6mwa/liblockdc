@@ -2877,6 +2877,36 @@ static int lc_pouch_disk_append_query_index_record(
   return LC_OK;
 }
 
+static int lc_pouch_disk_rebuild_query_index(lc_pouch_disk_store *store,
+                                             lc_error *error) {
+  size_t index;
+  int rc;
+
+  if (lseek(store->query_index_fd, 0, SEEK_SET) < 0) {
+    return lc_pouch_set_errno(error, "failed to rewind pouch query index");
+  }
+  if (ftruncate(store->query_index_fd, 0) != 0) {
+    return lc_pouch_set_errno(error, "failed to truncate pouch query index");
+  }
+  for (index = 0U; index < store->meta_entry_count; ++index) {
+    lc_pouch_disk_meta_entry *entry;
+
+    entry = &store->meta_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    rc = lc_pouch_disk_append_query_index_record(
+        store, entry->namespace_name, entry->key, entry->etag,
+        entry->meta.version, &entry->meta, 0, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  store->replayed_query_index_size = (unsigned long)-1;
+  store->replayed_query_index_record_count = 0UL;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_object_entry_ptr_compare(const void *left,
                                                   const void *right) {
   const lc_pouch_disk_object_entry *const *left_entry;
@@ -5671,7 +5701,28 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
     return lc_pouch_set_errno(error, "failed to stat pouch query index");
   }
   if (stat(store->query_index_path, &path_st) != 0) {
-    return lc_pouch_set_errno(error, "failed to stat pouch query index path");
+    if (errno != ENOENT) {
+      return lc_pouch_set_errno(error, "failed to stat pouch query index path");
+    }
+    new_fd = open(store->query_index_path, O_RDWR | O_CREAT, 0666);
+    if (new_fd < 0) {
+      return lc_pouch_set_errno(error,
+                                "failed to recreate missing pouch query index");
+    }
+    close(store->query_index_fd);
+    store->query_index_fd = new_fd;
+    store->replayed_query_index_size = (unsigned long)-1;
+    store->replayed_query_index_record_count = 0UL;
+    if (lc_pouch_disk_rebuild_query_index(store, error) != LC_OK) {
+      return error != NULL ? error->code : LC_ERR_TRANSPORT;
+    }
+    if (fstat(store->query_index_fd, &st) != 0) {
+      return lc_pouch_set_errno(
+          error, "failed to stat recreated pouch query index");
+    }
+    memset(&path_st, 0, sizeof(path_st));
+    path_st.st_dev = st.st_dev;
+    path_st.st_ino = st.st_ino;
   }
   if (st.st_dev != path_st.st_dev || st.st_ino != path_st.st_ino) {
     new_fd = open(store->query_index_path, O_RDWR);
