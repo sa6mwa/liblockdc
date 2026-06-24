@@ -2754,6 +2754,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
                                     lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_meta_entry *entry;
+  lc_pouch_key_lock *key_lock;
   unsigned char *payload;
   size_t payload_length;
   char *etag;
@@ -2776,8 +2777,14 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
+  key_lock = NULL;
+  rc = lc_pouch_disk_lock_key_wait(self, namespace_name, key, &key_lock, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   index = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
@@ -2785,6 +2792,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   rc = lc_pouch_check_meta_cas(entry, expected_etag, error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   payload = NULL;
@@ -2797,6 +2805,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   if (!lc_pouch_encode_meta(store, &effective_meta, &payload,
                             &payload_length)) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return lc_pouch_set_nomem(error, "failed to encode pouch metadata");
   }
   etag = lc_pouch_make_etag(store, effective_meta.version, payload,
@@ -2804,6 +2813,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   if (etag == NULL) {
     lc_pouch_free(&store->allocator, payload);
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch metadata etag");
   }
   if (!lc_pouch_disk_prepare_meta_upsert(store, namespace_name, key, etag,
@@ -2811,6 +2821,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
     lc_pouch_free(&store->allocator, etag);
     lc_pouch_free(&store->allocator, payload);
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return lc_pouch_set_nomem(error, "failed to update pouch metadata index");
   }
   rc = lc_pouch_disk_append_query_index_record(
@@ -2843,6 +2854,10 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
+      rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
   return rc;
 }
 
@@ -2852,6 +2867,7 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
                                      lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_meta_entry *entry;
+  lc_pouch_key_lock *key_lock;
   int index;
   int rc;
 
@@ -2865,8 +2881,14 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
     return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
+  key_lock = NULL;
+  rc = lc_pouch_disk_lock_key_wait(self, namespace_name, key, &key_lock, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   index = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
@@ -2874,6 +2896,7 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
   rc = lc_pouch_check_meta_cas(entry, expected_etag, error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   rc = lc_pouch_disk_append_meta_remove_locked(store, namespace_name, key,
@@ -2882,6 +2905,10 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
+      rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;

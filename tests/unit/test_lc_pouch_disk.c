@@ -8432,6 +8432,52 @@ static void child_process_write_state_after_ready(const char *root,
   _exit(0);
 }
 
+static void child_process_store_meta_after_ready(const char *root,
+                                                 int start_fd,
+                                                 int ready_fd) {
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_error error;
+  char start;
+  int rc;
+
+  store = NULL;
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&error, 0, sizeof(error));
+  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(90);
+  }
+  meta.owner = "blocked-meta-writer";
+  meta.lease_id = "blocked-meta-lease";
+  meta.version = 1L;
+  if (read(start_fd, &start, 1U) != 1) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(91);
+  }
+  close(start_fd);
+  if (write(ready_fd, "r", 1U) != 1) {
+    store->close(store, NULL);
+    lc_error_cleanup(&error);
+    _exit(92);
+  }
+  close(ready_fd);
+  rc = store->store_meta(store, "default", "meta-key", &meta, NULL, &meta_res,
+                         &error);
+  lc_pouch_store_meta_res_cleanup(NULL, &meta_res);
+  store->close(store, NULL);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    _exit(93);
+  }
+  lc_error_cleanup(&error);
+  _exit(0);
+}
+
 static void test_try_lock_key_serializes_same_process_handles(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -8639,6 +8685,89 @@ static void test_write_state_waits_for_cross_process_key_lock(void **state) {
   lock = NULL;
   child_code = child_exit_code(pid);
   assert_int_equal(child_code, 0);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_store_meta_waits_for_cross_process_key_lock(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_key_lock *lock;
+  lc_pouch_meta_record loaded;
+  lc_error error;
+  int start_pipe[2];
+  int ready_pipe[2];
+  char ready;
+  int acquired;
+  int status;
+  int child_code;
+  int rc;
+  pid_t pid;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "store-meta-key-lock-wait");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&loaded, 0, sizeof(loaded));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  lock = NULL;
+  start_pipe[0] = -1;
+  start_pipe[1] = -1;
+  ready_pipe[0] = -1;
+  ready_pipe[1] = -1;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = pipe(start_pipe);
+  assert_int_equal(rc, 0);
+  rc = pipe(ready_pipe);
+  assert_int_equal(rc, 0);
+  pid = fork();
+  assert_true(pid >= 0);
+  if (pid == 0) {
+    close(start_pipe[1]);
+    close(ready_pipe[0]);
+    child_process_store_meta_after_ready(root, start_pipe[0], ready_pipe[1]);
+  }
+  close(start_pipe[0]);
+  start_pipe[0] = -1;
+  close(ready_pipe[1]);
+  ready_pipe[1] = -1;
+
+  rc = store->try_lock_key(store, "default", "meta-key", &lock, &acquired,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquired);
+  assert_non_null(lock);
+  assert_int_equal(write(start_pipe[1], "x", 1U), 1);
+  close(start_pipe[1]);
+  start_pipe[1] = -1;
+  assert_int_equal(read(ready_pipe[0], &ready, 1U), 1);
+  close(ready_pipe[0]);
+  ready_pipe[0] = -1;
+
+  test_sleep_for_lock_wait();
+  status = 0;
+  rc = waitpid(pid, &status, WNOHANG);
+  assert_int_equal(rc, 0);
+
+  rc = store->unlock_key(store, lock, &error);
+  assert_int_equal(rc, LC_OK);
+  lock = NULL;
+  child_code = child_exit_code(pid);
+  assert_int_equal(child_code, 0);
+
+  rc = store->load_meta(store, "default", "meta-key", &loaded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded.found);
+  assert_string_equal(loaded.meta.owner, "blocked-meta-writer");
+  lc_pouch_meta_record_cleanup(&allocator, &loaded);
 
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
@@ -8887,6 +9016,7 @@ int main(void) {
       cmocka_unit_test(test_try_lock_key_serializes_same_process_handles),
       cmocka_unit_test(test_try_lock_key_serializes_cross_process_handles),
       cmocka_unit_test(test_write_state_waits_for_cross_process_key_lock),
+      cmocka_unit_test(test_store_meta_waits_for_cross_process_key_lock),
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),
