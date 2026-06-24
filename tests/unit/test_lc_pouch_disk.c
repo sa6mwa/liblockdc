@@ -7465,6 +7465,68 @@ static void test_abort_preserves_writer_marker(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_writer_status_reports_marker_presence(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *first;
+  lc_pouch_store *second;
+  lc_pouch_writer_status status;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "writer-status");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&status, 0, sizeof(status));
+  first = NULL;
+  second = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first->writer_status);
+
+  rc = first->writer_status(first, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(status.mode, "advisory-file-lock-marker");
+  assert_string_equal(status.marker_prefix, TEST_POUCH_WRITER_MARKER_PREFIX);
+  assert_true(status.own_marker_present);
+  assert_int_equal(status.active_marker_count, 2U);
+  assert_int_equal(status.other_marker_count, 1U);
+  assert_int_equal(status.heartbeat_sequence, 1UL);
+  lc_pouch_writer_status_cleanup(&allocator, &status);
+
+  rc = second->close(second, &error);
+  assert_int_equal(rc, LC_OK);
+  second = NULL;
+  rc = first->writer_status(first, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.own_marker_present);
+  assert_int_equal(status.active_marker_count, 1U);
+  assert_int_equal(status.other_marker_count, 0U);
+  lc_pouch_writer_status_cleanup(&allocator, &status);
+
+  tracked.fail_malloc_size = strlen("advisory-file-lock-marker") + 1U;
+  rc = first->writer_status(first, &status, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to copy pouch writer status");
+  assert_null(status.mode);
+  assert_null(status.marker_prefix);
+  assert_false(status.own_marker_present);
+  assert_int_equal(status.active_marker_count, 0U);
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+
+  rc = first->close(first, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
   char root[256];
   char marker_path[512];
@@ -7693,6 +7755,7 @@ int main(void) {
       cmocka_unit_test(test_open_removes_stale_compaction_temps),
       cmocka_unit_test(test_close_removes_writer_marker),
       cmocka_unit_test(test_abort_preserves_writer_marker),
+      cmocka_unit_test(test_writer_status_reports_marker_presence),
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),

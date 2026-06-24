@@ -2,6 +2,7 @@
 
 #include "lc_api_internal.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -363,6 +364,9 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
 static int lc_pouch_disk_queue_wake_status(
     lc_pouch_store *self, const char *namespace_name, const char *queue,
     lc_pouch_queue_wake_status *out, lc_error *error);
+static int lc_pouch_disk_writer_status(lc_pouch_store *self,
+                                       lc_pouch_writer_status *out,
+                                       lc_error *error);
 static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       const char *namespace_name,
                                       lc_pouch_query_config *out,
@@ -7212,6 +7216,56 @@ static int lc_pouch_disk_queue_wake_status(
   return LC_OK;
 }
 
+static int lc_pouch_disk_writer_status(lc_pouch_store *self,
+                                       lc_pouch_writer_status *out,
+                                       lc_error *error) {
+  lc_pouch_disk_store *store;
+  DIR *dir;
+  struct dirent *entry;
+  const char *own_leaf;
+  size_t prefix_len;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error, "writer_status requires store and out");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  out->mode = lc_pouch_strdup(&store->allocator, "advisory-file-lock-marker");
+  out->marker_prefix =
+      lc_pouch_strdup(&store->allocator, LC_POUCH_WRITER_MARKER_PREFIX);
+  if (out->mode == NULL || out->marker_prefix == NULL) {
+    lc_pouch_writer_status_cleanup(&store->allocator, out);
+    return lc_pouch_set_nomem(error, "failed to copy pouch writer status");
+  }
+  out->heartbeat_sequence = store->writer_marker_seq;
+
+  own_leaf = strrchr(store->writer_marker_path, '/');
+  own_leaf = own_leaf != NULL ? own_leaf + 1 : store->writer_marker_path;
+  prefix_len = strlen(LC_POUCH_WRITER_MARKER_PREFIX);
+  dir = opendir(store->root_path);
+  if (dir == NULL) {
+    lc_pouch_writer_status_cleanup(&store->allocator, out);
+    return lc_pouch_set_errno(error, "failed to inspect pouch writer markers");
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    if (strncmp(entry->d_name, LC_POUCH_WRITER_MARKER_PREFIX, prefix_len) !=
+        0) {
+      continue;
+    }
+    out->active_marker_count++;
+    if (strcmp(entry->d_name, own_leaf) == 0) {
+      out->own_marker_present = 1;
+    } else {
+      out->other_marker_count++;
+    }
+  }
+  if (closedir(dir) != 0) {
+    lc_pouch_writer_status_cleanup(&store->allocator, out);
+    return lc_pouch_set_errno(error, "failed to close pouch writer marker scan");
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       const char *namespace_name,
                                       lc_pouch_query_config *out,
@@ -7583,6 +7637,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.extend_message = lc_pouch_disk_extend_message;
   store->pub.queue_stats = lc_pouch_disk_queue_stats;
   store->pub.queue_wake_status = lc_pouch_disk_queue_wake_status;
+  store->pub.writer_status = lc_pouch_disk_writer_status;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;

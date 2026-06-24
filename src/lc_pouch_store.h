@@ -249,6 +249,15 @@ typedef struct lc_pouch_queue_wake_status {
   int uses_filesystem_notifications;
 } lc_pouch_queue_wake_status;
 
+typedef struct lc_pouch_writer_status {
+  char *mode;
+  char *marker_prefix;
+  int own_marker_present;
+  size_t active_marker_count;
+  size_t other_marker_count;
+  unsigned long heartbeat_sequence;
+} lc_pouch_writer_status;
+
 typedef struct lc_pouch_backend_capabilities {
   char *backend_kind;
   char *write_coordination;
@@ -362,6 +371,8 @@ struct lc_pouch_store {
   int (*queue_wake_status)(lc_pouch_store *self, const char *namespace_name,
                            const char *queue,
                            lc_pouch_queue_wake_status *out, lc_error *error);
+  int (*writer_status)(lc_pouch_store *self, lc_pouch_writer_status *out,
+                       lc_error *error);
   int (*query_config)(lc_pouch_store *self, const char *namespace_name,
                       lc_pouch_query_config *out, lc_error *error);
   int (*backend_capabilities)(lc_pouch_store *self,
@@ -406,6 +417,8 @@ void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
                                    lc_pouch_query_config *config);
 void lc_pouch_queue_wake_status_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_queue_wake_status *status);
+void lc_pouch_writer_status_cleanup(const lc_pouch_allocator *allocator,
+                                    lc_pouch_writer_status *status);
 void lc_pouch_backend_capabilities_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_backend_capabilities *caps);
 void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
