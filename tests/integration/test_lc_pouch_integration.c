@@ -2406,6 +2406,199 @@ static void test_pouch_public_attachment_delete_semantics(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_transaction_attachment_rollback_discards(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_release_req release_req;
+  lc_attachment_list_req list_req;
+  lc_attachment_list attachments;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "txn-attachment-rollback");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&attachments, 0, sizeof(attachments));
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-attachment-rollback";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  acquire.txn_id = "integration-txn-attachment-rollback-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "artifact.txt";
+  attach_req.content_type = "text/plain";
+  source = source_from_text("rolled-back-attachment", &error);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = acquire.key;
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = acquire.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "rolled_back");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-attachment-rollback";
+  acquire.owner = "reader";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->list_attachments(lease, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 0U);
+  lc_attachment_list_cleanup(&attachments);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  lc_attach_res_cleanup(&attach_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_transaction_attachment_commit_publishes(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_release_req release_req;
+  lc_attachment_list_req list_req;
+  lc_attachment_list attachments;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "txn-attachment-commit");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&attachments, 0, sizeof(attachments));
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-attachment-commit";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  acquire.txn_id = "integration-txn-attachment-commit-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "artifact.txt";
+  attach_req.content_type = "text/plain";
+  source = source_from_text("committed-attachment", &error);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = acquire.key;
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = acquire.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "committed");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-attachment-commit";
+  acquire.owner = "reader";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->list_attachments(lease, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 1U);
+  assert_string_equal(attachments.items[0].name, "artifact.txt");
+  assert_string_equal(attachments.items[0].id, attach_res.attachment.id);
+  lc_attachment_list_cleanup(&attachments);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_attachment_get_op_init(&get_op);
+  get_op.lease.namespace_name = lease->namespace_name;
+  get_op.lease.key = lease->key;
+  get_op.lease.lease_id = lease->lease_id;
+  get_op.lease.txn_id = lease->txn_id;
+  get_op.lease.fencing_token = lease->fencing_token;
+  get_op.selector.name = "artifact.txt";
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(get_res.attachment.name, "artifact.txt");
+  assert_sink_text(sink, "committed-attachment", &error);
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  lc_attach_res_cleanup(&attach_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_attachment_prevent_overwrite(void **state) {
   char root[256];
   char endpoint[320];
@@ -6203,6 +6396,10 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
+      cmocka_unit_test(
+          test_pouch_public_transaction_attachment_rollback_discards),
+      cmocka_unit_test(
+          test_pouch_public_transaction_attachment_commit_publishes),
       cmocka_unit_test(test_pouch_public_attachment_prevent_overwrite),
       cmocka_unit_test(test_pouch_public_client_level_attachment_apis),
       cmocka_unit_test(test_pouch_public_attachment_read_after_release),

@@ -709,6 +709,133 @@ static int lc_pouch_txn_delete_record(lc_client_handle *client,
       &selector, &deleted, error);
 }
 
+static char *lc_pouch_txn_attachment_stage_key(lc_client_handle *client,
+                                               const char *key,
+                                               const char *txn_id,
+                                               lc_error *error) {
+  const char mid[] = "/.staging/";
+  const char suffix[] = "/attachments";
+  size_t key_len;
+  size_t txn_len;
+  size_t mid_len;
+  size_t suffix_len;
+  size_t total;
+  char *staged_key;
+
+  if (client == NULL || key == NULL || txn_id == NULL || txn_id[0] == '\0') {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch staged attachment requires key and txn_id", NULL, NULL,
+                 NULL);
+    return NULL;
+  }
+  key_len = strlen(key);
+  txn_len = strlen(txn_id);
+  mid_len = strlen(mid);
+  suffix_len = strlen(suffix);
+  if (key_len > (size_t)-1 - mid_len ||
+      key_len + mid_len > (size_t)-1 - txn_len ||
+      key_len + mid_len + txn_len > (size_t)-1 - suffix_len ||
+      key_len + mid_len + txn_len + suffix_len > (size_t)-1 - 1U) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch staged attachment key is too large", NULL, NULL, NULL);
+    return NULL;
+  }
+  total = key_len + mid_len + txn_len + suffix_len;
+  staged_key = (char *)lc_client_calloc(client, total + 1U, 1U);
+  if (staged_key == NULL) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to allocate pouch staged attachment key", NULL, NULL,
+                 NULL);
+    return NULL;
+  }
+  memcpy(staged_key, key, key_len);
+  memcpy(staged_key + key_len, mid, mid_len);
+  memcpy(staged_key + key_len + mid_len, txn_id, txn_len);
+  memcpy(staged_key + key_len + mid_len + txn_len, suffix, suffix_len);
+  staged_key[total] = '\0';
+  return staged_key;
+}
+
+static int lc_pouch_txn_discard_staged_attachments(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *txn_id, lc_error *error) {
+  char *staged_key;
+  int deleted_count;
+  int rc;
+
+  if (client == NULL || client->pouch_store == NULL ||
+      client->pouch_store->delete_all_objects == NULL) {
+    return LC_OK;
+  }
+  staged_key = lc_pouch_txn_attachment_stage_key(client, key, txn_id, error);
+  if (staged_key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  deleted_count = 0;
+  rc = client->pouch_store->delete_all_objects(
+      client->pouch_store, namespace_name, staged_key, &deleted_count, error);
+  lc_client_free(client, staged_key);
+  return rc;
+}
+
+static int lc_pouch_txn_promote_staged_attachments(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *txn_id, int *promoted, lc_error *error) {
+  lc_pouch_object_list objects;
+  lc_pouch_copy_object_opts copy_opts;
+  lc_pouch_object_info copied;
+  char *staged_key;
+  size_t index;
+  int deleted_count;
+  int rc;
+
+  if (promoted != NULL) {
+    *promoted = 0;
+  }
+  if (client == NULL || client->pouch_store == NULL ||
+      client->pouch_store->list_objects == NULL ||
+      client->pouch_store->copy_object == NULL ||
+      client->pouch_store->delete_all_objects == NULL) {
+    return LC_OK;
+  }
+  memset(&objects, 0, sizeof(objects));
+  staged_key = lc_pouch_txn_attachment_stage_key(client, key, txn_id, error);
+  if (staged_key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  rc = client->pouch_store->list_objects(client->pouch_store, namespace_name,
+                                        staged_key, &objects, error);
+  if (rc != LC_OK) {
+    lc_client_free(client, staged_key);
+    return rc;
+  }
+  for (index = 0U; index < objects.count; ++index) {
+    memset(&copy_opts, 0, sizeof(copy_opts));
+    memset(&copied, 0, sizeof(copied));
+    copy_opts.source.id = objects.items[index].id;
+    copy_opts.source.name = objects.items[index].name;
+    copy_opts.name = objects.items[index].name;
+    rc = client->pouch_store->copy_object(client->pouch_store, namespace_name,
+                                          staged_key, key, &copy_opts, &copied,
+                                          error);
+    lc_pouch_object_info_cleanup(&client->pouch_allocator, &copied);
+    if (rc != LC_OK) {
+      lc_pouch_object_list_cleanup(&client->pouch_allocator, &objects);
+      lc_client_free(client, staged_key);
+      return rc;
+    }
+  }
+  if (objects.count > 0U && promoted != NULL) {
+    *promoted = 1;
+  }
+  lc_pouch_object_list_cleanup(&client->pouch_allocator, &objects);
+  deleted_count = 0;
+  rc = client->pouch_store->delete_all_objects(
+      client->pouch_store, namespace_name, staged_key, &deleted_count, error);
+  lc_client_free(client, staged_key);
+  return rc;
+}
+
 static int lc_pouch_txn_clear_participant_meta(
     lc_client_handle *client, const char *namespace_name,
     const lc_txn_participant *participant, const lc_pouch_meta_record *record,
@@ -794,12 +921,16 @@ static int lc_pouch_txn_apply_participant(lc_client_handle *client,
   lc_pouch_put_state_res promoted;
   lc_pouch_promote_staged_opts promote_opts;
   lc_pouch_discard_staged_opts discard_opts;
+  int state_promoted;
+  int attachments_promoted;
   int rc;
 
   memset(&record, 0, sizeof(record));
   memset(&promoted, 0, sizeof(promoted));
   memset(&promote_opts, 0, sizeof(promote_opts));
   memset(&discard_opts, 0, sizeof(discard_opts));
+  state_promoted = 0;
+  attachments_promoted = 0;
   rc = lc_pouch_public_namespace(client, participant->namespace_name,
                                  &namespace_name, error);
   if (rc != LC_OK) {
@@ -830,17 +961,39 @@ static int lc_pouch_txn_apply_participant(lc_client_handle *client,
       lc_error_cleanup(error);
       rc = lc_pouch_txn_finish_already_promoted_commit(
           client, namespace_name, participant, &record, error);
+      lc_pouch_put_state_res_cleanup(&client->pouch_allocator, &promoted);
+      lc_pouch_meta_record_cleanup(&client->pouch_allocator, &record);
+      return rc;
+    } else if (rc == LC_ERR_SERVER && error != NULL &&
+               error->http_status == 404L) {
+      lc_error_cleanup(error);
+      rc = LC_OK;
+    } else if (rc == LC_OK) {
+      state_promoted = 1;
     }
     if (rc == LC_OK) {
+      rc = lc_pouch_txn_promote_staged_attachments(
+          client, namespace_name, participant->key, txn_id,
+          &attachments_promoted, error);
+    }
+    if (rc == LC_OK && state_promoted) {
       rc = lc_pouch_txn_clear_participant_meta(
           client, namespace_name, participant, &record,
           1, promoted.new_state_etag, promoted.new_version, error);
+    } else if (rc == LC_OK) {
+      rc = lc_pouch_txn_clear_participant_meta(
+          client, namespace_name, participant, &record, 0, NULL,
+          attachments_promoted ? record.meta.version + 1L : 0L, error);
     }
   } else if (state == LC_POUCH_TXN_STATE_ROLLED_BACK) {
     discard_opts.ignore_not_found = 1;
     rc = client->pouch_store->discard_staged_state(
         client->pouch_store, namespace_name, participant->key, txn_id,
         &discard_opts, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_discard_staged_attachments(
+          client, namespace_name, participant->key, txn_id, error);
+    }
     if (rc == LC_OK) {
       rc = lc_pouch_txn_clear_participant_meta(
           client, namespace_name, participant, &record, 0, NULL, 0L, error);
@@ -3538,6 +3691,91 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   return rc;
 }
 
+static int lc_pouch_lease_staged_attach(lc_lease_handle *lease,
+                                        const lc_attach_req *req,
+                                        lc_source *src, lc_attach_res *out,
+                                        lc_error *error) {
+  lc_pouch_meta_record record;
+  lc_pouch_put_object_opts opts;
+  lc_pouch_object_info object;
+  lc_pouch_object_list live_objects;
+  lc_pouch_allocator *allocator;
+  lc_lease_ref ref;
+  char *staged_key;
+  size_t index;
+  int rc;
+
+  if (lease == NULL || req == NULL || src == NULL || out == NULL ||
+      req->name == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged attach requires lease, req, src, out, "
+                        "and name",
+                        NULL, NULL, NULL);
+  }
+  allocator = &lease->client->pouch_allocator;
+  memset(out, 0, sizeof(*out));
+  memset(&record, 0, sizeof(record));
+  memset(&opts, 0, sizeof(opts));
+  memset(&object, 0, sizeof(object));
+  memset(&live_objects, 0, sizeof(live_objects));
+  memset(&ref, 0, sizeof(ref));
+  staged_key = NULL;
+
+  ref.namespace_name = lease->namespace_name;
+  ref.key = lease->key;
+  ref.lease_id = lease->lease_id;
+  ref.txn_id = lease->txn_id;
+  ref.fencing_token = lease->fencing_token;
+  rc = lc_pouch_validate_active_lease(lease->client, &ref, &record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  if (req->prevent_overwrite) {
+    rc = lease->client->pouch_store->list_objects(
+        lease->client->pouch_store, record.namespace_name, lease->key,
+        &live_objects, error);
+    if (rc != LC_OK) {
+      lc_pouch_meta_record_cleanup(allocator, &record);
+      return rc;
+    }
+    for (index = 0U; index < live_objects.count; ++index) {
+      if (live_objects.items[index].name != NULL &&
+          strcmp(live_objects.items[index].name, req->name) == 0) {
+        lc_pouch_object_list_cleanup(allocator, &live_objects);
+        lc_pouch_meta_record_cleanup(allocator, &record);
+        return lc_error_set(error, LC_ERR_SERVER, 409L,
+                            "pouch attachment already exists", NULL,
+                            "attachment_exists", NULL);
+      }
+    }
+    lc_pouch_object_list_cleanup(allocator, &live_objects);
+  }
+
+  staged_key = lc_pouch_txn_attachment_stage_key(
+      lease->client, lease->key, lease->txn_id, error);
+  if (staged_key == NULL) {
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  opts.name = req->name;
+  opts.content_type = req->content_type;
+  opts.max_bytes = req->max_bytes;
+  opts.has_max_bytes = req->has_max_bytes;
+  opts.prevent_overwrite = req->prevent_overwrite;
+  rc = lease->client->pouch_store->put_object(
+      lease->client->pouch_store, record.namespace_name, staged_key, src, &opts,
+      &object, error);
+  if (rc == LC_OK) {
+    out->version = lease->version + 1L;
+    rc = lc_pouch_copy_attachment_info(&out->attachment, &object, error);
+  }
+  lc_client_free(lease->client, staged_key);
+  lc_pouch_object_info_cleanup(allocator, &object);
+  lc_pouch_meta_record_cleanup(allocator, &record);
+  return rc;
+}
+
 int lc_pouch_client_list_attachments_method(lc_client *self,
                                             const lc_attachment_list_req *req,
                                             lc_attachment_list *out,
@@ -5972,8 +6210,12 @@ int lc_pouch_lease_attach_method(lc_lease *self, const lc_attach_req *opts,
   req.max_bytes = opts->max_bytes;
   req.has_max_bytes = opts->has_max_bytes;
   req.prevent_overwrite = opts->prevent_overwrite;
-  rc =
-      lc_pouch_client_attach_method(&lease->client->pub, &req, src, out, error);
+  if (lease->pouch_txn_explicit) {
+    rc = lc_pouch_lease_staged_attach(lease, opts, src, out, error);
+  } else {
+    rc = lc_pouch_client_attach_method(&lease->client->pub, &req, src, out,
+                                       error);
+  }
   if (rc == LC_OK) {
     lease->version = out->version;
     lease->pub.version = lease->version;
