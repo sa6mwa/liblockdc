@@ -65,6 +65,21 @@ static int lc_pouch_lease_staged_remove_method(lc_lease *self,
 static int lc_pouch_lease_mutate_staged_method(lc_lease *self,
                                                const lc_mutate_req *req,
                                                lc_error *error);
+static int lc_pouch_lease_staged_attach(lc_lease_handle *lease,
+                                        const lc_attach_req *req,
+                                        lc_source *src, lc_attach_res *out,
+                                        lc_error *error);
+static int lc_pouch_lease_staged_list_attachments(lc_lease_handle *lease,
+                                                  lc_attachment_list *out,
+                                                  lc_error *error);
+static int lc_pouch_lease_staged_get_attachment(
+    lc_lease_handle *lease, const lc_attachment_get_req *req, lc_sink *dst,
+    lc_attachment_get_res *out, lc_error *error);
+static int lc_pouch_lease_staged_delete_attachment(
+    lc_lease_handle *lease, const lc_attachment_selector *selector,
+    int *deleted, lc_error *error);
+static int lc_pouch_lease_staged_delete_all_attachments(
+    lc_lease_handle *lease, int *deleted_count, lc_error *error);
 static int lc_pouch_refresh_lease(lc_lease_handle *lease,
                                   const lc_pouch_meta *meta, lc_error *error);
 static int lc_pouch_repair_meta_state_gap(lc_client_handle *client,
@@ -76,6 +91,10 @@ static int lc_pouch_repair_meta_state_gap(lc_client_handle *client,
 static int lc_pouch_set_lease_state(lc_lease_handle *lease,
                                     const char *state_etag, long version,
                                     lc_error *error);
+static int lc_pouch_validate_active_lease(lc_client_handle *client,
+                                          const lc_lease_ref *ref,
+                                          lc_pouch_meta_record *record,
+                                          lc_error *error);
 
 typedef struct lc_pouch_acquire_for_update_file_sink {
   FILE *fp;
@@ -179,6 +198,60 @@ static char *lc_pouch_new_txn_id(lc_client_handle *client, const char *key,
   snprintf(stack, sizeof(stack), "pouch-txn-%ld-%ld", (long)time(NULL),
            fencing_token);
   return lc_client_strdup(client, stack);
+}
+
+static int lc_pouch_txn_id_is_generated(const char *txn_id) {
+  const char prefix[] = "pouch-txn-";
+
+  return txn_id != NULL &&
+         strncmp(txn_id, prefix, sizeof(prefix) - 1U) == 0;
+}
+
+static int lc_pouch_lease_id_is_generated(const char *lease_id) {
+  const char prefix[] = "pouch-";
+
+  return lease_id != NULL &&
+         strncmp(lease_id, prefix, sizeof(prefix) - 1U) == 0;
+}
+
+static int lc_pouch_lease_ref_is_explicit_txn(const lc_lease_ref *ref) {
+  return ref != NULL && ref->txn_id != NULL && ref->txn_id[0] != '\0' &&
+         !lc_pouch_txn_id_is_generated(ref->txn_id) &&
+         lc_pouch_lease_id_is_generated(ref->lease_id);
+}
+
+static int lc_pouch_stack_lease_from_ref(lc_client_handle *client,
+                                         const lc_lease_ref *ref,
+                                         lc_lease_handle *lease,
+                                         lc_pouch_meta_record *record,
+                                         lc_error *error) {
+  int rc;
+
+  if (client == NULL || ref == NULL || lease == NULL || record == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction lease view requires client, ref, "
+                        "lease, and record",
+                        NULL, NULL, NULL);
+  }
+  memset(lease, 0, sizeof(*lease));
+  memset(record, 0, sizeof(*record));
+  rc = lc_pouch_validate_active_lease(client, ref, record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  lease->client = client;
+  lease->namespace_name = record->namespace_name;
+  lease->key = (char *)ref->key;
+  lease->lease_id = (char *)ref->lease_id;
+  lease->txn_id = (char *)ref->txn_id;
+  lease->fencing_token = ref->fencing_token;
+  lease->version = record->meta.version;
+  lease->state_etag = record->meta.state_etag;
+  lease->lease_expires_at_unix = record->meta.lease_expires_at_unix;
+  lease->has_query_hidden = record->meta.has_query_hidden;
+  lease->query_hidden = record->meta.query_hidden;
+  lease->pouch_txn_explicit = 1;
+  return LC_OK;
 }
 
 static char *lc_pouch_queue_state_key(lc_client_handle *client,
@@ -3864,6 +3937,8 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   lc_pouch_meta next_meta;
   lc_pouch_allocator *allocator;
   lc_error rollback_error;
+  lc_lease_handle txn_lease;
+  lc_attach_req staged_req;
   int deleted;
   int rc;
 
@@ -3876,6 +3951,24 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
   memset(out, 0, sizeof(*out));
+  if (lc_pouch_lease_ref_is_explicit_txn(&req->lease)) {
+    memset(&txn_lease, 0, sizeof(txn_lease));
+    memset(&staged_req, 0, sizeof(staged_req));
+    rc = lc_pouch_stack_lease_from_ref(client, &req->lease, &txn_lease,
+                                       &record, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    staged_req.name = req->name;
+    staged_req.content_type = req->content_type;
+    staged_req.max_bytes = req->max_bytes;
+    staged_req.has_max_bytes = req->has_max_bytes;
+    staged_req.prevent_overwrite = req->prevent_overwrite;
+    rc = lc_pouch_lease_staged_attach(&txn_lease, &staged_req, src, out,
+                                      error);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return rc;
+  }
   memset(&record, 0, sizeof(record));
   memset(&stored, 0, sizeof(stored));
   memset(&opts, 0, sizeof(opts));
@@ -4640,6 +4733,19 @@ int lc_pouch_client_list_attachments_method(lc_client *self,
   memset(&record, 0, sizeof(record));
   memset(&objects, 0, sizeof(objects));
   namespace_name = NULL;
+  if (!req->public_read && lc_pouch_lease_ref_is_explicit_txn(&req->lease)) {
+    lc_lease_handle txn_lease;
+
+    memset(&txn_lease, 0, sizeof(txn_lease));
+    rc = lc_pouch_stack_lease_from_ref(client, &req->lease, &txn_lease,
+                                       &record, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    rc = lc_pouch_lease_staged_list_attachments(&txn_lease, out, error);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return rc;
+  }
   if (req->public_read) {
     if (req->lease.key == NULL) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -4713,6 +4819,24 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
   memset(&object, 0, sizeof(object));
   body = NULL;
   namespace_name = NULL;
+  if (!req->public_read && lc_pouch_lease_ref_is_explicit_txn(&req->lease)) {
+    lc_lease_handle txn_lease;
+    lc_attachment_get_req staged_req;
+
+    memset(&txn_lease, 0, sizeof(txn_lease));
+    memset(&staged_req, 0, sizeof(staged_req));
+    rc = lc_pouch_stack_lease_from_ref(client, &req->lease, &txn_lease,
+                                       &record, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    staged_req.selector = req->selector;
+    staged_req.public_read = req->public_read;
+    rc = lc_pouch_lease_staged_get_attachment(&txn_lease, &staged_req, dst,
+                                              out, error);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return rc;
+  }
   if (req->public_read) {
     if (req->lease.key == NULL) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -4774,6 +4898,20 @@ int lc_pouch_client_delete_attachment_method(lc_client *self,
   memset(&record, 0, sizeof(record));
   memset(&stored, 0, sizeof(stored));
   memset(&selector, 0, sizeof(selector));
+  if (lc_pouch_lease_ref_is_explicit_txn(&req->lease)) {
+    lc_lease_handle txn_lease;
+
+    memset(&txn_lease, 0, sizeof(txn_lease));
+    rc = lc_pouch_stack_lease_from_ref(client, &req->lease, &txn_lease,
+                                       &record, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    rc = lc_pouch_lease_staged_delete_attachment(&txn_lease, &req->selector,
+                                                 deleted, error);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return rc;
+  }
   rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
   if (rc != LC_OK) {
     return rc;
@@ -4816,6 +4954,20 @@ int lc_pouch_client_delete_all_attachments_method(
   *deleted_count = 0;
   memset(&record, 0, sizeof(record));
   memset(&stored, 0, sizeof(stored));
+  if (lc_pouch_lease_ref_is_explicit_txn(&req->lease)) {
+    lc_lease_handle txn_lease;
+
+    memset(&txn_lease, 0, sizeof(txn_lease));
+    rc = lc_pouch_stack_lease_from_ref(client, &req->lease, &txn_lease,
+                                       &record, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    rc = lc_pouch_lease_staged_delete_all_attachments(&txn_lease,
+                                                      deleted_count, error);
+    lc_pouch_meta_record_cleanup(allocator, &record);
+    return rc;
+  }
   rc = lc_pouch_validate_active_lease(client, &req->lease, &record, error);
   if (rc != LC_OK) {
     return rc;
