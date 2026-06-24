@@ -67,6 +67,16 @@ typedef struct lc_pouch_disk_meta_entry {
   int deleted;
 } lc_pouch_disk_meta_entry;
 
+typedef struct lc_pouch_disk_query_summary_entry {
+  char *namespace_name;
+  char *key;
+  char *etag;
+  long version;
+  int has_query_hidden;
+  int query_hidden;
+  int deleted;
+} lc_pouch_disk_query_summary_entry;
+
 typedef struct lc_pouch_disk_meta_upsert {
   lc_pouch_disk_meta_entry entry;
   int existing;
@@ -130,6 +140,9 @@ typedef struct lc_pouch_disk_store {
   size_t *query_meta_indices;
   size_t query_meta_index_count;
   size_t query_meta_index_capacity;
+  lc_pouch_disk_query_summary_entry *query_summary_entries;
+  size_t query_summary_entry_count;
+  size_t query_summary_entry_capacity;
   lc_pouch_disk_object_entry *object_entries;
   size_t object_entry_count;
   size_t object_entry_capacity;
@@ -225,6 +238,9 @@ static int lc_pouch_disk_append_query_index_record(
 static int lc_pouch_disk_query_index_reserve(lc_pouch_disk_store *store);
 static int lc_pouch_disk_query_index_insert(lc_pouch_disk_store *store,
                                             size_t meta_index);
+static int lc_pouch_disk_query_summary_upsert(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
+    const char *etag, long version, const lc_pouch_meta *meta, int deleted);
 static unsigned long lc_pouch_disk_index_sequence(
     const lc_pouch_disk_store *store);
 static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
@@ -775,6 +791,17 @@ static void lc_pouch_disk_meta_entry_cleanup(lc_pouch_disk_store *store,
   memset(entry, 0, sizeof(*entry));
 }
 
+static void lc_pouch_disk_query_summary_entry_cleanup(
+    lc_pouch_disk_store *store, lc_pouch_disk_query_summary_entry *entry) {
+  if (entry == NULL) {
+    return;
+  }
+  lc_pouch_free(&store->allocator, entry->namespace_name);
+  lc_pouch_free(&store->allocator, entry->key);
+  lc_pouch_free(&store->allocator, entry->etag);
+  memset(entry, 0, sizeof(*entry));
+}
+
 static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
                                            const char *namespace_name,
                                            const char *key, const char *etag,
@@ -804,6 +831,12 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
 
   if (existing >= 0) {
     entry = &store->meta_entries[existing];
+    if (!lc_pouch_disk_query_summary_upsert(
+            store, namespace_name, key, etag, meta != NULL ? meta->version : 0L,
+            meta, deleted)) {
+      lc_pouch_disk_meta_entry_cleanup(store, &staged);
+      return 0;
+    }
     lc_pouch_free(&store->allocator, entry->etag);
     entry->etag = NULL;
     lc_pouch_meta_cleanup(&store->allocator, &entry->meta);
@@ -836,10 +869,16 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
       store->meta_entries = grown;
       store->meta_entry_capacity = new_capacity;
     }
-    entry = &store->meta_entries[store->meta_entry_count++];
-    *entry = staged;
-    memset(&staged, 0, sizeof(staged));
   }
+  if (!lc_pouch_disk_query_summary_upsert(store, namespace_name, key, etag,
+                                          meta != NULL ? meta->version : 0L,
+                                          meta, deleted)) {
+    lc_pouch_disk_meta_entry_cleanup(store, &staged);
+    return 0;
+  }
+  entry = &store->meta_entries[store->meta_entry_count++];
+  *entry = staged;
+  memset(&staged, 0, sizeof(staged));
   if (is_new && !lc_pouch_disk_query_index_insert(
                     store, store->meta_entry_count - 1U)) {
     store->meta_entry_count--;
@@ -912,6 +951,12 @@ static int lc_pouch_disk_commit_meta_upsert(
 
   if (!upsert->is_new) {
     entry = &store->meta_entries[upsert->existing];
+    if (!lc_pouch_disk_query_summary_upsert(
+            store, entry->namespace_name, entry->key, upsert->entry.etag,
+            upsert->entry.meta.version, &upsert->entry.meta,
+            upsert->entry.deleted)) {
+      return 0;
+    }
     lc_pouch_free(&store->allocator, entry->etag);
     entry->etag = NULL;
     lc_pouch_meta_cleanup(&store->allocator, &entry->meta);
@@ -923,6 +968,12 @@ static int lc_pouch_disk_commit_meta_upsert(
     return 1;
   }
 
+  if (!lc_pouch_disk_query_summary_upsert(
+          store, upsert->entry.namespace_name, upsert->entry.key,
+          upsert->entry.etag, upsert->entry.meta.version, &upsert->entry.meta,
+          upsert->entry.deleted)) {
+    return 0;
+  }
   entry = &store->meta_entries[store->meta_entry_count++];
   *entry = upsert->entry;
   memset(&upsert->entry, 0, sizeof(upsert->entry));
@@ -1033,6 +1084,128 @@ static int lc_pouch_disk_query_index_insert(lc_pouch_disk_store *store,
   }
   store->query_meta_indices[position] = meta_index;
   store->query_meta_index_count++;
+  return 1;
+}
+
+static int lc_pouch_disk_query_summary_compare(
+    const lc_pouch_disk_query_summary_entry *entry, const char *namespace_name,
+    const char *key) {
+  int cmp;
+
+  cmp = strcmp(entry->namespace_name, namespace_name);
+  if (cmp != 0) {
+    return cmp;
+  }
+  return strcmp(entry->key, key);
+}
+
+static int lc_pouch_disk_query_summary_find(lc_pouch_disk_store *store,
+                                            const char *namespace_name,
+                                            const char *key,
+                                            size_t *position) {
+  size_t low;
+  size_t high;
+
+  low = 0U;
+  high = store->query_summary_entry_count;
+  while (low < high) {
+    size_t mid;
+    int cmp;
+
+    mid = low + ((high - low) / 2U);
+    cmp = lc_pouch_disk_query_summary_compare(
+        &store->query_summary_entries[mid], namespace_name, key);
+    if (cmp < 0) {
+      low = mid + 1U;
+    } else {
+      high = mid;
+    }
+  }
+  if (position != NULL) {
+    *position = low;
+  }
+  return low < store->query_summary_entry_count &&
+         lc_pouch_disk_query_summary_compare(&store->query_summary_entries[low],
+                                             namespace_name, key) == 0;
+}
+
+static int lc_pouch_disk_query_summary_reserve(lc_pouch_disk_store *store) {
+  lc_pouch_disk_query_summary_entry *grown;
+  size_t new_capacity;
+
+  if (store->query_summary_entry_count <
+      store->query_summary_entry_capacity) {
+    return 1;
+  }
+  new_capacity = store->query_summary_entry_capacity == 0U
+                     ? 16U
+                     : store->query_summary_entry_capacity * 2U;
+  grown = (lc_pouch_disk_query_summary_entry *)lc_pouch_realloc(
+      &store->allocator, store->query_summary_entries,
+      new_capacity * sizeof(store->query_summary_entries[0]));
+  if (grown == NULL) {
+    return 0;
+  }
+  memset(grown + store->query_summary_entry_capacity, 0,
+         (new_capacity - store->query_summary_entry_capacity) *
+             sizeof(grown[0]));
+  store->query_summary_entries = grown;
+  store->query_summary_entry_capacity = new_capacity;
+  return 1;
+}
+
+static int lc_pouch_disk_query_summary_upsert(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
+    const char *etag, long version, const lc_pouch_meta *meta, int deleted) {
+  lc_pouch_disk_query_summary_entry staged;
+  lc_pouch_disk_query_summary_entry *entry;
+  size_t position;
+  int exists;
+
+  exists =
+      lc_pouch_disk_query_summary_find(store, namespace_name, key, &position);
+  memset(&staged, 0, sizeof(staged));
+  staged.namespace_name =
+      exists ? NULL : lc_pouch_strdup(&store->allocator, namespace_name);
+  staged.key = exists ? NULL : lc_pouch_strdup(&store->allocator, key);
+  staged.etag = lc_pouch_strdup(&store->allocator, etag);
+  if ((!exists && (staged.namespace_name == NULL || staged.key == NULL)) ||
+      (etag != NULL && staged.etag == NULL)) {
+    lc_pouch_disk_query_summary_entry_cleanup(store, &staged);
+    return 0;
+  }
+  staged.version = version;
+  staged.has_query_hidden = meta != NULL ? meta->has_query_hidden : 0;
+  staged.query_hidden = meta != NULL ? meta->query_hidden : 0;
+  staged.deleted = deleted;
+
+  if (!exists && !lc_pouch_disk_query_summary_reserve(store)) {
+    lc_pouch_disk_query_summary_entry_cleanup(store, &staged);
+    return 0;
+  }
+
+  if (exists) {
+    entry = &store->query_summary_entries[position];
+    lc_pouch_free(&store->allocator, entry->etag);
+    entry->etag = staged.etag;
+    entry->version = staged.version;
+    entry->has_query_hidden = staged.has_query_hidden;
+    entry->query_hidden = staged.query_hidden;
+    entry->deleted = staged.deleted;
+    staged.etag = NULL;
+    lc_pouch_disk_query_summary_entry_cleanup(store, &staged);
+    return 1;
+  }
+
+  if (position < store->query_summary_entry_count) {
+    memmove(store->query_summary_entries + position + 1U,
+            store->query_summary_entries + position,
+            (store->query_summary_entry_count - position) *
+                sizeof(store->query_summary_entries[0]));
+  }
+  store->query_summary_entries[position] = staged;
+  memset(&staged, 0, sizeof(staged));
+  store->query_summary_entry_count++;
   return 1;
 }
 
@@ -1490,6 +1663,11 @@ static void lc_pouch_disk_reset_indexes(lc_pouch_disk_store *store) {
   }
   store->meta_entry_count = 0U;
   store->query_meta_index_count = 0U;
+  for (index = 0U; index < store->query_summary_entry_count; ++index) {
+    lc_pouch_disk_query_summary_entry_cleanup(
+        store, &store->query_summary_entries[index]);
+  }
+  store->query_summary_entry_count = 0U;
   for (index = 0U; index < store->object_entry_count; ++index) {
     lc_pouch_disk_object_entry_cleanup(store, &store->object_entries[index]);
   }
@@ -2419,17 +2597,17 @@ static int lc_pouch_disk_query_index_keys_scan(
   }
 
   start_key = req->start_after != NULL ? req->start_after : "";
-  if (lc_pouch_disk_query_index_find(store, req->namespace_name, start_key,
-                                     &start_index) &&
+  if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
+                                       &start_index) &&
       req->start_after != NULL) {
     start_index++;
   }
 
-  for (index = start_index; index < store->query_meta_index_count; ++index) {
-    lc_pouch_disk_meta_entry *entry;
+  for (index = start_index; index < store->query_summary_entry_count; ++index) {
+    lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
 
-    entry = &store->meta_entries[store->query_meta_indices[index]];
+    entry = &store->query_summary_entries[index];
     namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
     if (namespace_cmp > 0) {
       break;
@@ -2437,8 +2615,7 @@ static int lc_pouch_disk_query_index_keys_scan(
     if (namespace_cmp < 0) {
       continue;
     }
-    if (entry->deleted ||
-        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
+    if (entry->deleted || (entry->has_query_hidden && entry->query_hidden)) {
       continue;
     }
     if (req->limit > 0U && visit_count == req->limit) {
@@ -2458,13 +2635,13 @@ static int lc_pouch_disk_query_index_keys_scan(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_meta_index_count &&
+  for (index = start_index; index < store->query_summary_entry_count &&
                         row_index < visit_count;
        ++index) {
-    lc_pouch_disk_meta_entry *entry;
+    lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
 
-    entry = &store->meta_entries[store->query_meta_indices[index]];
+    entry = &store->query_summary_entries[index];
     namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
     if (namespace_cmp > 0) {
       break;
@@ -2472,8 +2649,7 @@ static int lc_pouch_disk_query_index_keys_scan(
     if (namespace_cmp < 0) {
       continue;
     }
-    if (entry->deleted ||
-        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
+    if (entry->deleted || (entry->has_query_hidden && entry->query_hidden)) {
       continue;
     }
     keys[row_index] = lc_pouch_strdup(&store->allocator, entry->key);
@@ -6424,6 +6600,10 @@ static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
   for (index = 0U; index < store->meta_entry_count; ++index) {
     lc_pouch_disk_meta_entry_cleanup(store, &store->meta_entries[index]);
   }
+  for (index = 0U; index < store->query_summary_entry_count; ++index) {
+    lc_pouch_disk_query_summary_entry_cleanup(
+        store, &store->query_summary_entries[index]);
+  }
   for (index = 0U; index < store->object_entry_count; ++index) {
     lc_pouch_disk_object_entry_cleanup(store, &store->object_entries[index]);
   }
@@ -6433,6 +6613,7 @@ static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error) {
   lc_pouch_free(&allocator, store->state_entries);
   lc_pouch_free(&allocator, store->meta_entries);
   lc_pouch_free(&allocator, store->query_meta_indices);
+  lc_pouch_free(&allocator, store->query_summary_entries);
   lc_pouch_free(&allocator, store->object_entries);
   lc_pouch_free(&allocator, store->queue_entries);
   lc_pouch_free(&allocator, store->root_path);

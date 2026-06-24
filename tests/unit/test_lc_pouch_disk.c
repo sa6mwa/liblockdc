@@ -2180,6 +2180,28 @@ static void test_query_index_keys_scan_avoids_metadata_row_copies(
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
+  meta.lease_id = "lease-charlie";
+  meta.state_etag = "state-charlie";
+  meta.version = 3L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 1;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-delta";
+  meta.state_etag = "state-delta";
+  meta.version = 4L;
+  meta.has_query_hidden = 0;
+  meta.query_hidden = 0;
+  rc = store->store_meta(store, "default", "delta", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->delete_meta(store, "default", "delta", stored.etag, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
   tracked.fail_malloc_size = strlen(meta.owner) + 1U;
   req.namespace_name = "default";
   req.limit = 1U;
