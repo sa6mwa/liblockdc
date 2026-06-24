@@ -433,6 +433,8 @@ struct lc_pouch_store {
                        lc_error *error);
   int (*lock_status)(lc_pouch_store *self, lc_pouch_lock_status *out,
                      lc_error *error);
+  int (*lock_key_path)(lc_pouch_store *self, const char *namespace_name,
+                       const char *key, char **out, lc_error *error);
   int (*query_config)(lc_pouch_store *self, const char *namespace_name,
                       lc_pouch_query_config *out, lc_error *error);
   int (*backend_capabilities)(lc_pouch_store *self,

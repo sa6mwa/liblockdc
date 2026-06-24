@@ -475,7 +475,9 @@ whether the implementation uses a root-level writer lock or per-key lock cache,
 and counters for lock acquisitions, releases, replay refreshes, and log reopens.
 The current implementation is intentionally observable as a global writer-lock
 model; future per-key lock caching should change these diagnostics as part of
-the cutover.
+the cutover. The private disk vtable also exposes the lock-key path normalizer:
+lock paths live under `locks/<namespace>/<key>`, with key bytes percent-escaped
+so slash-separated user keys do not become filesystem path components.
 
 ## Performance Model
 

@@ -8137,6 +8137,72 @@ static void test_lock_status_reports_global_writer_lock_counters(
   test_cleanup_root(root);
 }
 
+static void test_lock_key_path_escapes_namespace_and_key(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_error error;
+  char *path;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "lock-key-path");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  path = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->lock_key_path);
+
+  rc = store->lock_key_path(store, "default", "alpha/beta.gamma", &path,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(path);
+  assert_non_null(strstr(path, "/locks/default/alpha%2fbeta%2egamma"));
+  lc_pouch_free(&allocator, path);
+  path = NULL;
+
+  rc = store->lock_key_path(store, "name-space_1", "key:with spaces/%",
+                            &path, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(strstr(path,
+                         "/locks/name-space_1/key%3awith%20spaces%2f%25"));
+  lc_pouch_free(&allocator, path);
+  path = NULL;
+
+  rc = store->lock_key_path(store, "default", "bad//key", &path, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "lock_key_path key must not contain empty path "
+                      "components");
+  assert_null(path);
+  lc_error_cleanup(&error);
+
+  rc = store->lock_key_path(store, "bad/ns", "key", &path, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "lock_key_path namespace must not contain '/'");
+  assert_null(path);
+  lc_error_cleanup(&error);
+
+  tracked.fail_malloc_size = strlen(root) + strlen("/locks/default/key") + 1U;
+  rc = store->lock_key_path(store, "default", "key", &path, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_string_equal(error.message, "failed to allocate pouch lock key path");
+  assert_null(path);
+  tracked.fail_malloc_size = 0U;
+  lc_error_cleanup(&error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
   char root[256];
   char marker_path[512];
@@ -8374,6 +8440,7 @@ int main(void) {
       cmocka_unit_test(test_writer_status_reports_marker_presence),
       cmocka_unit_test(test_writer_status_classifies_stale_markers),
       cmocka_unit_test(test_lock_status_reports_global_writer_lock_counters),
+      cmocka_unit_test(test_lock_key_path_escapes_namespace_and_key),
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),

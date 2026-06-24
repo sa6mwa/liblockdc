@@ -402,6 +402,10 @@ static int lc_pouch_disk_writer_status(lc_pouch_store *self,
 static int lc_pouch_disk_lock_status(lc_pouch_store *self,
                                      lc_pouch_lock_status *out,
                                      lc_error *error);
+static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
+                                       const char *namespace_name,
+                                       const char *key, char **out,
+                                       lc_error *error);
 static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       const char *namespace_name,
                                       lc_pouch_query_config *out,
@@ -513,6 +517,79 @@ static int lc_pouch_disk_validate_namespace_queue(lc_error *error,
     return rc;
   }
   return lc_pouch_disk_validate_path_name(error, operation, "queue", queue, 1);
+}
+
+static int lc_pouch_disk_lock_char_safe(unsigned char value) {
+  return (value >= (unsigned char)'a' && value <= (unsigned char)'z') ||
+         (value >= (unsigned char)'A' && value <= (unsigned char)'Z') ||
+         (value >= (unsigned char)'0' && value <= (unsigned char)'9') ||
+         value == (unsigned char)'_' || value == (unsigned char)'-';
+}
+
+static size_t lc_pouch_disk_lock_escaped_length(const char *value) {
+  const unsigned char *cursor;
+  size_t length;
+
+  length = 0U;
+  cursor = (const unsigned char *)value;
+  while (*cursor != '\0') {
+    length += lc_pouch_disk_lock_char_safe(*cursor) ? 1U : 3U;
+    cursor++;
+  }
+  return length;
+}
+
+static void lc_pouch_disk_lock_escape(char *dst, const char *value) {
+  static const char hex[] = "0123456789abcdef";
+  const unsigned char *cursor;
+
+  cursor = (const unsigned char *)value;
+  while (*cursor != '\0') {
+    if (lc_pouch_disk_lock_char_safe(*cursor)) {
+      *dst++ = (char)*cursor;
+    } else {
+      *dst++ = '%';
+      *dst++ = hex[(*cursor >> 4) & 0x0fU];
+      *dst++ = hex[*cursor & 0x0fU];
+    }
+    cursor++;
+  }
+  *dst = '\0';
+}
+
+static char *lc_pouch_disk_make_lock_key_path(lc_pouch_disk_store *store,
+                                              const char *namespace_name,
+                                              const char *key) {
+  const char lock_dir[] = "locks";
+  size_t root_len;
+  size_t dir_len;
+  size_t ns_len;
+  size_t key_len;
+  size_t total_len;
+  char *path;
+  char *cursor;
+
+  root_len = strlen(store->root_path);
+  dir_len = strlen(lock_dir);
+  ns_len = lc_pouch_disk_lock_escaped_length(namespace_name);
+  key_len = lc_pouch_disk_lock_escaped_length(key);
+  total_len = root_len + 1U + dir_len + 1U + ns_len + 1U + key_len;
+  path = (char *)lc_pouch_alloc(&store->allocator, total_len + 1U);
+  if (path == NULL) {
+    return NULL;
+  }
+  cursor = path;
+  memcpy(cursor, store->root_path, root_len);
+  cursor += root_len;
+  *cursor++ = '/';
+  memcpy(cursor, lock_dir, dir_len);
+  cursor += dir_len;
+  *cursor++ = '/';
+  lc_pouch_disk_lock_escape(cursor, namespace_name);
+  cursor += ns_len;
+  *cursor++ = '/';
+  lc_pouch_disk_lock_escape(cursor, key);
+  return path;
 }
 
 static int lc_pouch_disk_query_engine_supported(const char *value,
@@ -7747,6 +7824,33 @@ static int lc_pouch_disk_lock_status(lc_pouch_store *self,
   return LC_OK;
 }
 
+static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
+                                       const char *namespace_name,
+                                       const char *key, char **out,
+                                       lc_error *error) {
+  lc_pouch_disk_store *store;
+  int rc;
+
+  if (out != NULL) {
+    *out = NULL;
+  }
+  if (self == NULL || namespace_name == NULL || key == NULL || out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "lock_key_path requires store, namespace, key, and output");
+  }
+  rc = lc_pouch_disk_validate_namespace_key(error, "lock_key_path",
+                                           namespace_name, key);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  *out = lc_pouch_disk_make_lock_key_path(store, namespace_name, key);
+  if (*out == NULL) {
+    return lc_pouch_set_nomem(error, "failed to allocate pouch lock key path");
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_disk_backend_capabilities(
     lc_pouch_store *self, lc_pouch_backend_capabilities *out,
     lc_error *error) {
@@ -8094,6 +8198,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.fsync_stats = lc_pouch_disk_fsync_stats;
   store->pub.writer_status = lc_pouch_disk_writer_status;
   store->pub.lock_status = lc_pouch_disk_lock_status;
+  store->pub.lock_key_path = lc_pouch_disk_lock_key_path;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;
