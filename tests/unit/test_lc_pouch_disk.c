@@ -1765,6 +1765,32 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
+  meta.lease_id = "lease-before";
+  meta.state_etag = "state-before";
+  meta.version = 4L;
+  rc = store->store_meta(store, "aaa", "before-default", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-c";
+  meta.state_etag = "state-c";
+  meta.version = 5L;
+  meta.has_query_hidden = 0;
+  meta.query_hidden = 0;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-after";
+  meta.state_etag = "state-after";
+  meta.version = 6L;
+  rc = store->store_meta(store, "zzz", "after-default", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
   req.namespace_name = "default";
   req.limit = 1U;
   rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
@@ -1783,11 +1809,24 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
                                &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(capture.count, 1U);
+  assert_int_equal(capture.count, 2U);
   assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(capture.keys[1], "charlie");
   assert_false(scan.truncated);
   assert_null(scan.next_start_after);
   assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = "bravo-z";
+  req.limit = 8U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "charlie");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   rc = store->close(store, &error);

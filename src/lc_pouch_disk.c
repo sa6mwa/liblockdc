@@ -1972,6 +1972,8 @@ static int lc_pouch_disk_query_index_scan(
     lc_pouch_query_index_scan_res *out, lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_scan_meta_copy *rows;
+  const char *start_key;
+  size_t start_index;
   size_t visit_count;
   size_t index;
   size_t row_index;
@@ -1991,6 +1993,7 @@ static int lc_pouch_disk_query_index_scan(
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   rows = NULL;
+  start_index = 0U;
   visit_count = 0U;
 
   rc = lc_pouch_disk_lock(store, error);
@@ -1998,17 +2001,27 @@ static int lc_pouch_disk_query_index_scan(
     return rc;
   }
 
-  for (index = 0U; index < store->query_meta_index_count; ++index) {
+  start_key = req->start_after != NULL ? req->start_after : "";
+  if (lc_pouch_disk_query_index_find(store, req->namespace_name, start_key,
+                                     &start_index) &&
+      req->start_after != NULL) {
+    start_index++;
+  }
+
+  for (index = start_index; index < store->query_meta_index_count; ++index) {
     lc_pouch_disk_meta_entry *entry;
+    int namespace_cmp;
 
     entry = &store->meta_entries[store->query_meta_indices[index]];
-    if (entry->deleted ||
-        strcmp(entry->namespace_name, req->namespace_name) != 0 ||
-        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
+    namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
+    if (namespace_cmp > 0) {
+      break;
+    }
+    if (namespace_cmp < 0) {
       continue;
     }
-    if (req->start_after != NULL &&
-        strcmp(entry->key, req->start_after) <= 0) {
+    if (entry->deleted ||
+        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
       continue;
     }
     if (req->limit > 0U && visit_count == req->limit) {
@@ -2028,19 +2041,22 @@ static int lc_pouch_disk_query_index_scan(
     }
   }
   row_index = 0U;
-  for (index = 0U; index < store->query_meta_index_count &&
-                    row_index < visit_count;
+  for (index = start_index; index < store->query_meta_index_count &&
+                        row_index < visit_count;
        ++index) {
     lc_pouch_disk_meta_entry *entry;
+    int namespace_cmp;
 
     entry = &store->meta_entries[store->query_meta_indices[index]];
-    if (entry->deleted ||
-        strcmp(entry->namespace_name, req->namespace_name) != 0 ||
-        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
+    namespace_cmp = strcmp(entry->namespace_name, req->namespace_name);
+    if (namespace_cmp > 0) {
+      break;
+    }
+    if (namespace_cmp < 0) {
       continue;
     }
-    if (req->start_after != NULL &&
-        strcmp(entry->key, req->start_after) <= 0) {
+    if (entry->deleted ||
+        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
       continue;
     }
     if (!lc_pouch_disk_copy_meta_for_scan(store, &rows[row_index], entry)) {
