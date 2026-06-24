@@ -4020,6 +4020,398 @@ static int lc_pouch_object_matches_selector(
   return 0;
 }
 
+static int lc_pouch_object_name_equal(const lc_pouch_object_info *object,
+                                      const char *name) {
+  return object != NULL && object->name != NULL && name != NULL &&
+         strcmp(object->name, name) == 0;
+}
+
+static int lc_pouch_object_list_has_name(const lc_pouch_object_list *objects,
+                                         const char *name) {
+  size_t index;
+
+  if (objects == NULL || name == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < objects->count; ++index) {
+    if (lc_pouch_object_name_equal(&objects->items[index], name)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_txn_attachment_ops_have_clear(
+    const lc_pouch_object_list *ops) {
+  size_t index;
+
+  if (ops == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < ops->count; ++index) {
+    if (ops->items[index].name != NULL &&
+        strcmp(ops->items[index].name, LC_POUCH_TXN_ATTACHMENT_OP_CLEAR) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_txn_attachment_op_deletes_object(
+    const char *op_name, const lc_pouch_object_info *object) {
+  size_t prefix_len;
+
+  if (op_name == NULL || object == NULL) {
+    return 0;
+  }
+  prefix_len = strlen(LC_POUCH_TXN_ATTACHMENT_OP_DELETE_ID);
+  if (strncmp(op_name, LC_POUCH_TXN_ATTACHMENT_OP_DELETE_ID, prefix_len) == 0) {
+    return object->id != NULL && strcmp(object->id, op_name + prefix_len) == 0;
+  }
+  prefix_len = strlen(LC_POUCH_TXN_ATTACHMENT_OP_DELETE_NAME);
+  if (strncmp(op_name, LC_POUCH_TXN_ATTACHMENT_OP_DELETE_NAME,
+              prefix_len) == 0) {
+    return object->name != NULL &&
+           strcmp(object->name, op_name + prefix_len) == 0;
+  }
+  return 0;
+}
+
+static int lc_pouch_txn_attachment_ops_delete_object(
+    const lc_pouch_object_list *ops, const lc_pouch_object_info *object) {
+  size_t index;
+
+  if (ops == NULL || object == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < ops->count; ++index) {
+    if (lc_pouch_txn_attachment_op_deletes_object(ops->items[index].name,
+                                                  object)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_txn_attachment_hidden(
+    const lc_pouch_object_info *object, const lc_pouch_object_list *staged,
+    const lc_pouch_object_list *ops, int has_clear) {
+  if (object == NULL) {
+    return 1;
+  }
+  if (has_clear) {
+    return 1;
+  }
+  if (lc_pouch_txn_attachment_ops_delete_object(ops, object)) {
+    return 1;
+  }
+  if (lc_pouch_object_list_has_name(staged, object->name)) {
+    return 1;
+  }
+  return 0;
+}
+
+static int lc_pouch_attachment_info_compare(const void *left,
+                                            const void *right) {
+  const lc_attachment_info *left_info;
+  const lc_attachment_info *right_info;
+
+  left_info = (const lc_attachment_info *)left;
+  right_info = (const lc_attachment_info *)right;
+  if (left_info->name == NULL && right_info->name == NULL) {
+    return 0;
+  }
+  if (left_info->name == NULL) {
+    return -1;
+  }
+  if (right_info->name == NULL) {
+    return 1;
+  }
+  return strcmp(left_info->name, right_info->name);
+}
+
+static int lc_pouch_lease_load_staged_attachment_view(
+    lc_lease_handle *lease, lc_pouch_meta_record *record,
+    lc_pouch_object_list *live, lc_pouch_object_list *staged,
+    lc_pouch_object_list *ops, int *has_clear, char **staged_key,
+    lc_error *error) {
+  lc_pouch_allocator *allocator;
+  lc_lease_ref ref;
+  char *ops_key;
+  int rc;
+
+  if (lease == NULL || record == NULL || live == NULL || staged == NULL ||
+      ops == NULL || has_clear == NULL || staged_key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged attachment view requires lease and "
+                        "outputs",
+                        NULL, NULL, NULL);
+  }
+  allocator = &lease->client->pouch_allocator;
+  memset(record, 0, sizeof(*record));
+  memset(live, 0, sizeof(*live));
+  memset(staged, 0, sizeof(*staged));
+  memset(ops, 0, sizeof(*ops));
+  memset(&ref, 0, sizeof(ref));
+  *has_clear = 0;
+  *staged_key = NULL;
+  ops_key = NULL;
+
+  ref.namespace_name = lease->namespace_name;
+  ref.key = lease->key;
+  ref.lease_id = lease->lease_id;
+  ref.txn_id = lease->txn_id;
+  ref.fencing_token = lease->fencing_token;
+  rc = lc_pouch_validate_active_lease(lease->client, &ref, record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  *staged_key = lc_pouch_txn_attachment_stage_key(
+      lease->client, lease->key, lease->txn_id, error);
+  if (*staged_key == NULL) {
+    lc_pouch_meta_record_cleanup(allocator, record);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  ops_key = lc_pouch_txn_attachment_ops_key(lease->client, lease->key,
+                                            lease->txn_id, error);
+  if (ops_key == NULL) {
+    lc_client_free(lease->client, *staged_key);
+    *staged_key = NULL;
+    lc_pouch_meta_record_cleanup(allocator, record);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+
+  rc = lease->client->pouch_store->list_objects(
+      lease->client->pouch_store, record->namespace_name, lease->key, live,
+      error);
+  if (rc == LC_OK) {
+    rc = lease->client->pouch_store->list_objects(
+        lease->client->pouch_store, record->namespace_name, *staged_key,
+        staged, error);
+  }
+  if (rc == LC_OK) {
+    rc = lease->client->pouch_store->list_objects(
+        lease->client->pouch_store, record->namespace_name, ops_key, ops,
+        error);
+  }
+  lc_client_free(lease->client, ops_key);
+  if (rc != LC_OK) {
+    lc_pouch_object_list_cleanup(allocator, ops);
+    lc_pouch_object_list_cleanup(allocator, staged);
+    lc_pouch_object_list_cleanup(allocator, live);
+    lc_client_free(lease->client, *staged_key);
+    *staged_key = NULL;
+    lc_pouch_meta_record_cleanup(allocator, record);
+    return rc;
+  }
+  *has_clear = lc_pouch_txn_attachment_ops_have_clear(ops);
+  return LC_OK;
+}
+
+static void lc_pouch_lease_staged_attachment_view_cleanup(
+    lc_lease_handle *lease, lc_pouch_meta_record *record,
+    lc_pouch_object_list *live, lc_pouch_object_list *staged,
+    lc_pouch_object_list *ops, char *staged_key) {
+  lc_pouch_allocator *allocator;
+
+  if (lease == NULL) {
+    return;
+  }
+  allocator = &lease->client->pouch_allocator;
+  lc_pouch_object_list_cleanup(allocator, ops);
+  lc_pouch_object_list_cleanup(allocator, staged);
+  lc_pouch_object_list_cleanup(allocator, live);
+  lc_pouch_meta_record_cleanup(allocator, record);
+  lc_client_free(lease->client, staged_key);
+}
+
+static int lc_pouch_lease_staged_list_attachments(lc_lease_handle *lease,
+                                                  lc_attachment_list *out,
+                                                  lc_error *error) {
+  lc_pouch_meta_record record;
+  lc_pouch_object_list live;
+  lc_pouch_object_list staged;
+  lc_pouch_object_list ops;
+  char *staged_key;
+  size_t index;
+  size_t out_index;
+  size_t visible_count;
+  int has_clear;
+  int rc;
+
+  if (lease == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged list_attachments requires lease and out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  rc = lc_pouch_lease_load_staged_attachment_view(
+      lease, &record, &live, &staged, &ops, &has_clear, &staged_key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  visible_count = staged.count;
+  for (index = 0U; index < live.count; ++index) {
+    if (!lc_pouch_txn_attachment_hidden(&live.items[index], &staged, &ops,
+                                        has_clear)) {
+      ++visible_count;
+    }
+  }
+  if (visible_count > 0U) {
+    out->items = (lc_attachment_info *)lc_calloc_local(
+        visible_count, sizeof(out->items[0]));
+    if (out->items == NULL) {
+      lc_pouch_lease_staged_attachment_view_cleanup(
+          lease, &record, &live, &staged, &ops, staged_key);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch staged attachment list",
+                          NULL, NULL, NULL);
+    }
+    out->count = visible_count;
+    out_index = 0U;
+    for (index = 0U; index < live.count; ++index) {
+      if (lc_pouch_txn_attachment_hidden(&live.items[index], &staged, &ops,
+                                         has_clear)) {
+        continue;
+      }
+      rc = lc_pouch_copy_attachment_info(&out->items[out_index],
+                                         &live.items[index], error);
+      if (rc != LC_OK) {
+        lc_attachment_list_cleanup(out);
+        lc_pouch_lease_staged_attachment_view_cleanup(
+            lease, &record, &live, &staged, &ops, staged_key);
+        return rc;
+      }
+      ++out_index;
+    }
+    for (index = 0U; index < staged.count; ++index) {
+      rc = lc_pouch_copy_attachment_info(&out->items[out_index],
+                                         &staged.items[index], error);
+      if (rc != LC_OK) {
+        lc_attachment_list_cleanup(out);
+        lc_pouch_lease_staged_attachment_view_cleanup(
+            lease, &record, &live, &staged, &ops, staged_key);
+        return rc;
+      }
+      ++out_index;
+    }
+    qsort(out->items, out->count, sizeof(out->items[0]),
+          lc_pouch_attachment_info_compare);
+  }
+
+  lc_pouch_lease_staged_attachment_view_cleanup(
+      lease, &record, &live, &staged, &ops, staged_key);
+  return LC_OK;
+}
+
+static int lc_pouch_staged_not_found(lc_error *error) {
+  return lc_error_set(error, LC_ERR_SERVER, 404L,
+                      "pouch attachment was not found", NULL, "not_found",
+                      NULL);
+}
+
+static int lc_pouch_lease_staged_get_attachment(
+    lc_lease_handle *lease, const lc_attachment_get_req *req, lc_sink *dst,
+    lc_attachment_get_res *out, lc_error *error) {
+  lc_pouch_meta_record record;
+  lc_pouch_object_list live;
+  lc_pouch_object_list staged;
+  lc_pouch_object_list ops;
+  lc_pouch_object_selector object_selector;
+  lc_pouch_object_info object;
+  lc_source *body;
+  char *staged_key;
+  size_t index;
+  int has_clear;
+  int rc;
+
+  if (lease == NULL || req == NULL || dst == NULL || out == NULL ||
+      (req->selector.id == NULL && req->selector.name == NULL)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged get_attachment requires lease, req, "
+                        "dst, out, and selector",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&object_selector, 0, sizeof(object_selector));
+  memset(&object, 0, sizeof(object));
+  body = NULL;
+  rc = lc_pouch_lease_load_staged_attachment_view(
+      lease, &record, &live, &staged, &ops, &has_clear, &staged_key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  object_selector.id = req->selector.id;
+  object_selector.name = req->selector.name;
+  rc = lease->client->pouch_store->get_object(
+      lease->client->pouch_store, record.namespace_name, staged_key,
+      &object_selector, &body, &object, error);
+  if (rc == LC_ERR_SERVER && error != NULL && error->http_status == 404L) {
+    lc_error_cleanup(error);
+    rc = LC_OK;
+  } else if (rc == LC_OK) {
+    rc = lc_pouch_copy_source_to_sink(body, dst, error);
+    if (body != NULL) {
+      body->close(body);
+      body = NULL;
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_copy_attachment_info(&out->attachment, &object, error);
+    }
+    lc_pouch_object_info_cleanup(&lease->client->pouch_allocator, &object);
+    lc_pouch_lease_staged_attachment_view_cleanup(
+        lease, &record, &live, &staged, &ops, staged_key);
+    return rc;
+  }
+  if (body != NULL) {
+    body->close(body);
+    body = NULL;
+  }
+  lc_pouch_object_info_cleanup(&lease->client->pouch_allocator, &object);
+  if (rc != LC_OK) {
+    lc_pouch_lease_staged_attachment_view_cleanup(
+        lease, &record, &live, &staged, &ops, staged_key);
+    return rc;
+  }
+
+  for (index = 0U; index < live.count; ++index) {
+    if (!lc_pouch_object_matches_selector(&live.items[index],
+                                          &req->selector)) {
+      continue;
+    }
+    if (lc_pouch_txn_attachment_hidden(&live.items[index], &staged, &ops,
+                                       has_clear)) {
+      lc_pouch_lease_staged_attachment_view_cleanup(
+          lease, &record, &live, &staged, &ops, staged_key);
+      return lc_pouch_staged_not_found(error);
+    }
+    rc = lease->client->pouch_store->get_object(
+        lease->client->pouch_store, record.namespace_name, lease->key,
+        &object_selector, &body, &object, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_copy_source_to_sink(body, dst, error);
+    }
+    if (body != NULL) {
+      body->close(body);
+      body = NULL;
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_copy_attachment_info(&out->attachment, &object, error);
+    }
+    lc_pouch_object_info_cleanup(&lease->client->pouch_allocator, &object);
+    lc_pouch_lease_staged_attachment_view_cleanup(
+        lease, &record, &live, &staged, &ops, staged_key);
+    return rc;
+  }
+
+  lc_pouch_lease_staged_attachment_view_cleanup(
+      lease, &record, &live, &staged, &ops, staged_key);
+  return lc_pouch_staged_not_found(error);
+}
+
 static int lc_pouch_lease_staged_delete_attachment(
     lc_lease_handle *lease, const lc_attachment_selector *selector,
     int *deleted, lc_error *error) {
@@ -6684,6 +7076,9 @@ int lc_pouch_lease_list_attachments_method(lc_lease *self,
                         NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  if (lease->pouch_txn_explicit) {
+    return lc_pouch_lease_staged_list_attachments(lease, out, error);
+  }
   memset(&req, 0, sizeof(req));
   lc_pouch_lease_ref_from_handle(lease, &req.lease);
   return lc_pouch_client_list_attachments_method(&lease->client->pub, &req, out,
@@ -6705,6 +7100,9 @@ int lc_pouch_lease_get_attachment_method(lc_lease *self,
                         NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  if (lease->pouch_txn_explicit && !opts->public_read) {
+    return lc_pouch_lease_staged_get_attachment(lease, opts, dst, out, error);
+  }
   memset(&req, 0, sizeof(req));
   lc_pouch_lease_ref_from_handle(lease, &req.lease);
   req.selector = opts->selector;
