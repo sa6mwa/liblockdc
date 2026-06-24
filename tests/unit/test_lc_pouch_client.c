@@ -478,7 +478,22 @@ typedef struct acquire_for_update_meta_fail_hook {
   int failed_store_meta;
 } acquire_for_update_meta_fail_hook;
 
+typedef struct remove_meta_fail_hook {
+  lc_pouch_store *store;
+  int (*original_store_meta)(lc_pouch_store *self, const char *namespace_name,
+                             const char *key, const lc_pouch_meta *meta,
+                             const char *expected_etag,
+                             lc_pouch_store_meta_res *out, lc_error *error);
+  int (*original_remove_state)(lc_pouch_store *self,
+                               const char *namespace_name, const char *key,
+                               const char *expected_etag, int *removed,
+                               lc_error *error);
+  int remove_succeeded;
+  int failed_store_meta;
+} remove_meta_fail_hook;
+
 static acquire_for_update_meta_fail_hook g_acquire_for_update_meta_fail_hook;
+static remove_meta_fail_hook g_remove_meta_fail_hook;
 
 static int acquire_for_update_fail_after_promote_store_meta(
     lc_pouch_store *self, const char *namespace_name, const char *key,
@@ -538,6 +553,63 @@ static void acquire_for_update_meta_fail_hook_restore(void) {
         g_acquire_for_update_meta_fail_hook.original_store_meta;
     g_acquire_for_update_meta_fail_hook.store->promote_staged_state =
         g_acquire_for_update_meta_fail_hook.original_promote_staged_state;
+  }
+}
+
+static int remove_fail_after_state_remove_store_meta(
+    lc_pouch_store *self, const char *namespace_name, const char *key,
+    const lc_pouch_meta *meta, const char *expected_etag,
+    lc_pouch_store_meta_res *out, lc_error *error) {
+  if (g_remove_meta_fail_hook.remove_succeeded &&
+      !g_remove_meta_fail_hook.failed_store_meta) {
+    (void)self;
+    (void)namespace_name;
+    (void)key;
+    (void)meta;
+    (void)expected_etag;
+    (void)out;
+    g_remove_meta_fail_hook.failed_store_meta = 1;
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "intentional post-remove metadata failure", NULL, NULL,
+                        NULL);
+  }
+  return g_remove_meta_fail_hook.original_store_meta(
+      self, namespace_name, key, meta, expected_etag, out, error);
+}
+
+static int remove_mark_successful_state_remove(
+    lc_pouch_store *self, const char *namespace_name, const char *key,
+    const char *expected_etag, int *removed, lc_error *error) {
+  int rc;
+
+  rc = g_remove_meta_fail_hook.original_remove_state(
+      self, namespace_name, key, expected_etag, removed, error);
+  if (rc == LC_OK && removed != NULL && *removed) {
+    g_remove_meta_fail_hook.remove_succeeded = 1;
+  }
+  return rc;
+}
+
+static void remove_meta_fail_hook_install(lc_client *client) {
+  lc_client_handle *handle;
+
+  handle = (lc_client_handle *)client;
+  memset(&g_remove_meta_fail_hook, 0, sizeof(g_remove_meta_fail_hook));
+  g_remove_meta_fail_hook.store = handle->pouch_store;
+  g_remove_meta_fail_hook.original_store_meta =
+      handle->pouch_store->store_meta;
+  g_remove_meta_fail_hook.original_remove_state =
+      handle->pouch_store->remove_state;
+  handle->pouch_store->store_meta = remove_fail_after_state_remove_store_meta;
+  handle->pouch_store->remove_state = remove_mark_successful_state_remove;
+}
+
+static void remove_meta_fail_hook_restore(void) {
+  if (g_remove_meta_fail_hook.store != NULL) {
+    g_remove_meta_fail_hook.store->store_meta =
+        g_remove_meta_fail_hook.original_store_meta;
+    g_remove_meta_fail_hook.store->remove_state =
+        g_remove_meta_fail_hook.original_remove_state;
   }
 }
 
@@ -2610,6 +2682,94 @@ test_pouch_endpoint_acquire_for_update_repairs_post_promotion_meta_failure(
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
   reopened->close(reopened);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_get_repairs_post_remove_meta_failure(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_lease *reacquired;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_update_opts update_opts;
+  lc_remove_req remove_req;
+  lc_release_req release_req;
+  lc_get_res get_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "remove-meta-repair");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+  reacquired = NULL;
+  sink = NULL;
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "remove/repair-key";
+  acquire_req.owner = "owner-a";
+  acquire_req.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"value\":1}");
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_non_null(lease->state_etag);
+
+  lc_remove_req_init(&remove_req);
+  remove_req.if_state_etag = lease->state_etag;
+  remove_meta_fail_hook_install(client);
+  rc = lease->remove(lease, &remove_req, &error);
+  remove_meta_fail_hook_restore();
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_true(g_remove_meta_fail_hook.remove_succeeded);
+  assert_true(g_remove_meta_fail_hook.failed_store_meta);
+  assert_string_equal(error.message,
+                      "intentional post-remove metadata failure");
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "remove/repair-key", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  assert_int_equal(get_res.version, 2L);
+  assert_null(get_res.etag);
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  acquire_req.owner = "owner-b";
+  rc = client->acquire(client, &acquire_req, &reacquired, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(reacquired);
+  assert_null(reacquired->state_etag);
+  assert_int_equal(reacquired->version, 2L);
+  rc = reacquired->release(reacquired, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+
+  client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
@@ -7182,6 +7342,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(
           test_pouch_endpoint_lease_load_repairs_state_meta_gap),
+      cmocka_unit_test(
+          test_pouch_endpoint_get_repairs_post_remove_meta_failure),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_waits_for_later_enqueue),
       cmocka_unit_test(test_pouch_endpoint_watch_queue_snapshots),

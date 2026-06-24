@@ -2039,6 +2039,22 @@ static int lc_pouch_repair_meta_state_gap(lc_client_handle *client,
   }
   if (state_ref->no_content || state_ref->etag == NULL ||
       state_ref->etag[0] == '\0') {
+    if (state_ref->no_content && record->meta.state_etag != NULL) {
+      next_meta = record->meta;
+      next_meta.state_etag = NULL;
+      next_meta.version = record->meta.version + 1L;
+      rc = client->pouch_store->store_meta(client->pouch_store, namespace_name,
+                                           key, &next_meta, record->etag,
+                                           &stored, error);
+      lc_pouch_store_meta_res_cleanup(&client->pouch_allocator, &stored);
+      lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      lc_pouch_meta_record_cleanup(&client->pouch_allocator, record);
+      return client->pouch_store->load_meta(client->pouch_store, namespace_name,
+                                            key, record, error);
+    }
     lc_pouch_state_info_cleanup(&client->pouch_allocator, &state);
     return LC_OK;
   }
