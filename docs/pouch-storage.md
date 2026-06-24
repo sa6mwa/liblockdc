@@ -663,8 +663,15 @@ query-summary projection rather than the full metadata row array, so
 `query_keys` does not pay for metadata row copies.
 Indexed match-all document scans also page over the query-summary projection
 and copy only the row fields currently required by query callbacks: key, ETag,
-version, update timestamp, and query-hidden state. Document payloads are still
-loaded only after a summary row survives pagination and visibility filtering.
+owner, version, update timestamp, and query-hidden state. Document payloads are
+still loaded only after a summary row survives pagination and visibility
+filtering. The current disk backend also maintains an internal owner posting
+index over query-summary rows. That pre-LQL predicate boundary can return
+document rows or key-only candidates for one owner in stable key order without
+walking unrelated owners in the namespace. The `query.index` sidecar records
+written by the current implementation carry the owner column; older sidecar
+records without that column remain replayable because the authoritative
+metadata log can repopulate the summary owner before candidate scans run.
 Large-namespace low-match indexed searches must be able to walk the relevant
 posting/candidate sets without loading every metadata summary or every document
 payload in the namespace.
@@ -950,7 +957,8 @@ Each opened namespace maintains in-memory indexes:
 - sorted metadata key list
 - sorted object key list
 - cached decoded metadata summary for query hot paths
-- field/term/range postings for indexed metadata fields
+- owner postings over cached query summaries
+- later field/term/range postings for additional indexed metadata fields
 - live/deleted filters for compacted index segments
 - segment-level min/max and cardinality hints for fast negative matches
 
@@ -961,10 +969,11 @@ upgrade, yet normal indexed query execution must use them rather than falling
 back to a full log scan.
 
 LQL integration should consume storage query APIs, not raw log scans. Until
-`liblql` is available, pouch should expose a narrow internal predicate/query
-boundary over indexed summaries, term/range postings, stable ordering, limits,
-and cursors. That same boundary must also support explicit scan mode over
-ordered metadata summaries that were refreshed from authoritative log state.
+`liblql` is available, pouch exposes a narrow internal predicate/query boundary
+over indexed summaries, owner postings, stable ordering, limits, and cursors.
+That same boundary must also support explicit scan mode over ordered metadata
+summaries that were refreshed from authoritative log state. Additional
+term/range postings should extend this boundary rather than bypass it.
 Indexed mode is the preferred default; scan mode is a configured backend mode
 or configured fallback. The persistent format should not encode LQL-specific
 query plans. Pre-LQL scan support is intentionally limited to match-all

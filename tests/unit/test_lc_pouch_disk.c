@@ -644,6 +644,97 @@ static void test_put_u64(unsigned char *dst, unsigned long value) {
   test_put_u32(dst + 4, (value >> 32) & 0xffffffffUL);
 }
 
+static unsigned long test_crc32_update(unsigned long crc,
+                                       const unsigned char *bytes,
+                                       size_t count) {
+  size_t index;
+
+  for (index = 0U; index < count; ++index) {
+    unsigned long byte;
+    int bit;
+
+    byte = bytes != NULL ? bytes[index] : 0UL;
+    crc ^= byte;
+    for (bit = 0; bit < 8; ++bit) {
+      if ((crc & 1UL) != 0UL) {
+        crc = (crc >> 1) ^ 0xedb88320UL;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+static void rewrite_query_index_as_v1_without_owner(const char *root) {
+  char index_path[512];
+  char temp_path[512];
+  unsigned char header[TEST_POUCH_QUERY_INDEX_HEADER_SIZE];
+  unsigned char *payload;
+  unsigned long ns_len;
+  unsigned long key_len;
+  unsigned long owner_len;
+  unsigned long etag_len;
+  unsigned long payload_len;
+  unsigned long new_payload_len;
+  unsigned long crc;
+  ssize_t got;
+  int in_fd;
+  int out_fd;
+
+  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  snprintf(temp_path, sizeof(temp_path), "%s/query.index.v1tmp", root);
+  in_fd = open(index_path, O_RDONLY);
+  assert_true(in_fd >= 0);
+  out_fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  assert_true(out_fd >= 0);
+
+  for (;;) {
+    got = read(in_fd, header, sizeof(header));
+    if (got == 0) {
+      break;
+    }
+    assert_int_equal(got, sizeof(header));
+    assert_memory_equal(header, "LCQI", 4U);
+    ns_len = test_get_u32(header + 12);
+    key_len = test_get_u32(header + 16);
+    owner_len = test_get_u32(header + 20);
+    etag_len = test_get_u32(header + 24);
+    payload_len = test_get_u64(header + 44);
+    assert_int_equal(payload_len, ns_len + key_len + owner_len + etag_len);
+    payload = (unsigned char *)malloc((size_t)payload_len);
+    assert_non_null(payload);
+    assert_int_equal(read(in_fd, payload, (size_t)payload_len), payload_len);
+
+    new_payload_len = ns_len + key_len + etag_len;
+    crc = 0xffffffffUL;
+    crc = test_crc32_update(crc, payload, (size_t)(ns_len + key_len));
+    if (etag_len > 0UL) {
+      crc = test_crc32_update(
+          crc, payload + ns_len + key_len + owner_len, (size_t)etag_len);
+    }
+    test_put_u32(header + 20, 0UL);
+    test_put_u64(header + 44, new_payload_len);
+    test_put_u32(header + 52, crc ^ 0xffffffffUL);
+    test_put_u32(header + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET, 1UL);
+    assert_int_equal(write(out_fd, header, sizeof(header)), sizeof(header));
+    assert_int_equal(write(out_fd, payload, (size_t)(ns_len + key_len)),
+                     ns_len + key_len);
+    if (etag_len > 0UL) {
+      assert_int_equal(
+          write(out_fd, payload + ns_len + key_len + owner_len,
+                (size_t)etag_len),
+          etag_len);
+    }
+    free(payload);
+  }
+
+  close(in_fd);
+  assert_int_equal(fsync(out_fd), 0);
+  close(out_fd);
+  assert_int_equal(rename(temp_path, index_path), 0);
+}
+
 static void corrupt_first_log_match(const char *root, const char *needle) {
   char log_path[512];
   unsigned char *bytes;
@@ -932,6 +1023,7 @@ static void truncate_log_after_first_record(const char *root) {
 
 typedef struct scan_capture {
   char keys[8][64];
+  char owners[8][64];
   long versions[8];
   long updated_at_unix[8];
   int query_hidden[8];
@@ -956,6 +1048,10 @@ static int capture_scan_row(void *context, const lc_pouch_scan_meta_row *row,
   assert_true(capture->count < sizeof(capture->keys) / sizeof(capture->keys[0]));
   snprintf(capture->keys[capture->count],
            sizeof(capture->keys[capture->count]), "%s", row->key);
+  if (row->meta->owner != NULL) {
+    snprintf(capture->owners[capture->count],
+             sizeof(capture->owners[capture->count]), "%s", row->meta->owner);
+  }
   capture->versions[capture->count] = row->meta->version;
   capture->updated_at_unix[capture->count] = row->meta->updated_at_unix;
   capture->query_hidden[capture->count] = row->meta->query_hidden;
@@ -1245,6 +1341,7 @@ static void test_cas_and_remove_semantics(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
+  rewrite_query_index_as_v1_without_owner(root);
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   read_body = NULL;
@@ -3308,8 +3405,8 @@ static void test_query_index_keys_scan_avoids_metadata_row_copies(
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_index_keys_scan);
 
-  meta.owner = "owner-key-only-allocation-sentinel";
-  meta.lease_id = "lease-alpha";
+  meta.owner = "owner";
+  meta.lease_id = "lease-key-only-allocation-sentinel";
   meta.state_etag = "state-alpha";
   meta.version = 1L;
   rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
@@ -3347,7 +3444,7 @@ static void test_query_index_keys_scan_avoids_metadata_row_copies(
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
-  tracked.fail_malloc_size = strlen(meta.owner) + 1U;
+  tracked.fail_malloc_size = strlen("lease-key-only-allocation-sentinel") + 1U;
   req.namespace_name = "default";
   req.limit = 1U;
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
@@ -3371,6 +3468,169 @@ static void test_query_index_keys_scan_avoids_metadata_row_copies(
   assert_string_equal(capture.keys[0], "bravo");
   assert_false(scan.truncated);
   assert_null(scan.next_start_after);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_owner_index_scans_candidates_and_replays(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_owner_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-owner-index");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->query_owner_scan);
+  assert_non_null(store->query_owner_keys_scan);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.owner = "owner-b";
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-charlie";
+  meta.state_etag = "state-charlie";
+  meta.version = 3L;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-hidden";
+  meta.state_etag = "state-hidden";
+  meta.version = 4L;
+  meta.has_query_hidden = 1;
+  meta.query_hidden = 1;
+  rc = store->store_meta(store, "default", "hidden", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-deleted";
+  meta.state_etag = "state-deleted";
+  meta.version = 5L;
+  meta.has_query_hidden = 0;
+  meta.query_hidden = 0;
+  rc = store->store_meta(store, "default", "deleted", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->delete_meta(store, "default", "deleted", stored.etag, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.owner = "owner-a";
+  meta.lease_id = "lease-other";
+  meta.state_etag = "state-other";
+  meta.version = 6L;
+  rc = store->store_meta(store, "other", "aardvark", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  req.namespace_name = "default";
+  req.owner = "owner-a";
+  req.limit = 1U;
+  rc = store->query_owner_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_string_equal(rows.owners[0], "owner-a");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "alpha");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  req.start_after = "alpha";
+  req.limit = 8U;
+  rc = store->query_owner_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "charlie");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  meta.owner = "owner-b";
+  meta.lease_id = "lease-charlie-moved";
+  meta.state_etag = "state-charlie-moved";
+  meta.version = 7L;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  memset(&keys, 0, sizeof(keys));
+  req.start_after = NULL;
+  req.limit = 8U;
+  rc = store->query_owner_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  req.owner = "owner-b";
+  rc = store->query_owner_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "bravo");
+  assert_string_equal(keys.keys[1], "charlie");
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   rc = store->close(store, &error);
@@ -11836,6 +12096,8 @@ int main(void) {
           test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(
           test_query_index_keys_scan_avoids_metadata_row_copies),
+      cmocka_unit_test(
+          test_query_owner_index_scans_candidates_and_replays),
       cmocka_unit_test(
           test_query_index_scans_refresh_stale_reader_before_sidecar),
       cmocka_unit_test(

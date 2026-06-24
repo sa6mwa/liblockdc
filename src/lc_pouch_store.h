@@ -131,6 +131,13 @@ typedef struct lc_pouch_query_index_scan_req {
   size_t limit;
 } lc_pouch_query_index_scan_req;
 
+typedef struct lc_pouch_query_owner_scan_req {
+  const char *namespace_name;
+  const char *owner;
+  const char *start_after;
+  size_t limit;
+} lc_pouch_query_owner_scan_req;
+
 typedef struct lc_pouch_query_index_scan_res {
   size_t visited;
   int truncated;
@@ -387,6 +394,18 @@ struct lc_pouch_store {
                           lc_error *error);
   int (*query_index_keys_scan)(lc_pouch_store *self,
                                const lc_pouch_query_index_scan_req *req,
+                               lc_pouch_query_index_key_visit_fn visit,
+                               void *visit_context,
+                               lc_pouch_query_index_scan_res *out,
+                               lc_error *error);
+  int (*query_owner_scan)(lc_pouch_store *self,
+                          const lc_pouch_query_owner_scan_req *req,
+                          lc_pouch_scan_meta_visit_fn visit,
+                          void *visit_context,
+                          lc_pouch_query_index_scan_res *out,
+                          lc_error *error);
+  int (*query_owner_keys_scan)(lc_pouch_store *self,
+                               const lc_pouch_query_owner_scan_req *req,
                                lc_pouch_query_index_key_visit_fn visit,
                                void *visit_context,
                                lc_pouch_query_index_scan_res *out,
