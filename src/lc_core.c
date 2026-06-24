@@ -1328,6 +1328,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   size_t bundle_length;
   lc_client_handle *client;
   size_t i;
+  size_t pouch_endpoint_count;
   int is_pouch;
   int rc;
 
@@ -1341,9 +1342,20 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   memset(&pouch_endpoint_options, 0, sizeof(pouch_endpoint_options));
   bundle_bytes = NULL;
   bundle_length = 0U;
-  is_pouch = config->endpoint_count == 1U &&
-             lc_endpoint_is_pouch(
-                 config->endpoints != NULL ? config->endpoints[0] : NULL);
+  pouch_endpoint_count = 0U;
+  if (config->endpoints != NULL) {
+    for (i = 0U; i < config->endpoint_count; ++i) {
+      if (lc_endpoint_is_pouch(config->endpoints[i])) {
+        ++pouch_endpoint_count;
+      }
+    }
+  }
+  if (pouch_endpoint_count != 0U && config->endpoint_count != 1U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoints must be configured alone", NULL,
+                        NULL, NULL);
+  }
+  is_pouch = pouch_endpoint_count == 1U;
   if (is_pouch &&
       !lc_pouch_query_engine_supported(config->pouch_query_engine, 0)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,

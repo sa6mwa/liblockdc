@@ -3086,6 +3086,38 @@ static void test_pouch_endpoint_rejects_invalid_query_options(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_rejects_mixed_endpoint_configuration(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  const char *endpoints[2];
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "mixed-endpoints-invalid");
+  test_cleanup_root(root);
+  memset(&error, 0, sizeof(error));
+  lc_client_config_init(&config);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  endpoints[0] = endpoint;
+  endpoints[1] = "https://127.0.0.1:1";
+  config.endpoints = endpoints;
+  config.endpoint_count = 2U;
+
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch endpoints must be configured alone");
+
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys(
     void **state) {
   char root[256];
@@ -4318,6 +4350,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_decodes_percent_encoded_path_and_options),
       cmocka_unit_test(test_pouch_endpoint_rejects_invalid_query_options),
+      cmocka_unit_test(
+          test_pouch_endpoint_rejects_mixed_endpoint_configuration),
       cmocka_unit_test(
           test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys),
       cmocka_unit_test(
