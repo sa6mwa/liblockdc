@@ -1677,7 +1677,8 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
 
     entry = &store->meta_entries[index];
     if (entry->deleted ||
-        strcmp(entry->namespace_name, req->namespace_name) != 0) {
+        strcmp(entry->namespace_name, req->namespace_name) != 0 ||
+        (entry->meta.has_query_hidden && entry->meta.query_hidden)) {
       continue;
     }
     if (req->start_after != NULL &&

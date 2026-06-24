@@ -542,9 +542,11 @@ large scans unless a query actually needs it.
 
 Summary rows use `published_version` when present and fall back to `version`.
 The query-hidden attribute must be reflected in the summary without requiring a
-full metadata decode. A cached summary is valid only while the corresponding
-metadata record ref remains the current head for that key; any newer metadata
-record must invalidate or replace the cached summary.
+full metadata decode. Hidden rows are excluded from normal query scans, but they
+still remain visible to direct key lookup and lease/metadata operations. A
+cached summary is valid only while the corresponding metadata record ref remains
+the current head for that key; any newer metadata record must invalidate or
+replace the cached summary.
 
 Remove semantics are part of the visible lockd contract:
 

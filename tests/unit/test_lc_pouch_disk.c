@@ -1569,26 +1569,35 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
+  meta.lease_id = "lease-d";
+  meta.state_etag = "state-d";
+  meta.version = 50L;
+  meta.query_hidden = 0;
+  rc = store->store_meta(store, "default", "delta", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
   req.namespace_name = "default";
   req.limit = 1U;
   rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 1U);
-  assert_string_equal(capture.keys[0], "alpha");
-  assert_int_equal(capture.versions[0], 10L);
-  assert_true(capture.query_hidden[0]);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_int_equal(capture.versions[0], 20L);
+  assert_false(capture.query_hidden[0]);
   assert_true(scan.truncated);
-  assert_string_equal(scan.next_start_after, "alpha");
+  assert_string_equal(scan.next_start_after, "bravo");
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
 
   memset(&capture, 0, sizeof(capture));
-  req.start_after = "alpha";
+  req.start_after = "bravo";
   req.limit = 8U;
   rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 1U);
-  assert_string_equal(capture.keys[0], "bravo");
-  assert_int_equal(capture.versions[0], 20L);
+  assert_string_equal(capture.keys[0], "delta");
+  assert_int_equal(capture.versions[0], 50L);
   assert_false(capture.query_hidden[0]);
   assert_false(scan.truncated);
   assert_null(scan.next_start_after);
@@ -1606,8 +1615,8 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 2U);
-  assert_string_equal(capture.keys[0], "alpha");
-  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(capture.keys[1], "delta");
   assert_false(scan.truncated);
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
 
