@@ -299,6 +299,16 @@ typedef struct pouch_consumer_failure_test {
   int saw_delivery_error;
 } pouch_consumer_failure_test;
 
+typedef struct pouch_consumer_defer_test {
+  lc_consumer_service *service;
+  size_t handled;
+  char message_id[128];
+  long first_attempts;
+  long first_failures;
+  long redelivery_attempts;
+  long redelivery_failures;
+} pouch_consumer_defer_test;
+
 typedef struct pouch_acquire_for_update_test {
   lc_client *observer;
   const char *key;
@@ -605,6 +615,62 @@ static int pouch_consumer_failure_on_error(
   assert_int_equal(event->cause->code, LC_ERR_TRANSPORT);
   state->errors += 1U;
   state->saw_delivery_error = 1;
+  return LC_OK;
+}
+
+static int pouch_consumer_defer_handle(void *context,
+                                       lc_consumer_message *message,
+                                       lc_error *error) {
+  pouch_consumer_defer_test *state;
+  lc_nack_req nack_req;
+  lc_sink *sink;
+  size_t written;
+  int rc;
+
+  state = (pouch_consumer_defer_test *)context;
+  assert_non_null(state);
+  assert_non_null(message);
+  assert_non_null(message->message);
+  assert_false(message->with_state);
+  assert_null(message->state);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  written = 0U;
+  rc = message->message->write_payload(message->message, sink, &written,
+                                       error);
+  assert_lc_ok(rc, error);
+  assert_int_equal(written, strlen("defer-work"));
+  assert_sink_text(sink, "defer-work", error);
+  lc_sink_close(sink);
+
+  if (state->handled == 0U) {
+    snprintf(state->message_id, sizeof(state->message_id), "%s",
+             message->message->message_id);
+    state->first_attempts = message->message->attempts;
+    state->first_failures = message->message->failure_attempts;
+    assert_int_equal(message->message->attempts, 1);
+    assert_int_equal(message->message->failure_attempts, 0);
+
+    lc_nack_req_init(&nack_req);
+    nack_req.intent = LC_NACK_INTENT_DEFER;
+    nack_req.delay_seconds = 0L;
+    rc = message->message->nack(message->message, &nack_req, error);
+    assert_lc_ok(rc, error);
+  } else {
+    assert_string_equal(message->message->message_id, state->message_id);
+    state->redelivery_attempts = message->message->attempts;
+    state->redelivery_failures = message->message->failure_attempts;
+    assert_int_equal(message->message->attempts, 2);
+    assert_int_equal(message->message->failure_attempts, 0);
+    rc = message->message->ack(message->message, error);
+    assert_lc_ok(rc, error);
+  }
+
+  state->handled += 1U;
+  rc = lc_consumer_service_stop(state->service);
+  assert_int_equal(rc, LC_OK);
   return LC_OK;
 }
 
@@ -5140,6 +5206,105 @@ static void test_pouch_public_mutate_local_shared_state(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_consumer_service_explicit_defer_redelivery(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  pouch_consumer_defer_test consumer_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "consumer-explicit-defer");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  source = NULL;
+  service = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&consumer_state, 0, sizeof(consumer_state));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "managed-defer";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("defer-work", &error);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.request.queue = "managed-defer";
+  consumer_config.request.owner = "managed-defer-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.handle = pouch_consumer_defer_handle;
+  consumer_config.context = &consumer_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(service);
+  consumer_state.service = service;
+  rc = service->run(service, &error);
+  assert_lc_ok(rc, &error);
+  service->close(service);
+  service = NULL;
+  assert_int_equal(consumer_state.handled, 1U);
+  assert_int_equal(consumer_state.first_attempts, 1L);
+  assert_int_equal(consumer_state.first_failures, 0L);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "managed-defer";
+  rc = client->queue_stats(client, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(stats.available);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_string_equal(stats.head_message_id, enqueue_res.message_id);
+  lc_queue_stats_res_cleanup(&stats);
+
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(service);
+  consumer_state.service = service;
+  rc = service->run(service, &error);
+  assert_lc_ok(rc, &error);
+  service->close(service);
+  service = NULL;
+  assert_int_equal(consumer_state.handled, 2U);
+  assert_int_equal(consumer_state.redelivery_attempts, 2L);
+  assert_int_equal(consumer_state.redelivery_failures, 0L);
+
+  memset(&stats, 0, sizeof(stats));
+  rc = client->queue_stats(client, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_public_state_attachment_shared_handles),
@@ -5195,6 +5360,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_consumer_service_polls_later_enqueue),
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
+      cmocka_unit_test(
+          test_pouch_public_consumer_service_explicit_defer_redelivery),
       cmocka_unit_test(test_pouch_public_acquire_for_update_stages_state),
       cmocka_unit_test(
           test_pouch_public_acquire_for_update_creates_empty_state),
