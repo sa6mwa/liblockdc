@@ -2050,6 +2050,98 @@ static void test_pouch_public_consumer_service_with_state(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_consumer_service_start_wait_with_state(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *verifier;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  pouch_consumer_state_test consumer_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "consumer-start-wait");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  verifier = NULL;
+  source = NULL;
+  service = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&consumer_state, 0, sizeof(consumer_state));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &producer, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "managed-start-state";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("stateful-work", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.request.queue = "managed-start-state";
+  consumer_config.request.owner = "managed-start-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.with_state = 1;
+  consumer_config.handle = pouch_consumer_state_handle;
+  consumer_config.context = &consumer_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+  rc = lc_client_new_consumer_service(producer, &service_config, &service,
+                                      &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(service);
+  consumer_state.service = service;
+  rc = lc_consumer_service_start(service, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_consumer_service_wait(service, &error);
+  assert_lc_ok(rc, &error);
+  service->close(service);
+  service = NULL;
+
+  assert_int_equal(consumer_state.handled, 1U);
+  assert_string_equal(consumer_state.queue, "managed-start-state");
+  assert_string_equal(consumer_state.message_id, enqueue_res.message_id);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "managed-start-state";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats);
+
+  open_pouch_client(endpoint, &verifier, &error);
+  assert_client_state_text(
+      verifier, consumer_state.state_key,
+      "{\"consumer\":\"stateful\",\"saved\":true}", &error);
+  verifier->close(verifier);
+  verifier = NULL;
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  producer->close(producer);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_consumer_service_failure_redelivery(
     void **state) {
   char root[256];
@@ -2365,6 +2457,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_watch_queue_snapshots),
       cmocka_unit_test(test_pouch_public_subscribe_with_state),
       cmocka_unit_test(test_pouch_public_consumer_service_with_state),
+      cmocka_unit_test(
+          test_pouch_public_consumer_service_start_wait_with_state),
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),

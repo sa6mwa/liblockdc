@@ -1518,7 +1518,8 @@ delivery fencing, nack redelivery, delayed nack redelivery, client-level nack
 retry exhaustion terminal behavior across reopen, read-only queue stats while a
 delivery is invisible,
 acknowledgement, watch snapshots, direct subscribe-with-state, batch dequeue
-without duplicate acked delivery, managed consumer state-save, managed failure
+without duplicate acked delivery, managed consumer state-save through both
+blocking `run()` and asynchronous `start()`/`wait()`, managed failure
 redelivery, and cross-client CAS. The optional e2e shard still covers broader
 consumer-service behavior.
 
