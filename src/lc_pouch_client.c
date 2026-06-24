@@ -53,6 +53,9 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
                                                lc_error *error);
 static int lc_pouch_refresh_lease(lc_lease_handle *lease,
                                   const lc_pouch_meta *meta, lc_error *error);
+static int lc_pouch_set_lease_state(lc_lease_handle *lease,
+                                    const char *state_etag, long version,
+                                    lc_error *error);
 
 typedef struct lc_pouch_acquire_for_update_file_sink {
   FILE *fp;
@@ -590,34 +593,210 @@ static int lc_pouch_lease_save_method(lc_lease *self, const lonejson_map *map,
   return rc;
 }
 
-static int lc_pouch_lease_mutate_unsupported(lc_lease *self,
-                                             const lc_mutate_req *req,
-                                             lc_error *error) {
-  (void)self;
-  (void)req;
-  return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch lease mutate requires the LQL/mutate slice", NULL,
-                      NULL, NULL);
-}
-
 static int lc_pouch_mutate_write_empty_object(FILE *fp, lc_error *error) {
   if (fp == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch mutate_local requires scratch file", NULL, NULL,
-                        NULL);
+                        "pouch mutate requires scratch file", NULL, NULL, NULL);
   }
   if (fwrite("{}", 1U, 2U, fp) != 2U) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to seed pouch local mutate document",
-                        strerror(errno), NULL, NULL);
+                        "failed to seed pouch mutate document", strerror(errno),
+                        NULL, NULL);
   }
   if (fflush(fp) != 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to flush pouch local mutate document",
-                        strerror(errno), NULL, NULL);
+                        "failed to flush pouch mutate document", strerror(errno),
+                        NULL, NULL);
   }
   rewind(fp);
   return LC_OK;
+}
+
+static int lc_pouch_apply_mutations(lc_client_handle *client,
+                                    const lc_lease_ref *lease,
+                                    const char *const *mutations,
+                                    size_t mutation_count,
+                                    const char *if_state_etag,
+                                    long if_version, int has_if_version,
+                                    int default_lease_version,
+                                    long default_if_version,
+                                    lc_update_res *out,
+                                    lc_error *error) {
+  lc_mutation_parse_options parse_options;
+  lc_mutation_plan *plan;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_pouch_state_info state_info;
+  lc_source *source;
+  lc_source *body;
+  const char *namespace_name;
+  FILE *input_fp;
+  FILE *final_fp;
+  size_t limit;
+  int rc;
+
+  if (client == NULL || lease == NULL || lease->key == NULL ||
+      mutations == NULL || mutation_count == 0U || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutate requires client, lease, mutations, and "
+                        "output",
+                        NULL, NULL, NULL);
+  }
+
+  memset(&parse_options, 0, sizeof(parse_options));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&update_res, 0, sizeof(update_res));
+  lc_update_req_init(&update_req);
+  plan = NULL;
+  source = NULL;
+  body = NULL;
+  namespace_name = NULL;
+  input_fp = NULL;
+  final_fp = NULL;
+
+  if (clock_gettime(CLOCK_REALTIME, &parse_options.now) == 0) {
+    parse_options.has_now = 1;
+  }
+
+  rc = lc_mutation_plan_build(mutations, mutation_count, &parse_options, &plan,
+                              error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_public_namespace(client, lease->namespace_name,
+                                 &namespace_name, error);
+  if (rc != LC_OK) {
+    lc_mutation_plan_close(plan);
+    return rc;
+  }
+
+  input_fp = tmpfile();
+  if (input_fp == NULL) {
+    lc_mutation_plan_close(plan);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create pouch mutate input file",
+                        strerror(errno), NULL, NULL);
+  }
+  rc = client->pouch_store->read_state(client->pouch_store, namespace_name,
+                                       lease->key, &body, &state_info, error);
+  if (rc != LC_OK) {
+    fclose(input_fp);
+    lc_mutation_plan_close(plan);
+    return rc;
+  }
+  if (!state_info.no_content && body != NULL) {
+    limit = client->http_json_response_limit_bytes > 0U
+                ? client->http_json_response_limit_bytes
+                : (size_t)LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
+    rc = lc_pouch_copy_source_to_file_limited(body, input_fp, limit, error);
+    body->close(body);
+    body = NULL;
+    if (rc != LC_OK) {
+      fclose(input_fp);
+      lc_pouch_state_info_cleanup(&client->pouch_allocator, &state_info);
+      lc_mutation_plan_close(plan);
+      return rc;
+    }
+  } else if (body != NULL) {
+    body->close(body);
+    body = NULL;
+  }
+  if (fflush(input_fp) != 0) {
+    fclose(input_fp);
+    lc_pouch_state_info_cleanup(&client->pouch_allocator, &state_info);
+    lc_mutation_plan_close(plan);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to flush pouch mutate input file",
+                        strerror(errno), NULL, NULL);
+  }
+  rewind(input_fp);
+
+  if (state_info.no_content) {
+    rc = lc_pouch_mutate_write_empty_object(input_fp, error);
+    if (rc != LC_OK) {
+      fclose(input_fp);
+      lc_pouch_state_info_cleanup(&client->pouch_allocator, &state_info);
+      lc_mutation_plan_close(plan);
+      return rc;
+    }
+  }
+
+  rc = lc_mutation_plan_apply(plan, input_fp, &final_fp, error);
+  fclose(input_fp);
+  lc_mutation_plan_close(plan);
+  if (rc != LC_OK) {
+    lc_pouch_state_info_cleanup(&client->pouch_allocator, &state_info);
+    return rc;
+  }
+
+  update_req.lease = *lease;
+  update_req.content_type = "application/json";
+  update_req.if_state_etag = if_state_etag;
+  update_req.if_version = if_version;
+  update_req.has_if_version = has_if_version;
+  if (default_lease_version && !update_req.has_if_version &&
+      default_if_version > 0L) {
+    update_req.if_version = default_if_version;
+    update_req.has_if_version = 1;
+  }
+
+  source = lc_source_from_open_file(final_fp, 0);
+  if (source == NULL) {
+    fclose(final_fp);
+    lc_pouch_state_info_cleanup(&client->pouch_allocator, &state_info);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to wrap pouch mutate output stream", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_client_update_method(&client->pub, &update_req, source,
+                                     &update_res, error);
+  lc_source_close(source);
+  fclose(final_fp);
+  lc_pouch_state_info_cleanup(&client->pouch_allocator, &state_info);
+  if (rc != LC_OK) {
+    lc_update_res_cleanup(&update_res);
+    return rc;
+  }
+  *out = update_res;
+  memset(&update_res, 0, sizeof(update_res));
+  return LC_OK;
+}
+
+static int lc_pouch_lease_mutate_method(lc_lease *self,
+                                        const lc_mutate_req *req,
+                                        lc_error *error) {
+  lc_lease_handle *lease;
+  lc_lease_ref ref;
+  lc_update_res update_res;
+  int rc;
+
+  if (self == NULL || req == NULL || req->mutations == NULL ||
+      req->mutation_count == 0U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease mutate requires self, request, and "
+                        "mutations",
+                        NULL, NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  memset(&ref, 0, sizeof(ref));
+  memset(&update_res, 0, sizeof(update_res));
+  ref.namespace_name = lease->namespace_name;
+  ref.key = lease->key;
+  ref.lease_id = lease->lease_id;
+  ref.txn_id = lease->txn_id;
+  ref.fencing_token = lease->fencing_token;
+
+  rc = lc_pouch_apply_mutations(lease->client, &ref, req->mutations,
+                                req->mutation_count, req->if_state_etag,
+                                req->if_version, req->has_if_version, 1,
+                                lease->version, &update_res, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_set_lease_state(lease, update_res.new_state_etag,
+                                update_res.new_version, error);
+  lc_update_res_cleanup(&update_res);
+  return rc;
 }
 
 static int lc_pouch_lease_mutate_local_method(
@@ -874,7 +1053,7 @@ static void lc_pouch_install_lease_methods(lc_lease *lease) {
   lease->load = lc_pouch_lease_load_method;
   lease->save = lc_pouch_lease_save_method;
   lease->update = lc_pouch_lease_update_method;
-  lease->mutate = lc_pouch_lease_mutate_unsupported;
+  lease->mutate = lc_pouch_lease_mutate_method;
   lease->mutate_local = lc_pouch_lease_mutate_local_method;
   lease->metadata = lc_pouch_lease_metadata_method;
   lease->remove = lc_pouch_lease_remove_method;
@@ -1285,10 +1464,12 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
   return LC_OK;
 }
 
-int lc_pouch_client_get_method(lc_client *self, const char *key,
-                               const lc_get_opts *opts, lc_sink *dst,
-                               lc_get_res *out, lc_error *error) {
-  lc_client_handle *client;
+static int lc_pouch_client_get_in_namespace(lc_client_handle *client,
+                                            const char *namespace_name_opt,
+                                            const char *key,
+                                            const lc_get_opts *opts,
+                                            lc_sink *dst, lc_get_res *out,
+                                            lc_error *error) {
   lc_source *body;
   lc_pouch_state_info info;
   lc_pouch_meta_record record;
@@ -1298,16 +1479,16 @@ int lc_pouch_client_get_method(lc_client *self, const char *key,
   size_t got;
   int rc;
 
-  if (self == NULL || key == NULL || dst == NULL || out == NULL) {
+  if (client == NULL || key == NULL || dst == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch get requires self, key, dst, and out", NULL,
                         NULL, NULL);
   }
   (void)opts;
-  client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
   namespace_name = NULL;
-  rc = lc_pouch_public_namespace(client, NULL, &namespace_name, error);
+  rc = lc_pouch_public_namespace(client, namespace_name_opt, &namespace_name,
+                                 error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -1360,6 +1541,18 @@ int lc_pouch_client_get_method(lc_client *self, const char *key,
   lc_pouch_meta_record_cleanup(allocator, &record);
   lc_pouch_state_info_cleanup(allocator, &info);
   return LC_OK;
+}
+
+int lc_pouch_client_get_method(lc_client *self, const char *key,
+                               const lc_get_opts *opts, lc_sink *dst,
+                               lc_get_res *out, lc_error *error) {
+  if (self == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch get requires self, key, dst, and out", NULL,
+                        NULL, NULL);
+  }
+  return lc_pouch_client_get_in_namespace((lc_client_handle *)self, NULL, key,
+                                          opts, dst, out, error);
 }
 
 int lc_pouch_client_load_method(lc_client *self, const char *key,
@@ -1533,6 +1726,42 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   lc_pouch_put_state_res_cleanup(allocator, &put);
   lc_pouch_meta_record_cleanup(allocator, &record);
   return rc;
+}
+
+int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
+                                  lc_mutate_res *out, lc_error *error) {
+  lc_client_handle *client;
+  lc_update_res update_res;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL || req->mutations == NULL ||
+      req->mutation_count == 0U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutate requires self, request, mutations, and "
+                        "output",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  memset(&update_res, 0, sizeof(update_res));
+
+  rc = lc_pouch_apply_mutations(client, &req->lease, req->mutations,
+                                req->mutation_count, req->if_state_etag,
+                                req->if_version, req->has_if_version, 0, 0L,
+                                &update_res, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  out->new_version = update_res.new_version;
+  out->bytes = update_res.bytes;
+  out->new_state_etag = lc_strdup_local(update_res.new_state_etag);
+  lc_update_res_cleanup(&update_res);
+  if (out->new_state_etag == NULL) {
+    lc_mutate_res_cleanup(out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch mutate etag", NULL, NULL, NULL);
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
@@ -3868,8 +4097,8 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
                         "pouch lease get requires self", NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
-  rc = lc_pouch_client_get_method(&lease->client->pub, lease->key, opts, dst,
-                                  out, error);
+  rc = lc_pouch_client_get_in_namespace(lease->client, lease->namespace_name,
+                                        lease->key, opts, dst, out, error);
   if (rc == LC_OK && out != NULL) {
     new_state_etag = lc_client_strdup(lease->client, out->etag);
     if (out->etag != NULL && new_state_etag == NULL) {

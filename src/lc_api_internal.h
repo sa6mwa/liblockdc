@@ -210,6 +210,8 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
 int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error);
+int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
+                                  lc_mutate_res *out, lc_error *error);
 int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
                                     lc_metadata_res *out, lc_error *error);
 int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,

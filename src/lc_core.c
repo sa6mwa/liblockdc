@@ -1591,6 +1591,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.get = lc_pouch_client_get_method;
     client->pub.load = lc_pouch_client_load_method;
     client->pub.update = lc_pouch_client_update_method;
+    client->pub.mutate = lc_pouch_client_mutate_method;
     client->pub.metadata = lc_pouch_client_metadata_method;
     client->pub.remove = lc_pouch_client_remove_method;
     client->pub.keepalive = lc_pouch_client_keepalive_method;

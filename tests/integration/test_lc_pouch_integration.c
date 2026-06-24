@@ -27,6 +27,32 @@ static void assert_lc_ok(int rc, lc_error *error) {
   }
 }
 
+static void assert_lc_server_error(int rc, lc_error *error, long http_status) {
+  if (rc == LC_OK) {
+    print_message("expected pouch server error, got success\n");
+  } else {
+    print_message(
+        "expected pouch server error: code=%d http=%ld message=%s detail=%s "
+        "server_code=%s correlation=%s\n",
+        error != NULL ? error->code : -1,
+        error != NULL ? error->http_status : 0L,
+        error != NULL && error->message != NULL ? error->message : "(null)",
+        error != NULL && error->detail != NULL ? error->detail : "(null)",
+        error != NULL && error->server_code != NULL ? error->server_code
+                                                    : "(null)",
+        error != NULL && error->correlation_id != NULL ? error->correlation_id
+                                                       : "(null)");
+  }
+  assert_int_not_equal(rc, LC_OK);
+  assert_non_null(error);
+  assert_int_equal(error->code, LC_ERR_SERVER);
+  if (http_status > 0L) {
+    assert_int_equal(error->http_status, http_status);
+  } else {
+    assert_true(error->http_status >= 400L);
+  }
+}
+
 static void pouch_root_path(char *root, size_t root_size, const char *suffix) {
   snprintf(root, root_size, "/tmp/liblockdc-pouch-integration-%ld-%s",
            (long)getpid(), suffix);
@@ -94,6 +120,24 @@ static void open_pouch_client(const char *endpoint, lc_client **out,
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "default";
+  rc = lc_client_open(&config, out, error);
+  assert_lc_ok(rc, error);
+  assert_non_null(*out);
+}
+
+static void open_pouch_client_with_namespace(const char *endpoint,
+                                             const char *namespace_name,
+                                             lc_client **out,
+                                             lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  int rc;
+
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = namespace_name;
   rc = lc_client_open(&config, out, error);
   assert_lc_ok(rc, error);
   assert_non_null(*out);
@@ -4310,11 +4354,16 @@ static void test_pouch_public_mutate_local_shared_state(void **state) {
   lc_lease *lease;
   lc_acquire_req acquire;
   lc_mutate_local_req mutate_req;
+  lc_mutate_req lease_mutate_req;
+  lc_mutate_op client_mutate_req;
+  lc_mutate_res client_mutate_res;
   lc_get_res get_res;
   lc_release_req release_req;
   lc_sink *sink;
   lc_error error;
   const char *mutations[2];
+  const char *lease_mutations[2];
+  const char *client_mutations[1];
   char *text;
   int rc;
 
@@ -4329,9 +4378,11 @@ static void test_pouch_public_mutate_local_shared_state(void **state) {
   sink = NULL;
   text = NULL;
   memset(&get_res, 0, sizeof(get_res));
+  memset(&client_mutate_res, 0, sizeof(client_mutate_res));
 
   open_pouch_client(endpoint, &writer, &error);
   lc_acquire_req_init(&acquire);
+  acquire.namespace_name = "mutns";
   acquire.key = "integration/mutate-local";
   acquire.owner = "writer";
   acquire.ttl_seconds = 60L;
@@ -4349,7 +4400,41 @@ static void test_pouch_public_mutate_local_shared_state(void **state) {
   assert_int_equal(lease->version, 1L);
   assert_non_null(lease->state_etag);
 
-  open_pouch_client(endpoint, &reader, &error);
+  lease_mutations[0] = "/attempts++";
+  lease_mutations[1] = "/kind=\"lease-mutate\"";
+  lc_mutate_req_init(&lease_mutate_req);
+  lease_mutate_req.mutations = lease_mutations;
+  lease_mutate_req.mutation_count = 2U;
+  rc = lease->mutate(lease, &lease_mutate_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, 2L);
+  assert_non_null(lease->state_etag);
+
+  lease_mutate_req.if_version = lease->version + 100L;
+  lease_mutate_req.has_if_version = 1;
+  rc = lease->mutate(lease, &lease_mutate_req, &error);
+  assert_lc_server_error(rc, &error, 412L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  client_mutations[0] = "/client_mutated=true";
+  memset(&client_mutate_req, 0, sizeof(client_mutate_req));
+  client_mutate_req.lease.namespace_name = lease->namespace_name;
+  client_mutate_req.lease.key = lease->key;
+  client_mutate_req.lease.lease_id = lease->lease_id;
+  client_mutate_req.lease.txn_id = lease->txn_id;
+  client_mutate_req.lease.fencing_token = lease->fencing_token;
+  client_mutate_req.mutations = client_mutations;
+  client_mutate_req.mutation_count = 1U;
+  client_mutate_req.if_version = lease->version;
+  client_mutate_req.has_if_version = 1;
+  rc = writer->mutate(writer, &client_mutate_req, &client_mutate_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(client_mutate_res.new_version, 3L);
+  assert_non_null(client_mutate_res.new_state_etag);
+  lc_mutate_res_cleanup(&client_mutate_res);
+
+  open_pouch_client_with_namespace(endpoint, "mutns", &reader, &error);
   rc = lc_sink_to_memory(&sink, &error);
   assert_lc_ok(rc, &error);
   rc = reader->get(reader, "integration/mutate-local", NULL, sink, &get_res,
@@ -4357,10 +4442,12 @@ static void test_pouch_public_mutate_local_shared_state(void **state) {
   assert_lc_ok(rc, &error);
   assert_false(get_res.no_content);
   assert_string_equal(get_res.content_type, "application/json");
-  assert_int_equal(get_res.version, 1L);
+  assert_int_equal(get_res.version, 3L);
   text = sink_text(sink, &error);
   assert_non_null(strstr(text, "\"owner\":\"writer\""));
-  assert_non_null(strstr(text, "\"attempts\":1"));
+  assert_non_null(strstr(text, "\"attempts\":2"));
+  assert_non_null(strstr(text, "\"kind\":\"lease-mutate\""));
+  assert_non_null(strstr(text, "\"client_mutated\":true"));
   free(text);
   text = NULL;
   lc_sink_close(sink);
