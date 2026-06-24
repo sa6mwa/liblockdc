@@ -8,6 +8,7 @@
 #include <time.h>
 
 #define LC_POUCH_RESERVED_BACKEND_NAMESPACE ".lockd"
+#define LC_POUCH_RESERVED_TRANSACTION_NAMESPACE ".lockd-txn"
 
 static const char *lc_pouch_default_namespace(lc_client_handle *client,
                                               const char *namespace_name) {
@@ -32,7 +33,8 @@ static int lc_pouch_public_namespace(lc_client_handle *client,
                         NULL, NULL, NULL);
   }
   resolved = lc_pouch_default_namespace(client, namespace_name);
-  if (strcmp(resolved, LC_POUCH_RESERVED_BACKEND_NAMESPACE) == 0) {
+  if (strcmp(resolved, LC_POUCH_RESERVED_BACKEND_NAMESPACE) == 0 ||
+      strcmp(resolved, LC_POUCH_RESERVED_TRANSACTION_NAMESPACE) == 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch namespace is reserved for internal storage",
                         resolved, "reserved_namespace", NULL);

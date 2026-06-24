@@ -2990,6 +2990,26 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   lc_error_cleanup(&error);
   client->close(client);
 
+  client = open_pouch_client(endpoint);
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.namespace_name = ".lockd-txn";
+  acquire_req.key = "decision";
+  acquire_req.owner = "owner";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.namespace_name = ".lockd-txn";
+  enqueue_req.queue = "transactions";
+  source = source_from_text("reserved-transaction");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_error_cleanup(&error);
+  client->close(client);
+
   reserved_default_client = open_pouch_client_with_namespace(endpoint, ".lockd");
   lc_acquire_req_init(&acquire_req);
   acquire_req.key = "alpha";
@@ -3014,6 +3034,17 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
       reserved_default_client, &namespace_req, &namespace_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_namespace_config_res_cleanup(&namespace_res);
+  lc_error_cleanup(&error);
+  reserved_default_client->close(reserved_default_client);
+
+  reserved_default_client =
+      open_pouch_client_with_namespace(endpoint, ".lockd-txn");
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "decision";
+  acquire_req.owner = "owner";
+  rc = reserved_default_client->acquire(reserved_default_client, &acquire_req,
+                                        &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
   lc_error_cleanup(&error);
   reserved_default_client->close(reserved_default_client);
   test_cleanup_root(root);

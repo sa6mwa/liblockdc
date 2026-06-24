@@ -729,10 +729,10 @@ lexically, and treat reserved internal namespaces as implementation-owned.
 Queue/object scans and metadata scans must also return stable lexical order;
 pagination cursors are string keys, not byte offsets into mutable files.
 
-Reserved internal namespaces must be explicit. At minimum, transaction decision
-records need a reserved transaction namespace and backend identity needs a
-reserved backend namespace. Public acquire/update/query paths must reject user
-requests that target those namespaces.
+Reserved internal namespaces must be explicit. Backend identity uses `.lockd`
+and transaction decision records use `.lockd-txn`. Public acquire/update/query
+and queue paths must reject user requests that target those namespaces, while
+the disk backend remains free to use them internally.
 
 The backend identity should be persisted as an object with create-if-absent CAS.
 If two processes initialize the same empty root concurrently, exactly one writes
