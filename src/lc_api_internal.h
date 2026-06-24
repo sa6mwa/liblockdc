@@ -68,6 +68,7 @@ struct lc_lease_handle {
   long lease_expires_at_unix;
   char *state_etag;
   char *queue_state_etag;
+  int pouch_txn_explicit;
   int pouch_stage_active;
   int pouch_stage_dirty;
   char *pouch_stage_etag;

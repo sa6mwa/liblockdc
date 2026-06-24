@@ -2289,6 +2289,8 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
       meta.lease_expires_at_unix;
   ((lc_lease_handle *)lease)->has_query_hidden = meta.has_query_hidden;
   ((lc_lease_handle *)lease)->query_hidden = meta.query_hidden;
+  ((lc_lease_handle *)lease)->pouch_txn_explicit =
+      req->txn_id != NULL && req->txn_id[0] != '\0';
   lease->lease_expires_at_unix = meta.lease_expires_at_unix;
   lease->has_query_hidden = meta.has_query_hidden;
   lease->query_hidden = meta.query_hidden;
@@ -2907,10 +2909,11 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
                         NULL);
   }
   lease = (lc_lease_handle *)self;
-  if (!lease->pouch_stage_active) {
+  if (!lease->pouch_stage_active && !lease->pouch_txn_explicit) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch staged update requires acquire_for_update", NULL,
-                        NULL, NULL);
+                        "pouch staged update requires acquire_for_update or "
+                        "an explicit transaction",
+                        NULL, NULL, NULL);
   }
   if (opts != NULL && opts->has_if_version &&
       opts->if_version != lease->version) {
@@ -5508,6 +5511,9 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
                         "pouch lease update requires self", NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  if (lease->pouch_stage_active || lease->pouch_txn_explicit) {
+    return lc_pouch_lease_staged_update_method(self, src, opts, error);
+  }
   memset(&req, 0, sizeof(req));
   memset(&res, 0, sizeof(res));
   req.lease.namespace_name = lease->namespace_name;
