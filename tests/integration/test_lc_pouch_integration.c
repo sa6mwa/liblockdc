@@ -3493,6 +3493,107 @@ static void test_pouch_public_queue_batch_honors_start_after_cursor(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_dequeue_with_state_honors_start_after_cursor(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *worker;
+  lc_client *observer;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res[3];
+  lc_dequeue_req dequeue_req;
+  lc_update_opts update_opts;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_message *message;
+  lc_lease *queue_state;
+  lc_error error;
+  const char *payloads[3];
+  size_t index;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "queue-state-start-after");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  worker = NULL;
+  observer = NULL;
+  source = NULL;
+  message = NULL;
+  memset(enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats, 0, sizeof(stats));
+  payloads[0] = "state-cursor-one";
+  payloads[1] = "state-cursor-two";
+  payloads[2] = "state-cursor-three";
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &worker, &error);
+  open_pouch_client(endpoint, &observer, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "state-cursor-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  for (index = 0U; index < 3U; ++index) {
+    source = source_from_text(payloads[index], &error);
+    rc = producer->enqueue(producer, &enqueue_req, source,
+                           &enqueue_res[index], &error);
+    lc_source_close(source);
+    assert_lc_ok(rc, &error);
+  }
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "state-cursor-jobs";
+  dequeue_req.owner = "state-cursor-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.start_after = enqueue_res[0].message_id;
+  rc = worker->dequeue_with_state(worker, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res[1].message_id);
+  assert_string_equal(message->next_cursor, enqueue_res[1].message_id);
+  queue_state = message->state(message);
+  assert_non_null(queue_state);
+  assert_string_equal(queue_state->namespace_name, "default");
+  assert_non_null(queue_state->lease_id);
+  assert_non_null(queue_state->txn_id);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"cursor_state\":true}", &error);
+  rc = queue_state->update(queue_state, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "state-cursor-jobs";
+  rc = observer->queue_stats(observer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(stats.available);
+  assert_int_equal(stats.pending_candidates, 2);
+  assert_string_equal(stats.head_message_id, enqueue_res[0].message_id);
+
+  lc_queue_stats_res_cleanup(&stats);
+  for (index = 0U; index < 3U; ++index) {
+    lc_enqueue_res_cleanup(&enqueue_res[index]);
+  }
+  producer->close(producer);
+  worker->close(worker);
+  observer->close(observer);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_watch_queue_snapshots(void **state) {
   char root[256];
   char endpoint[320];
@@ -4767,6 +4868,8 @@ int main(void) {
           test_pouch_public_queue_batch_no_duplicate_acked_delivery),
       cmocka_unit_test(
           test_pouch_public_queue_batch_honors_start_after_cursor),
+      cmocka_unit_test(
+          test_pouch_public_dequeue_with_state_honors_start_after_cursor),
       cmocka_unit_test(test_pouch_public_watch_queue_snapshots),
       cmocka_unit_test(test_pouch_public_subscribe_with_state),
       cmocka_unit_test(test_pouch_public_dequeue_waits_for_later_enqueue),
