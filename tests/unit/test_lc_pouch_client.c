@@ -54,6 +54,28 @@ static void test_cleanup_root(const char *root) {
   rmdir(root);
 }
 
+static off_t test_query_index_size(const char *root) {
+  char path[512];
+  struct stat st;
+
+  snprintf(path, sizeof(path), "%s/query.index", root);
+  assert_int_equal(stat(path, &st), 0);
+  return st.st_size;
+}
+
+static void corrupt_query_index_tail(const char *root) {
+  static const unsigned char garbage[] = {0x7fU, 0x55U, 0x13U};
+  char path[512];
+  FILE *file;
+
+  snprintf(path, sizeof(path), "%s/query.index", root);
+  file = fopen(path, "ab");
+  assert_non_null(file);
+  assert_int_equal(fwrite(garbage, 1U, sizeof(garbage), file),
+                   sizeof(garbage));
+  assert_int_equal(fclose(file), 0);
+}
+
 static lc_source *source_from_text(const char *text) {
   lc_source *source;
   lc_error error;
@@ -4641,6 +4663,79 @@ static void test_pouch_endpoint_configured_scan_query_keys_without_hint(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_configured_scan_ignores_corrupt_query_sidecar(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res doc_res;
+  lc_query_res key_res;
+  lc_sink *sink;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  char *text;
+  off_t corrupt_size;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-scan-corrupt-sidecar");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&doc_res, 0, sizeof(doc_res));
+  memset(&key_res, 0, sizeof(key_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  client = open_pouch_client(endpoint);
+  lease = pouch_acquire_query_key(client, "corrupt-sidecar-doc", &error);
+  pouch_save_query_json(lease, "{\"corrupt_sidecar\":true}", &error);
+  lease->close(lease);
+  client->close(client);
+
+  corrupt_query_index_tail(root);
+  corrupt_size = test_query_index_size(root);
+
+  client = open_pouch_client_with_query_config(endpoint, "scan", NULL);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query(client, &req, sink, &doc_res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "corrupt-sidecar-doc"));
+  assert_non_null(strstr(text, "\"document\":{\"corrupt_sidecar\":true}"));
+  assert_string_equal(doc_res.return_mode, "documents");
+  assert_int_equal(doc_res.index_seq, 0UL);
+  assert_int_equal(test_query_index_size(root), corrupt_size);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&doc_res);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query_keys(client, &req, &handler, &capture, &key_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "corrupt-sidecar-doc");
+  assert_string_equal(key_res.return_mode, "keys");
+  assert_int_equal(key_res.index_seq, 0UL);
+  assert_int_equal(test_query_index_size(root), corrupt_size);
+
+  lc_query_res_cleanup(&key_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_explicit_scan_query_keys_bypasses_fallback(
     void **state) {
   char root[256];
@@ -5137,6 +5232,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_scan_query_rejects_lql_selector),
       cmocka_unit_test(
           test_pouch_endpoint_configured_scan_query_keys_without_hint),
+      cmocka_unit_test(
+          test_pouch_endpoint_configured_scan_ignores_corrupt_query_sidecar),
       cmocka_unit_test(
           test_pouch_endpoint_explicit_scan_query_keys_bypasses_fallback),
       cmocka_unit_test(
