@@ -2230,6 +2230,81 @@ static void test_pouch_endpoint_rejects_reserved_namespace(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_rejects_non_normalized_identifiers(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "pathlike-public-identifiers");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&query_res, 0, sizeof(query_res));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "../bad";
+  acquire_req.owner = "owner";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "load_meta key must not contain dot path components");
+  lc_error_cleanup(&error);
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.namespace_name = "bad/ns";
+  acquire_req.key = "alpha";
+  acquire_req.owner = "owner";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "load_meta namespace must not contain '/'");
+  lc_error_cleanup(&error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "jobs//bad";
+  source = source_from_text("bad queue");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "enqueue_message queue must not contain empty path components");
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_error_cleanup(&error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&query_req);
+  query_req.namespace_name = "bad/ns";
+  query_req.selector_json = "{}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "query_index_scan namespace must not contain '/'");
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&query_res);
+  lc_error_cleanup(&error);
+
+  client->close(client);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_dequeue_with_state_lifecycle(void **state) {
   char root[256];
   char endpoint[320];
@@ -4145,6 +4220,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_queue_rejects_missing_or_stale_meta_etag),
       cmocka_unit_test(test_pouch_endpoint_rejects_reserved_namespace),
+      cmocka_unit_test(
+          test_pouch_endpoint_rejects_non_normalized_identifiers),
       cmocka_unit_test(test_pouch_endpoint_dequeue_with_state_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_dequeue_batch_lifecycle),
       cmocka_unit_test(test_pouch_endpoint_subscribe_lifecycle),

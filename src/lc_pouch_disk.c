@@ -386,18 +386,66 @@ static int lc_pouch_disk_validate_name(lc_error *error, const char *operation,
   return lc_pouch_set_invalid(error, message);
 }
 
+static int lc_pouch_disk_validate_path_name(lc_error *error,
+                                            const char *operation,
+                                            const char *kind,
+                                            const char *value,
+                                            int allow_slash) {
+  const char *cursor;
+  const char *component;
+  size_t component_len;
+  char message[192];
+  int rc;
+
+  rc = lc_pouch_disk_validate_name(error, operation, kind, value);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  cursor = value;
+  while (1) {
+    component = cursor;
+    while (*cursor != '\0' && *cursor != '/') {
+      ++cursor;
+    }
+    component_len = (size_t)(cursor - component);
+    if (component_len == 0U) {
+      snprintf(message, sizeof(message),
+               "%s %s must not contain empty path components", operation,
+               kind);
+      return lc_pouch_set_invalid(error, message);
+    }
+    if ((component_len == 1U && component[0] == '.') ||
+        (component_len == 2U && component[0] == '.' &&
+         component[1] == '.')) {
+      snprintf(message, sizeof(message),
+               "%s %s must not contain dot path components", operation, kind);
+      return lc_pouch_set_invalid(error, message);
+    }
+    if (*cursor == '\0') {
+      break;
+    }
+    if (!allow_slash) {
+      snprintf(message, sizeof(message), "%s %s must not contain '/'",
+               operation, kind);
+      return lc_pouch_set_invalid(error, message);
+    }
+    ++cursor;
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_disk_validate_namespace_key(lc_error *error,
                                                 const char *operation,
                                                 const char *namespace_name,
                                                 const char *key) {
   int rc;
 
-  rc = lc_pouch_disk_validate_name(error, operation, "namespace",
-                                   namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, operation, "namespace",
+                                        namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
-  return lc_pouch_disk_validate_name(error, operation, "key", key);
+  return lc_pouch_disk_validate_path_name(error, operation, "key", key, 1);
 }
 
 static int lc_pouch_disk_validate_namespace_queue(lc_error *error,
@@ -406,12 +454,12 @@ static int lc_pouch_disk_validate_namespace_queue(lc_error *error,
                                                   const char *queue) {
   int rc;
 
-  rc = lc_pouch_disk_validate_name(error, operation, "namespace",
-                                   namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, operation, "namespace",
+                                        namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
-  return lc_pouch_disk_validate_name(error, operation, "queue", queue);
+  return lc_pouch_disk_validate_path_name(error, operation, "queue", queue, 1);
 }
 
 static int lc_pouch_disk_query_engine_supported(const char *value,
@@ -2321,8 +2369,8 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
                                 "scan_meta requires store, request, "
                                 "namespace, visitor, and output");
   }
-  rc = lc_pouch_disk_validate_name(error, "scan_meta", "namespace",
-                                   req->namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, "scan_meta", "namespace",
+                                        req->namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2471,8 +2519,8 @@ static int lc_pouch_disk_query_index_scan(
                                 "query_index_scan requires store, request, "
                                 "namespace, visitor, and output");
   }
-  rc = lc_pouch_disk_validate_name(error, "query_index_scan", "namespace",
-                                   req->namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, "query_index_scan",
+                                        "namespace", req->namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2632,8 +2680,8 @@ static int lc_pouch_disk_query_index_keys_scan(
         "query_index_keys_scan requires store, request, namespace, visitor, "
         "and output");
   }
-  rc = lc_pouch_disk_validate_name(error, "query_index_keys_scan",
-                                   "namespace", req->namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, "query_index_keys_scan",
+                                        "namespace", req->namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2780,8 +2828,8 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
                                 "flush_index requires store, namespace, "
                                 "and output");
   }
-  rc = lc_pouch_disk_validate_name(error, "flush_index", "namespace",
-                                   namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, "flush_index", "namespace",
+                                        namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4993,8 +5041,17 @@ static int lc_pouch_disk_validate_staged_args(lc_error *error,
     return lc_pouch_set_invalid(error, operation);
   }
   if (namespace_name[0] == '\0') {
-    return lc_pouch_disk_validate_name(error, operation, "namespace",
-                                       namespace_name);
+    return lc_pouch_disk_validate_path_name(error, operation, "namespace",
+                                            namespace_name, 0);
+  }
+  if (lc_pouch_disk_validate_path_name(error, operation, "namespace",
+                                       namespace_name, 0) != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  }
+  if (key[0] != '\0' &&
+      lc_pouch_disk_validate_path_name(error, operation, "key", key, 1) !=
+          LC_OK) {
+    return error != NULL ? error->code : LC_ERR_INVALID;
   }
   key_len = strlen(key);
   while (key_len > 0U && key[key_len - 1U] == '/') {
@@ -5345,8 +5402,8 @@ static int lc_pouch_disk_list_staged_state(
                                 "list_staged_state requires store, request, "
                                 "namespace, key, and output");
   }
-  rc = lc_pouch_disk_validate_name(error, "list_staged_state", "namespace",
-                                   req->namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, "list_staged_state",
+                                        "namespace", req->namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -5764,18 +5821,18 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                                 "source key, destination key, options, and "
                                 "output metadata");
   }
-  rc = lc_pouch_disk_validate_name(error, "copy_object", "namespace",
-                                   namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, "copy_object", "namespace",
+                                        namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_disk_validate_name(error, "copy_object", "source key",
-                                   src_key);
+  rc = lc_pouch_disk_validate_path_name(error, "copy_object", "source key",
+                                        src_key, 1);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_disk_validate_name(error, "copy_object", "destination key",
-                                   dst_key);
+  rc = lc_pouch_disk_validate_path_name(error, "copy_object",
+                                        "destination key", dst_key, 1);
   if (rc != LC_OK) {
     return rc;
   }
@@ -6780,8 +6837,8 @@ static int lc_pouch_disk_query_config(lc_pouch_store *self,
     return lc_pouch_set_invalid(
         error, "query_config requires store, namespace, and out");
   }
-  rc = lc_pouch_disk_validate_name(error, "query_config", "namespace",
-                                   namespace_name);
+  rc = lc_pouch_disk_validate_path_name(error, "query_config", "namespace",
+                                        namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }

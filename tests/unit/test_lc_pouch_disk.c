@@ -3779,6 +3779,100 @@ static void test_empty_identifiers_are_rejected_before_append(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pathlike_identifiers_are_rejected_before_append(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res state_res;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_queue_message_info queue_info;
+  lc_pouch_scan_meta_req scan_req;
+  lc_pouch_scan_meta_res scan_res;
+  scan_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "pathlike-identifiers");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&state_res, 0, sizeof(state_res));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&queue_info, 0, sizeof(queue_info));
+  memset(&scan_req, 0, sizeof(scan_req));
+  memset(&scan_res, 0, sizeof(scan_res));
+  memset(&capture, 0, sizeof(capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("state");
+  rc = store->write_state(store, "bad/ns", "key", source, &state_opts,
+                          &state_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "write_state namespace must not contain '/'");
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  source = source_from_text("state");
+  rc = store->write_state(store, "default", "alpha//bravo", source,
+                          &state_opts, &state_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "write_state key must not contain empty path components");
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "../bad", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "store_meta key must not contain dot path components");
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  source = source_from_text("queue");
+  rc = store->enqueue_message(store, "default", "jobs/./bad", source,
+                              &enqueue_opts, &queue_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "enqueue_message queue must not contain dot path components");
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_QUEUE_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  scan_req.namespace_name = "bad/ns";
+  rc = store->scan_meta(store, &scan_req, capture_scan_row, &capture,
+                        &scan_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "scan_meta namespace must not contain '/'");
+  lc_error_cleanup(&error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -5403,6 +5497,8 @@ int main(void) {
           test_independent_handle_refreshes_after_log_replacement),
       cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
+      cmocka_unit_test(
+          test_pathlike_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(test_queue_ref_requires_current_meta_etag),
       cmocka_unit_test(test_queue_delay_hides_until_visible),
