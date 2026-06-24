@@ -6834,6 +6834,8 @@ static void test_pouch_endpoint_txn_commit_promotes_staged_state(void **state) {
   lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
   lc_error error;
   int rc;
 
@@ -6843,6 +6845,7 @@ static void test_pouch_endpoint_txn_commit_promotes_staged_state(void **state) {
   test_endpoint(endpoint, sizeof(endpoint), root);
   memset(&error, 0, sizeof(error));
   memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
   client = open_pouch_client(endpoint);
   lease = NULL;
 
@@ -6880,6 +6883,12 @@ static void test_pouch_endpoint_txn_commit_promotes_staged_state(void **state) {
   assert_string_equal(decision_res.txn_id, "txn-commit-1");
   assert_string_equal(decision_res.state, "committed");
   lc_txn_decision_res_cleanup(&decision_res);
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "txn-commit-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 404L);
+  lc_error_cleanup(&error);
   lc_lease_close(lease);
   lease = NULL;
 
@@ -6908,6 +6917,8 @@ static void test_pouch_endpoint_txn_rollback_discards_staged_state(
   lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
   lc_error error;
   int rc;
 
@@ -6917,6 +6928,7 @@ static void test_pouch_endpoint_txn_rollback_discards_staged_state(
   test_endpoint(endpoint, sizeof(endpoint), root);
   memset(&error, 0, sizeof(error));
   memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
   client = open_pouch_client(endpoint);
   lease = NULL;
 
@@ -6952,6 +6964,12 @@ static void test_pouch_endpoint_txn_rollback_discards_staged_state(
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.state, "rolled_back");
   lc_txn_decision_res_cleanup(&decision_res);
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "txn-rollback-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 404L);
+  lc_error_cleanup(&error);
   lc_lease_close(lease);
   lease = NULL;
 
