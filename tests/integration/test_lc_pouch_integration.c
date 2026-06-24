@@ -1,6 +1,7 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -254,6 +255,15 @@ typedef struct pouch_subscribe_state_test {
   char state_key[256];
 } pouch_subscribe_state_test;
 
+typedef struct pouch_subscribe_wait_test {
+  const char *endpoint;
+  int rc;
+  lc_error error;
+  size_t handled;
+  int payload_ok;
+  char message_id[128];
+} pouch_subscribe_wait_test;
+
 typedef struct pouch_watch_state {
   size_t handled;
   int available;
@@ -261,6 +271,17 @@ typedef struct pouch_watch_state {
   char head_message_id[128];
   char correlation_id[64];
 } pouch_watch_state;
+
+static int pouch_test_error(lc_error *error, const char *message) {
+  if (error != NULL) {
+    error->code = LC_ERR_INVALID;
+    error->message = strdup(message);
+    if (error->message == NULL) {
+      return LC_ERR_NOMEM;
+    }
+  }
+  return LC_ERR_INVALID;
+}
 
 static int pouch_acquire_for_update_handler(
     void *context, lc_acquire_for_update_context *update, lc_error *error) {
@@ -487,6 +508,92 @@ static int pouch_subscribe_state_handle(void *context, lc_message *message,
   rc = message->ack(message, error);
   assert_lc_ok(rc, error);
   return LC_OK;
+}
+
+static int pouch_subscribe_wait_handle(void *context, lc_message *message,
+                                       lc_error *error) {
+  pouch_subscribe_wait_test *test;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  size_t written;
+  int rc;
+
+  test = (pouch_subscribe_wait_test *)context;
+  if (test == NULL || message == NULL) {
+    return pouch_test_error(error, "subscribe wait test missing message");
+  }
+  if (test->handled != 0U) {
+    return pouch_test_error(error,
+                            "subscribe wait test delivered more than once");
+  }
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  written = 0U;
+  rc = message->write_payload(message, sink, &written, error);
+  if (rc == LC_OK) {
+    bytes = NULL;
+    length = 0U;
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  }
+  if (rc == LC_OK && written == strlen("waited-work") &&
+      length == strlen("waited-work") &&
+      memcmp(bytes, "waited-work", length) == 0) {
+    test->payload_ok = 1;
+  } else if (rc == LC_OK) {
+    rc = pouch_test_error(error,
+                          "subscribe wait test saw unexpected payload");
+  }
+  lc_sink_close(sink);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  snprintf(test->message_id, sizeof(test->message_id), "%s",
+           message->message_id);
+  test->handled += 1U;
+  return message->ack(message, error);
+}
+
+static void *pouch_subscribe_wait_main(void *context) {
+  pouch_subscribe_wait_test *test;
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *subscriber;
+  lc_dequeue_req subscribe_req;
+  lc_consumer consumer;
+
+  test = (pouch_subscribe_wait_test *)context;
+  subscriber = NULL;
+  lc_error_init(&test->error);
+
+  endpoints[0] = test->endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "default";
+  test->rc = lc_client_open(&config, &subscriber, &test->error);
+  if (test->rc != LC_OK) {
+    return NULL;
+  }
+
+  lc_dequeue_req_init(&subscribe_req);
+  subscribe_req.queue = "subscribe-wait";
+  subscribe_req.owner = "wait-subscriber";
+  subscribe_req.visibility_timeout_seconds = 30L;
+  subscribe_req.wait_seconds = 3L;
+  subscribe_req.page_size = 1;
+  lc_consumer_init(&consumer);
+  consumer.handle = pouch_subscribe_wait_handle;
+  consumer.context = test;
+  test->rc = subscriber->subscribe(subscriber, &subscribe_req, &consumer,
+                                   &test->error);
+  subscriber->close(subscriber);
+  return NULL;
 }
 
 static int pouch_watch_handle(void *context, const lc_watch_event *event,
@@ -3134,6 +3241,71 @@ static void test_pouch_public_subscribe_with_state(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_subscribe_waits_for_later_enqueue(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  pouch_subscribe_wait_test subscribe_state;
+  pthread_t subscribe_thread;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "subscribe-wait");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  source = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats, 0, sizeof(stats));
+  memset(&subscribe_state, 0, sizeof(subscribe_state));
+  subscribe_state.endpoint = endpoint;
+
+  assert_int_equal(
+      pthread_create(&subscribe_thread, NULL, pouch_subscribe_wait_main,
+                     &subscribe_state),
+      0);
+  usleep(200000U);
+
+  open_pouch_client(endpoint, &producer, &error);
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "subscribe-wait";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("waited-work", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  assert_int_equal(pthread_join(subscribe_thread, NULL), 0);
+  assert_lc_ok(subscribe_state.rc, &subscribe_state.error);
+  assert_int_equal(subscribe_state.handled, 1U);
+  assert_true(subscribe_state.payload_ok);
+  assert_string_equal(subscribe_state.message_id, enqueue_res.message_id);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "subscribe-wait";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+
+  lc_queue_stats_res_cleanup(&stats);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  producer->close(producer);
+  lc_error_cleanup(&subscribe_state.error);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_consumer_service_with_state(void **state) {
   char root[256];
   char endpoint[320];
@@ -3802,6 +3974,7 @@ int main(void) {
           test_pouch_public_queue_batch_no_duplicate_acked_delivery),
       cmocka_unit_test(test_pouch_public_watch_queue_snapshots),
       cmocka_unit_test(test_pouch_public_subscribe_with_state),
+      cmocka_unit_test(test_pouch_public_subscribe_waits_for_later_enqueue),
       cmocka_unit_test(test_pouch_public_consumer_service_with_state),
       cmocka_unit_test(
           test_pouch_public_consumer_service_start_wait_with_state),
