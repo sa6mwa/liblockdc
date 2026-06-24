@@ -1337,6 +1337,11 @@ Integration tests:
 - reserved internal namespaces are rejected by public lock operations while
   internal transaction/backend-id records remain usable
 
+Current default local integration coverage in `tests/integration` exercises
+public `pouch://` clients sharing one disk root for state and attachment
+persistence, queue handoff and acknowledgement, and cross-client CAS. The
+optional e2e shard still covers broader consumer-service behavior.
+
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a
 fresh store and rebuilding indexes from disk, not only by observing in-memory

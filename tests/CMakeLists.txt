@@ -134,6 +134,7 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NO
 endif()
 
 add_subdirectory(unit)
+add_subdirectory(integration)
 if(LOCKDC_BUILD_E2E_TESTS)
   add_subdirectory(e2e)
 endif()
