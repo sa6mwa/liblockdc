@@ -8516,6 +8516,13 @@ static int lc_pouch_disk_queue_ref_valid(lc_pouch_disk_queue_entry *entry,
                         "message lease",
                         NULL, "txn_mismatch", NULL);
   }
+  if (entry->txn_id == NULL && ref->txn_id != NULL &&
+      ref->txn_id[0] != '\0') {
+    return lc_error_set(error, LC_ERR_SERVER, 409L,
+                        "pouch queue transaction id does not match active "
+                        "message lease",
+                        NULL, "txn_mismatch", NULL);
+  }
   return LC_OK;
 }
 
