@@ -578,6 +578,16 @@ ordered scan route, and `query_fallback_engine` is explicit rather than
 implicit. Scan mode is useful for tiny stores, diagnostics, index rebuild
 validation, and early deployments before a particular index feature exists.
 
+This configuration is part of pouch setup, not just a per-request hint. A pouch
+instance opened with scan as the preferred engine must route ordinary match-all
+`query` and `query_keys` calls through scan mode when the request does not name
+an engine. A request-level `engine` value is still honored as an override, and
+fallback is considered only for implicit routing from the configured preferred
+engine. That makes scan mode an operationally testable mode in its own right:
+operators can deliberately run a store in full log-backed scan mode, compare it
+with indexed mode, or keep it available while a new index generation is being
+rebuilt.
+
 The scan route must remain a true configured route, not a compatibility shim
 inside indexed search. A pouch instance opened in scan mode must be able to
 serve match-all key and document queries even if `query.index` is absent,
@@ -586,19 +596,19 @@ not silently degrade into a full-log scan for ordinary predicate execution,
 because that would hide the performance cliff that indexed search is intended
 to avoid.
 
-Scan mode is a real Go-style full log-backed scan route, not a synonym for the
-indexed path with fewer predicates and not a hidden fallback inside indexed
-search. Before serving a scan page, the disk backend must refresh from the
-authoritative log state, including the equivalent of a forced segment/log scan
-when marker state, open-file replacement, or configured refresh intervals make
-cached projections uncertain. After that authoritative refresh it may serve the
-page from the rebuilt ordered metadata-summary projection, rather than rereading
-every payload record for every page. The scan result must preserve stable
-lexical key ordering, honor `start_after` and `limit`, skip query-hidden rows,
-and avoid payload materialization until a surviving query row needs its document
-body. This keeps full log-scan correctness available for pouch instances that
-request it while keeping indexed search as the default and preferred
-performance path.
+Scan mode is a real full log-backed scan route, not a synonym for the indexed
+path with fewer predicates and not a hidden fallback inside indexed search.
+Before serving a scan page, the disk backend must refresh from the authoritative
+log state, including the equivalent of a forced snapshot/segment/log scan when
+marker state, open-file replacement, missing sidecars, corrupt sidecars, future
+sidecar versions, or configured refresh intervals make cached projections
+uncertain. After that authoritative refresh it may serve the page from the
+rebuilt ordered metadata-summary projection, rather than rereading every payload
+record for every page. The scan result must preserve stable lexical key
+ordering, honor `start_after` and `limit`, skip query-hidden rows, and avoid
+payload materialization until a surviving query row needs its document body.
+This keeps full log-scan correctness available for pouch instances that request
+it while keeping indexed search as the default and preferred performance path.
 Fallback policy applies only to configured default routing, not to explicit
 per-request engine hints. For example, a store configured with
 `query_engine=scan&query_fallback_engine=index` should route `refresh=wait_for`
@@ -614,10 +624,13 @@ can be validated against the store log and truncated at the last verified
 record. Indexed scans must never trust sidecar rows that do not match current
 metadata, and key-only scans must agree with document scans even after a sidecar
 tail fault. Later field postings and `liblql` predicates must extend this
-boundary rather than falling back to a single full-log scan. Key-only indexed
-scans have their own storage primitive and copy only visible keys before
-invoking callbacks, so `query_keys` does not pay for metadata row copies that
-only document scans need.
+boundary with storage-owned index segments/postings and candidate iteration,
+rather than falling back to a single full-log scan. Key-only indexed scans have
+their own storage primitive and copy only visible keys before invoking
+callbacks, so `query_keys` does not pay for metadata row copies that only
+document scans need. Large-namespace low-match indexed searches must be able to
+walk the relevant posting/candidate sets without loading every metadata summary
+or every document payload in the namespace.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
