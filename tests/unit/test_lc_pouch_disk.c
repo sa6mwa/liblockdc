@@ -9224,6 +9224,123 @@ static void test_read_source_survives_store_close_without_cache_owner(
   test_cleanup_root(root);
 }
 
+static void test_object_source_survives_store_close_without_cache_owner(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_object_opts put_opts;
+  lc_pouch_object_selector selector;
+  lc_pouch_object_info put_info;
+  lc_pouch_object_info get_info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "object-source-after-close");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&selector, 0, sizeof(selector));
+  memset(&put_info, 0, sizeof(put_info));
+  memset(&get_info, 0, sizeof(get_info));
+  store = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  put_opts.name = "blob";
+  put_opts.content_type = "text/plain";
+  source = source_from_text("object-survives-close");
+  rc = store->put_object(store, "default", "kept-object", source, &put_opts,
+                         &put_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  selector.name = "blob";
+  rc = store->get_object(store, "default", "kept-object", &selector, &body,
+                         &get_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  text = read_source_text(body);
+  assert_string_equal(text, "object-survives-close");
+  free(text);
+  lc_source_close(body);
+
+  lc_pouch_object_info_cleanup(&allocator, &get_info);
+  lc_pouch_object_info_cleanup(&allocator, &put_info);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_queue_source_survives_store_close_without_cache_owner(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-source-after-close");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  store = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 60L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queue-survives-close");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_opts.owner = "worker";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &body,
+                              &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  text = read_source_text(body);
+  assert_string_equal(text, "queue-survives-close");
+  free(text);
+  lc_source_close(body);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_key_lock_wait_serializes_same_process_threads(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -10360,6 +10477,10 @@ int main(void) {
           test_read_fd_cache_reuses_descriptors_without_closing_active_readers),
       cmocka_unit_test(
           test_read_source_survives_store_close_without_cache_owner),
+      cmocka_unit_test(
+          test_object_source_survives_store_close_without_cache_owner),
+      cmocka_unit_test(
+          test_queue_source_survives_store_close_without_cache_owner),
       cmocka_unit_test(test_key_lock_wait_serializes_same_process_threads),
       cmocka_unit_test(test_try_lock_key_serializes_cross_process_handles),
       cmocka_unit_test(test_write_state_waits_for_cross_process_key_lock),
