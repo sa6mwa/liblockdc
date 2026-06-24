@@ -350,6 +350,17 @@ static void lease_ref_from_lease(lc_lease *lease, lc_lease_ref *ref) {
   ref->fencing_token = lease->fencing_token;
 }
 
+static void message_ref_from_message(lc_message *message, lc_message_ref *ref) {
+  lc_message_ref_init(ref);
+  ref->namespace_name = message->namespace_name;
+  ref->queue = message->queue;
+  ref->message_id = message->message_id;
+  ref->lease_id = message->lease_id;
+  ref->txn_id = message->txn_id;
+  ref->fencing_token = message->fencing_token;
+  ref->meta_etag = message->meta_etag;
+}
+
 static void test_pouch_public_state_attachment_shared_handles(void **state) {
   char root[256];
   char endpoint[320];
@@ -1292,6 +1303,132 @@ static void test_pouch_public_queue_nack_delay_redelivery(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_queue_retry_exhaustion_terminal(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *worker;
+  lc_client *reopened;
+  lc_source *source;
+  lc_message *first_delivery;
+  lc_message *second_delivery;
+  lc_message *empty_delivery;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_nack_op nack_op;
+  lc_nack_res first_nack;
+  lc_nack_res final_nack;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "queue-retry-exhaustion");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  worker = NULL;
+  reopened = NULL;
+  source = NULL;
+  first_delivery = NULL;
+  second_delivery = NULL;
+  empty_delivery = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&first_nack, 0, sizeof(first_nack));
+  memset(&final_nack, 0, sizeof(final_nack));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &worker, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "retry-terminal";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 2;
+  source = source_from_text("terminal-work", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "retry-terminal";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = worker->dequeue(worker, &dequeue_req, &first_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(first_delivery);
+  assert_string_equal(first_delivery->message_id, enqueue_res.message_id);
+  assert_int_equal(first_delivery->attempts, 1);
+  assert_int_equal(first_delivery->failure_attempts, 0);
+
+  lc_nack_op_init(&nack_op);
+  message_ref_from_message(first_delivery, &nack_op.message);
+  nack_op.intent = LC_NACK_INTENT_FAILURE;
+  rc = lc_queue_nack(worker, &nack_op, &first_nack, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(first_nack.requeued);
+  assert_non_null(first_nack.meta_etag);
+  first_delivery->close(first_delivery);
+  first_delivery = NULL;
+
+  rc = worker->dequeue(worker, &dequeue_req, &second_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(second_delivery);
+  assert_string_equal(second_delivery->message_id, enqueue_res.message_id);
+  assert_int_equal(second_delivery->attempts, 2);
+  assert_int_equal(second_delivery->failure_attempts, 1);
+  assert_true(second_delivery->fencing_token > 0L);
+
+  lc_nack_op_init(&nack_op);
+  message_ref_from_message(second_delivery, &nack_op.message);
+  nack_op.intent = LC_NACK_INTENT_FAILURE;
+  rc = lc_queue_nack(worker, &nack_op, &final_nack, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(final_nack.requeued);
+  assert_non_null(final_nack.meta_etag);
+  second_delivery->close(second_delivery);
+  second_delivery = NULL;
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "retry-terminal";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  assert_null(stats.head_message_id);
+  lc_queue_stats_res_cleanup(&stats);
+
+  rc = worker->dequeue(worker, &dequeue_req, &empty_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(empty_delivery);
+
+  producer->close(producer);
+  producer = NULL;
+  worker->close(worker);
+  worker = NULL;
+
+  open_pouch_client(endpoint, &reopened, &error);
+  memset(&stats, 0, sizeof(stats));
+  rc = reopened->queue_stats(reopened, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  assert_null(stats.head_message_id);
+
+  lc_queue_stats_res_cleanup(&stats);
+  lc_nack_res_cleanup(&first_nack);
+  lc_nack_res_cleanup(&final_nack);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  reopened->close(reopened);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_stats_is_read_only(void **state) {
   char root[256];
   char endpoint[320];
@@ -2084,6 +2221,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(test_pouch_public_queue_nack_delay_redelivery),
+      cmocka_unit_test(test_pouch_public_queue_retry_exhaustion_terminal),
       cmocka_unit_test(test_pouch_public_queue_stats_is_read_only),
       cmocka_unit_test(
           test_pouch_public_queue_batch_no_duplicate_acked_delivery),
