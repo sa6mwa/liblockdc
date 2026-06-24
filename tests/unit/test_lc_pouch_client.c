@@ -767,6 +767,7 @@ static void test_pouch_endpoint_generates_implicit_txn_id(void **state) {
   assert_non_null(lease);
   assert_non_null(lease->txn_id);
   assert_true(lease->txn_id[0] != '\0');
+  assert_null(strchr(lease->txn_id, '/'));
 
   lc_update_req_init(&update_req);
   update_req.lease.namespace_name = lease->namespace_name;

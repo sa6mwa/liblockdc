@@ -140,9 +140,13 @@ typedef struct pouch_consumer_failure_test {
 } pouch_consumer_failure_test;
 
 typedef struct pouch_acquire_for_update_test {
+  lc_client *observer;
+  const char *key;
   const char *expected_snapshot;
+  const char *expected_visible_during_update;
   const char *next_state;
   int saw_snapshot;
+  int checked_staged_invisible;
 } pouch_acquire_for_update_test;
 
 typedef struct pouch_subscribe_state_test {
@@ -198,6 +202,12 @@ static int pouch_acquire_for_update_handler(
   source = source_from_text(test->next_state, error);
   rc = update->lease->update(update->lease, source, NULL, error);
   lc_source_close(source);
+  if (rc == LC_OK && test->observer != NULL &&
+      test->expected_visible_during_update != NULL) {
+    assert_client_state_text(test->observer, test->key,
+                             test->expected_visible_during_update, error);
+    test->checked_staged_invisible = 1;
+  }
   return rc;
 }
 
@@ -2296,6 +2306,7 @@ static void test_pouch_public_acquire_for_update_stages_state(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
+  lc_client *observer;
   lc_lease *lease;
   lc_source *source;
   lc_acquire_req acquire;
@@ -2310,11 +2321,13 @@ static void test_pouch_public_acquire_for_update_stages_state(void **state) {
   cleanup_pouch_root(root);
   lc_error_init(&error);
   client = NULL;
+  observer = NULL;
   lease = NULL;
   source = NULL;
   memset(&handler_state, 0, sizeof(handler_state));
 
   open_pouch_client(endpoint, &client, &error);
+  open_pouch_client(endpoint, &observer, &error);
 
   lc_acquire_req_init(&acquire);
   acquire.key = "integration/acquire-for-update-key";
@@ -2332,13 +2345,17 @@ static void test_pouch_public_acquire_for_update_stages_state(void **state) {
   lease = NULL;
 
   acquire.owner = "commit";
+  handler_state.observer = observer;
+  handler_state.key = "integration/acquire-for-update-key";
   handler_state.expected_snapshot = "{\"value\":1}";
+  handler_state.expected_visible_during_update = "{\"value\":1}";
   handler_state.next_state = "{\"value\":2,\"via\":\"commit\"}";
   rc = lc_acquire_for_update(client, &acquire,
                              pouch_acquire_for_update_handler, &handler_state,
                              &error);
   assert_lc_ok(rc, &error);
   assert_true(handler_state.saw_snapshot);
+  assert_true(handler_state.checked_staged_invisible);
   assert_client_state_text(client, "integration/acquire-for-update-key",
                            "{\"value\":2,\"via\":\"commit\"}", &error);
 
@@ -2357,6 +2374,7 @@ static void test_pouch_public_acquire_for_update_stages_state(void **state) {
                            "{\"value\":2,\"via\":\"commit\"}", &error);
 
   client->close(client);
+  observer->close(observer);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
 }
