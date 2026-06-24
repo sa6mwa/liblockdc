@@ -488,6 +488,9 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
                                         long extend_by_seconds,
                                         lc_pouch_queue_message_info *out,
                                         lc_error *error);
+static int lc_pouch_disk_apply_queue_txn(lc_pouch_store *self,
+                                         const char *txn_id, int commit,
+                                         lc_error *error);
 static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
                                      const char *namespace_name,
                                      const char *queue,
@@ -9379,6 +9382,75 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
   return rc;
 }
 
+static int lc_pouch_disk_apply_queue_txn(lc_pouch_store *self,
+                                         const char *txn_id, int commit,
+                                         lc_error *error) {
+  lc_pouch_disk_store *store;
+  lc_pouch_disk_queue_entry updated;
+  char *meta_etag;
+  long now_unix;
+  size_t entry_count;
+  size_t index;
+  int touched;
+  int rc;
+
+  if (self == NULL || txn_id == NULL || txn_id[0] == '\0') {
+    return lc_pouch_set_invalid(error,
+                                "apply_queue_txn requires store and txn_id");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  rc = lc_pouch_disk_lock(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  touched = 0;
+  now_unix = (long)time(NULL);
+  entry_count = store->queue_entry_count;
+  for (index = 0U; index < entry_count; ++index) {
+    if (store->queue_entries[index].txn_id == NULL ||
+        strcmp(store->queue_entries[index].txn_id, txn_id) != 0) {
+      continue;
+    }
+    updated = store->queue_entries[index];
+    updated.txn_id = NULL;
+    updated.lease_id = NULL;
+    updated.lease_expires_at_unix = 0L;
+    updated.fencing_token += 1L;
+    if (commit) {
+      updated.deleted = store->queue_entries[index].deleted;
+      updated.not_visible_until_unix =
+          store->queue_entries[index].not_visible_until_unix;
+    } else {
+      updated.deleted = 0;
+      updated.not_visible_until_unix = now_unix;
+    }
+    meta_etag = lc_pouch_make_etag(store, updated.fencing_token,
+                                   updated.message_id,
+                                   strlen(updated.message_id));
+    if (meta_etag == NULL) {
+      rc = lc_pouch_set_nomem(error, "failed to allocate pouch queue etag");
+      break;
+    }
+    updated.meta_etag = meta_etag;
+    rc = lc_pouch_disk_append_queue_entry(
+        store, updated.deleted ? LC_POUCH_RECORD_QUEUE_REMOVE
+                               : LC_POUCH_RECORD_QUEUE_UPDATE,
+        &updated, NULL, 0U, 0, error);
+    lc_pouch_free(&store->allocator, meta_etag);
+    if (rc != LC_OK) {
+      break;
+    }
+    touched = 1;
+  }
+  if (rc == LC_OK && touched) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
+  if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  return rc;
+}
+
 static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
                                      const char *namespace_name,
                                      const char *queue,
@@ -10401,6 +10473,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.ack_message = lc_pouch_disk_ack_message;
   store->pub.nack_message = lc_pouch_disk_nack_message;
   store->pub.extend_message = lc_pouch_disk_extend_message;
+  store->pub.apply_queue_txn = lc_pouch_disk_apply_queue_txn;
   store->pub.queue_stats = lc_pouch_disk_queue_stats;
   store->pub.queue_wake_status = lc_pouch_disk_queue_wake_status;
   store->pub.fsync_stats = lc_pouch_disk_fsync_stats;

@@ -473,6 +473,8 @@ struct lc_pouch_store {
   int (*extend_message)(lc_pouch_store *self, const lc_pouch_queue_ref *ref,
                         long extend_by_seconds,
                         lc_pouch_queue_message_info *out, lc_error *error);
+  int (*apply_queue_txn)(lc_pouch_store *self, const char *txn_id, int commit,
+                         lc_error *error);
   int (*queue_stats)(lc_pouch_store *self, const char *namespace_name,
                      const char *queue, lc_pouch_queue_stats *out,
                      lc_error *error);

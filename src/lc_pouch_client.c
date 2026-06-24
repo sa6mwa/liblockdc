@@ -867,6 +867,13 @@ static int lc_pouch_txn_apply_record(lc_client_handle *client,
           return rc;
         }
       }
+      if (client->pouch_store->apply_queue_txn != NULL) {
+        rc = client->pouch_store->apply_queue_txn(client->pouch_store,
+                                                  record->txn_id, 0, error);
+        if (rc != LC_OK) {
+          return rc;
+        }
+      }
       return lc_pouch_txn_delete_record(client, record->txn_id, error);
     }
     return LC_OK;
@@ -882,6 +889,14 @@ static int lc_pouch_txn_apply_record(lc_client_handle *client,
                                         &record->participants[index],
                                         record->state, allow_already_applied,
                                         error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  if (client->pouch_store->apply_queue_txn != NULL) {
+    rc = client->pouch_store->apply_queue_txn(
+        client->pouch_store, record->txn_id,
+        record->state == LC_POUCH_TXN_STATE_COMMITTED, error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -5171,6 +5186,8 @@ static int lc_pouch_client_dequeue_once(lc_client *self,
         state_handle = (lc_lease_handle *)message_handle->state_lease;
         state_handle->lease_expires_at_unix = state_lease_expires_at_unix;
         state_handle->pub.lease_expires_at_unix = state_lease_expires_at_unix;
+        state_handle->pouch_txn_explicit =
+            req->txn_id != NULL && req->txn_id[0] != '\0';
       }
     }
   }
