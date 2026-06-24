@@ -907,6 +907,130 @@ static void test_pouch_public_queue_nack_delay_redelivery(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_queue_batch_no_duplicate_acked_delivery(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *worker_a;
+  lc_client *worker_b;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res[4];
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_batch_res first_batch;
+  lc_dequeue_batch_res second_batch;
+  lc_dequeue_batch_res empty_batch;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  const char *payloads[4];
+  size_t index;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "queue-batch");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  worker_a = NULL;
+  worker_b = NULL;
+  source = NULL;
+  memset(enqueue_res, 0, sizeof(enqueue_res));
+  memset(&first_batch, 0, sizeof(first_batch));
+  memset(&second_batch, 0, sizeof(second_batch));
+  memset(&empty_batch, 0, sizeof(empty_batch));
+  memset(&stats, 0, sizeof(stats));
+  payloads[0] = "batch-one";
+  payloads[1] = "batch-two";
+  payloads[2] = "batch-three";
+  payloads[3] = "batch-four";
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &worker_a, &error);
+  open_pouch_client(endpoint, &worker_b, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "batch-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  for (index = 0U; index < 4U; ++index) {
+    source = source_from_text(payloads[index], &error);
+    rc = producer->enqueue(producer, &enqueue_req, source,
+                           &enqueue_res[index], &error);
+    lc_source_close(source);
+    assert_lc_ok(rc, &error);
+  }
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "batch-jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.page_size = 2;
+  rc = worker_a->dequeue_batch(worker_a, &dequeue_req, &first_batch, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(first_batch.count, 2U);
+  assert_string_equal(first_batch.messages[0]->message_id,
+                      enqueue_res[0].message_id);
+  assert_string_equal(first_batch.messages[1]->message_id,
+                      enqueue_res[1].message_id);
+  assert_string_not_equal(first_batch.messages[0]->message_id,
+                          first_batch.messages[1]->message_id);
+
+  rc = first_batch.messages[0]->ack(first_batch.messages[0], &error);
+  assert_lc_ok(rc, &error);
+  first_batch.messages[0] = NULL;
+  rc = first_batch.messages[1]->ack(first_batch.messages[1], &error);
+  assert_lc_ok(rc, &error);
+  first_batch.messages[1] = NULL;
+  lc_dequeue_batch_cleanup(&first_batch);
+
+  dequeue_req.owner = "worker-b";
+  dequeue_req.page_size = 4;
+  rc = worker_b->dequeue_batch(worker_b, &dequeue_req, &second_batch, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(second_batch.count, 2U);
+  assert_string_equal(second_batch.messages[0]->message_id,
+                      enqueue_res[2].message_id);
+  assert_string_equal(second_batch.messages[1]->message_id,
+                      enqueue_res[3].message_id);
+  assert_string_not_equal(second_batch.messages[0]->message_id,
+                          second_batch.messages[1]->message_id);
+
+  rc = second_batch.messages[0]->ack(second_batch.messages[0], &error);
+  assert_lc_ok(rc, &error);
+  second_batch.messages[0] = NULL;
+  rc = second_batch.messages[1]->ack(second_batch.messages[1], &error);
+  assert_lc_ok(rc, &error);
+  second_batch.messages[1] = NULL;
+  lc_dequeue_batch_cleanup(&second_batch);
+
+  rc = worker_b->dequeue_batch(worker_b, &dequeue_req, &empty_batch, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(empty_batch.count, 0U);
+  lc_dequeue_batch_cleanup(&empty_batch);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "batch-jobs";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+
+  lc_queue_stats_res_cleanup(&stats);
+  for (index = 0U; index < 4U; ++index) {
+    lc_enqueue_res_cleanup(&enqueue_res[index]);
+  }
+  producer->close(producer);
+  worker_a->close(worker_a);
+  worker_b->close(worker_b);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_watch_queue_snapshots(void **state) {
   char root[256];
   char endpoint[320];
@@ -1473,6 +1597,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(test_pouch_public_queue_nack_delay_redelivery),
+      cmocka_unit_test(
+          test_pouch_public_queue_batch_no_duplicate_acked_delivery),
       cmocka_unit_test(test_pouch_public_watch_queue_snapshots),
       cmocka_unit_test(test_pouch_public_subscribe_with_state),
       cmocka_unit_test(test_pouch_public_consumer_service_with_state),

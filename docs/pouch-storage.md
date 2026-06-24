@@ -1349,9 +1349,9 @@ Current default local integration coverage in `tests/integration` exercises
 public `pouch://` clients sharing one disk root for state and attachment
 persistence, queue visibility handoff, stale delivery fencing, nack redelivery,
 delayed nack redelivery, acknowledgement, watch snapshots, direct
-subscribe-with-state, managed consumer state-save, managed failure redelivery,
-and cross-client CAS. The optional e2e shard still covers broader
-consumer-service behavior.
+subscribe-with-state, batch dequeue without duplicate acked delivery, managed
+consumer state-save, managed failure redelivery, and cross-client CAS. The
+optional e2e shard still covers broader consumer-service behavior.
 
 Current disk unit coverage includes queue nack and extend allocator-failure
 paths that prove failed redelivery-control mutations leave the active lease
