@@ -4339,9 +4339,11 @@ static char *lc_pouch_disk_make_staged_key(lc_pouch_disk_store *store,
                                            const char *key,
                                            const char *txn_id) {
   const char suffix[] = "/.staging/";
+  const char root_prefix[] = ".staging/";
   size_t key_len;
   size_t txn_len;
   size_t suffix_len;
+  size_t prefix_len;
   char *staged_key;
 
   key_len = strlen(key);
@@ -4349,16 +4351,22 @@ static char *lc_pouch_disk_make_staged_key(lc_pouch_disk_store *store,
     key_len--;
   }
   txn_len = strlen(txn_id);
-  suffix_len = sizeof(suffix) - 1U;
-  staged_key =
-      (char *)lc_pouch_alloc(&store->allocator,
-                             key_len + suffix_len + txn_len + 1U);
+  suffix_len =
+      key_len > 0U ? (sizeof(suffix) - 1U) : (sizeof(root_prefix) - 1U);
+  staged_key = (char *)lc_pouch_alloc(&store->allocator,
+                                      key_len + suffix_len + txn_len + 1U);
   if (staged_key == NULL) {
     return NULL;
   }
-  memcpy(staged_key, key, key_len);
-  memcpy(staged_key + key_len, suffix, suffix_len);
-  memcpy(staged_key + key_len + suffix_len, txn_id, txn_len + 1U);
+  if (key_len > 0U) {
+    memcpy(staged_key, key, key_len);
+    memcpy(staged_key + key_len, suffix, suffix_len);
+    prefix_len = key_len + suffix_len;
+  } else {
+    memcpy(staged_key, root_prefix, suffix_len);
+    prefix_len = suffix_len;
+  }
+  memcpy(staged_key + prefix_len, txn_id, txn_len + 1U);
   return staged_key;
 }
 
@@ -4367,11 +4375,12 @@ static int lc_pouch_disk_validate_staged_args(lc_error *error,
                                              lc_pouch_store *self,
                                              const char *namespace_name,
                                              const char *key,
-                                             const char *txn_id) {
+                                             const char *txn_id,
+                                             int allow_empty_key) {
   size_t key_len;
 
   if (self == NULL || namespace_name == NULL || key == NULL ||
-      key[0] == '\0' || txn_id == NULL || txn_id[0] == '\0') {
+      txn_id == NULL || txn_id[0] == '\0') {
     return lc_pouch_set_invalid(error, operation);
   }
   if (namespace_name[0] == '\0') {
@@ -4382,7 +4391,7 @@ static int lc_pouch_disk_validate_staged_args(lc_error *error,
   while (key_len > 0U && key[key_len - 1U] == '/') {
     key_len--;
   }
-  if (key_len == 0U) {
+  if (key_len == 0U && (!allow_empty_key || key[0] != '\0')) {
     return lc_pouch_set_invalid(error, operation);
   }
   if (strchr(txn_id, '/') != NULL) {
@@ -4417,7 +4426,7 @@ static int lc_pouch_disk_stage_state(lc_pouch_store *self,
       error,
       "stage_state requires store, namespace, key, transaction id, body, and "
       "output metadata",
-      self, namespace_name, key, txn_id);
+      self, namespace_name, key, txn_id, 1);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4453,7 +4462,7 @@ static int lc_pouch_disk_load_staged_state(lc_pouch_store *self,
       error,
       "load_staged_state requires store, namespace, key, transaction id, body, "
       "and output metadata",
-      self, namespace_name, key, txn_id);
+      self, namespace_name, key, txn_id, 1);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4555,7 +4564,7 @@ static int lc_pouch_disk_promote_staged_state(
       error,
       "promote_staged_state requires store, namespace, key, transaction id, "
       "and output metadata",
-      self, namespace_name, key, txn_id);
+      self, namespace_name, key, txn_id, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4635,7 +4644,7 @@ static int lc_pouch_disk_discard_staged_state(
   rc = lc_pouch_disk_validate_staged_args(
       error, "discard_staged_state requires store, namespace, key, and "
              "transaction id",
-      self, namespace_name, key, txn_id);
+      self, namespace_name, key, txn_id, 1);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4722,7 +4731,7 @@ static int lc_pouch_disk_list_staged_state(
   int rc;
 
   if (self == NULL || req == NULL || req->namespace_name == NULL ||
-      req->key == NULL || req->key[0] == '\0' || out == NULL) {
+      req->key == NULL || out == NULL) {
     return lc_pouch_set_invalid(error,
                                 "list_staged_state requires store, request, "
                                 "namespace, key, and output");
@@ -4737,10 +4746,13 @@ static int lc_pouch_disk_list_staged_state(
   matches = NULL;
   staged_prefix = NULL;
   base_key = lc_pouch_disk_dup_trimmed_key(store, req->key);
-  if (base_key == NULL || base_key[0] == '\0') {
+  if (base_key == NULL) {
     lc_pouch_free(&store->allocator, base_key);
-    return lc_pouch_set_invalid(error,
-                                "list_staged_state requires a non-empty key");
+    return lc_pouch_set_nomem(error, "failed to allocate pouch staged key");
+  }
+  if (base_key[0] == '\0' && req->key[0] != '\0') {
+    lc_pouch_free(&store->allocator, base_key);
+    return lc_pouch_set_invalid(error, "list_staged_state requires valid key");
   }
   staged_prefix = lc_pouch_disk_make_staged_key(store, base_key, "");
   if (staged_prefix == NULL) {
