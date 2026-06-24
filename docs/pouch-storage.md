@@ -482,10 +482,10 @@ user keys do not become filesystem path components. The current per-key
 primitive creates those lock files, uses `fcntl` byte-range locks for
 cross-process contention, and adds a process-local held-lock registry so two
 store handles in the same process contend before the full striped lock cache
-lands. State write/remove and metadata store/delete paths now acquire the
-per-key guard before the global append-log lock; other mutation families still
-use the global writer lock until the cutover is completed and diagnostics are
-updated.
+lands. State write/remove, metadata store/delete, and single-key object
+put/delete paths now acquire the per-key guard before the global append-log
+lock; multi-key object copy and queue mutation families still use the global
+writer lock until the cutover is completed and diagnostics are updated.
 
 ## Performance Model
 

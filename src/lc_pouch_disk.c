@@ -6461,6 +6461,7 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
                                     lc_pouch_object_info *out,
                                     lc_error *error) {
   lc_pouch_disk_store *store;
+  lc_pouch_key_lock *key_lock;
   char *id;
   const char *name;
   const char *content_type;
@@ -6493,8 +6494,14 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
     return lc_pouch_set_invalid(error,
                                 "put_object requires non-negative max_bytes");
   }
+  key_lock = NULL;
+  rc = lc_pouch_disk_lock_key_wait(self, namespace_name, key, &key_lock, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   name = opts->name;
@@ -6504,6 +6511,7 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
       lc_pouch_disk_find_object_by_name(store, namespace_name, key, name);
   if (existing >= 0 && opts->prevent_overwrite) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return lc_error_set(error, LC_ERR_SERVER, 409L,
                         "pouch attachment already exists", NULL,
                         "attachment_exists", NULL);
@@ -6514,12 +6522,14 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
       &payload_length, &payload_crc, error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   id = lc_pouch_make_object_id_from_crc(store, name, payload_crc);
   if (id == NULL) {
     close(temp_fd);
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch object id");
   }
   now_unix = (long)time(NULL);
@@ -6548,6 +6558,10 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
   }
   lc_pouch_free(&store->allocator, id);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
+      rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
@@ -6873,6 +6887,7 @@ static int lc_pouch_disk_delete_object(lc_pouch_store *self,
                                        int *deleted, lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_object_entry *entry;
+  lc_pouch_key_lock *key_lock;
   unsigned long body_offset;
   int index;
   int rc;
@@ -6890,8 +6905,14 @@ static int lc_pouch_disk_delete_object(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   *deleted = 0;
+  key_lock = NULL;
+  rc = lc_pouch_disk_lock_key_wait(self, namespace_name, key, &key_lock, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   index = lc_pouch_disk_find_object(store, namespace_name, key, selector);
@@ -6911,6 +6932,10 @@ static int lc_pouch_disk_delete_object(lc_pouch_store *self,
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
+      rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
   return rc;
 }
 
@@ -6919,6 +6944,7 @@ static int lc_pouch_disk_delete_all_objects(lc_pouch_store *self,
                                             const char *key, int *deleted_count,
                                             lc_error *error) {
   lc_pouch_disk_store *store;
+  lc_pouch_key_lock *key_lock;
   unsigned long body_offset;
   size_t index;
   int rc;
@@ -6936,8 +6962,14 @@ static int lc_pouch_disk_delete_all_objects(lc_pouch_store *self,
   }
   store = (lc_pouch_disk_store *)self->impl;
   *deleted_count = 0;
+  key_lock = NULL;
+  rc = lc_pouch_disk_lock_key_wait(self, namespace_name, key, &key_lock, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     return rc;
   }
   for (index = 0U; index < store->object_entry_count; ++index) {
@@ -6960,6 +6992,10 @@ static int lc_pouch_disk_delete_all_objects(lc_pouch_store *self,
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
+      rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
