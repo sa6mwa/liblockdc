@@ -162,6 +162,18 @@ typedef struct lc_pouch_compaction_res {
   unsigned long live_record_count;
 } lc_pouch_compaction_res;
 
+typedef struct lc_pouch_retention_sweep_req {
+  long updated_before_unix;
+} lc_pouch_retention_sweep_req;
+
+typedef struct lc_pouch_retention_sweep_res {
+  unsigned long scanned_metadata;
+  unsigned long expired_metadata;
+  unsigned long deleted_metadata;
+  unsigned long deleted_state;
+  unsigned long failed_keys;
+} lc_pouch_retention_sweep_res;
+
 typedef struct lc_pouch_query_config {
   char *preferred_engine;
   char *fallback_engine;
@@ -326,6 +338,9 @@ struct lc_pouch_store {
                      lc_error *error);
   int (*compact)(lc_pouch_store *self, const char *mode,
                  lc_pouch_compaction_res *out, lc_error *error);
+  int (*retention_sweep)(lc_pouch_store *self,
+                         const lc_pouch_retention_sweep_req *req,
+                         lc_pouch_retention_sweep_res *out, lc_error *error);
   int (*read_state)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, lc_source **body, lc_pouch_state_info *out,
                     lc_error *error);

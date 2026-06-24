@@ -447,7 +447,9 @@ The interface should also expose optional capability functions or flags:
 - index flush/default tuning for the storage indexer and later LQL integration
 - query backend mode/defaults: indexed is preferred, full metadata-summary scan
   is supported when explicitly configured, and fallback policy is explicit
-- retention/janitor sweep for expired metadata and state
+- retention/janitor sweep for expired metadata and state; the current private
+  disk hook accepts an `updated_before_unix` cutoff and reports scanned,
+  expired, deleted metadata, deleted state, and failed-key counts
 
 The disk implementation should report that it is not a general concurrent
 writer backend, even though it safely serializes same-root mutations with
@@ -1444,7 +1446,9 @@ Cleanup tasks must be restartable and idempotent:
 Retention sweep is metadata-driven. It must decode current metadata records,
 check `updated_at_unix`, append metadata/state delete records for expired keys,
 and continue when individual keys fail to decode or delete. It must not remove
-log files directly.
+log files directly. The current private disk hook implements the append-record
+path and idempotent reruns; future public scheduling/configuration can sit above
+that hook without changing the log semantics.
 
 ## Crypto and Descriptors
 

@@ -230,6 +230,9 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
 static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
                                  lc_pouch_compaction_res *out,
                                  lc_error *error);
+static int lc_pouch_disk_retention_sweep(
+    lc_pouch_store *self, const lc_pouch_retention_sweep_req *req,
+    lc_pouch_retention_sweep_res *out, lc_error *error);
 static int lc_pouch_disk_append_record(
     lc_pouch_disk_store *store, unsigned long type, const char *namespace_name,
     const char *key, const char *content_type, const char *etag, long version,
@@ -256,6 +259,9 @@ static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
 static int lc_pouch_disk_append_query_index_record(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *etag, long version, const lc_pouch_meta *meta, int deleted,
+    lc_error *error);
+static int lc_pouch_disk_append_meta_remove_locked(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     lc_error *error);
 static int lc_pouch_disk_query_index_reserve(lc_pouch_disk_store *store);
 static int lc_pouch_disk_query_index_insert(lc_pouch_disk_store *store,
@@ -290,6 +296,9 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
                                       const char *key,
                                       const char *expected_etag,
                                       int *removed, lc_error *error);
+static int lc_pouch_disk_append_state_remove_locked(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
+    lc_error *error);
 static int lc_pouch_disk_stage_state(lc_pouch_store *self,
                                      const char *namespace_name,
                                      const char *key, const char *txn_id,
@@ -2606,9 +2615,6 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
                                      lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_meta_entry *entry;
-  char *etag;
-  unsigned long body_offset;
-  long version;
   int index;
   int rc;
 
@@ -2633,10 +2639,28 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
     lc_pouch_disk_unlock(store, error);
     return rc;
   }
+  rc = lc_pouch_disk_append_meta_remove_locked(store, namespace_name, key,
+                                               error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  }
+  if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  return rc;
+}
+
+static int lc_pouch_disk_append_meta_remove_locked(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
+    lc_error *error) {
+  char *etag;
+  unsigned long body_offset;
+  long version;
+  int rc;
+
   version = store->next_version++;
   etag = lc_pouch_make_etag(store, version, NULL, 0U);
   if (etag == NULL) {
-    lc_pouch_disk_unlock(store, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch metadata etag");
   }
   rc = lc_pouch_disk_append_query_index_record(store, namespace_name, key, etag,
@@ -2650,13 +2674,7 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
                                                       key, etag, NULL, 1)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch metadata index");
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
-  }
   lc_pouch_free(&store->allocator, etag);
-  if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
-    rc = LC_ERR_TRANSPORT;
-  }
   return rc;
 }
 
@@ -3383,6 +3401,86 @@ static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
     return LC_ERR_TRANSPORT;
   }
   return LC_OK;
+}
+
+static int lc_pouch_disk_retention_sweep(
+    lc_pouch_store *self, const lc_pouch_retention_sweep_req *req,
+    lc_pouch_retention_sweep_res *out, lc_error *error) {
+  lc_pouch_disk_store *store;
+  lc_pouch_disk_meta_entry *meta_entry;
+  lc_pouch_disk_state_entry *state_entry;
+  lc_error item_error;
+  size_t index;
+  int state_index;
+  int state_live;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "retention_sweep requires store, request, and output");
+  }
+  if (req->updated_before_unix <= 0L) {
+    return lc_pouch_set_invalid(
+        error, "retention_sweep requires a positive updated_before_unix");
+  }
+
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  rc = lc_pouch_disk_lock(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_force_replay_locked(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
+    return rc;
+  }
+
+  for (index = 0U; index < store->meta_entry_count; ++index) {
+    meta_entry = &store->meta_entries[index];
+    if (meta_entry->deleted) {
+      continue;
+    }
+    out->scanned_metadata++;
+    if (meta_entry->meta.updated_at_unix <= 0L ||
+        meta_entry->meta.updated_at_unix >= req->updated_before_unix) {
+      continue;
+    }
+
+    out->expired_metadata++;
+    state_index = lc_pouch_disk_find_entry(
+        store, meta_entry->namespace_name, meta_entry->key);
+    state_entry = state_index >= 0 ? &store->state_entries[state_index] : NULL;
+    state_live = state_entry != NULL && !state_entry->deleted;
+
+    memset(&item_error, 0, sizeof(item_error));
+    rc = lc_pouch_disk_append_meta_remove_locked(
+        store, meta_entry->namespace_name, meta_entry->key, &item_error);
+    if (rc != LC_OK) {
+      out->failed_keys++;
+      lc_error_cleanup(&item_error);
+      continue;
+    }
+    out->deleted_metadata++;
+
+    if (state_live) {
+      memset(&item_error, 0, sizeof(item_error));
+      rc = lc_pouch_disk_append_state_remove_locked(
+          store, meta_entry->namespace_name, meta_entry->key, &item_error);
+      if (rc != LC_OK) {
+        out->failed_keys++;
+        lc_error_cleanup(&item_error);
+        continue;
+      }
+      out->deleted_state++;
+    }
+  }
+
+  rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  return rc;
 }
 
 static int lc_pouch_disk_append_record(
@@ -7851,6 +7949,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.query_index_keys_scan = lc_pouch_disk_query_index_keys_scan;
   store->pub.flush_index = lc_pouch_disk_flush_index;
   store->pub.compact = lc_pouch_disk_compact;
+  store->pub.retention_sweep = lc_pouch_disk_retention_sweep;
   store->pub.read_state = lc_pouch_disk_read_state;
   store->pub.write_state = lc_pouch_disk_write_state;
   store->pub.remove_state = lc_pouch_disk_remove_state;
