@@ -146,6 +146,21 @@ typedef struct lc_pouch_index_flush_res {
   unsigned long index_seq;
 } lc_pouch_index_flush_res;
 
+typedef struct lc_pouch_compaction_res {
+  char *mode;
+  char *skip_reason;
+  int accepted;
+  int compacted;
+  int skipped;
+  unsigned long before_log_bytes;
+  unsigned long after_log_bytes;
+  unsigned long before_query_index_bytes;
+  unsigned long after_query_index_bytes;
+  unsigned long before_record_count;
+  unsigned long after_record_count;
+  unsigned long live_record_count;
+} lc_pouch_compaction_res;
+
 typedef struct lc_pouch_query_config {
   char *preferred_engine;
   char *fallback_engine;
@@ -298,6 +313,8 @@ struct lc_pouch_store {
   int (*flush_index)(lc_pouch_store *self, const char *namespace_name,
                      const char *mode, lc_pouch_index_flush_res *out,
                      lc_error *error);
+  int (*compact)(lc_pouch_store *self, const char *mode,
+                 lc_pouch_compaction_res *out, lc_error *error);
   int (*read_state)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, lc_source **body, lc_pouch_state_info *out,
                     lc_error *error);
@@ -413,6 +430,8 @@ void lc_pouch_query_index_scan_res_cleanup(
     const lc_pouch_allocator *allocator, lc_pouch_query_index_scan_res *res);
 void lc_pouch_index_flush_res_cleanup(const lc_pouch_allocator *allocator,
                                       lc_pouch_index_flush_res *res);
+void lc_pouch_compaction_res_cleanup(const lc_pouch_allocator *allocator,
+                                     lc_pouch_compaction_res *res);
 void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
                                    lc_pouch_query_config *config);
 void lc_pouch_queue_wake_status_cleanup(

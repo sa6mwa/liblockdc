@@ -4883,6 +4883,167 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_manual_compaction_reports_stats_and_preserves_state(
+    void **state) {
+  char root[256];
+  char payload[4096];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_compaction_res compacted;
+  lc_error error;
+  off_t before_log_size;
+  off_t before_query_size;
+  long last_version;
+  size_t index;
+  size_t read_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "manual-compact");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&compacted, 0, sizeof(compacted));
+  memset(payload, 'x', sizeof(payload));
+  store = NULL;
+  body = NULL;
+  last_version = 0L;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->compact);
+
+  state_opts.content_type = "application/octet-stream";
+  for (index = 0U; index < 8U; ++index) {
+    source = NULL;
+    rc = lc_source_from_memory(payload, sizeof(payload), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = store->write_state(store, "default", "hot-key", source, &state_opts,
+                            &put_res, &error);
+    lc_source_close(source);
+    assert_int_equal(rc, LC_OK);
+    last_version = put_res.new_version;
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+    memset(&put_res, 0, sizeof(put_res));
+  }
+
+  before_log_size = test_log_size(root);
+  before_query_size = test_query_index_size(root);
+  assert_true(before_log_size > 0);
+  rc = store->compact(store, "force", &compacted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(compacted.mode, "force");
+  assert_null(compacted.skip_reason);
+  assert_int_equal(compacted.accepted, 1);
+  assert_int_equal(compacted.compacted, 1);
+  assert_int_equal(compacted.skipped, 0);
+  assert_int_equal(compacted.before_log_bytes, (unsigned long)before_log_size);
+  assert_int_equal(compacted.before_query_index_bytes,
+                   (unsigned long)before_query_size);
+  assert_true(compacted.before_record_count > compacted.after_record_count);
+  assert_true(compacted.after_record_count <= compacted.live_record_count);
+  assert_true(compacted.after_log_bytes < compacted.before_log_bytes);
+  lc_pouch_compaction_res_cleanup(&allocator, &compacted);
+
+  rc = store->read_state(store, "default", "hot-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(state_info.version, last_version);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, sizeof(payload));
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "hot-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(state_info.version, last_version);
+  read_length = read_source_count_x(body);
+  assert_int_equal(read_length, sizeof(payload));
+  lc_source_close(body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_compaction_res skipped;
+  lc_pouch_compaction_res failed;
+  lc_error error;
+  off_t before_log_size;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "compact-if-needed");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&skipped, 0, sizeof(skipped));
+  memset(&failed, 0, sizeof(failed));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  before_log_size = test_log_size(root);
+
+  rc = store->compact(store, "if_needed", &skipped, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(skipped.mode, "if_needed");
+  assert_string_equal(skipped.skip_reason, "below-min-log-size");
+  assert_int_equal(skipped.accepted, 1);
+  assert_int_equal(skipped.compacted, 0);
+  assert_int_equal(skipped.skipped, 1);
+  assert_int_equal(skipped.before_log_bytes, (unsigned long)before_log_size);
+  assert_int_equal(skipped.after_log_bytes, skipped.before_log_bytes);
+  assert_int_equal(test_log_size(root), before_log_size);
+  lc_pouch_compaction_res_cleanup(&allocator, &skipped);
+
+  rc = store->compact(store, "later", &failed, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  tracked.fail_malloc_size = strlen("if_needed") + 1U;
+  rc = store->compact(store, "if_needed", &failed, &error);
+  tracked.fail_malloc_size = 0U;
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(failed.mode);
+  assert_null(failed.skip_reason);
+  assert_int_equal(test_log_size(root), before_log_size);
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_compaction_preserves_promoted_staged_state_link(void **state) {
   char root[256];
   char payload[4096];
@@ -7719,6 +7880,10 @@ int main(void) {
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
       cmocka_unit_test(
           test_auto_compaction_preserves_live_heads_and_tokens),
+      cmocka_unit_test(
+          test_manual_compaction_reports_stats_and_preserves_state),
+      cmocka_unit_test(
+          test_compaction_if_needed_skip_and_allocator_failure),
       cmocka_unit_test(
           test_compaction_preserves_promoted_staged_state_link),
       cmocka_unit_test(

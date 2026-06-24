@@ -219,6 +219,9 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
                                      const char *mode,
                                      lc_pouch_index_flush_res *out,
                                      lc_error *error);
+static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
+                                 lc_pouch_compaction_res *out,
+                                 lc_error *error);
 static int lc_pouch_disk_append_record(
     lc_pouch_disk_store *store, unsigned long type, const char *namespace_name,
     const char *key, const char *content_type, const char *etag, long version,
@@ -256,6 +259,10 @@ static int lc_pouch_disk_query_summary_upsert(
     const char *etag, long version, const lc_pouch_meta *meta, int deleted);
 static unsigned long lc_pouch_disk_index_sequence(
     const lc_pouch_disk_store *store);
+static unsigned long
+lc_pouch_disk_compaction_live_record_count(lc_pouch_disk_store *store);
+static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
+                                        lc_error *error);
 static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
                                               unsigned long log_size,
                                               lc_error *error);
@@ -3163,6 +3170,133 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK) {
     lc_pouch_index_flush_res_cleanup(&store->allocator, out);
+    return LC_ERR_TRANSPORT;
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_fd_size(int fd, const char *message,
+                                 unsigned long *out, lc_error *error) {
+  struct stat st;
+
+  if (fstat(fd, &st) != 0) {
+    return lc_pouch_set_errno(error, message);
+  }
+  *out = (unsigned long)st.st_size;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
+                                 lc_pouch_compaction_res *out,
+                                 lc_error *error) {
+  lc_pouch_disk_store *store;
+  const char *effective_mode;
+  const char *skip_reason;
+  unsigned long before_log_bytes;
+  unsigned long after_log_bytes;
+  unsigned long before_query_index_bytes;
+  unsigned long after_query_index_bytes;
+  unsigned long before_record_count;
+  unsigned long after_record_count;
+  unsigned long live_record_count;
+  int should_compact;
+  int rc;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error, "compact requires store and output");
+  }
+  effective_mode = mode != NULL && mode[0] != '\0' ? mode : "force";
+  if (strcmp(effective_mode, "force") != 0 &&
+      strcmp(effective_mode, "if_needed") != 0) {
+    return lc_pouch_set_invalid(error,
+                                "pouch compaction mode must be force or "
+                                "if_needed");
+  }
+
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  rc = lc_pouch_disk_lock(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_force_replay_locked(store, error);
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
+    return rc;
+  }
+  rc = lc_pouch_disk_fd_size(store->log_fd, "failed to stat pouch log",
+                             &before_log_bytes, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_fd_size(store->query_index_fd,
+                               "failed to stat pouch query index",
+                               &before_query_index_bytes, error);
+  }
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
+    return rc;
+  }
+
+  before_record_count = store->replayed_record_count;
+  live_record_count = lc_pouch_disk_compaction_live_record_count(store);
+  should_compact = 1;
+  skip_reason = NULL;
+  if (strcmp(effective_mode, "if_needed") == 0) {
+    if (before_log_bytes < LC_POUCH_COMPACT_MIN_LOG_BYTES) {
+      should_compact = 0;
+      skip_reason = "below-min-log-size";
+    } else if (before_record_count <=
+               live_record_count * LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER) {
+      should_compact = 0;
+      skip_reason = "below-obsolete-threshold";
+    }
+  }
+
+  if (should_compact) {
+    rc = lc_pouch_disk_compact_locked(store, error);
+    if (rc != LC_OK) {
+      lc_pouch_disk_unlock(store, error);
+      return rc;
+    }
+    lc_pouch_disk_touch_writer_marker(store);
+  }
+
+  rc = lc_pouch_disk_fd_size(store->log_fd, "failed to stat pouch log",
+                             &after_log_bytes, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_fd_size(store->query_index_fd,
+                               "failed to stat pouch query index",
+                               &after_query_index_bytes, error);
+  }
+  if (rc != LC_OK) {
+    lc_pouch_disk_unlock(store, error);
+    return rc;
+  }
+  after_record_count = store->replayed_record_count;
+
+  out->mode = lc_pouch_strdup(&store->allocator, effective_mode);
+  if (skip_reason != NULL) {
+    out->skip_reason = lc_pouch_strdup(&store->allocator, skip_reason);
+  }
+  if (out->mode == NULL ||
+      (skip_reason != NULL && out->skip_reason == NULL)) {
+    lc_pouch_compaction_res_cleanup(&store->allocator, out);
+    lc_pouch_disk_unlock(store, error);
+    return lc_pouch_set_nomem(error,
+                              "failed to copy pouch compaction result");
+  }
+  out->accepted = 1;
+  out->compacted = should_compact;
+  out->skipped = !should_compact;
+  out->before_log_bytes = before_log_bytes;
+  out->after_log_bytes = after_log_bytes;
+  out->before_query_index_bytes = before_query_index_bytes;
+  out->after_query_index_bytes = after_query_index_bytes;
+  out->before_record_count = before_record_count;
+  out->after_record_count = after_record_count;
+  out->live_record_count = live_record_count;
+
+  if (lc_pouch_disk_unlock(store, error) != LC_OK) {
+    lc_pouch_compaction_res_cleanup(&store->allocator, out);
     return LC_ERR_TRANSPORT;
   }
   return LC_OK;
@@ -7616,6 +7750,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.query_index_scan = lc_pouch_disk_query_index_scan;
   store->pub.query_index_keys_scan = lc_pouch_disk_query_index_keys_scan;
   store->pub.flush_index = lc_pouch_disk_flush_index;
+  store->pub.compact = lc_pouch_disk_compact;
   store->pub.read_state = lc_pouch_disk_read_state;
   store->pub.write_state = lc_pouch_disk_write_state;
   store->pub.remove_state = lc_pouch_disk_remove_state;

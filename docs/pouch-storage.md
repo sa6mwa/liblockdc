@@ -415,6 +415,8 @@ struct lc_pouch_store {
                            const lc_pouch_list_staged_req *req,
                            lc_pouch_list_objects_res *out, lc_error *error);
 
+  int (*compact)(lc_pouch_store *self, const char *mode,
+                 lc_pouch_compaction_res *out, lc_error *error);
   int (*backend_hash)(lc_pouch_store *self, char **out, lc_error *error);
   int (*close)(lc_pouch_store *self, lc_error *error);
   int (*abort)(lc_pouch_store *self, lc_error *error);
@@ -435,7 +437,11 @@ The interface should also expose optional capability functions or flags:
 - single-writer optimization mode
 - whether the backend is safe for concurrent writers to the same root
 - fsync statistics
-- compaction statistics and explicit compaction trigger
+- compaction statistics and explicit compaction trigger; the current private
+  disk hook supports `force` and threshold-gated `if_needed`, returning
+  before/after log and query-index byte counts, before/after record counts,
+  live-record count, and a skip reason such as `below-min-log-size` or
+  `below-obsolete-threshold`
 - index flush/default tuning for the storage indexer and later LQL integration
 - query backend mode/defaults: indexed is preferred, full metadata-summary scan
   is supported when explicitly configured, and fallback policy is explicit
@@ -493,6 +499,13 @@ survive compaction through a private high-water record.
 Opening a store also removes stale `store.compact.tmp` and
 `query.index.compact.tmp` files while holding the writer lock, so crash leftovers
 from an interrupted compaction do not accumulate or confuse later runs.
+The private backend control surface now exposes explicit compaction diagnostics:
+`force` runs the same live-head rewrite immediately, while `if_needed` applies
+the auto-compaction thresholds and returns a concrete skip reason without
+rewriting below-threshold stores. Both modes report before/after log bytes,
+query-index bytes, record counts, and live-record counts so tests and future
+management tooling can treat compaction as observable behavior rather than an
+implicit side effect.
 
 The single-log milestone is not the v1 search-performance shape. A searchable
 pouch store must not use full-log scanning as the preferred indexed-query path.
