@@ -1027,6 +1027,119 @@ static void test_pouch_public_index_query_documents_replays_after_reopen(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_index_query_documents_refreshes_open_reader(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "index-query-open-reader");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  alpha = NULL;
+  bravo = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+
+  open_pouch_client(endpoint, &reader, &error);
+  open_pouch_client(endpoint, &writer, &error);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_string_equal(text, "");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "index-open-writer";
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+
+  acquire.key = "integration/index-open/alpha";
+  rc = writer->acquire(writer, &acquire, &alpha, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"kind\":\"index-open\",\"ordinal\":1}", &error);
+  rc = alpha->update(alpha, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/index-open/bravo";
+  rc = writer->acquire(writer, &acquire, &bravo, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"kind\":\"index-open\",\"ordinal\":2}", &error);
+  rc = bravo->update(bravo, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = alpha->release(alpha, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  alpha = NULL;
+  rc = bravo->release(bravo, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  bravo = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 2L;
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/index-open/alpha\""));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"index-open\",\"ordinal\":1}"));
+  assert_non_null(strstr(text, "\"key\":\"integration/index-open/bravo\""));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"index-open\",\"ordinal\":2}"));
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(query_res.index_seq > 0UL);
+
+  free(text);
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  writer->close(writer);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_attachment_survives_compaction_reopen(
     void **state) {
   char root[256];
@@ -3033,6 +3146,8 @@ int main(void) {
           test_pouch_public_scan_query_documents_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_index_query_documents_replays_after_reopen),
+      cmocka_unit_test(
+          test_pouch_public_index_query_documents_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
