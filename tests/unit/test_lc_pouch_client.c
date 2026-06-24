@@ -6981,6 +6981,206 @@ static void test_pouch_endpoint_txn_rollback_discards_staged_state(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_txn_commit_spans_namespaces(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *ns_a_client;
+  lc_client *ns_b_client;
+  lc_lease *first_lease;
+  lc_lease *second_lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "txn-commit-namespaces");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&decision_res, 0, sizeof(decision_res));
+  client = open_pouch_client(endpoint);
+  ns_a_client = NULL;
+  ns_b_client = NULL;
+  first_lease = NULL;
+  second_lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "txn/ns-key";
+  acquire.owner = "seed-a";
+  acquire.ttl_seconds = 60L;
+  acquire.namespace_name = "txn-a";
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":\"a1\"}");
+  rc = first_lease->update(first_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = first_lease->release(first_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  first_lease = NULL;
+
+  acquire.owner = "seed-b";
+  acquire.namespace_name = "txn-b";
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":\"b1\"}");
+  rc = second_lease->update(second_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = second_lease->release(second_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  second_lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "txn-commit-ns-1";
+  acquire.namespace_name = "txn-a";
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, first_lease, "{\"value\":\"a2\"}", &error);
+  acquire.namespace_name = "txn-b";
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, second_lease, "{\"value\":\"b2\"}", &error);
+
+  memset(participants, 0, sizeof(participants));
+  participants[0].namespace_name = "txn-a";
+  participants[0].key = "txn/ns-key";
+  participants[1].namespace_name = "txn-b";
+  participants[1].key = "txn/ns-key";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "txn-commit-ns-1";
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "committed");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(first_lease);
+  lc_lease_close(second_lease);
+  first_lease = NULL;
+  second_lease = NULL;
+
+  ns_a_client = open_pouch_client_with_namespace(endpoint, "txn-a");
+  ns_b_client = open_pouch_client_with_namespace(endpoint, "txn-b");
+  assert_pouch_client_state_text(ns_a_client, "txn/ns-key",
+                                 "{\"value\":\"a2\"}", &error);
+  assert_pouch_client_state_text(ns_b_client, "txn/ns-key",
+                                 "{\"value\":\"b2\"}", &error);
+
+  ns_a_client->close(ns_a_client);
+  ns_b_client->close(ns_b_client);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_txn_rollback_spans_namespaces(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *ns_a_client;
+  lc_client *ns_b_client;
+  lc_lease *first_lease;
+  lc_lease *second_lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "txn-rollback-namespaces");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&decision_res, 0, sizeof(decision_res));
+  client = open_pouch_client(endpoint);
+  ns_a_client = NULL;
+  ns_b_client = NULL;
+  first_lease = NULL;
+  second_lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "txn/ns-key";
+  acquire.owner = "seed-a";
+  acquire.ttl_seconds = 60L;
+  acquire.namespace_name = "txn-a";
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":\"a1\"}");
+  rc = first_lease->update(first_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = first_lease->release(first_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  first_lease = NULL;
+
+  acquire.owner = "seed-b";
+  acquire.namespace_name = "txn-b";
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":\"b1\"}");
+  rc = second_lease->update(second_lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = second_lease->release(second_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  second_lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "txn-rollback-ns-1";
+  acquire.namespace_name = "txn-a";
+  rc = client->acquire(client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, first_lease, "{\"value\":\"a2\"}", &error);
+  acquire.namespace_name = "txn-b";
+  rc = client->acquire(client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, second_lease, "{\"value\":\"b2\"}", &error);
+
+  memset(participants, 0, sizeof(participants));
+  participants[0].namespace_name = "txn-a";
+  participants[0].key = "txn/ns-key";
+  participants[1].namespace_name = "txn-b";
+  participants[1].key = "txn/ns-key";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "txn-rollback-ns-1";
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "rolled_back");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(first_lease);
+  lc_lease_close(second_lease);
+  first_lease = NULL;
+  second_lease = NULL;
+
+  ns_a_client = open_pouch_client_with_namespace(endpoint, "txn-a");
+  ns_b_client = open_pouch_client_with_namespace(endpoint, "txn-b");
+  assert_pouch_client_state_text(ns_a_client, "txn/ns-key",
+                                 "{\"value\":\"a1\"}", &error);
+  assert_pouch_client_state_text(ns_b_client, "txn/ns-key",
+                                 "{\"value\":\"b1\"}", &error);
+
+  ns_a_client->close(ns_a_client);
+  ns_b_client->close(ns_b_client);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen(
     void **state) {
   char root[256];
@@ -7459,6 +7659,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_txn_commit_promotes_staged_state),
       cmocka_unit_test(
           test_pouch_endpoint_txn_rollback_discards_staged_state),
+      cmocka_unit_test(test_pouch_endpoint_txn_commit_spans_namespaces),
+      cmocka_unit_test(test_pouch_endpoint_txn_rollback_spans_namespaces),
       cmocka_unit_test(
           test_pouch_endpoint_txn_recovery_expired_prepare_after_reopen),
       cmocka_unit_test(
