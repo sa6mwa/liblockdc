@@ -3587,10 +3587,10 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
   return rc;
 }
 
-static int lc_pouch_client_dequeue_one(lc_client *self,
-                                       const lc_dequeue_req *req,
-                                       int with_state, lc_message **out,
-                                       int *terminal_flag, lc_error *error) {
+static int lc_pouch_client_dequeue_once(lc_client *self,
+                                        const lc_dequeue_req *req,
+                                        int with_state, lc_message **out,
+                                        int *terminal_flag, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_dequeue_opts opts;
   lc_pouch_queue_message_info info;
@@ -3680,16 +3680,54 @@ static int lc_pouch_client_dequeue_one(lc_client *self,
   return rc;
 }
 
+static int lc_pouch_client_dequeue_wait(lc_client *self,
+                                        const lc_dequeue_req *req,
+                                        int with_state, lc_message **out,
+                                        int *terminal_flag, lc_error *error) {
+  long deadline_ms;
+  long now_ms;
+  long remaining_ms;
+  long sleep_ms;
+  int rc;
+
+  if (req != NULL && req->wait_seconds < 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue wait_seconds must be non-negative",
+                        NULL, NULL, NULL);
+  }
+  deadline_ms = 0L;
+  if (req != NULL && req->wait_seconds > 0L) {
+    now_ms = lc_pouch_now_millis();
+    if (now_ms > 0L) {
+      deadline_ms = now_ms + req->wait_seconds * 1000L;
+    }
+  }
+  while (1) {
+    rc = lc_pouch_client_dequeue_once(self, req, with_state, out, terminal_flag,
+                                      error);
+    if (rc != LC_OK || out == NULL || *out != NULL || deadline_ms <= 0L) {
+      return rc;
+    }
+    now_ms = lc_pouch_now_millis();
+    if (now_ms <= 0L || now_ms >= deadline_ms) {
+      return LC_OK;
+    }
+    remaining_ms = deadline_ms - now_ms;
+    sleep_ms = remaining_ms < 100L ? remaining_ms : 100L;
+    lc_pouch_sleep_millis(sleep_ms);
+  }
+}
+
 int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
                                    lc_message **out, lc_error *error) {
-  return lc_pouch_client_dequeue_one(self, req, 0, out, NULL, error);
+  return lc_pouch_client_dequeue_wait(self, req, 0, out, NULL, error);
 }
 
 int lc_pouch_client_dequeue_with_state_method(lc_client *self,
                                               const lc_dequeue_req *req,
                                               lc_message **out,
                                               lc_error *error) {
-  return lc_pouch_client_dequeue_one(self, req, 1, out, NULL, error);
+  return lc_pouch_client_dequeue_wait(self, req, 1, out, NULL, error);
 }
 
 int lc_pouch_client_dequeue_batch_method(lc_client *self,
@@ -3714,14 +3752,25 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
                         "pouch dequeue_batch requires owner", NULL,
                         "missing_owner", NULL);
   }
+  if (req->wait_seconds < 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue wait_seconds must be non-negative",
+                        NULL, NULL, NULL);
+  }
   memset(out, 0, sizeof(*out));
   single_req = *req;
   single_req.page_size = 1;
   limit = req->page_size > 0 ? req->page_size : 1;
   for (index = 0; index < limit; ++index) {
     message = NULL;
-    rc = lc_pouch_client_dequeue_one(self, &single_req, 0, &message, NULL,
-                                     error);
+    if (index == 0) {
+      rc = lc_pouch_client_dequeue_wait(self, &single_req, 0, &message, NULL,
+                                        error);
+      single_req.wait_seconds = 0L;
+    } else {
+      rc = lc_pouch_client_dequeue_once(self, &single_req, 0, &message, NULL,
+                                        error);
+    }
     if (rc != LC_OK) {
       lc_dequeue_batch_cleanup(out);
       return rc;
@@ -3774,6 +3823,11 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
                         "pouch subscribe requires owner", NULL,
                         "missing_owner", NULL);
   }
+  if (req->wait_seconds < 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue wait_seconds must be non-negative",
+                        NULL, NULL, NULL);
+  }
   single_req = *req;
   single_req.page_size = 1;
   limit = req->page_size > 0 ? req->page_size : 1;
@@ -3788,8 +3842,8 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
   while (index < limit) {
     terminal = 0;
     message = NULL;
-    rc = lc_pouch_client_dequeue_one(self, &single_req, with_state, &message,
-                                     &terminal, error);
+    rc = lc_pouch_client_dequeue_once(self, &single_req, with_state, &message,
+                                      &terminal, error);
     if (rc != LC_OK) {
       return rc;
     }

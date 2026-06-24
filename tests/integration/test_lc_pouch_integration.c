@@ -325,6 +325,14 @@ typedef struct pouch_subscribe_wait_test {
   char message_id[128];
 } pouch_subscribe_wait_test;
 
+typedef struct pouch_delayed_enqueue_test {
+  const char *endpoint;
+  const char *queue;
+  const char *payload;
+  int rc;
+  lc_error error;
+} pouch_delayed_enqueue_test;
+
 typedef struct pouch_watch_state {
   size_t handled;
   int available;
@@ -731,6 +739,37 @@ static void *pouch_subscribe_wait_main(void *context) {
   test->rc = subscriber->subscribe(subscriber, &subscribe_req, &consumer,
                                    &test->error);
   subscriber->close(subscriber);
+  return NULL;
+}
+
+static void *pouch_delayed_enqueue_main(void *context) {
+  pouch_delayed_enqueue_test *test;
+  lc_client *producer;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_source *source;
+
+  test = (pouch_delayed_enqueue_test *)context;
+  producer = NULL;
+  source = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_error_init(&test->error);
+  test->rc = LC_ERR_TRANSPORT;
+  usleep(200000U);
+
+  open_pouch_client(test->endpoint, &producer, &test->error);
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = test->queue;
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text(test->payload, &test->error);
+  test->rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res,
+                               &test->error);
+  lc_source_close(source);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  producer->close(producer);
   return NULL;
 }
 
@@ -3591,6 +3630,82 @@ static void test_pouch_public_subscribe_waits_for_later_enqueue(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_dequeue_waits_for_later_enqueue(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *consumer;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_message *message;
+  lc_sink *sink;
+  pouch_delayed_enqueue_test enqueue_test;
+  pthread_t enqueue_thread;
+  lc_error error;
+  size_t written;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "dequeue-wait");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  memset(&stats, 0, sizeof(stats));
+  memset(&enqueue_test, 0, sizeof(enqueue_test));
+  consumer = NULL;
+  message = NULL;
+  sink = NULL;
+
+  open_pouch_client(endpoint, &consumer, &error);
+  enqueue_test.endpoint = endpoint;
+  enqueue_test.queue = "dequeue-wait";
+  enqueue_test.payload = "waited-dequeue";
+  assert_int_equal(
+      pthread_create(&enqueue_thread, NULL, pouch_delayed_enqueue_main,
+                     &enqueue_test),
+      0);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "dequeue-wait";
+  dequeue_req.owner = "wait-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.wait_seconds = 1L;
+  rc = consumer->dequeue(consumer, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  assert_string_equal(message->queue, "dequeue-wait");
+  assert_string_equal(message->payload_content_type, "text/plain");
+
+  assert_int_equal(pthread_join(enqueue_thread, NULL), 0);
+  assert_lc_ok(enqueue_test.rc, &enqueue_test.error);
+  lc_error_cleanup(&enqueue_test.error);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  written = 0U;
+  rc = message->write_payload(message, sink, &written, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(written, strlen("waited-dequeue"));
+  assert_sink_text(sink, "waited-dequeue", &error);
+  lc_sink_close(sink);
+
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "dequeue-wait";
+  rc = consumer->queue_stats(consumer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+
+  lc_queue_stats_res_cleanup(&stats);
+  consumer->close(consumer);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_consumer_service_with_state(void **state) {
   char root[256];
   char endpoint[320];
@@ -4550,6 +4665,7 @@ int main(void) {
           test_pouch_public_queue_batch_no_duplicate_acked_delivery),
       cmocka_unit_test(test_pouch_public_watch_queue_snapshots),
       cmocka_unit_test(test_pouch_public_subscribe_with_state),
+      cmocka_unit_test(test_pouch_public_dequeue_waits_for_later_enqueue),
       cmocka_unit_test(test_pouch_public_subscribe_waits_for_later_enqueue),
       cmocka_unit_test(test_pouch_public_consumer_service_with_state),
       cmocka_unit_test(

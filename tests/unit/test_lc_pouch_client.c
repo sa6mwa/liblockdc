@@ -1,6 +1,7 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,6 +180,40 @@ static lc_client *open_pouch_client_with_query_config(
 
 static lc_client *open_pouch_client(const char *endpoint) {
   return open_pouch_client_with_namespace(endpoint, "default");
+}
+
+typedef struct delayed_enqueue_context {
+  const char *endpoint;
+  const char *queue;
+  const char *body;
+  int rc;
+  lc_error error;
+} delayed_enqueue_context;
+
+static void *delayed_enqueue_main(void *arg) {
+  delayed_enqueue_context *ctx;
+  lc_client *client;
+  lc_enqueue_req req;
+  lc_enqueue_res res;
+  lc_source *source;
+
+  ctx = (delayed_enqueue_context *)arg;
+  memset(&ctx->error, 0, sizeof(ctx->error));
+  ctx->rc = LC_ERR_TRANSPORT;
+  usleep(200000U);
+  client = open_pouch_client(ctx->endpoint);
+  memset(&res, 0, sizeof(res));
+  lc_enqueue_req_init(&req);
+  req.queue = ctx->queue;
+  req.content_type = "text/plain";
+  req.visibility_timeout_seconds = 30L;
+  req.ttl_seconds = 3600L;
+  source = source_from_text(ctx->body);
+  ctx->rc = client->enqueue(client, &req, source, &res, &ctx->error);
+  lc_source_close(source);
+  lc_enqueue_res_cleanup(&res);
+  client->close(client);
+  return NULL;
 }
 
 typedef struct subscribe_test_state {
@@ -2243,6 +2278,69 @@ static void test_pouch_endpoint_queue_lifecycle(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_dequeue_waits_for_later_enqueue(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_sink *sink;
+  lc_error error;
+  delayed_enqueue_context enqueue_ctx;
+  pthread_t thread;
+  char *text;
+  size_t written;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "queue-dequeue-wait");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&enqueue_ctx, 0, sizeof(enqueue_ctx));
+  client = open_pouch_client(endpoint);
+
+  enqueue_ctx.endpoint = endpoint;
+  enqueue_ctx.queue = "jobs";
+  enqueue_ctx.body = "waited-body";
+  rc = pthread_create(&thread, NULL, delayed_enqueue_main, &enqueue_ctx);
+  assert_int_equal(rc, 0);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.wait_seconds = 1L;
+  message = NULL;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->queue, "jobs");
+  assert_string_equal(message->payload_content_type, "text/plain");
+
+  assert_int_equal(pthread_join(thread, NULL), 0);
+  assert_int_equal(enqueue_ctx.rc, LC_OK);
+  lc_error_cleanup(&enqueue_ctx.error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  written = 0U;
+  rc = message->write_payload(message, sink, &written, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(written, strlen("waited-body"));
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "waited-body");
+  free(text);
+  lc_sink_close(sink);
+
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_watch_queue_snapshots(void **state) {
   char root[256];
   char endpoint[320];
@@ -2424,6 +2522,18 @@ static void test_pouch_endpoint_queue_rejects_negative_timing_options(
   assert_string_equal(
       error.message,
       "dequeue_message visibility_timeout_seconds must be non-negative");
+  assert_null(message);
+  lc_error_cleanup(&error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.wait_seconds = -1L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch dequeue wait_seconds must be non-negative");
   assert_null(message);
   lc_error_cleanup(&error);
 
@@ -5299,6 +5409,7 @@ int main(void) {
           test_pouch_endpoint_release_preserves_state_for_reacquire),
       cmocka_unit_test(test_pouch_endpoint_lease_load_respects_json_limit),
       cmocka_unit_test(test_pouch_endpoint_queue_lifecycle),
+      cmocka_unit_test(test_pouch_endpoint_dequeue_waits_for_later_enqueue),
       cmocka_unit_test(test_pouch_endpoint_watch_queue_snapshots),
       cmocka_unit_test(
           test_pouch_endpoint_queue_rejects_negative_timing_options),
