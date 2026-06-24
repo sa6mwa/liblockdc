@@ -1356,6 +1356,118 @@ static void test_pouch_endpoint_reports_lockd_lease_validation_errors(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_attachment_selector_requires_matching_id_and_name(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_attach_req attach_req;
+  lc_attach_res first_attach;
+  lc_attach_res second_attach;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_attachment_delete_op delete_op;
+  lc_release_req release_req;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int deleted;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "attachment-selector-match");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&first_attach, 0, sizeof(first_attach));
+  memset(&second_attach, 0, sizeof(second_attach));
+  memset(&get_res, 0, sizeof(get_res));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+  sink = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "attachment-selector";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "current.txt";
+  attach_req.content_type = "text/plain";
+  source = source_from_text("old-body");
+  rc = lease->attach(lease, &attach_req, source, &first_attach, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first_attach.attachment.id);
+
+  source = source_from_text("new-body");
+  rc = lease->attach(lease, &attach_req, source, &second_attach, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_attach.attachment.id);
+  assert_string_not_equal(first_attach.attachment.id,
+                          second_attach.attachment.id);
+
+  lc_attachment_get_op_init(&get_op);
+  get_op.lease.namespace_name = lease->namespace_name;
+  get_op.lease.key = lease->key;
+  get_op.lease.lease_id = lease->lease_id;
+  get_op.lease.txn_id = lease->txn_id;
+  get_op.lease.fencing_token = lease->fencing_token;
+  get_op.selector.id = first_attach.attachment.id;
+  get_op.selector.name = "current.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 404L);
+  assert_string_equal(error.server_code, "not_found");
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_error_cleanup(&error);
+
+  lc_attachment_delete_op_init(&delete_op);
+  delete_op.lease = get_op.lease;
+  delete_op.selector.id = first_attach.attachment.id;
+  delete_op.selector.name = "current.txt";
+  deleted = 1;
+  rc = client->delete_attachment(client, &delete_op, &deleted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(deleted);
+
+  lc_attachment_get_op_init(&get_op);
+  get_op.lease = delete_op.lease;
+  get_op.selector.name = "current.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(get_res.attachment.id, second_attach.attachment.id);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "new-body");
+  free(text);
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_sink_close(sink);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  client->close(client);
+  lc_attach_res_cleanup(&first_attach);
+  lc_attach_res_cleanup(&second_attach);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_attachment_rejects_stale_lease_refs(
     void **state) {
   char root[256];
@@ -4851,6 +4963,8 @@ int main(void) {
           test_pouch_endpoint_reports_lockd_lease_validation_errors),
       cmocka_unit_test(
           test_pouch_endpoint_attach_rolls_back_object_on_meta_reject),
+      cmocka_unit_test(
+          test_pouch_endpoint_attachment_selector_requires_matching_id_and_name),
       cmocka_unit_test(
           test_pouch_endpoint_attachment_rejects_stale_lease_refs),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_or_wrong_txn_id),

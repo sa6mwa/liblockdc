@@ -1599,11 +1599,16 @@ static int lc_pouch_disk_find_object(lc_pouch_disk_store *store,
         strcmp(store->object_entries[index].key, key) != 0) {
       continue;
     }
-    if (selector->id != NULL &&
+    if (selector->id != NULL && selector->name != NULL &&
+        strcmp(store->object_entries[index].id, selector->id) == 0 &&
+        strcmp(store->object_entries[index].name, selector->name) == 0) {
+      return (int)index;
+    }
+    if (selector->id != NULL && selector->name == NULL &&
         strcmp(store->object_entries[index].id, selector->id) == 0) {
       return (int)index;
     }
-    if (selector->name != NULL &&
+    if (selector->name != NULL && selector->id == NULL &&
         strcmp(store->object_entries[index].name, selector->name) == 0) {
       return (int)index;
     }
