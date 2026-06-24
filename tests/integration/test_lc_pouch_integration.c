@@ -449,6 +449,143 @@ static void test_pouch_public_state_attachment_shared_handles(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_metadata_query_hidden_persists(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_metadata_req metadata_req;
+  lc_describe_req describe_req;
+  lc_describe_res describe_res;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_error error;
+  char *state_etag;
+  long state_version;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "metadata-query-hidden");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  state_etag = NULL;
+  memset(&describe_res, 0, sizeof(describe_res));
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/metadata-query-hidden";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"indexed\":true}", &error);
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  state_version = lease->version;
+  state_etag = strdup(lease->state_etag);
+  assert_non_null(state_etag);
+
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  metadata_req.has_if_version = 1;
+  metadata_req.if_version = state_version - 1L;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 412L);
+  assert_string_equal(error.server_code, "precondition_failed");
+  assert_int_equal(lease->version, state_version);
+  assert_false(lease->has_query_hidden);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  metadata_req.if_version = state_version;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, state_version + 1L);
+  assert_string_equal(lease->state_etag, state_etag);
+  assert_true(lease->has_query_hidden);
+  assert_true(lease->query_hidden);
+
+  lc_describe_req_init(&describe_req);
+  describe_req.key = acquire.key;
+  rc = client->describe(client, &describe_req, &describe_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(describe_res.version, lease->version);
+  assert_string_equal(describe_res.state_etag, state_etag);
+  assert_true(describe_res.has_query_hidden);
+  assert_true(describe_res.query_hidden);
+  lc_describe_res_cleanup(&describe_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(get_res.no_content);
+  assert_int_equal(get_res.version, lease->version);
+  assert_string_equal(get_res.etag, state_etag);
+  assert_sink_text(sink, "{\"indexed\":true}", &error);
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  client->close(client);
+  client = NULL;
+
+  open_pouch_client(endpoint, &reader, &error);
+  acquire.owner = "reader";
+  rc = reader->acquire(reader, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+  assert_int_equal(lease->version, state_version + 1L);
+  assert_string_equal(lease->state_etag, state_etag);
+  assert_true(lease->has_query_hidden);
+  assert_true(lease->query_hidden);
+
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 0;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, state_version + 2L);
+  assert_string_equal(lease->state_etag, state_etag);
+  assert_true(lease->has_query_hidden);
+  assert_false(lease->query_hidden);
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  reader->close(reader);
+  reader = NULL;
+
+  free(state_etag);
+  lc_describe_res_cleanup(&describe_res);
+  lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_attachment_survives_compaction_reopen(
     void **state) {
   char root[256];
@@ -1939,6 +2076,7 @@ static void test_pouch_public_remove_recreate_semantics(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_public_state_attachment_shared_handles),
+      cmocka_unit_test(test_pouch_public_metadata_query_hidden_persists),
       cmocka_unit_test(
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
