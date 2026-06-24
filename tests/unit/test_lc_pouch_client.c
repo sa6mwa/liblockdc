@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <pthread.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,10 @@
 
 #include "lc/lc.h"
 #include "lc_api_internal.h"
+
+#define TEST_POUCH_QUERY_INDEX_HEADER_SIZE 64U
+#define TEST_POUCH_QUERY_INDEX_PAYLOAD_LENGTH_OFFSET 44U
+#define TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET 56U
 
 typedef struct pouch_value_doc {
   lonejson_int64 value;
@@ -62,6 +67,82 @@ static off_t test_query_index_size(const char *root) {
   snprintf(path, sizeof(path), "%s/query.index", root);
   assert_int_equal(stat(path, &st), 0);
   return st.st_size;
+}
+
+static unsigned long test_get_u64(const unsigned char *bytes) {
+  return ((unsigned long)bytes[0]) | ((unsigned long)bytes[1] << 8) |
+         ((unsigned long)bytes[2] << 16) | ((unsigned long)bytes[3] << 24) |
+         ((unsigned long)bytes[4] << 32) | ((unsigned long)bytes[5] << 40) |
+         ((unsigned long)bytes[6] << 48) | ((unsigned long)bytes[7] << 56);
+}
+
+static void test_put_u64(unsigned char *bytes, unsigned long value) {
+  bytes[0] = (unsigned char)(value & 0xffU);
+  bytes[1] = (unsigned char)((value >> 8) & 0xffU);
+  bytes[2] = (unsigned char)((value >> 16) & 0xffU);
+  bytes[3] = (unsigned char)((value >> 24) & 0xffU);
+  bytes[4] = (unsigned char)((value >> 32) & 0xffU);
+  bytes[5] = (unsigned char)((value >> 40) & 0xffU);
+  bytes[6] = (unsigned char)((value >> 48) & 0xffU);
+  bytes[7] = (unsigned char)((value >> 56) & 0xffU);
+}
+
+static int test_bytes_contains(const unsigned char *haystack,
+                               size_t haystack_len, const char *needle,
+                               size_t needle_len) {
+  size_t index;
+
+  if (needle_len == 0U || needle_len > haystack_len) {
+    return 0;
+  }
+  for (index = 0U; index + needle_len <= haystack_len; ++index) {
+    if (memcmp(haystack + index, needle, needle_len) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void set_first_query_index_match_record_version(const char *root,
+                                                       const char *needle,
+                                                       unsigned long version) {
+  char path[512];
+  unsigned char header[TEST_POUCH_QUERY_INDEX_HEADER_SIZE];
+  unsigned char *payload;
+  size_t needle_len;
+  unsigned long payload_len;
+  off_t record_offset;
+  int fd;
+  int found;
+
+  snprintf(path, sizeof(path), "%s/query.index", root);
+  fd = open(path, O_RDWR);
+  assert_true(fd >= 0);
+  assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
+  needle_len = strlen(needle);
+  found = 0;
+  while (!found) {
+    record_offset = lseek(fd, 0, SEEK_CUR);
+    assert_true(record_offset >= 0);
+    assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
+    assert_memory_equal(header, "LCQI", 4U);
+    payload_len =
+        test_get_u64(header + TEST_POUCH_QUERY_INDEX_PAYLOAD_LENGTH_OFFSET);
+    payload = (unsigned char *)malloc((size_t)payload_len);
+    assert_non_null(payload);
+    assert_int_equal(read(fd, payload, (size_t)payload_len), payload_len);
+    if (test_bytes_contains(payload, (size_t)payload_len, needle,
+                            needle_len)) {
+      test_put_u64(header + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
+                   version);
+      assert_int_equal(lseek(fd, record_offset, SEEK_SET), record_offset);
+      assert_int_equal(write(fd, header, sizeof(header)), sizeof(header));
+      found = 1;
+    }
+    free(payload);
+  }
+  assert_int_equal(close(fd), 0);
+  assert_true(found);
 }
 
 static void corrupt_query_index_tail(const char *root) {
@@ -5383,6 +5464,120 @@ static void test_pouch_endpoint_configured_scan_ignores_corrupt_query_sidecar(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_configured_scan_ignores_absent_or_future_sidecar(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  char index_path[512];
+  lc_client *client;
+  lc_lease *lease;
+  lc_query_req req;
+  lc_query_res doc_res;
+  lc_query_res key_res;
+  lc_sink *sink;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  struct stat st;
+  char *text;
+  off_t future_size;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-scan-absent-future-sidecar");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  memset(&error, 0, sizeof(error));
+  memset(&doc_res, 0, sizeof(doc_res));
+  memset(&key_res, 0, sizeof(key_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  client = open_pouch_client(endpoint);
+  lease = pouch_acquire_query_key(client, "missing-sidecar-doc", &error);
+  pouch_save_query_json(lease, "{\"missing_sidecar\":true}", &error);
+  lease->close(lease);
+  client->close(client);
+  assert_int_equal(unlink(index_path), 0);
+
+  client = open_pouch_client_with_query_config(endpoint, "scan", NULL);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query(client, &req, sink, &doc_res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "missing-sidecar-doc"));
+  assert_non_null(strstr(text, "\"document\":{\"missing_sidecar\":true}"));
+  assert_string_equal(doc_res.return_mode, "documents");
+  assert_int_equal(doc_res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&doc_res);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query_keys(client, &req, &handler, &capture, &key_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "missing-sidecar-doc");
+  assert_string_equal(key_res.return_mode, "keys");
+  assert_int_equal(key_res.index_seq, 0UL);
+  assert_int_equal(stat(index_path, &st), 0);
+  assert_int_equal(st.st_size, 0);
+  lc_query_res_cleanup(&key_res);
+  client->close(client);
+
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+  lease = pouch_acquire_query_key(client, "future-sidecar-doc", &error);
+  pouch_save_query_json(lease, "{\"future_sidecar\":true}", &error);
+  lease->close(lease);
+  client->close(client);
+
+  set_first_query_index_match_record_version(root, "future-sidecar-doc", 99UL);
+  future_size = test_query_index_size(root);
+
+  client = open_pouch_client_with_query_config(endpoint, "scan", NULL);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query(client, &req, sink, &doc_res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "missing-sidecar-doc"));
+  assert_non_null(strstr(text, "future-sidecar-doc"));
+  assert_non_null(strstr(text, "\"document\":{\"future_sidecar\":true}"));
+  assert_string_equal(doc_res.return_mode, "documents");
+  assert_int_equal(doc_res.index_seq, 0UL);
+  assert_int_equal(test_query_index_size(root), future_size);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&doc_res);
+
+  rc = client->query_keys(client, &req, &handler, &capture, &key_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "future-sidecar-doc");
+  assert_string_equal(capture.keys[1], "missing-sidecar-doc");
+  assert_string_equal(key_res.return_mode, "keys");
+  assert_int_equal(key_res.index_seq, 0UL);
+  assert_int_equal(test_query_index_size(root), future_size);
+
+  lc_query_res_cleanup(&key_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_configured_scan_refreshes_shared_log(
     void **state) {
   char root[256];
@@ -6057,6 +6252,8 @@ int main(void) {
           test_pouch_endpoint_configured_scan_query_keys_without_hint),
       cmocka_unit_test(
           test_pouch_endpoint_configured_scan_ignores_corrupt_query_sidecar),
+      cmocka_unit_test(
+          test_pouch_endpoint_configured_scan_ignores_absent_or_future_sidecar),
       cmocka_unit_test(test_pouch_endpoint_configured_scan_refreshes_shared_log),
       cmocka_unit_test(
           test_pouch_endpoint_explicit_scan_query_keys_bypasses_fallback),
