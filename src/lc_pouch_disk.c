@@ -133,6 +133,13 @@ typedef struct lc_pouch_read_fd_cache_entry {
   struct lc_pouch_read_fd_cache_entry *next;
 } lc_pouch_read_fd_cache_entry;
 
+typedef struct lc_pouch_read_cache_owner {
+  lc_pouch_allocator allocator;
+  pthread_mutex_t mutex;
+  unsigned int refs;
+  int alive;
+} lc_pouch_read_cache_owner;
+
 typedef struct lc_pouch_disk_queue_entry {
   char *namespace_name;
   char *queue;
@@ -165,6 +172,7 @@ typedef struct lc_pouch_disk_store {
   char *writer_marker_path;
   char *query_engine;
   char *query_fallback_engine;
+  lc_pouch_read_cache_owner *read_cache_owner;
   int log_fd;
   int lock_fd;
   int query_index_fd;
@@ -242,7 +250,7 @@ static pthread_mutex_t lc_pouch_process_read_fd_cache_mutex =
 
 typedef struct lc_pouch_file_source {
   lc_pouch_allocator allocator;
-  lc_pouch_disk_store *store;
+  lc_pouch_read_cache_owner *read_cache_owner;
   char *path;
   int fd;
   unsigned long remaining;
@@ -1116,6 +1124,76 @@ static void lc_pouch_disk_lock_fd_cache_snapshot(
   (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
 }
 
+static lc_pouch_read_cache_owner *lc_pouch_read_cache_owner_create(
+    const lc_pouch_allocator *allocator, lc_error *error) {
+  lc_pouch_read_cache_owner *owner;
+  int err;
+
+  owner = (lc_pouch_read_cache_owner *)lc_pouch_calloc(allocator, 1U,
+                                                       sizeof(*owner));
+  if (owner == NULL) {
+    lc_pouch_set_nomem(error, "failed to allocate pouch read cache owner");
+    return NULL;
+  }
+  if (allocator != NULL) {
+    owner->allocator = *allocator;
+  }
+  err = pthread_mutex_init(&owner->mutex, NULL);
+  if (err != 0) {
+    errno = err;
+    lc_pouch_free(&owner->allocator, owner);
+    lc_pouch_set_errno(error, "failed to initialize pouch read cache owner");
+    return NULL;
+  }
+  owner->refs = 1U;
+  owner->alive = 1;
+  return owner;
+}
+
+static void lc_pouch_read_cache_owner_retain(
+    lc_pouch_read_cache_owner *owner) {
+  if (owner == NULL) {
+    return;
+  }
+  (void)pthread_mutex_lock(&owner->mutex);
+  owner->refs++;
+  (void)pthread_mutex_unlock(&owner->mutex);
+}
+
+static void lc_pouch_read_cache_owner_release(
+    lc_pouch_read_cache_owner *owner) {
+  lc_pouch_allocator allocator;
+  int destroy;
+
+  if (owner == NULL) {
+    return;
+  }
+  destroy = 0;
+  (void)pthread_mutex_lock(&owner->mutex);
+  if (owner->refs > 0U) {
+    owner->refs--;
+  }
+  if (owner->refs == 0U) {
+    destroy = 1;
+  }
+  (void)pthread_mutex_unlock(&owner->mutex);
+  if (destroy) {
+    allocator = owner->allocator;
+    (void)pthread_mutex_destroy(&owner->mutex);
+    lc_pouch_free(&allocator, owner);
+  }
+}
+
+static void lc_pouch_read_cache_owner_mark_closed(
+    lc_pouch_read_cache_owner *owner) {
+  if (owner == NULL) {
+    return;
+  }
+  (void)pthread_mutex_lock(&owner->mutex);
+  owner->alive = 0;
+  (void)pthread_mutex_unlock(&owner->mutex);
+}
+
 static int lc_pouch_disk_cached_read_fd_current(const char *path, int fd) {
   struct stat path_st;
   struct stat fd_st;
@@ -1208,7 +1286,7 @@ static int lc_pouch_disk_open_read_fd(lc_pouch_disk_store *store,
   return LC_OK;
 }
 
-static int lc_pouch_disk_cache_read_fd(lc_pouch_disk_store *store,
+static int lc_pouch_disk_cache_read_fd(lc_pouch_read_cache_owner *owner,
                                        char **path, int fd, lc_error *error) {
   lc_pouch_read_fd_cache_entry *entry;
   lc_pouch_read_fd_cache_entry **cursor;
@@ -1217,14 +1295,14 @@ static int lc_pouch_disk_cache_read_fd(lc_pouch_disk_store *store,
   unsigned long oldest;
   int rc;
 
-  if (store == NULL || path == NULL || *path == NULL || fd < 0) {
+  if (owner == NULL || path == NULL || *path == NULL || fd < 0) {
     if (fd >= 0 && close(fd) != 0) {
       return lc_pouch_set_errno(error, "failed to close pouch read fd");
     }
     return LC_OK;
   }
   entry = (lc_pouch_read_fd_cache_entry *)lc_pouch_calloc(
-      &store->allocator, 1U, sizeof(*entry));
+      &owner->allocator, 1U, sizeof(*entry));
   if (entry == NULL) {
     if (close(fd) != 0) {
       return lc_pouch_set_errno(error, "failed to close pouch read fd");
@@ -1234,7 +1312,7 @@ static int lc_pouch_disk_cache_read_fd(lc_pouch_disk_store *store,
     (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
     return LC_OK;
   }
-  entry->allocator = store->allocator;
+  entry->allocator = owner->allocator;
   entry->path = *path;
   entry->fd = fd;
 
@@ -1278,6 +1356,31 @@ static int lc_pouch_disk_cache_read_fd(lc_pouch_disk_store *store,
   lc_pouch_process_read_fd_cache_count++;
   (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
   *path = NULL;
+  return LC_OK;
+}
+
+static int lc_pouch_read_cache_owner_cache_fd(
+    lc_pouch_read_cache_owner *owner, char **path, int fd, lc_error *error) {
+  int alive;
+  int rc;
+
+  if (owner == NULL || path == NULL || *path == NULL || fd < 0) {
+    if (fd >= 0 && close(fd) != 0) {
+      return lc_pouch_set_errno(error, "failed to close pouch read fd");
+    }
+    return LC_OK;
+  }
+  (void)pthread_mutex_lock(&owner->mutex);
+  alive = owner->alive;
+  if (alive) {
+    rc = lc_pouch_disk_cache_read_fd(owner, path, fd, error);
+    (void)pthread_mutex_unlock(&owner->mutex);
+    return rc;
+  }
+  (void)pthread_mutex_unlock(&owner->mutex);
+  if (close(fd) != 0) {
+    return lc_pouch_set_errno(error, "failed to close pouch read fd");
+  }
   return LC_OK;
 }
 
@@ -1368,7 +1471,8 @@ static int lc_pouch_disk_make_file_source(lc_pouch_disk_store *store,
     return lc_pouch_set_nomem(error, alloc_error);
   }
   source->allocator = store->allocator;
-  source->store = store;
+  source->read_cache_owner = store->read_cache_owner;
+  lc_pouch_read_cache_owner_retain(source->read_cache_owner);
   source->path = path;
   source->fd = fd;
   source->remaining = body_length;
@@ -6287,15 +6391,13 @@ static void lc_pouch_file_source_close(lc_source *self) {
   if (source != NULL) {
     allocator = source->allocator;
     if (source->fd >= 0) {
-      if (source->store != NULL && source->path != NULL) {
-        (void)lc_pouch_disk_cache_read_fd(source->store, &source->path,
-                                          source->fd, NULL);
-      } else {
-        close(source->fd);
-      }
+      (void)lc_pouch_read_cache_owner_cache_fd(source->read_cache_owner,
+                                               &source->path, source->fd,
+                                               NULL);
       source->fd = -1;
     }
     lc_pouch_free(&allocator, source->path);
+    lc_pouch_read_cache_owner_release(source->read_cache_owner);
     lc_pouch_free(&allocator, source);
     lc_pouch_free(&allocator, self);
   }
@@ -9299,7 +9401,9 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->object_entries);
   lc_pouch_free(&allocator, store->queue_entries);
   lc_pouch_disk_close_lock_fd_cache(store);
+  lc_pouch_read_cache_owner_mark_closed(store->read_cache_owner);
   lc_pouch_disk_close_read_fd_cache(store);
+  lc_pouch_read_cache_owner_release(store->read_cache_owner);
   lc_pouch_free(&allocator, store->root_path);
   lc_pouch_free(&allocator, store->log_path);
   lc_pouch_free(&allocator, store->lock_path);
@@ -9371,6 +9475,13 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->replayed_query_index_size = (unsigned long)-1;
   store->next_version = 1L;
   store->pub.impl = store;
+  store->read_cache_owner =
+      lc_pouch_read_cache_owner_create(&store->allocator, error);
+  if (store->read_cache_owner == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    lc_pouch_disk_close(&store->pub, error);
+    return rc;
+  }
   rc = lc_pouch_disk_init_store_key_stripes(store, error);
   if (rc != LC_OK) {
     lc_pouch_disk_close(&store->pub, error);

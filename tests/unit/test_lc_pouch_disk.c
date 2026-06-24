@@ -9174,6 +9174,56 @@ static void test_read_fd_cache_reuses_descriptors_without_closing_active_readers
   test_cleanup_root(root);
 }
 
+static void test_read_source_survives_store_close_without_cache_owner(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "read-source-after-close");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  store = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("survives-close");
+  rc = store->write_state(store, "default", "kept-source", source, NULL,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+
+  rc = store->read_state(store, "default", "kept-source", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  text = read_source_text(body);
+  assert_string_equal(text, "survives-close");
+  free(text);
+  lc_source_close(body);
+
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_key_lock_wait_serializes_same_process_threads(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -10308,6 +10358,8 @@ int main(void) {
       cmocka_unit_test(test_lock_fd_cache_reuses_released_key_descriptors),
       cmocka_unit_test(
           test_read_fd_cache_reuses_descriptors_without_closing_active_readers),
+      cmocka_unit_test(
+          test_read_source_survives_store_close_without_cache_owner),
       cmocka_unit_test(test_key_lock_wait_serializes_same_process_threads),
       cmocka_unit_test(test_try_lock_key_serializes_cross_process_handles),
       cmocka_unit_test(test_write_state_waits_for_cross_process_key_lock),

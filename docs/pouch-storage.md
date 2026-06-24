@@ -501,7 +501,10 @@ read sources keep their own descriptor and are never closed by cache eviction.
 Before reusing a cached descriptor, the backend validates that its device/inode
 still matches the current `store.log` path, so compaction or log replacement
 cannot route a new reader to obsolete bytes while older active readers continue
-to read from their original descriptor.
+to read from their original descriptor. A read source may outlive the store
+handle that created it; store close marks the cache owner closed, and later
+source close must close its descriptor directly instead of reinserting it into
+the cache through freed store state.
 
 ## Performance Model
 
