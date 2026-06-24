@@ -1406,6 +1406,119 @@ static void test_pouch_public_index_query_keys_refreshes_open_reader(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_flush_index_refreshes_open_reader(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res before_flush;
+  lc_index_flush_res after_first_flush;
+  lc_index_flush_res after_second_flush;
+  lc_error error;
+  unsigned long before_seq;
+  unsigned long first_seq;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "flush-index-open-reader");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  alpha = NULL;
+  bravo = NULL;
+  source = NULL;
+  memset(&before_flush, 0, sizeof(before_flush));
+  memset(&after_first_flush, 0, sizeof(after_first_flush));
+  memset(&after_second_flush, 0, sizeof(after_second_flush));
+
+  open_pouch_client(endpoint, &reader, &error);
+  open_pouch_client(endpoint, &writer, &error);
+
+  lc_index_flush_req_init(&flush_req);
+  flush_req.namespace_name = "default";
+  rc = reader->flush_index(reader, &flush_req, &before_flush, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(before_flush.namespace_name, "default");
+  assert_string_equal(before_flush.mode, "wait");
+  assert_string_equal(before_flush.flush_id, "local");
+  assert_true(before_flush.accepted);
+  assert_true(before_flush.flushed);
+  assert_false(before_flush.pending);
+  before_seq = before_flush.index_seq;
+
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "flush-index-writer";
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+
+  acquire.key = "integration/flush-index/alpha";
+  rc = writer->acquire(writer, &acquire, &alpha, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"flush\":1}", &error);
+  rc = alpha->update(alpha, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = alpha->release(alpha, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  alpha = NULL;
+
+  lc_index_flush_req_init(&flush_req);
+  flush_req.namespace_name = "default";
+  rc = reader->flush_index(reader, &flush_req, &after_first_flush, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(after_first_flush.namespace_name, "default");
+  assert_string_equal(after_first_flush.mode, "wait");
+  assert_true(after_first_flush.accepted);
+  assert_true(after_first_flush.flushed);
+  assert_false(after_first_flush.pending);
+  assert_true(after_first_flush.index_seq > before_seq);
+  first_seq = after_first_flush.index_seq;
+
+  acquire.key = "integration/flush-index/bravo";
+  rc = writer->acquire(writer, &acquire, &bravo, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"flush\":2}", &error);
+  rc = bravo->update(bravo, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+  rc = bravo->release(bravo, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  bravo = NULL;
+
+  lc_index_flush_req_init(&flush_req);
+  flush_req.namespace_name = "default";
+  flush_req.mode = "now";
+  rc = reader->flush_index(reader, &flush_req, &after_second_flush, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(after_second_flush.namespace_name, "default");
+  assert_string_equal(after_second_flush.mode, "now");
+  assert_true(after_second_flush.accepted);
+  assert_true(after_second_flush.flushed);
+  assert_false(after_second_flush.pending);
+  assert_true(after_second_flush.index_seq > first_seq);
+
+  lc_index_flush_res_cleanup(&before_flush);
+  lc_index_flush_res_cleanup(&after_first_flush);
+  lc_index_flush_res_cleanup(&after_second_flush);
+  writer->close(writer);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_attachment_survives_compaction_reopen(
     void **state) {
   char root[256];
@@ -3418,6 +3531,7 @@ int main(void) {
           test_pouch_public_index_query_documents_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_index_query_keys_refreshes_open_reader),
+      cmocka_unit_test(test_pouch_public_flush_index_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
