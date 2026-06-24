@@ -287,8 +287,10 @@ of rewritten JSON files.
   advisory byte-range locks.
 - Keep the backend single-writer at the mutation level while allowing readers to
   refresh their indexes from committed log records.
-- Make LQL/query integration a first-class v1 requirement, but keep the storage
-  and index boundary independent from the unfinished C LQL library.
+- Make indexed query support a first-class v1 storage requirement. `liblql`
+  supplies the query language/parser/evaluator layer, but pouch must maintain
+  storage-owned indexes and expose indexed scan primitives before `liblql` is
+  ready.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
@@ -298,11 +300,13 @@ of rewritten JSON files.
 ## Non-Goals
 
 - Pouch v1 does not implement management APIs.
-- Public client surfaces that pouch does not yet implement, including LQL query
-  calls before `liblql`, namespace/index management, public transaction-control
-  replay/decision calls, and TC cluster/resource-manager calls, must return
-  deterministic local unsupported errors. A `pouch://` client must never fall
-  through to HTTP transport for an unimplemented server-side surface.
+- Public client surfaces that pouch does not yet implement, including public
+  LQL query calls before `liblql`, namespace/index management, public
+  transaction-control replay/decision calls, and TC cluster/resource-manager
+  calls, must return deterministic local unsupported errors. A `pouch://`
+  client must never fall through to HTTP transport for an unimplemented
+  server-side surface. Internal indexed metadata scans are not optional: they
+  are part of the storage engine even before the public LQL surface is enabled.
 - Pouch v1 does not implement authentication, authorization, permissions, TLS,
   or remote networking concerns.
 - Pouch is not a fake HTTP server. The client adapter may preserve the public
@@ -417,8 +421,9 @@ struct lc_pouch_store {
 
 The interface intentionally separates metadata, state blobs, and arbitrary
 objects. Queue messages and attachments can use the object plane while lease and
-state coordination use the metadata/state plane. Query hot paths need a summary
-scanner so LQL can avoid loading full metadata and payloads for every key.
+state coordination use the metadata/state plane. Query hot paths need
+storage-owned summary and posting scans so LQL, or the temporary pre-LQL query
+adapter, can avoid loading full metadata and payloads for every key.
 
 The interface should also expose optional capability functions or flags:
 
@@ -429,7 +434,7 @@ The interface should also expose optional capability functions or flags:
 - whether the backend is safe for concurrent writers to the same root
 - fsync statistics
 - compaction statistics and explicit compaction trigger
-- index flush/default tuning for LQL
+- index flush/default tuning for the storage indexer and later LQL integration
 - retention/janitor sweep for expired metadata and state
 
 The disk implementation should report that it is not a general concurrent
@@ -470,6 +475,16 @@ invariants: payload spans are copied with bounded buffers, existing read
 sources keep their old file descriptor alive across rename, foreground writers
 stay serialized, corrupt tails remain replay-truncated, and monotonic tokens
 survive compaction through a private high-water record.
+
+The single-log milestone is not the v1 search-performance shape. A searchable
+pouch store must not answer indexed queries by replaying or scanning one large
+append log. Before public query/LQL support ships, the disk backend must grow
+append-friendly index storage: compactable index segments or equivalent
+Lucene-style sidecar files with term/range postings, per-field summary columns,
+deleted/live filters, and stable key ordering. The authoritative object state
+still comes from the log, but query planning should touch index data first and
+load full metadata or payload bytes only for candidate rows that survive the
+index predicates.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
@@ -734,14 +749,22 @@ Each opened namespace maintains in-memory indexes:
 - sorted metadata key list
 - sorted object key list
 - cached decoded metadata summary for query hot paths
+- field/term/range postings for indexed metadata fields
+- live/deleted filters for compacted index segments
+- segment-level min/max and cardinality hints for fast negative matches
 
 Indexes are projections. They must be rebuildable from manifest, snapshots, and
-segments. No index file is authoritative in v1.
+segments. No index file is authoritative in v1, but index files are still
+durable performance artifacts. They may be rebuilt after corruption or version
+upgrade, yet normal indexed query execution must use them rather than falling
+back to a full log scan.
 
-LQL integration should consume a storage summary scan API. Until `liblql` is
-available, pouch can expose a narrow internal predicate/query boundary and a
-full ordered scan. The persistent format should not encode LQL-specific query
-plans.
+LQL integration should consume storage index APIs, not raw log scans. Until
+`liblql` is available, pouch should expose a narrow internal predicate/query
+boundary over indexed summaries, term/range postings, stable ordering, limits,
+and cursors. A full ordered scan may exist for diagnostics and rebuilds, but it
+must not be the only implementation path for indexed query behavior. The
+persistent format should not encode LQL-specific query plans.
 
 Query refresh contracts are storage-visible. A query that waits for a flush or
 refresh target must observe committed summary records without requiring a full
@@ -1570,8 +1593,9 @@ state after writes.
 6. Metadata and state operations with CAS and fsync.
 7. Object operations for attachments and queues.
 8. Segment sealing, manifest, and reopen recovery tests.
-9. Compaction snapshots and cleanup.
-10. Queue semantics and consumer-service adapter.
-11. LQL scan/query integration boundary, then `liblql` integration when ready.
-12. `pouch://` endpoint selection in the client engine.
-13. Benchmarks, diagnostics, packaging, and final ABI bump.
+9. Durable summary/posting index segments with rebuild and compaction tests.
+10. Compaction snapshots and cleanup.
+11. Queue semantics and consumer-service adapter.
+12. Storage indexed-query boundary, then `liblql` integration when ready.
+13. `pouch://` endpoint selection in the client engine.
+14. Benchmarks, diagnostics, packaging, and final ABI bump.
