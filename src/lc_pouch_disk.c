@@ -6321,6 +6321,7 @@ static int lc_pouch_disk_promote_staged_state(
   lc_pouch_disk_store *store;
   lc_pouch_disk_state_entry *staged;
   lc_pouch_disk_state_entry *head;
+  lc_pouch_disk_key_lock_set key_locks;
   lc_pouch_put_state_res committed;
   char *staged_key;
   int staged_index;
@@ -6344,19 +6345,28 @@ static int lc_pouch_disk_promote_staged_state(
   store = (lc_pouch_disk_store *)self->impl;
   memset(out, 0, sizeof(*out));
   memset(&committed, 0, sizeof(committed));
+  memset(&key_locks, 0, sizeof(key_locks));
   staged_key = lc_pouch_disk_make_staged_key(store, key, txn_id);
   if (staged_key == NULL) {
     return lc_pouch_set_nomem(error, "failed to allocate pouch staged key");
   }
 
+  rc = lc_pouch_disk_lock_key_pair_wait(self, namespace_name, key, staged_key,
+                                        &key_locks, error);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, staged_key);
+    return rc;
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     lc_pouch_free(&store->allocator, staged_key);
     return rc;
   }
   staged_index = lc_pouch_disk_find_entry(store, namespace_name, staged_key);
   if (staged_index < 0 || store->state_entries[staged_index].deleted) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     lc_pouch_free(&store->allocator, staged_key);
     return lc_error_set(error, LC_ERR_SERVER, 404L,
                         "pouch staged state was not found", NULL, "not_found",
@@ -6374,6 +6384,7 @@ static int lc_pouch_disk_promote_staged_state(
   }
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     lc_pouch_free(&store->allocator, staged_key);
     return rc;
   }
@@ -6387,6 +6398,10 @@ static int lc_pouch_disk_promote_staged_state(
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (lc_pouch_disk_unlock_key_set(self, &key_locks, error) != LC_OK &&
+      rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   lc_pouch_free(&store->allocator, staged_key);
@@ -6404,6 +6419,7 @@ static int lc_pouch_disk_discard_staged_state(
     lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_state_entry *staged;
+  lc_pouch_key_lock *key_lock;
   char *staged_key;
   int staged_index;
   int rc;
@@ -6416,19 +6432,28 @@ static int lc_pouch_disk_discard_staged_state(
     return rc;
   }
   store = (lc_pouch_disk_store *)self->impl;
+  key_lock = NULL;
   staged_key = lc_pouch_disk_make_staged_key(store, key, txn_id);
   if (staged_key == NULL) {
     return lc_pouch_set_nomem(error, "failed to allocate pouch staged key");
   }
 
+  rc = lc_pouch_disk_lock_key_wait(self, namespace_name, staged_key, &key_lock,
+                                   error);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, staged_key);
+    return rc;
+  }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     lc_pouch_free(&store->allocator, staged_key);
     return rc;
   }
   staged_index = lc_pouch_disk_find_entry(store, namespace_name, staged_key);
   if (staged_index < 0 || store->state_entries[staged_index].deleted) {
     lc_pouch_disk_unlock(store, error);
+    lc_pouch_disk_unlock_key(self, key_lock, error);
     lc_pouch_free(&store->allocator, staged_key);
     if (opts != NULL && opts->ignore_not_found) {
       return LC_OK;
@@ -6448,6 +6473,10 @@ static int lc_pouch_disk_discard_staged_state(
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
+      rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   lc_pouch_free(&store->allocator, staged_key);

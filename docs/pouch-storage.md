@@ -1269,6 +1269,10 @@ Promotion is intentionally link-based. It must not read the staged payload into
 memory, copy the payload into a new state record, or re-encrypt the bytes. The
 committed state head should point at the staged payload span, then compaction may
 later materialize it into a normal state-put record if doing so is safe.
+The current disk backend implements this promotion path with sorted committed
+key and staged-key guards before the append-log lock. Staged writes are ordinary
+state writes against the generated staged key, and staged discard acquires the
+staged-key guard before deleting the staged record.
 
 The staging listing contract is narrower than generic object listing. It must
 include direct staged state objects only and exclude nested staged attachment
