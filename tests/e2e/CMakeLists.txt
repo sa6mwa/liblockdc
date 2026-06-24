@@ -65,6 +65,7 @@ function(lc_add_lua_e2e_test test_name script_path)
 endfunction()
 
 lc_add_e2e_shard(lc_e2e_disk_direct LC_E2E_GROUP_DISK_DIRECT)
+lc_add_e2e_shard(lc_e2e_pouch_direct LC_E2E_GROUP_POUCH_DIRECT)
 lc_add_e2e_shard(lc_e2e_s3_direct LC_E2E_GROUP_S3_DIRECT)
 lc_add_e2e_shard(lc_e2e_mem_direct LC_E2E_GROUP_MEM_DIRECT)
 lc_add_e2e_shard(lc_e2e_disk_consumer LC_E2E_GROUP_DISK_CONSUMER)
