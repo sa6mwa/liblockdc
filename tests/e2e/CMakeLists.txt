@@ -3,12 +3,7 @@ function(lc_add_e2e_shard target_name group_macro)
   target_link_libraries(${target_name} PRIVATE ${lc_test_link_target} lc::cmocka)
   target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
   target_compile_definitions(${target_name} PRIVATE ${group_macro})
-  set_target_properties(${target_name}
-    PROPERTIES
-      C_STANDARD 99
-      C_STANDARD_REQUIRED ON
-      C_EXTENSIONS ON
-  )
+  lc_configure_c_test_target(${target_name})
   if(LOCKDC_ENABLE_COVERAGE)
     target_compile_options(${target_name} PRIVATE
       $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>

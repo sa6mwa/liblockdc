@@ -185,6 +185,26 @@ function(lc_configure_c_target target)
     endif()
 endfunction()
 
+function(lc_configure_c_test_target target)
+    set_target_properties(${target} PROPERTIES
+        C_STANDARD 99
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS ON
+    )
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(${target} PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Wno-missing-field-initializers
+            -Wno-unused-function
+        )
+        if(LOCKDC_RELEASE_WERROR AND CMAKE_BUILD_TYPE STREQUAL "Release")
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
+
 function(lc_enable_coverage_if_requested target)
     get_target_property(target_type ${target} TYPE)
     if(LOCKDC_ENABLE_COVERAGE AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")

@@ -358,7 +358,8 @@ static int fake_delivery_message_nack(lc_message *self, const lc_nack_req *req,
   consumer_test_sleep_ms(message->state->nack_delay_ms);
   pthread_mutex_lock(&message->state->mutex);
   message->state->nack_calls += 1U;
-  message->state->last_nack_intent = req != NULL ? req->intent : -1;
+  message->state->last_nack_intent =
+      req != NULL ? (int)req->intent : -1;
   pthread_mutex_unlock(&message->state->mutex);
   if (message->terminal_flag != NULL) {
     *message->terminal_flag = 1;

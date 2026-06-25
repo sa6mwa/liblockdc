@@ -1874,6 +1874,7 @@ static void test_client_open_accepts_memory_bundle_source(void **state) {
   source = NULL;
   client = NULL;
   bytes = NULL;
+  length = 0U;
   assert_true(read_file_bytes(material.client_bundle_path, &bytes, &length));
   rc = lc_source_from_memory(bytes, length, &source, &source_error);
   assert_int_equal(rc, LC_OK);
@@ -1991,6 +1992,7 @@ test_public_client_open_accepts_chunked_callback_bundle_source(void **state) {
   source = NULL;
   client = NULL;
   bytes = NULL;
+  length = 0U;
   assert_true(
       read_file_bytes(shared_tls_material.client_bundle_path, &bytes, &length));
   memset(&chunked, 0, sizeof(chunked));

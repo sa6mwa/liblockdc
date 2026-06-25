@@ -10,12 +10,7 @@ function(lc_add_unit_test target_name)
     ${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include
     ${LOCKDC_EXTERNAL_ROOT}/zlib/install/include
   )
-  set_target_properties(${target_name}
-    PROPERTIES
-      C_STANDARD 99
-      C_STANDARD_REQUIRED ON
-      C_EXTENSIONS ON
-  )
+  lc_configure_c_test_target(${target_name})
   if(LOCKDC_ENABLE_COVERAGE)
     target_compile_options(${target_name} PRIVATE
       $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>
@@ -46,12 +41,7 @@ function(lc_add_https_unit_test_case target_name case_macro)
     ${CMAKE_SOURCE_DIR}/src
   )
   target_compile_definitions(${target_name} PRIVATE ${case_macro})
-  set_target_properties(${target_name}
-    PROPERTIES
-      C_STANDARD 99
-      C_STANDARD_REQUIRED ON
-      C_EXTENSIONS ON
-  )
+  lc_configure_c_test_target(${target_name})
   if(LOCKDC_ENABLE_COVERAGE)
     target_compile_options(${target_name} PRIVATE
       $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>

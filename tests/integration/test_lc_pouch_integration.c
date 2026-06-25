@@ -3025,7 +3025,6 @@ static void test_pouch_public_transaction_attachment_rollback_discards(
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
   lc_release_req release_req;
-  lc_attachment_list_req list_req;
   lc_attachment_list attachments;
   lc_error error;
   int rc;
@@ -3110,7 +3109,6 @@ static void test_pouch_public_transaction_attachment_commit_publishes(
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
   lc_release_req release_req;
-  lc_attachment_list_req list_req;
   lc_attachment_list attachments;
   lc_attachment_get_op get_op;
   lc_attachment_get_res get_res;
