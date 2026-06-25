@@ -7356,7 +7356,17 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   lc_txn_decision_res decision_res;
   lc_tc_lease_acquire_req tc_acquire_req;
   lc_tc_lease_acquire_res tc_acquire_res;
+  lc_tc_lease_renew_req tc_renew_req;
+  lc_tc_lease_renew_res tc_renew_res;
+  lc_tc_lease_release_req tc_release_req;
+  lc_tc_lease_release_res tc_release_res;
   lc_tc_leader_res tc_leader_res;
+  lc_tc_cluster_announce_req tc_cluster_announce_req;
+  lc_tc_cluster_res tc_cluster_res;
+  lc_tc_rm_register_req tc_rm_register_req;
+  lc_tc_rm_unregister_req tc_rm_unregister_req;
+  lc_tc_rm_res tc_rm_res;
+  lc_tc_rm_list_res tc_rm_list_res;
   lc_sink *sink;
   lc_error error;
   int rc;
@@ -7372,7 +7382,12 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   memset(&replay_res, 0, sizeof(replay_res));
   memset(&decision_res, 0, sizeof(decision_res));
   memset(&tc_acquire_res, 0, sizeof(tc_acquire_res));
+  memset(&tc_renew_res, 0, sizeof(tc_renew_res));
+  memset(&tc_release_res, 0, sizeof(tc_release_res));
   memset(&tc_leader_res, 0, sizeof(tc_leader_res));
+  memset(&tc_cluster_res, 0, sizeof(tc_cluster_res));
+  memset(&tc_rm_res, 0, sizeof(tc_rm_res));
+  memset(&tc_rm_list_res, 0, sizeof(tc_rm_list_res));
   client = open_pouch_client(endpoint);
 
   sink = NULL;
@@ -7460,7 +7475,49 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
                                 &error);
   assert_pouch_unsupported(
       rc, &error, "pouch transaction coordinator is not supported");
+  lc_tc_lease_renew_req_init(&tc_renew_req);
+  tc_renew_req.leader_id = "candidate";
+  tc_renew_req.term = 1UL;
+  tc_renew_req.ttl_ms = 1000L;
+  rc = client->tc_lease_renew(client, &tc_renew_req, &tc_renew_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+  lc_tc_lease_release_req_init(&tc_release_req);
+  tc_release_req.leader_id = "candidate";
+  tc_release_req.term = 1UL;
+  rc = client->tc_lease_release(client, &tc_release_req, &tc_release_res,
+                                &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
   rc = client->tc_leader(client, &tc_leader_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+  lc_tc_cluster_announce_req_init(&tc_cluster_announce_req);
+  tc_cluster_announce_req.self_endpoint = "pouch://candidate";
+  rc = client->tc_cluster_announce(client, &tc_cluster_announce_req,
+                                   &tc_cluster_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+  rc = client->tc_cluster_leave(client, &tc_cluster_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+  rc = client->tc_cluster_list(client, &tc_cluster_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+  lc_tc_rm_register_req_init(&tc_rm_register_req);
+  tc_rm_register_req.backend_hash = "backend";
+  tc_rm_register_req.endpoint = "pouch://rm";
+  rc = client->tc_rm_register(client, &tc_rm_register_req, &tc_rm_res, &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+  lc_tc_rm_unregister_req_init(&tc_rm_unregister_req);
+  tc_rm_unregister_req.backend_hash = "backend";
+  tc_rm_unregister_req.endpoint = "pouch://rm";
+  rc = client->tc_rm_unregister(client, &tc_rm_unregister_req, &tc_rm_res,
+                                &error);
+  assert_pouch_unsupported(
+      rc, &error, "pouch transaction coordinator is not supported");
+  rc = client->tc_rm_list(client, &tc_rm_list_res, &error);
   assert_pouch_unsupported(
       rc, &error, "pouch transaction coordinator is not supported");
 

@@ -1849,6 +1849,10 @@ managed consumer state-save through both blocking `run()` and asynchronous
 acknowledgement and defer redelivery, and cross-client CAS. The optional e2e
 shard still covers broader consumer-service behavior.
 
+Current pouch client unit coverage includes deterministic local unsupported
+errors for LQL-shaped selectors, namespace mutation management, and every
+transaction-coordinator cluster/resource-manager method that pouch v1 defers.
+
 Current disk unit coverage includes queue nack and extend allocator-failure
 paths, TTL expiry, retry-exhaustion replay paths that prove failed
 redelivery-control mutations leave the active lease ackable and terminal queue
