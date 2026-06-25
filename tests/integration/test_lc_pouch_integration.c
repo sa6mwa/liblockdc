@@ -1467,6 +1467,92 @@ static void test_pouch_public_endpoint_query_engine_overrides_client_default(
   cleanup_pouch_root(root);
 }
 
+static void
+test_pouch_public_endpoint_query_fallback_overrides_client_default(
+    void **state) {
+  char root[256];
+  char writer_endpoint[320];
+  char scan_endpoint[384];
+  const char *endpoints[1];
+  lc_client_config config;
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "endpoint-query-fallback-override");
+  pouch_endpoint(writer_endpoint, sizeof(writer_endpoint), root);
+  pouch_endpoint_with_query(scan_endpoint, sizeof(scan_endpoint), root,
+                            "query_engine=scan&query_fallback_engine=none");
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+
+  open_pouch_client(writer_endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "endpoint-fallback-override-writer";
+  acquire.ttl_seconds = 60L;
+  acquire.key = "integration/query-fallback-override/alpha";
+  rc = writer->acquire(writer, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"kind\":\"fallback-override\"}", &error);
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  writer->close(writer);
+  writer = NULL;
+
+  endpoints[0] = scan_endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "default";
+  config.pouch_query_engine = "scan";
+  config.pouch_query_fallback_engine = "index";
+  rc = lc_client_open(&config, &reader, &error);
+  assert_lc_ok(rc, &error);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.refresh = "wait_for";
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch scan query does not support refresh");
+
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_scan_query_ignores_corrupt_index_sidecar(
     void **state) {
   char root[256];
@@ -9912,6 +9998,8 @@ int main(void) {
           test_pouch_public_scan_query_can_be_configured_by_endpoint),
       cmocka_unit_test(
           test_pouch_public_endpoint_query_engine_overrides_client_default),
+      cmocka_unit_test(
+          test_pouch_public_endpoint_query_fallback_overrides_client_default),
       cmocka_unit_test(
           test_pouch_public_scan_query_ignores_corrupt_index_sidecar),
       cmocka_unit_test(
