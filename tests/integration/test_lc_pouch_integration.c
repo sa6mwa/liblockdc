@@ -8104,6 +8104,152 @@ static void test_pouch_public_transaction_rollback_across_namespaces(
   cleanup_pouch_root(root);
 }
 
+static void
+test_pouch_public_transaction_prepare_replays_across_namespaces(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_client *reader_a;
+  lc_client *reader_b;
+  lc_lease *lease_a;
+  lc_lease *lease_b;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "txn-cross-namespace-prepare-replay");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  reader_a = NULL;
+  reader_b = NULL;
+  lease_a = NULL;
+  lease_b = NULL;
+  source = NULL;
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = "txn-replay-ns-a";
+  acquire.key = "integration/txn-cross-replay";
+  acquire.owner = "seed-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease_a, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":\"a1\"}", &error);
+  rc = lease_a->update(lease_a, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease_a->release(lease_a, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease_a = NULL;
+
+  acquire.namespace_name = "txn-replay-ns-b";
+  acquire.owner = "seed-b";
+  rc = client->acquire(client, &acquire, &lease_b, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":\"b1\"}", &error);
+  rc = lease_b->update(lease_b, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  rc = lease_b->release(lease_b, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease_b = NULL;
+
+  acquire.namespace_name = "txn-replay-ns-a";
+  acquire.owner = "txn-a";
+  acquire.txn_id = "integration-cross-namespace-prepare-replay-1";
+  rc = client->acquire(client, &acquire, &lease_a, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":\"a2\"}", &error);
+  rc = lease_a->update(lease_a, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  acquire.namespace_name = "txn-replay-ns-b";
+  acquire.owner = "txn-b";
+  rc = client->acquire(client, &acquire, &lease_b, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":\"b2\"}", &error);
+  rc = lease_b->update(lease_b, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  memset(participants, 0, sizeof(participants));
+  participants[0].namespace_name = "txn-replay-ns-a";
+  participants[0].key = "integration/txn-cross-replay";
+  participants[1].namespace_name = "txn-replay-ns-b";
+  participants[1].key = "integration/txn-cross-replay";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-cross-namespace-prepare-replay-1";
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
+  decision_req.expires_at_unix = 4102444800L;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "prepared");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease_a);
+  lease_a = NULL;
+  lc_lease_close(lease_b);
+  lease_b = NULL;
+  client->close(client);
+  client = NULL;
+
+  open_pouch_client(endpoint, &client, &error);
+  open_pouch_client_with_namespace(endpoint, "txn-replay-ns-a", &reader_a,
+                                   &error);
+  open_pouch_client_with_namespace(endpoint, "txn-replay-ns-b", &reader_b,
+                                   &error);
+  assert_client_state_text(reader_a, "integration/txn-cross-replay",
+                           "{\"value\":\"a1\"}", &error);
+  assert_client_state_text(reader_b, "integration/txn-cross-replay",
+                           "{\"value\":\"b1\"}", &error);
+
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "integration-cross-namespace-prepare-replay-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(replay_res.txn_id,
+                      "integration-cross-namespace-prepare-replay-1");
+  assert_string_equal(replay_res.state, "prepared");
+  lc_txn_replay_res_cleanup(&replay_res);
+
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "committed");
+  lc_txn_decision_res_cleanup(&decision_res);
+  assert_client_state_text(reader_a, "integration/txn-cross-replay",
+                           "{\"value\":\"a2\"}", &error);
+  assert_client_state_text(reader_b, "integration/txn-cross-replay",
+                           "{\"value\":\"b2\"}", &error);
+
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_lc_server_error(rc, &error, 404L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  reader_a->close(reader_a);
+  reader_b->close(reader_b);
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_txn_replay_res_cleanup(&replay_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_transaction_mutate_uses_staged_state(
     void **state) {
   char root[256];
@@ -8639,6 +8785,8 @@ int main(void) {
           test_pouch_public_transaction_commit_across_namespaces),
       cmocka_unit_test(
           test_pouch_public_transaction_rollback_across_namespaces),
+      cmocka_unit_test(
+          test_pouch_public_transaction_prepare_replays_across_namespaces),
       cmocka_unit_test(
           test_pouch_public_transaction_mutate_uses_staged_state),
       cmocka_unit_test(test_pouch_public_transaction_remove_commits_delete),
