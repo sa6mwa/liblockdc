@@ -1831,6 +1831,7 @@ semantics, client-level attachment APIs, namespace query-engine configuration
 reporting, endpoint query-engine/fallback override for document and key
 queries, scan-mode corrupt/future/absent
 query-index sidecars, indexed document and key-query replay after reopen,
+indexed document and key-query namespace isolation,
 indexed owner low-match queries over larger namespaces with candidate counts,
 transaction attachment
 replay commit/rollback, transaction attachment-delete replay commit/rollback,
