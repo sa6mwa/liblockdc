@@ -73,6 +73,10 @@ add_test(NAME release_werror_contract_test
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
     -P "${CMAKE_SOURCE_DIR}/tests/release_werror_contract_test.cmake"
 )
+set_tests_properties(release_werror_contract_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
+)
 
 add_test(NAME pouch_storage_allocator_contract_test
   COMMAND "${CMAKE_COMMAND}"
