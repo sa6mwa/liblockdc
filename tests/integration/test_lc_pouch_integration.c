@@ -5183,11 +5183,59 @@ static void run_pouch_public_query_key_selector_skips_removed(
   lc_sink_close(sink);
   sink = NULL;
 
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json =
+      "{\"key\":\"integration/key-removed/removed\","
+      "\"owner\":\"key-removed-target-owner\"}";
+  query_req.limit = 10L;
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_string_equal(text, "");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
   handler.begin = query_key_capture_begin;
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
   lc_query_req_init(&query_req);
   query_req.selector_json = "{\"key\":\"integration/key-removed/removed\"}";
+  query_req.limit = 10L;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 0U);
+  assert_int_equal(capture.begin_calls, 0U);
+  assert_int_equal(capture.chunk_calls, 0U);
+  assert_int_equal(capture.end_calls, 0U);
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  lc_query_res_cleanup(&query_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json =
+      "{\"key\":\"integration/key-removed/removed\","
+      "\"owner\":\"key-removed-target-owner\"}";
   query_req.limit = 10L;
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
                           &error);
