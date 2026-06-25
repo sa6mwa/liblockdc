@@ -5089,6 +5089,149 @@ static void test_pouch_public_index_query_keys_refreshes_open_reader(
   cleanup_pouch_root(root);
 }
 
+static void run_pouch_public_query_key_selector_skips_removed(
+    const char *root_suffix, int scan_mode) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *live;
+  lc_lease *removed;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_remove_req remove_req;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  char *text;
+  int rc;
+
+  pouch_root_path(root, sizeof(root), root_suffix);
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  live = NULL;
+  removed = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  if (scan_mode) {
+    open_pouch_scan_client(endpoint, &client, &error);
+  } else {
+    open_pouch_client(endpoint, &client, &error);
+  }
+  lc_acquire_req_init(&acquire);
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+
+  acquire.key = "integration/key-removed/live";
+  acquire.owner = "key-removed-live-owner";
+  rc = client->acquire(client, &acquire, &live, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"live\":true}", &error);
+  rc = live->update(live, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/key-removed/removed";
+  acquire.owner = "key-removed-target-owner";
+  rc = client->acquire(client, &acquire, &removed, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"removed\":true}", &error);
+  rc = removed->update(removed, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_remove_req_init(&remove_req);
+  remove_req.if_state_etag = removed->state_etag;
+  rc = removed->remove(removed, &remove_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(removed->state_etag);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{\"key\":\"integration/key-removed/removed\"}";
+  query_req.limit = 10L;
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_string_equal(text, "");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{\"key\":\"integration/key-removed/removed\"}";
+  query_req.limit = 10L;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 0U);
+  assert_int_equal(capture.begin_calls, 0U);
+  assert_int_equal(capture.chunk_calls, 0U);
+  assert_int_equal(capture.end_calls, 0U);
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  lc_query_res_cleanup(&query_res);
+
+  lc_release_req_init(&release_req);
+  rc = live->release(live, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  live = NULL;
+  rc = removed->release(removed, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  removed = NULL;
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_scan_query_key_selector_skips_removed(
+    void **state) {
+  (void)state;
+  run_pouch_public_query_key_selector_skips_removed(
+      "scan-query-key-removed", 1);
+}
+
+static void test_pouch_public_index_query_key_selector_skips_removed(
+    void **state) {
+  (void)state;
+  run_pouch_public_query_key_selector_skips_removed(
+      "index-query-key-removed", 0);
+}
+
 static void test_pouch_public_flush_index_refreshes_open_reader(void **state) {
   char root[256];
   char endpoint[320];
@@ -12276,6 +12419,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_scan_query_key_selector_filters_candidates),
       cmocka_unit_test(
+          test_pouch_public_scan_query_key_selector_skips_removed),
+      cmocka_unit_test(
           test_pouch_public_scan_query_documents_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_scan_query_keys_refreshes_open_reader),
@@ -12302,6 +12447,8 @@ int main(void) {
           test_pouch_public_index_query_owner_selector_narrows_large_namespace),
       cmocka_unit_test(
           test_pouch_public_index_query_key_selector_filters_candidates),
+      cmocka_unit_test(
+          test_pouch_public_index_query_key_selector_skips_removed),
       cmocka_unit_test(
           test_pouch_public_index_query_keys_refreshes_open_reader),
       cmocka_unit_test(test_pouch_public_flush_index_refreshes_open_reader),
