@@ -3694,6 +3694,243 @@ static void test_pouch_public_index_query_paginates_documents_and_keys(
   cleanup_pouch_root(root);
 }
 
+static void run_pouch_public_query_paginates_across_removed_candidate(
+    const char *root_suffix, int scan_mode) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *leases[4];
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_remove_req remove_req;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  char *text;
+  const char *keys[4];
+  const char *payloads[4];
+  size_t index;
+  int rc;
+
+  pouch_root_path(root, sizeof(root), root_suffix);
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  keys[0] = "integration/page-removed/alpha";
+  keys[1] = "integration/page-removed/bravo";
+  keys[2] = "integration/page-removed/charlie";
+  keys[3] = "integration/page-removed/delta";
+  payloads[0] = "{\"page\":\"alpha\"}";
+  payloads[1] = "{\"page\":\"bravo\"}";
+  payloads[2] = "{\"page\":\"charlie\"}";
+  payloads[3] = "{\"page\":\"delta\"}";
+  memset(leases, 0, sizeof(leases));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  if (scan_mode) {
+    open_pouch_scan_client(endpoint, &client, &error);
+  } else {
+    open_pouch_client(endpoint, &client, &error);
+  }
+
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "page-removed-writer";
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  for (index = 0U; index < 4U; ++index) {
+    acquire.key = keys[index];
+    rc = client->acquire(client, &acquire, &leases[index], &error);
+    assert_lc_ok(rc, &error);
+    source = source_from_text(payloads[index], &error);
+    rc = leases[index]->update(leases[index], source, &update_opts, &error);
+    lc_source_close(source);
+    source = NULL;
+    assert_lc_ok(rc, &error);
+  }
+
+  lc_remove_req_init(&remove_req);
+  remove_req.if_state_etag = leases[1]->state_etag;
+  rc = leases[1]->remove(leases[1], &remove_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(leases[1]->state_etag);
+
+  lc_release_req_init(&release_req);
+  for (index = 0U; index < 4U; ++index) {
+    rc = leases[index]->release(leases[index], &release_req, &error);
+    assert_lc_ok(rc, &error);
+    leases[index] = NULL;
+  }
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 1L;
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/page-removed/alpha\""));
+  assert_non_null(strstr(text, "\"document\":{\"page\":\"alpha\"}"));
+  assert_null(strstr(text, "integration/page-removed/bravo"));
+  assert_string_equal(query_res.cursor, "integration/page-removed/alpha");
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.cursor = "integration/page-removed/alpha";
+  query_req.limit = 1L;
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_null(strstr(text, "integration/page-removed/alpha"));
+  assert_null(strstr(text, "integration/page-removed/bravo"));
+  assert_non_null(
+      strstr(text, "\"key\":\"integration/page-removed/charlie\""));
+  assert_non_null(strstr(text, "\"document\":{\"page\":\"charlie\"}"));
+  assert_string_equal(query_res.cursor, "integration/page-removed/charlie");
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.cursor = "integration/page-removed/charlie";
+  query_req.limit = 1L;
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/page-removed/delta\""));
+  assert_non_null(strstr(text, "\"document\":{\"page\":\"delta\"}"));
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 1L;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "integration/page-removed/alpha");
+  assert_string_equal(query_res.cursor, "integration/page-removed/alpha");
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  lc_query_res_cleanup(&query_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.cursor = "integration/page-removed/alpha";
+  query_req.limit = 1L;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "integration/page-removed/charlie");
+  assert_string_equal(query_res.cursor, "integration/page-removed/charlie");
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  lc_query_res_cleanup(&query_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.cursor = "integration/page-removed/charlie";
+  query_req.limit = 1L;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "integration/page-removed/delta");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  if (scan_mode) {
+    assert_int_equal(query_res.index_seq, 0UL);
+  } else {
+    assert_true(query_res.index_seq > 0UL);
+  }
+  lc_query_res_cleanup(&query_res);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void
+test_pouch_public_scan_query_paginates_across_removed_candidate(void **state) {
+  (void)state;
+  run_pouch_public_query_paginates_across_removed_candidate(
+      "scan-query-page-removed", 1);
+}
+
+static void
+test_pouch_public_index_query_paginates_across_removed_candidate(void **state) {
+  (void)state;
+  run_pouch_public_query_paginates_across_removed_candidate(
+      "index-query-page-removed", 0);
+}
+
 static void test_pouch_public_index_query_wait_for_refreshes_open_reader(
     void **state) {
   char root[256];
@@ -12469,6 +12706,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_scan_query_key_selector_skips_removed),
       cmocka_unit_test(
+          test_pouch_public_scan_query_paginates_across_removed_candidate),
+      cmocka_unit_test(
           test_pouch_public_scan_query_documents_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_scan_query_keys_refreshes_open_reader),
@@ -12479,6 +12718,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_index_query_isolates_namespaces),
       cmocka_unit_test(
           test_pouch_public_index_query_paginates_documents_and_keys),
+      cmocka_unit_test(
+          test_pouch_public_index_query_paginates_across_removed_candidate),
       cmocka_unit_test(
           test_pouch_public_index_query_wait_for_refreshes_open_reader),
       cmocka_unit_test(
