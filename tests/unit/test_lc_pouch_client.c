@@ -6518,6 +6518,14 @@ static void test_pouch_endpoint_scan_query_rejects_lql_selector(void **state) {
                            "pouch scan query supports only match-all, key, "
                            "owner, or key+owner selector");
 
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"alpha\",\"value\":\"beta\"}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_pouch_unsupported(rc, &error,
+                           "pouch scan query supports only match-all, key, "
+                           "owner, or key+owner selector");
+
   lc_sink_close(sink);
   client->close(client);
   lc_error_cleanup(&error);
@@ -7174,6 +7182,16 @@ static void test_pouch_endpoint_scan_query_keys_rejects_lql_selector(
       "key+owner selector");
   assert_int_equal(capture.key_count, 0U);
 
+  lc_query_req_init(&req);
+  req.selector_json = "{\"owner\":\"owner-a\",\"value\":\"beta\"}";
+  req.engine = "scan";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_pouch_unsupported(
+      rc, &error,
+      "pouch scan query_keys supports only match-all, key, owner, or "
+      "key+owner selector");
+  assert_int_equal(capture.key_count, 0U);
+
   client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -7345,12 +7363,26 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   assert_pouch_unsupported(rc, &error,
                            "pouch index query supports only match-all, key, "
                            "owner, or key+owner selector");
+
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{\"key\":\"alpha\",\"value\":\"beta\"}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_pouch_unsupported(rc, &error,
+                           "pouch index query supports only match-all, key, "
+                           "owner, or key+owner selector");
   lc_sink_close(sink);
 
   memset(&key_handler, 0, sizeof(key_handler));
   key_handler.begin = query_key_begin_unexpected;
   key_handler.chunk = query_key_chunk_unexpected;
   key_handler.end = query_key_end_unexpected;
+  rc = client->query_keys(client, &query_req, &key_handler, NULL, &query_res,
+                          &error);
+  assert_pouch_unsupported(rc, &error,
+                           "pouch index query_keys supports only match-all, "
+                           "key, owner, or key+owner selector");
+
+  query_req.selector_json = "{\"owner\":\"owner-a\",\"value\":\"beta\"}";
   rc = client->query_keys(client, &query_req, &key_handler, NULL, &query_res,
                           &error);
   assert_pouch_unsupported(rc, &error,

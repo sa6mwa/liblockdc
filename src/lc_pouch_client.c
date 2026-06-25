@@ -5219,6 +5219,256 @@ static int lc_pouch_query_selector_is_match_all(const char *selector_json) {
   return *p == '\0';
 }
 
+static int lc_pouch_json_is_ws(char c) {
+  return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static const char *lc_pouch_json_skip_ws(const char *p) {
+  while (lc_pouch_json_is_ws(*p)) {
+    ++p;
+  }
+  return p;
+}
+
+static int lc_pouch_json_hex_value(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return c - 'a' + 10;
+  }
+  if (c >= 'A' && c <= 'F') {
+    return c - 'A' + 10;
+  }
+  return -1;
+}
+
+static int lc_pouch_query_selector_append_name_char(char *name,
+                                                    size_t *name_len,
+                                                    int *allowed,
+                                                    int value) {
+  if (value < 0 || value > 127) {
+    *allowed = 0;
+    return 1;
+  }
+  if (*name_len >= 5U) {
+    *allowed = 0;
+    return 1;
+  }
+  name[*name_len] = (char)value;
+  ++*name_len;
+  return 1;
+}
+
+static int lc_pouch_query_selector_parse_field_name(const char **cursor,
+                                                    int *allowed) {
+  const char *p;
+  char name[6];
+  size_t name_len;
+  int value;
+  int hex;
+  int index;
+
+  p = *cursor;
+  name_len = 0U;
+  *allowed = 1;
+  if (*p++ != '"') {
+    return 0;
+  }
+  while (*p != '\0' && *p != '"') {
+    if ((unsigned char)*p < 0x20U) {
+      return 0;
+    }
+    if (*p == '\\') {
+      ++p;
+      switch (*p) {
+      case '"':
+      case '\\':
+      case '/':
+        value = *p;
+        break;
+      case 'b':
+        value = '\b';
+        break;
+      case 'f':
+        value = '\f';
+        break;
+      case 'n':
+        value = '\n';
+        break;
+      case 'r':
+        value = '\r';
+        break;
+      case 't':
+        value = '\t';
+        break;
+      case 'u':
+        value = 0;
+        for (index = 0; index < 4; ++index) {
+          ++p;
+          hex = lc_pouch_json_hex_value(*p);
+          if (hex < 0) {
+            return 0;
+          }
+          value = (value << 4) | hex;
+        }
+        break;
+      default:
+        return 0;
+      }
+    } else {
+      value = *p;
+    }
+    if (!lc_pouch_query_selector_append_name_char(name, &name_len, allowed,
+                                                  value)) {
+      return 0;
+    }
+    ++p;
+  }
+  if (*p != '"') {
+    return 0;
+  }
+  name[name_len] = '\0';
+  if (strcmp(name, "key") != 0 && strcmp(name, "owner") != 0) {
+    *allowed = 0;
+  }
+  *cursor = p + 1;
+  return 1;
+}
+
+static int lc_pouch_query_selector_skip_json_string(const char **cursor) {
+  const char *p;
+  int index;
+
+  p = *cursor;
+  if (*p++ != '"') {
+    return 0;
+  }
+  while (*p != '\0' && *p != '"') {
+    if ((unsigned char)*p < 0x20U) {
+      return 0;
+    }
+    if (*p == '\\') {
+      ++p;
+      switch (*p) {
+      case '"':
+      case '\\':
+      case '/':
+      case 'b':
+      case 'f':
+      case 'n':
+      case 'r':
+      case 't':
+        break;
+      case 'u':
+        for (index = 0; index < 4; ++index) {
+          ++p;
+          if (lc_pouch_json_hex_value(*p) < 0) {
+            return 0;
+          }
+        }
+        break;
+      default:
+        return 0;
+      }
+    }
+    ++p;
+  }
+  if (*p != '"') {
+    return 0;
+  }
+  *cursor = p + 1;
+  return 1;
+}
+
+static int lc_pouch_query_selector_skip_json_value(const char **cursor) {
+  const char *p;
+  int depth;
+
+  p = lc_pouch_json_skip_ws(*cursor);
+  depth = 0;
+  while (*p != '\0') {
+    if (*p == '"') {
+      if (!lc_pouch_query_selector_skip_json_string(&p)) {
+        return 0;
+      }
+      continue;
+    }
+    if (*p == '{' || *p == '[') {
+      ++depth;
+      ++p;
+      continue;
+    }
+    if (*p == '}') {
+      if (depth == 0) {
+        *cursor = p;
+        return 1;
+      }
+      --depth;
+      ++p;
+      continue;
+    }
+    if (*p == ']') {
+      if (depth == 0) {
+        return 0;
+      }
+      --depth;
+      ++p;
+      continue;
+    }
+    if (*p == ',' && depth == 0) {
+      *cursor = p;
+      return 1;
+    }
+    ++p;
+  }
+  return 0;
+}
+
+static int
+lc_pouch_query_selector_has_only_exact_fields(const char *selector_json) {
+  const char *p;
+  int allowed;
+
+  if (selector_json == NULL) {
+    return 0;
+  }
+  p = lc_pouch_json_skip_ws(selector_json);
+  if (*p++ != '{') {
+    return 0;
+  }
+  p = lc_pouch_json_skip_ws(p);
+  if (*p == '}') {
+    ++p;
+    p = lc_pouch_json_skip_ws(p);
+    return *p == '\0';
+  }
+  for (;;) {
+    p = lc_pouch_json_skip_ws(p);
+    if (!lc_pouch_query_selector_parse_field_name(&p, &allowed) || !allowed) {
+      return 0;
+    }
+    p = lc_pouch_json_skip_ws(p);
+    if (*p++ != ':') {
+      return 0;
+    }
+    if (!lc_pouch_query_selector_skip_json_value(&p)) {
+      return 0;
+    }
+    p = lc_pouch_json_skip_ws(p);
+    if (*p == ',') {
+      ++p;
+      continue;
+    }
+    if (*p == '}') {
+      ++p;
+      p = lc_pouch_json_skip_ws(p);
+      return *p == '\0';
+    }
+    return 0;
+  }
+}
+
 typedef enum lc_pouch_query_selector_kind {
   LC_POUCH_QUERY_SELECTOR_UNSUPPORTED = 0,
   LC_POUCH_QUERY_SELECTOR_MATCH_ALL = 1,
@@ -5262,6 +5512,9 @@ lc_pouch_query_selector_kind_parse(const char *selector_json, char **key_out,
     return LC_POUCH_QUERY_SELECTOR_MATCH_ALL;
   }
   if (selector_json == NULL) {
+    return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
+  }
+  if (!lc_pouch_query_selector_has_only_exact_fields(selector_json)) {
     return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
   }
   runtime = lc_thread_lonejson_runtime();
