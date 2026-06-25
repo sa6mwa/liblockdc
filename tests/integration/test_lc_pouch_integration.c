@@ -1544,6 +1544,60 @@ static void test_pouch_public_scan_query_can_be_configured_by_endpoint(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_namespace_config_reports_query_mode(
+    void **state) {
+  char root[256];
+  char default_endpoint[320];
+  char scan_endpoint[384];
+  lc_client *default_client;
+  lc_client *scan_client;
+  lc_namespace_config_req req;
+  lc_namespace_config_res res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "namespace-config-query-mode");
+  pouch_endpoint(default_endpoint, sizeof(default_endpoint), root);
+  pouch_endpoint_with_query(scan_endpoint, sizeof(scan_endpoint), root,
+                            "query_engine=scan&query_fallback_engine=index");
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  default_client = NULL;
+  scan_client = NULL;
+  memset(&res, 0, sizeof(res));
+
+  open_pouch_client(default_endpoint, &default_client, &error);
+  lc_namespace_config_req_init(&req);
+  req.namespace_name = "default";
+  rc = default_client->get_namespace_config(default_client, &req, &res,
+                                            &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(res.namespace_name, "default");
+  assert_string_equal(res.preferred_engine, "index");
+  assert_string_equal(res.fallback_engine, "none");
+  assert_string_equal(res.correlation_id, "pouch-namespace-config");
+  lc_namespace_config_res_cleanup(&res);
+  default_client->close(default_client);
+  default_client = NULL;
+
+  open_pouch_client(scan_endpoint, &scan_client, &error);
+  memset(&res, 0, sizeof(res));
+  lc_namespace_config_req_init(&req);
+  req.namespace_name = "tenant-a";
+  rc = scan_client->get_namespace_config(scan_client, &req, &res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(res.namespace_name, "tenant-a");
+  assert_string_equal(res.preferred_engine, "scan");
+  assert_string_equal(res.fallback_engine, "index");
+  assert_string_equal(res.correlation_id, "pouch-namespace-config");
+  lc_namespace_config_res_cleanup(&res);
+
+  scan_client->close(scan_client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_endpoint_query_engine_overrides_client_default(
     void **state) {
   char root[256];
@@ -10819,6 +10873,8 @@ int main(void) {
           test_pouch_public_scan_query_documents_replays_after_reopen),
       cmocka_unit_test(
           test_pouch_public_scan_query_can_be_configured_by_endpoint),
+      cmocka_unit_test(
+          test_pouch_public_namespace_config_reports_query_mode),
       cmocka_unit_test(
           test_pouch_public_endpoint_query_engine_overrides_client_default),
       cmocka_unit_test(

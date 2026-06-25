@@ -1827,8 +1827,9 @@ Current default local integration coverage in `tests/integration` exercises
 public `pouch://` clients sharing one disk root for state and attachment
 persistence, query-hidden metadata versioning and persistence, attachment
 prevent-overwrite and overwrite semantics, attachment delete/delete-all
-semantics, client-level attachment APIs, endpoint query-engine/fallback
-override for document and key queries, scan-mode corrupt/future/absent
+semantics, client-level attachment APIs, namespace query-engine configuration
+reporting, endpoint query-engine/fallback override for document and key
+queries, scan-mode corrupt/future/absent
 query-index sidecars, indexed document and key-query replay after reopen,
 transaction attachment
 replay commit/rollback, transaction attachment-delete replay commit/rollback,
