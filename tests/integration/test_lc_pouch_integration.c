@@ -1,6 +1,7 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,9 @@
 #include <cmocka.h>
 
 #include "lc/lc.h"
+
+#define POUCH_TEST_QUERY_INDEX_HEADER_SIZE 64U
+#define POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET 56U
 
 static void assert_lc_ok(int rc, lc_error *error) {
   if (rc != LC_OK) {
@@ -102,6 +106,86 @@ static void remove_query_index_sidecar(const char *root) {
 
   snprintf(path, sizeof(path), "%s/query.index", root);
   unlink(path);
+}
+
+static unsigned long pouch_test_get_u32(const unsigned char *src) {
+  return ((unsigned long)src[0]) | (((unsigned long)src[1]) << 8) |
+         (((unsigned long)src[2]) << 16) | (((unsigned long)src[3]) << 24);
+}
+
+static unsigned long pouch_test_get_u64(const unsigned char *src) {
+  return pouch_test_get_u32(src) | (pouch_test_get_u32(src + 4) << 32);
+}
+
+static void pouch_test_put_u32(unsigned char *dst, unsigned long value) {
+  dst[0] = (unsigned char)(value & 255UL);
+  dst[1] = (unsigned char)((value >> 8) & 255UL);
+  dst[2] = (unsigned char)((value >> 16) & 255UL);
+  dst[3] = (unsigned char)((value >> 24) & 255UL);
+}
+
+static void set_first_query_index_match_record_version(const char *root,
+                                                       const char *needle,
+                                                       unsigned long version) {
+  char path[512];
+  unsigned char header[POUCH_TEST_QUERY_INDEX_HEADER_SIZE];
+  unsigned char *payload;
+  size_t needle_len;
+  unsigned long payload_len;
+  off_t record_offset;
+  int fd;
+  int found;
+
+  snprintf(path, sizeof(path), "%s/query.index", root);
+  fd = open(path, O_RDWR);
+  assert_true(fd >= 0);
+  assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
+  needle_len = strlen(needle);
+  found = 0;
+  while (!found) {
+    record_offset = lseek(fd, 0, SEEK_CUR);
+    assert_true(record_offset >= 0);
+    assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
+    assert_memory_equal(header, "LCQI", 4U);
+    payload_len = pouch_test_get_u64(header + 44);
+    payload = (unsigned char *)malloc((size_t)payload_len);
+    assert_non_null(payload);
+    assert_int_equal(read(fd, payload, (size_t)payload_len), payload_len);
+    if (payload_len >= needle_len) {
+      size_t index;
+
+      for (index = 0U; index + needle_len <= payload_len; ++index) {
+        if (memcmp(payload + index, needle, needle_len) == 0) {
+          pouch_test_put_u32(
+              header + POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET, version);
+          assert_int_equal(
+              lseek(fd,
+                    record_offset +
+                        POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET,
+                    SEEK_SET),
+              record_offset + POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET);
+          assert_int_equal(
+              write(fd,
+                    header + POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET,
+                    4U),
+              4);
+          found = 1;
+          break;
+        }
+      }
+    }
+    free(payload);
+    if (!found) {
+      assert_int_equal(
+          lseek(fd,
+                record_offset + POUCH_TEST_QUERY_INDEX_HEADER_SIZE +
+                    (off_t)payload_len,
+                SEEK_SET),
+          record_offset + POUCH_TEST_QUERY_INDEX_HEADER_SIZE +
+              (off_t)payload_len);
+    }
+  }
+  close(fd);
 }
 
 static lc_source *source_from_bytes(const void *bytes, size_t length,
@@ -1720,6 +1804,112 @@ static void test_pouch_public_scan_query_ignores_corrupt_index_sidecar(
   free(text);
   lc_query_res_cleanup(&query_res);
   lc_sink_close(sink);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_scan_query_ignores_future_index_sidecar(
+    void **state) {
+  char root[256];
+  char writer_endpoint[320];
+  char scan_endpoint[384];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "scan-query-future-index");
+  pouch_endpoint(writer_endpoint, sizeof(writer_endpoint), root);
+  pouch_endpoint_with_query(scan_endpoint, sizeof(scan_endpoint), root,
+                            "query_engine=scan");
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_client(writer_endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "scan-future-index-writer";
+  acquire.ttl_seconds = 60L;
+  acquire.key = "integration/query-future-index/alpha";
+  rc = writer->acquire(writer, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"kind\":\"scan-future-index\"}", &error);
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  writer->close(writer);
+  writer = NULL;
+
+  set_first_query_index_match_record_version(root, "query-future-index", 99UL);
+
+  open_pouch_client(scan_endpoint, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+
+  text = sink_text(sink, &error);
+  assert_non_null(
+      strstr(text, "\"key\":\"integration/query-future-index/alpha\""));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"scan-future-index\"}"));
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_int_equal(query_res.index_seq, 0UL);
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = reader->query_keys(reader, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "integration/query-future-index/alpha");
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_int_equal(query_res.index_seq, 0UL);
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+
+  lc_query_res_cleanup(&query_res);
   reader->close(reader);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
@@ -10174,6 +10364,8 @@ int main(void) {
           test_pouch_public_endpoint_query_keys_fallback_overrides_client_default),
       cmocka_unit_test(
           test_pouch_public_scan_query_ignores_corrupt_index_sidecar),
+      cmocka_unit_test(
+          test_pouch_public_scan_query_ignores_future_index_sidecar),
       cmocka_unit_test(
           test_pouch_public_scan_query_ignores_absent_index_sidecar),
       cmocka_unit_test(
