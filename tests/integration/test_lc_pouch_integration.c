@@ -97,6 +97,13 @@ static void corrupt_query_index_sidecar(const char *root) {
   assert_int_equal(fclose(file), 0);
 }
 
+static void remove_query_index_sidecar(const char *root) {
+  char path[512];
+
+  snprintf(path, sizeof(path), "%s/query.index", root);
+  unlink(path);
+}
+
 static lc_source *source_from_bytes(const void *bytes, size_t length,
                                     lc_error *error) {
   lc_source *source;
@@ -1446,6 +1453,111 @@ static void test_pouch_public_scan_query_ignores_corrupt_index_sidecar(
   free(text);
   lc_query_res_cleanup(&query_res);
   lc_sink_close(sink);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_scan_query_ignores_absent_index_sidecar(
+    void **state) {
+  char root[256];
+  char writer_endpoint[320];
+  char scan_endpoint[384];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "scan-query-absent-index");
+  pouch_endpoint(writer_endpoint, sizeof(writer_endpoint), root);
+  pouch_endpoint_with_query(scan_endpoint, sizeof(scan_endpoint), root,
+                            "query_engine=scan");
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_client(writer_endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "scan-absent-index-writer";
+  acquire.ttl_seconds = 60L;
+  acquire.key = "integration/query-absent-index/alpha";
+  rc = writer->acquire(writer, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"kind\":\"scan-absent-index\"}", &error);
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  writer->close(writer);
+  writer = NULL;
+
+  remove_query_index_sidecar(root);
+  open_pouch_client(scan_endpoint, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+
+  text = sink_text(sink, &error);
+  assert_non_null(
+      strstr(text, "\"key\":\"integration/query-absent-index/alpha\""));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"scan-absent-index\"}"));
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_int_equal(query_res.index_seq, 0UL);
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  rc = reader->query_keys(reader, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0],
+                      "integration/query-absent-index/alpha");
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_int_equal(query_res.index_seq, 0UL);
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+
+  lc_query_res_cleanup(&query_res);
   reader->close(reader);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
@@ -9708,6 +9820,8 @@ int main(void) {
           test_pouch_public_scan_query_can_be_configured_by_endpoint),
       cmocka_unit_test(
           test_pouch_public_scan_query_ignores_corrupt_index_sidecar),
+      cmocka_unit_test(
+          test_pouch_public_scan_query_ignores_absent_index_sidecar),
       cmocka_unit_test(
           test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh),
       cmocka_unit_test(
