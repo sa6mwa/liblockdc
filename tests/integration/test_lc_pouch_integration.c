@@ -407,6 +407,17 @@ typedef struct pouch_consumer_ack_test {
   lc_consumer_service *service;
   size_t handled;
   char message_id[128];
+  unsigned int starts;
+  unsigned int stops;
+  int start_attempt;
+  int stop_attempt;
+  int start_with_state;
+  int stop_with_state;
+  int stop_had_error;
+  char start_name[64];
+  char stop_name[64];
+  char start_queue[64];
+  char stop_queue[64];
 } pouch_consumer_ack_test;
 
 typedef struct pouch_consumer_defer_test {
@@ -798,6 +809,45 @@ static int pouch_consumer_auto_ack_handle(void *context,
   rc = lc_consumer_service_stop(state->service);
   assert_int_equal(rc, LC_OK);
   return LC_OK;
+}
+
+static void pouch_consumer_lifecycle_on_start(
+    void *context, const lc_consumer_lifecycle_event *event) {
+  pouch_consumer_ack_test *state;
+
+  state = (pouch_consumer_ack_test *)context;
+  assert_non_null(state);
+  assert_non_null(event);
+  assert_non_null(event->name);
+  assert_non_null(event->queue);
+  assert_null(event->error);
+  assert_int_equal(state->starts, 0U);
+
+  state->starts += 1U;
+  state->start_attempt = event->attempt;
+  state->start_with_state = event->with_state;
+  snprintf(state->start_name, sizeof(state->start_name), "%s", event->name);
+  snprintf(state->start_queue, sizeof(state->start_queue), "%s",
+           event->queue);
+}
+
+static void pouch_consumer_lifecycle_on_stop(
+    void *context, const lc_consumer_lifecycle_event *event) {
+  pouch_consumer_ack_test *state;
+
+  state = (pouch_consumer_ack_test *)context;
+  assert_non_null(state);
+  assert_non_null(event);
+  assert_non_null(event->name);
+  assert_non_null(event->queue);
+  assert_int_equal(state->stops, 0U);
+
+  state->stops += 1U;
+  state->stop_attempt = event->attempt;
+  state->stop_with_state = event->with_state;
+  state->stop_had_error = event->error != NULL;
+  snprintf(state->stop_name, sizeof(state->stop_name), "%s", event->name);
+  snprintf(state->stop_queue, sizeof(state->stop_queue), "%s", event->queue);
 }
 
 static int pouch_consumer_defer_handle(void *context,
@@ -10372,6 +10422,98 @@ static void test_pouch_public_consumer_service_auto_ack(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_consumer_service_lifecycle_callbacks(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  pouch_consumer_ack_test consumer_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "consumer-lifecycle");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  source = NULL;
+  service = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&consumer_state, 0, sizeof(consumer_state));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "managed-lifecycle";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("auto-work", &error);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.name = "managed-lifecycle-name";
+  consumer_config.request.queue = "managed-lifecycle";
+  consumer_config.request.owner = "managed-lifecycle-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.handle = pouch_consumer_auto_ack_handle;
+  consumer_config.on_start = pouch_consumer_lifecycle_on_start;
+  consumer_config.on_stop = pouch_consumer_lifecycle_on_stop;
+  consumer_config.context = &consumer_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(service);
+  consumer_state.service = service;
+  rc = service->run(service, &error);
+  assert_lc_ok(rc, &error);
+  service->close(service);
+  service = NULL;
+
+  assert_int_equal(consumer_state.handled, 1U);
+  assert_string_equal(consumer_state.message_id, enqueue_res.message_id);
+  assert_int_equal(consumer_state.starts, 1U);
+  assert_int_equal(consumer_state.stops, 1U);
+  assert_int_equal(consumer_state.start_attempt, 1);
+  assert_int_equal(consumer_state.stop_attempt, 1);
+  assert_int_equal(consumer_state.start_with_state, 0);
+  assert_int_equal(consumer_state.stop_with_state, 0);
+  assert_false(consumer_state.stop_had_error);
+  assert_string_equal(consumer_state.start_name, "managed-lifecycle-name");
+  assert_string_equal(consumer_state.stop_name, "managed-lifecycle-name");
+  assert_string_equal(consumer_state.start_queue, "managed-lifecycle");
+  assert_string_equal(consumer_state.stop_queue, "managed-lifecycle");
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "managed-lifecycle";
+  rc = client->queue_stats(client, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_consumer_service_explicit_defer_redelivery(
     void **state) {
   char root[256];
@@ -10598,6 +10740,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
       cmocka_unit_test(test_pouch_public_consumer_service_explicit_ack),
       cmocka_unit_test(test_pouch_public_consumer_service_auto_ack),
+      cmocka_unit_test(
+          test_pouch_public_consumer_service_lifecycle_callbacks),
       cmocka_unit_test(
           test_pouch_public_consumer_service_explicit_defer_redelivery),
       cmocka_unit_test(test_pouch_public_acquire_for_update_stages_state),

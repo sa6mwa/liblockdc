@@ -1831,8 +1831,8 @@ scan-engine fallback and explicit bypass for refresh requests, queue visibility
 handoff, stale delivery fencing, nack redelivery, delayed nack redelivery,
 client-level nack retry exhaustion terminal behavior across reopen, read-only
 queue stats while a delivery is invisible, explicit handler
-acknowledgement, handler-success auto-ack, watch snapshots, direct
-subscribe-with-state, direct
+acknowledgement, handler-success auto-ack, managed-consumer lifecycle
+callbacks, watch snapshots, direct subscribe-with-state, direct
 dequeue-wait polling for later enqueues, batch dequeue without duplicate acked
 delivery, queue transaction commit/rollback including mixed state plus queue
 decisions, prepared mixed replay/commit, and expired mixed recovery after
