@@ -1826,6 +1826,87 @@ test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh(
 }
 
 static void
+test_pouch_public_scan_query_keys_endpoint_uses_index_fallback_for_refresh(
+    void **state) {
+  char root[256];
+  char writer_endpoint[320];
+  char scan_endpoint[384];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "scan-query-keys-endpoint-fallback");
+  pouch_endpoint(writer_endpoint, sizeof(writer_endpoint), root);
+  pouch_endpoint_with_query(scan_endpoint, sizeof(scan_endpoint), root,
+                            "query_engine=scan&query_fallback_engine=index");
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_client(writer_endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "scan-key-fallback-writer";
+  acquire.ttl_seconds = 60L;
+  acquire.key = "integration/query-keys-endpoint/fallback";
+  rc = writer->acquire(writer, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"kind\":\"scan-key-fallback\"}", &error);
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  writer->close(writer);
+  writer = NULL;
+
+  open_pouch_client(scan_endpoint, &reader, &error);
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.refresh = "wait_for";
+  rc = reader->query_keys(reader, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0],
+                      "integration/query-keys-endpoint/fallback");
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_true(query_res.index_seq > 0UL);
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+
+  lc_query_res_cleanup(&query_res);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void
 test_pouch_public_scan_query_explicit_engine_bypasses_refresh_fallback(
     void **state) {
   char root[256];
@@ -10006,6 +10087,8 @@ int main(void) {
           test_pouch_public_scan_query_ignores_absent_index_sidecar),
       cmocka_unit_test(
           test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh),
+      cmocka_unit_test(
+          test_pouch_public_scan_query_keys_endpoint_uses_index_fallback_for_refresh),
       cmocka_unit_test(
           test_pouch_public_scan_query_explicit_engine_bypasses_refresh_fallback),
       cmocka_unit_test(

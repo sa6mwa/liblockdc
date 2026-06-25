@@ -1826,7 +1826,7 @@ prevent-overwrite and overwrite semantics, attachment delete/delete-all
 semantics, client-level attachment APIs, endpoint query-engine/fallback
 override, scan-mode corrupt/absent query-index sidecars, transaction attachment
 replay commit/rollback, transaction attachment-delete replay commit/rollback,
-explicit scan-engine fallback bypass for refresh requests, queue visibility
+scan-engine fallback and explicit bypass for refresh requests, queue visibility
 handoff, stale delivery fencing, nack redelivery, delayed nack redelivery,
 client-level nack retry exhaustion terminal behavior across reopen, read-only
 queue stats while a delivery is invisible, explicit handler
