@@ -3875,6 +3875,184 @@ static void test_query_owner_index_scans_candidates_and_replays(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_query_index_scans_exclude_removed_state(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res alpha_state;
+  lc_pouch_put_state_res bravo_state;
+  lc_pouch_put_state_res removed_state;
+  lc_pouch_put_state_res noise_state;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_index_scan_req index_req;
+  lc_pouch_query_owner_scan_req owner_req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  key_capture keys;
+  int removed;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-exclude-removed-state");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&alpha_state, 0, sizeof(alpha_state));
+  memset(&bravo_state, 0, sizeof(bravo_state));
+  memset(&removed_state, 0, sizeof(removed_state));
+  memset(&noise_state, 0, sizeof(noise_state));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&index_req, 0, sizeof(index_req));
+  memset(&owner_req, 0, sizeof(owner_req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+  source = NULL;
+  removed = 0;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  put_opts.content_type = "application/json";
+  source = source_from_text("{\"live\":\"alpha\"}");
+  rc = store->write_state(store, "default", "alpha", source, &put_opts,
+                          &alpha_state, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"live\":\"bravo\"}");
+  rc = store->write_state(store, "default", "bravo", source, &put_opts,
+                          &bravo_state, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"live\":\"removed\"}");
+  rc = store->write_state(store, "default", "removed", source, &put_opts,
+                          &removed_state, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"live\":\"noise\"}");
+  rc = store->write_state(store, "default", "noise", source, &put_opts,
+                          &noise_state, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "target-owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = alpha_state.new_state_etag;
+  meta.version = alpha_state.new_version;
+  meta.fencing_token = alpha_state.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = bravo_state.new_state_etag;
+  meta.version = bravo_state.new_version;
+  meta.fencing_token = bravo_state.new_version;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-removed";
+  meta.state_etag = removed_state.new_state_etag;
+  meta.version = removed_state.new_version;
+  meta.fencing_token = removed_state.new_version;
+  rc = store->store_meta(store, "default", "removed", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.owner = "noise-owner";
+  meta.lease_id = "lease-noise";
+  meta.state_etag = noise_state.new_state_etag;
+  meta.version = noise_state.new_version;
+  meta.fencing_token = noise_state.new_version;
+  rc = store->store_meta(store, "default", "noise", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  rc = store->remove_state(store, "default", "removed",
+                           removed_state.new_state_etag, &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(removed);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  index_req.namespace_name = "default";
+  rc = store->query_index_scan(store, &index_req, capture_scan_row, &rows,
+                               &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 3U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_string_equal(rows.keys[1], "bravo");
+  assert_string_equal(rows.keys[2], "noise");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  index_req.owner = "target-owner";
+  rc = store->query_index_keys_scan(store, &index_req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_string_equal(keys.keys[1], "bravo");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&rows, 0, sizeof(rows));
+  owner_req.namespace_name = "default";
+  owner_req.owner = "target-owner";
+  rc = store->query_owner_scan(store, &owner_req, capture_scan_row, &rows,
+                               &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 2U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_string_equal(rows.keys[1], "bravo");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  rc = store->query_owner_keys_scan(store, &owner_req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_string_equal(keys.keys[1], "bravo");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &noise_state);
+  lc_pouch_put_state_res_cleanup(&allocator, &removed_state);
+  lc_pouch_put_state_res_cleanup(&allocator, &bravo_state);
+  lc_pouch_put_state_res_cleanup(&allocator, &alpha_state);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_query_index_scans_refresh_stale_reader_before_sidecar(
     void **state) {
   char root[256];
@@ -12354,6 +12532,7 @@ int main(void) {
           test_query_index_keys_scan_avoids_metadata_row_copies),
       cmocka_unit_test(
           test_query_owner_index_scans_candidates_and_replays),
+      cmocka_unit_test(test_query_index_scans_exclude_removed_state),
       cmocka_unit_test(
           test_query_index_scans_refresh_stale_reader_before_sidecar),
       cmocka_unit_test(
