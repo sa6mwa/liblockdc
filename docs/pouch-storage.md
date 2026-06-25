@@ -1698,7 +1698,8 @@ Current native benchmark coverage in `bench/lockdc_bench` includes pouch
 state roundtrip, explicit state payload write/read sizes at 1 KiB, 64 KiB,
 1 MiB, and 16 MiB, staged promotion, public mutate throughput, attachment
 put/get, enqueue/dequeue/ack, transactional queue ack rollback/redelivery, and
-hot-key compaction churn, metadata summary scans, open/replay index rebuild,
+transactional queue ack commit/removal, hot-key compaction churn, metadata
+summary scans, open/replay index rebuild,
 direct indexed summary scans, direct key-only indexed scans, public indexed
 document query streaming, public scan-mode document query streaming, public
 indexed key streaming, public scan-mode key streaming, exact-key indexed
