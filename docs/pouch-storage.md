@@ -1830,10 +1830,11 @@ delivery is invisible, explicit handler acknowledgement, watch snapshots, direct
 subscribe-with-state, direct
 dequeue-wait polling for later enqueues, batch dequeue without duplicate acked
 delivery, queue transaction commit/rollback including mixed state plus queue
-decisions, cross-namespace transaction commit/rollback and prepared replay
-after reopen, expired cross-namespace prepared transaction rollback on reopen,
-managed consumer state-save through both blocking `run()` and asynchronous
-`start()`/`wait()`, managed failure redelivery, managed explicit
+decisions and expired mixed recovery after reopen, cross-namespace transaction
+commit/rollback and prepared replay after reopen, expired cross-namespace
+prepared transaction rollback on reopen, managed consumer state-save through
+both blocking `run()` and asynchronous `start()`/`wait()`, managed failure
+redelivery, managed explicit
 acknowledgement and defer redelivery, and cross-client CAS. The optional e2e
 shard still covers broader consumer-service behavior.
 
