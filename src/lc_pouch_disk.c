@@ -4825,6 +4825,10 @@ static int lc_pouch_disk_query_index_scan(
         (entry->has_query_hidden && entry->query_hidden)) {
       continue;
     }
+    if (req->owner != NULL &&
+        (entry->owner == NULL || strcmp(entry->owner, req->owner) != 0)) {
+      continue;
+    }
     if (req->limit > 0U && visit_count == req->limit) {
       out->truncated = 1;
       break;
@@ -4869,6 +4873,10 @@ static int lc_pouch_disk_query_index_scan(
     }
     if (entry->deleted ||
         (entry->has_query_hidden && entry->query_hidden)) {
+      continue;
+    }
+    if (req->owner != NULL &&
+        (entry->owner == NULL || strcmp(entry->owner, req->owner) != 0)) {
       continue;
     }
     if (!lc_pouch_disk_copy_summary_for_scan(store, &rows[row_index], entry)) {
@@ -5017,6 +5025,10 @@ static int lc_pouch_disk_query_index_keys_scan(
         (entry->has_query_hidden && entry->query_hidden)) {
       continue;
     }
+    if (req->owner != NULL &&
+        (entry->owner == NULL || strcmp(entry->owner, req->owner) != 0)) {
+      continue;
+    }
     if (req->limit > 0U && visit_count == req->limit) {
       out->truncated = 1;
       break;
@@ -5061,6 +5073,10 @@ static int lc_pouch_disk_query_index_keys_scan(
     }
     if (entry->deleted ||
         (entry->has_query_hidden && entry->query_hidden)) {
+      continue;
+    }
+    if (req->owner != NULL &&
+        (entry->owner == NULL || strcmp(entry->owner, req->owner) != 0)) {
       continue;
     }
     keys[row_index] = lc_pouch_strdup(&store->allocator, entry->key);

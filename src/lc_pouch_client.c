@@ -5223,7 +5223,8 @@ typedef enum lc_pouch_query_selector_kind {
   LC_POUCH_QUERY_SELECTOR_UNSUPPORTED = 0,
   LC_POUCH_QUERY_SELECTOR_MATCH_ALL = 1,
   LC_POUCH_QUERY_SELECTOR_OWNER = 2,
-  LC_POUCH_QUERY_SELECTOR_KEY = 3
+  LC_POUCH_QUERY_SELECTOR_KEY = 3,
+  LC_POUCH_QUERY_SELECTOR_KEY_OWNER = 4
 } lc_pouch_query_selector_kind;
 
 typedef struct lc_pouch_query_exact_selector_json {
@@ -5248,6 +5249,8 @@ lc_pouch_query_selector_kind_parse(const char *selector_json, char **key_out,
   lonejson *runtime;
   lonejson_error lj_error;
   lonejson_status status;
+  int has_key;
+  int has_owner;
 
   if (key_out != NULL) {
     *key_out = NULL;
@@ -5273,13 +5276,14 @@ lc_pouch_query_selector_kind_parse(const char *selector_json, char **key_out,
   status = lc_lonejson_parse_cstr_value(
       runtime, &lc_pouch_query_exact_selector_map, &selector, selector_json,
       &lj_error);
-  if (status != LONEJSON_STATUS_OK ||
-      ((selector.key == NULL) == (selector.owner == NULL))) {
+  has_key = selector.key != NULL;
+  has_owner = selector.owner != NULL;
+  if (status != LONEJSON_STATUS_OK || (!has_key && !has_owner)) {
     lc_lonejson_cleanup_value(runtime, &lc_pouch_query_exact_selector_map,
                               &selector);
     return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
   }
-  if (selector.key != NULL) {
+  if (has_key) {
     if (key_out != NULL) {
       *key_out = lc_strdup_local(selector.key);
       if (*key_out == NULL) {
@@ -5291,13 +5295,14 @@ lc_pouch_query_selector_kind_parse(const char *selector_json, char **key_out,
         return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
       }
     }
-    lc_lonejson_cleanup_value(runtime, &lc_pouch_query_exact_selector_map,
-                              &selector);
-    return LC_POUCH_QUERY_SELECTOR_KEY;
   }
-  if (owner_out != NULL) {
+  if (has_owner && owner_out != NULL) {
     *owner_out = lc_strdup_local(selector.owner);
     if (*owner_out == NULL) {
+      if (key_out != NULL) {
+        free(*key_out);
+        *key_out = NULL;
+      }
       lc_lonejson_cleanup_value(runtime, &lc_pouch_query_exact_selector_map,
                                 &selector);
       (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -5308,6 +5313,12 @@ lc_pouch_query_selector_kind_parse(const char *selector_json, char **key_out,
   }
   lc_lonejson_cleanup_value(runtime, &lc_pouch_query_exact_selector_map,
                             &selector);
+  if (has_key && has_owner) {
+    return LC_POUCH_QUERY_SELECTOR_KEY_OWNER;
+  }
+  if (has_key) {
+    return LC_POUCH_QUERY_SELECTOR_KEY;
+  }
   return LC_POUCH_QUERY_SELECTOR_OWNER;
 }
 
@@ -5618,7 +5629,8 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
     }
     return lc_pouch_client_unsupported(
         error,
-        "pouch scan query supports only match-all, key, or owner selector");
+        "pouch scan query supports only match-all, key, owner, or key+owner "
+        "selector");
   }
   if (req->fields_json != NULL && req->fields_json[0] != '\0') {
     lc_client_free(client, key_selector);
@@ -5661,10 +5673,12 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
   memset(&visit, 0, sizeof(visit));
   memset(out, 0, sizeof(*out));
   scan_req.namespace_name = namespace_name;
-  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY) {
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY ||
+      selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
     scan_req.key = key_selector;
   }
-  if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER) {
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER ||
+      selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
     scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
@@ -5747,7 +5761,8 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     }
     return lc_pouch_client_unsupported(
         error,
-        "pouch index query supports only match-all, key, or owner selector");
+        "pouch index query supports only match-all, key, owner, or key+owner "
+        "selector");
   }
   if (req->fields_json != NULL && req->fields_json[0] != '\0') {
     lc_client_free(client, key_selector);
@@ -5800,8 +5815,12 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   memset(&visit, 0, sizeof(visit));
   memset(out, 0, sizeof(*out));
   scan_req.namespace_name = namespace_name;
-  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY) {
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY ||
+      selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
     scan_req.key = key_selector;
+  }
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
+    scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
   scan_req.limit = (size_t)req->limit;
@@ -5897,7 +5916,8 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
     }
     return lc_pouch_client_unsupported(
         error,
-        "pouch scan query_keys supports only match-all, key, or owner selector");
+        "pouch scan query_keys supports only match-all, key, owner, or "
+        "key+owner selector");
   }
   if (req->fields_json != NULL && req->fields_json[0] != '\0') {
     lc_client_free(client, key_selector);
@@ -5940,10 +5960,12 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
   memset(&scan_context, 0, sizeof(scan_context));
   memset(out, 0, sizeof(*out));
   scan_req.namespace_name = namespace_name;
-  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY) {
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY ||
+      selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
     scan_req.key = key_selector;
   }
-  if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER) {
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER ||
+      selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
     scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
@@ -6033,7 +6055,8 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     }
     return lc_pouch_client_unsupported(
         error,
-        "pouch index query_keys supports only match-all, key, or owner selector");
+        "pouch index query_keys supports only match-all, key, owner, or "
+        "key+owner selector");
   }
   if (req->fields_json != NULL && req->fields_json[0] != '\0') {
     lc_client_free(client, key_selector);
@@ -6086,8 +6109,12 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   memset(&scan_context, 0, sizeof(scan_context));
   memset(out, 0, sizeof(*out));
   scan_req.namespace_name = namespace_name;
-  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY) {
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY ||
+      selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
     scan_req.key = key_selector;
+  }
+  if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
+    scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
   scan_req.limit = (size_t)req->limit;

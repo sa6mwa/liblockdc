@@ -1735,12 +1735,12 @@ static void test_pouch_public_scan_query_key_selector_filters_candidates(
 
   open_pouch_scan_client(endpoint, &client, &error);
   lc_acquire_req_init(&acquire);
-  acquire.owner = "scan-key-selector";
   acquire.ttl_seconds = 60L;
   lc_update_opts_init(&update_opts);
   update_opts.content_type = "application/json";
 
   acquire.key = "integration/scan-key/alpha";
+  acquire.owner = "scan-key-owner-a";
   rc = client->acquire(client, &acquire, &alpha, &error);
   assert_lc_ok(rc, &error);
   source = source_from_text("{\"ordinal\":1}", &error);
@@ -1750,6 +1750,7 @@ static void test_pouch_public_scan_query_key_selector_filters_candidates(
   assert_lc_ok(rc, &error);
 
   acquire.key = "integration/scan-key/bravo";
+  acquire.owner = "scan-key-owner-b";
   rc = client->acquire(client, &acquire, &bravo, &error);
   assert_lc_ok(rc, &error);
   source = source_from_text("{\"ordinal\":2}", &error);
@@ -1759,6 +1760,7 @@ static void test_pouch_public_scan_query_key_selector_filters_candidates(
   assert_lc_ok(rc, &error);
 
   acquire.key = "integration/scan-key/charlie";
+  acquire.owner = "scan-key-owner-a";
   rc = client->acquire(client, &acquire, &charlie, &error);
   assert_lc_ok(rc, &error);
   source = source_from_text("{\"ordinal\":3}", &error);
@@ -1792,7 +1794,8 @@ static void test_pouch_public_scan_query_key_selector_filters_candidates(
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
   lc_query_req_init(&query_req);
-  query_req.selector_json = "{\"key\":\"integration/scan-key/bravo\"}";
+  query_req.selector_json =
+      "{\"key\":\"integration/scan-key/bravo\",\"owner\":\"scan-key-owner-b\"}";
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
                           &error);
   assert_lc_ok(rc, &error);
@@ -2461,12 +2464,12 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
 
   open_pouch_client(endpoint, &client, &error);
   lc_acquire_req_init(&acquire);
-  acquire.owner = "index-key-selector";
   acquire.ttl_seconds = 60L;
   lc_update_opts_init(&update_opts);
   update_opts.content_type = "application/json";
 
   acquire.key = "integration/index-key/alpha";
+  acquire.owner = "index-key-owner-a";
   rc = client->acquire(client, &acquire, &alpha, &error);
   assert_lc_ok(rc, &error);
   source = source_from_text("{\"ordinal\":1}", &error);
@@ -2476,6 +2479,7 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   assert_lc_ok(rc, &error);
 
   acquire.key = "integration/index-key/bravo";
+  acquire.owner = "index-key-owner-b";
   rc = client->acquire(client, &acquire, &bravo, &error);
   assert_lc_ok(rc, &error);
   source = source_from_text("{\"ordinal\":2}", &error);
@@ -2485,6 +2489,7 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   assert_lc_ok(rc, &error);
 
   acquire.key = "integration/index-key/charlie";
+  acquire.owner = "index-key-owner-a";
   rc = client->acquire(client, &acquire, &charlie, &error);
   assert_lc_ok(rc, &error);
   source = source_from_text("{\"ordinal\":3}", &error);
@@ -2518,7 +2523,8 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
   lc_query_req_init(&query_req);
-  query_req.selector_json = "{\"key\":\"integration/index-key/bravo\"}";
+  query_req.selector_json =
+      "{\"key\":\"integration/index-key/bravo\",\"owner\":\"index-key-owner-b\"}";
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
                           &error);
   assert_lc_ok(rc, &error);

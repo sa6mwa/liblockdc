@@ -3417,6 +3417,7 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
 
   memset(&capture, 0, sizeof(capture));
   req.key = "bravo";
+  req.owner = "owner";
   req.start_after = NULL;
   req.limit = 8U;
   rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
@@ -3431,6 +3432,18 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   memset(&capture, 0, sizeof(capture));
+  req.owner = "other-owner";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 0U);
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.owner = NULL;
   req.start_after = "bravo";
   rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
                                &error);
@@ -3543,6 +3556,7 @@ static void test_query_index_keys_scan_avoids_metadata_row_copies(
 
   memset(&capture, 0, sizeof(capture));
   req.key = "bravo";
+  req.owner = "owner";
   req.start_after = NULL;
   req.limit = 8U;
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
@@ -3556,6 +3570,18 @@ static void test_query_index_keys_scan_avoids_metadata_row_copies(
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   memset(&capture, 0, sizeof(capture));
+  req.owner = "other-owner";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 0U);
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.owner = NULL;
   req.start_after = "bravo";
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
                                     &scan, &error);

@@ -647,13 +647,15 @@ Scan mode acceptance criteria:
 The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index
 scan primitive and return the current `index_seq`. Before `liblql` integration,
-indexed mode also accepts exact key selector form `{"key":"..."}` and exact
-owner selector form `{"owner":"..."}`. Exact keys route through the sorted
-query-summary projection; exact owners route through storage-owned owner
-postings. Scan mode accepts the same pre-LQL selector set, but resolves equality
-by walking ordered full-summary or metadata scan routes instead of consulting
-postings. The current disk backend keeps the sorted metadata projection as the
-authoritative in-memory index for match-all and exact-key scans, while
+indexed mode also accepts exact key selector form `{"key":"..."}`, exact owner
+selector form `{"owner":"..."}`, and their exact conjunction
+`{"key":"...","owner":"..."}`. Exact keys route through the sorted
+query-summary projection and can validate owner as a post-filter; exact owners
+route through storage-owned owner postings. Scan mode accepts the same pre-LQL
+selector set, but resolves equality by walking ordered full-summary or metadata
+scan routes instead of consulting postings. The current disk backend keeps the
+sorted metadata projection as the authoritative in-memory index for match-all
+and exact-key scans, while
 `query.index` remains a durable sidecar accelerator that can be validated
 against the store log and truncated at the last verified record. Indexed scans
 must never trust sidecar rows that do not match current metadata, and key-only
@@ -684,8 +686,9 @@ payload in the namespace.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
-returns `keys` as the return mode. Exact key and owner selectors filter that
-same ordered scan before limits and cursors are applied. Both `query_keys` and
+returns `keys` as the return mode. Exact key, owner, and key+owner selectors
+filter that same ordered scan before limits and cursors are applied. Both
+`query_keys` and
 `query` report local metadata such as `query_candidates`. `query` streams NDJSON
 document rows in the same ordered page, embeds JSON state payloads as
 `document`, emits `null` for non-JSON or empty state payloads, and returns
@@ -699,8 +702,8 @@ scanning the indexed projection. Explicit scan mode remains available for
 full-log/full-summary scanning through the ordered metadata summary API, but it
 does not accept refresh hints because no durable query index is consulted.
 Non-empty field selection, non-document scan return modes, and LQL selectors
-beyond exact key or owner equality remain unsupported until the indexed/LQL
-query slice lands.
+beyond exact key/owner equality and their conjunction remain unsupported until
+the indexed/LQL query slice lands.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
@@ -984,9 +987,10 @@ summaries that were refreshed from authoritative log state. Additional
 term/range postings should extend this boundary rather than bypass it.
 Indexed mode is the preferred default; scan mode is a configured backend mode
 or configured fallback. The persistent format should not encode LQL-specific
-query plans. Pre-LQL scan support is intentionally limited to match-all and
-exact key/owner equality for `query_keys` and document `query`; richer
-predicate evaluation requires the later query/index integration.
+query plans. Pre-LQL scan support is intentionally limited to match-all, exact
+key/owner equality, and key+owner conjunction for `query_keys` and document
+`query`; richer predicate evaluation requires the later query/index
+integration.
 
 Query refresh contracts are storage-visible. A query that waits for a flush or
 refresh target must observe committed summary records without requiring a full

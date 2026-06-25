@@ -5550,11 +5550,14 @@ static void test_pouch_endpoint_scan_query_filters_key_selector(void **state) {
   memset(&capture, 0, sizeof(capture));
   client = open_pouch_client(endpoint);
 
-  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  alpha = pouch_acquire_query_key_for_owner(client, "alpha", "owner-a",
+                                            &error);
   pouch_save_query_json(alpha, "{\"value\":1}", &error);
-  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  bravo = pouch_acquire_query_key_for_owner(client, "bravo", "owner-b",
+                                            &error);
   pouch_save_query_json(bravo, "{\"value\":2}", &error);
-  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  charlie = pouch_acquire_query_key_for_owner(client, "charlie", "owner-a",
+                                              &error);
   pouch_save_query_json(charlie, "{\"value\":3}", &error);
 
   sink = NULL;
@@ -5578,12 +5581,47 @@ static void test_pouch_endpoint_scan_query_filters_key_selector(void **state) {
   lc_sink_close(sink);
   lc_query_res_cleanup(&res);
 
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-b\"}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-a\"}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":0}");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
   memset(&capture, 0, sizeof(capture));
   handler.begin = query_key_capture_begin;
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
   lc_query_req_init(&req);
-  req.selector_json = "{\"key\":\"bravo\"}";
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-b\"}";
   req.engine = "scan";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
@@ -5596,6 +5634,17 @@ static void test_pouch_endpoint_scan_query_filters_key_selector(void **state) {
   lc_query_res_cleanup(&res);
 
   memset(&capture, 0, sizeof(capture));
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-a\"}";
+  req.cursor = NULL;
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 0U);
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":0}");
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-b\"}";
   req.cursor = "bravo";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
@@ -5824,11 +5873,14 @@ static void test_pouch_endpoint_index_query_filters_key_selector(void **state) {
   memset(&capture, 0, sizeof(capture));
   client = open_pouch_client(endpoint);
 
-  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  alpha = pouch_acquire_query_key_for_owner(client, "alpha", "owner-a",
+                                            &error);
   pouch_save_query_json(alpha, "{\"value\":1}", &error);
-  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  bravo = pouch_acquire_query_key_for_owner(client, "bravo", "owner-b",
+                                            &error);
   pouch_save_query_json(bravo, "{\"value\":2}", &error);
-  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  charlie = pouch_acquire_query_key_for_owner(client, "charlie", "owner-a",
+                                              &error);
   pouch_save_query_json(charlie, "{\"value\":3}", &error);
 
   sink = NULL;
@@ -5851,12 +5903,45 @@ static void test_pouch_endpoint_index_query_filters_key_selector(void **state) {
   lc_sink_close(sink);
   lc_query_res_cleanup(&res);
 
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-b\"}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-a\"}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_string_equal(text, "");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":0}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
   memset(&capture, 0, sizeof(capture));
   handler.begin = query_key_capture_begin;
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
   lc_query_req_init(&req);
-  req.selector_json = "{\"key\":\"bravo\"}";
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-b\"}";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.key_count, 1U);
@@ -5868,6 +5953,18 @@ static void test_pouch_endpoint_index_query_filters_key_selector(void **state) {
   lc_query_res_cleanup(&res);
 
   memset(&capture, 0, sizeof(capture));
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-a\"}";
+  req.cursor = NULL;
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 0U);
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":0}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-b\"}";
   req.cursor = "bravo";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
@@ -6419,7 +6516,7 @@ static void test_pouch_endpoint_scan_query_rejects_lql_selector(void **state) {
   rc = client->query(client, &req, sink, &res, &error);
   assert_pouch_unsupported(rc, &error,
                            "pouch scan query supports only match-all, key, "
-                           "or owner selector");
+                           "owner, or key+owner selector");
 
   lc_sink_close(sink);
   client->close(client);
@@ -7073,7 +7170,8 @@ static void test_pouch_endpoint_scan_query_keys_rejects_lql_selector(
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_pouch_unsupported(
       rc, &error,
-      "pouch scan query_keys supports only match-all, key, or owner selector");
+      "pouch scan query_keys supports only match-all, key, owner, or "
+      "key+owner selector");
   assert_int_equal(capture.key_count, 0U);
 
   client->close(client);
@@ -7246,7 +7344,7 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   rc = client->query(client, &query_req, sink, &query_res, &error);
   assert_pouch_unsupported(rc, &error,
                            "pouch index query supports only match-all, key, "
-                           "or owner selector");
+                           "owner, or key+owner selector");
   lc_sink_close(sink);
 
   memset(&key_handler, 0, sizeof(key_handler));
@@ -7257,7 +7355,7 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
                           &error);
   assert_pouch_unsupported(rc, &error,
                            "pouch index query_keys supports only match-all, "
-                           "key, or owner selector");
+                           "key, owner, or key+owner selector");
 
   lc_namespace_config_req_init(&namespace_req);
   namespace_req.namespace_name = "default";

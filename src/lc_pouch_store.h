@@ -130,6 +130,7 @@ typedef int (*lc_pouch_query_index_key_visit_fn)(void *context,
 typedef struct lc_pouch_query_index_scan_req {
   const char *namespace_name;
   const char *key;
+  const char *owner;
   const char *start_after;
   size_t limit;
 } lc_pouch_query_index_scan_req;
