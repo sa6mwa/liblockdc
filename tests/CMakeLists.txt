@@ -68,6 +68,12 @@ add_test(NAME release_targeting_test
     -P "${CMAKE_SOURCE_DIR}/tests/release_targeting_test.cmake"
 )
 
+add_test(NAME release_werror_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/release_werror_contract_test.cmake"
+)
+
 add_test(NAME packaging_portability_source_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
