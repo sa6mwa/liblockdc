@@ -3356,6 +3356,142 @@ static void test_pouch_public_transaction_attachment_commit_publishes(
   cleanup_pouch_root(root);
 }
 
+static void
+test_pouch_public_transaction_attachment_replay_commit_publishes(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_release_req release_req;
+  lc_attachment_list attachments;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "txn-attachment-replay-commit");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+  memset(&attachments, 0, sizeof(attachments));
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-attachment-replay-commit";
+  acquire.owner = "writer";
+  acquire.ttl_seconds = 60L;
+  acquire.txn_id = "integration-txn-attachment-replay-commit-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "artifact.txt";
+  attach_req.content_type = "text/plain";
+  source = source_from_text("replayed-attachment", &error);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = acquire.key;
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = acquire.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  decision_req.expires_at_unix = 4102444800L;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "prepared");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+  client->close(client);
+  client = NULL;
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "integration-txn-attachment-replay-commit-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(replay_res.txn_id,
+                      "integration-txn-attachment-replay-commit-1");
+  assert_string_equal(replay_res.state, "prepared");
+  lc_txn_replay_res_cleanup(&replay_res);
+
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "committed");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-attachment-replay-commit";
+  acquire.owner = "reader-after-commit";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->list_attachments(lease, &attachments, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachments.count, 1U);
+  assert_string_equal(attachments.items[0].name, "artifact.txt");
+  assert_string_equal(attachments.items[0].id, attach_res.attachment.id);
+  lc_attachment_list_cleanup(&attachments);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_attachment_get_op_init(&get_op);
+  get_op.lease.namespace_name = lease->namespace_name;
+  get_op.lease.key = lease->key;
+  get_op.lease.lease_id = lease->lease_id;
+  get_op.lease.txn_id = lease->txn_id;
+  get_op.lease.fencing_token = lease->fencing_token;
+  get_op.selector.name = "artifact.txt";
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(get_res.attachment.name, "artifact.txt");
+  assert_sink_text(sink, "replayed-attachment", &error);
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_lc_server_error(rc, &error, 404L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_attach_res_cleanup(&attach_res);
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_txn_replay_res_cleanup(&replay_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_transaction_attachment_staged_put_is_visible(
     void **state) {
   char root[256];
@@ -9129,6 +9265,8 @@ int main(void) {
           test_pouch_public_transaction_attachment_rollback_discards),
       cmocka_unit_test(
           test_pouch_public_transaction_attachment_commit_publishes),
+      cmocka_unit_test(
+          test_pouch_public_transaction_attachment_replay_commit_publishes),
       cmocka_unit_test(
           test_pouch_public_transaction_attachment_staged_put_is_visible),
       cmocka_unit_test(
