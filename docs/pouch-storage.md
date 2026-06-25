@@ -1697,10 +1697,12 @@ put/get, enqueue/dequeue/ack, transactional queue ack rollback/redelivery, and
 hot-key compaction churn, metadata summary scans, open/replay index rebuild,
 direct indexed summary scans, direct key-only indexed scans, public indexed
 document query streaming, public scan-mode document query streaming, public
-indexed key streaming, public scan-mode key streaming, and retention sweep
-throughput over metadata/state rows. The native harness also includes a hot-key
-contention case that repeatedly contends two store handles on one key and
-verifies that lock-contention diagnostics advance under that workload.
+indexed key streaming, public scan-mode key streaming, exact-key indexed
+summary/key scans, exact-key public document and key queries in both scan and
+indexed modes, and retention sweep throughput over metadata/state rows. The
+native harness also includes a hot-key contention case that repeatedly contends
+two store handles on one key and verifies that lock-contention diagnostics
+advance under that workload.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local
 benchmarks rather than performance gates; the larger matrix above remains the
