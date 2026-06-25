@@ -15,7 +15,7 @@ lua_script="$4"
 lua_bin="${LOCKDC_LUA_BIN:-lua}"
 luarocks_bin="${LOCKDC_LUAROCKS_BIN:-luarocks}"
 lua_version="${LOCKDC_LUA_VERSION:-5.5}"
-lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.32.1/lonejson-0.32.1-1.src.rock}"
+lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.35.0/lonejson-0.35.0-1.src.rock}"
 luarocks_build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${tree_dir}/.luarocks-build}"
 luarocks_workdir="${LOCKDC_LUAROCKS_WORKDIR:-$PWD}"
 run_lua_smoke="${LOCKDC_RUN_LUA_SMOKE:-1}"
@@ -44,6 +44,8 @@ require_path "$luarocks_workdir"
 
 export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LOCKDC_PREFIX="$sdk_prefix"
+: "${LONEJSON_LIBDIR:=$sdk_prefix/lib}"
+export LONEJSON_LIBDIR
 if [ -n "$lockdc_ld_preload" ]; then
   export LD_PRELOAD="$lockdc_ld_preload${LD_PRELOAD:+:$LD_PRELOAD}"
 fi

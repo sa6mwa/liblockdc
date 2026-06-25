@@ -38,7 +38,7 @@ assert_contains(deps_script "deps-aarch64-linux-gnu" "aarch64 host-native depend
 assert_contains(deps_script "deps-armhf-linux-gnu" "armhf host-native dependency mapping")
 assert_contains(deps_script "deps-x86_64-linux-gnu" "x86_64 host-native dependency mapping")
 assert_contains(deps_script "LOCKDC_DEPS_DRY_RUN" "deps dry-run support")
-assert_contains(deps_script [=[lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-16}]=] "lonejson ABI readiness check knob")
+assert_contains(deps_script [=[lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-19}]=] "lonejson ABI readiness check knob")
 assert_contains(deps_script [=[liblonejson.${lonejson_abi_version}.${shared_ext}]=] "Darwin lonejson ABI readiness path")
 assert_contains(deps_script [=[liblonejson.so.${lonejson_abi_version}]=] "Linux lonejson ABI readiness path")
 assert_not_contains(deps_script "liblonejson.4.${shared_ext}" "stale Darwin lonejson ABI readiness path")

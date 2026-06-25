@@ -36,10 +36,10 @@ SDK root or make `lockdc.pc` visible to `pkg-config`.
 The generated rockspec expects:
 
 - package `lockdc`
-- `lonejson == 0.32.1-1`
+- `lonejson == 0.35.0-1`
 - Lua `>= 5.5, < 5.6`
 
-The C SDK is pinned to the matching `lonejson 0.32.1` native dependency for
+The C SDK is pinned to the matching `lonejson 0.35.0` native dependency for
 mapped state load/save and internal typed JSON parsing. The Lua rock declares
 the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C
 SDK JSON boundary stay in the same release line.
