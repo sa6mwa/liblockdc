@@ -5100,6 +5100,122 @@ test_pouch_public_queue_transaction_recovery_rolls_back_ack(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_mixed_state_queue_transaction_commit(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_message *message;
+  lc_message *after_commit;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "mixed-state-queue-txn-commit");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  message = NULL;
+  after_commit = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&decision_res, 0, sizeof(decision_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/mixed-txn-state";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"state\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "mixed-txn-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("mixed-work", &error);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  acquire.owner = "mixed-txn-owner";
+  acquire.txn_id = "integration-mixed-state-queue-commit-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"state\":2}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "mixed-txn-jobs";
+  dequeue_req.owner = "mixed-worker";
+  dequeue_req.txn_id = "integration-mixed-state-queue-commit-1";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "integration/mixed-txn-state";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-mixed-state-queue-commit-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "committed");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+
+  assert_client_state_text(client, "integration/mixed-txn-state",
+                           "{\"state\":2}", &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "mixed-txn-jobs";
+  dequeue_req.owner = "mixed-worker-after-commit";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue(client, &dequeue_req, &after_commit, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(after_commit);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_initial_delay_hides_until_visible(
     void **state) {
   char root[256];
@@ -8127,6 +8243,8 @@ int main(void) {
           test_pouch_public_queue_only_transaction_ack_commit_removes),
       cmocka_unit_test(
           test_pouch_public_queue_transaction_recovery_rolls_back_ack),
+      cmocka_unit_test(
+          test_pouch_public_mixed_state_queue_transaction_commit),
       cmocka_unit_test(
           test_pouch_public_queue_initial_delay_hides_until_visible),
       cmocka_unit_test(test_pouch_public_queue_ttl_expiry_removes_candidate),
