@@ -5553,7 +5553,7 @@ lc_pouch_query_selector_kind_parse(const char *selector_json, char **key_out,
     *owner_out = lc_strdup_local(selector.owner);
     if (*owner_out == NULL) {
       if (key_out != NULL) {
-        free(*key_out);
+        lc_free_with_allocator(NULL, *key_out);
         *key_out = NULL;
       }
       lc_lonejson_cleanup_value(runtime, &lc_pouch_query_exact_selector_map,
