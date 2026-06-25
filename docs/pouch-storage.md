@@ -1825,7 +1825,7 @@ persistence, query-hidden metadata versioning and persistence, attachment
 prevent-overwrite and overwrite semantics, attachment delete/delete-all
 semantics, client-level attachment APIs, transaction attachment replay
 commit/rollback, transaction attachment-delete replay commit/rollback,
-queue visibility
+explicit scan-engine fallback bypass for refresh requests, queue visibility
 handoff, stale delivery fencing, nack redelivery, delayed nack redelivery,
 client-level nack retry exhaustion terminal behavior across reopen, read-only
 queue stats while a delivery is invisible, explicit handler

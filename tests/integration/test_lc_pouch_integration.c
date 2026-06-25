@@ -1535,6 +1535,104 @@ test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh(
   cleanup_pouch_root(root);
 }
 
+static void
+test_pouch_public_scan_query_explicit_engine_bypasses_refresh_fallback(
+    void **state) {
+  char root[256];
+  char writer_endpoint[320];
+  char scan_endpoint[384];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "scan-query-explicit-no-fallback");
+  pouch_endpoint(writer_endpoint, sizeof(writer_endpoint), root);
+  pouch_endpoint_with_query(scan_endpoint, sizeof(scan_endpoint), root,
+                            "query_engine=scan&query_fallback_engine=index");
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_client(writer_endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "scan-explicit-writer";
+  acquire.ttl_seconds = 60L;
+  acquire.key = "integration/query-explicit-scan/alpha";
+  rc = writer->acquire(writer, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_from_text("{\"kind\":\"explicit-scan\"}", &error);
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  writer->close(writer);
+  writer = NULL;
+
+  open_pouch_client(scan_endpoint, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.engine = "scan";
+  query_req.refresh = "wait_for";
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch scan query does not support refresh");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.engine = "scan";
+  query_req.refresh = "wait_for";
+  rc = reader->query_keys(reader, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch scan query_keys does not support refresh");
+
+  lc_query_res_cleanup(&query_res);
+  lc_error_cleanup(&error);
+  reader->close(reader);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_scan_query_keys_can_be_configured_by_endpoint(
     void **state) {
   char root[256];
@@ -9612,6 +9710,8 @@ int main(void) {
           test_pouch_public_scan_query_ignores_corrupt_index_sidecar),
       cmocka_unit_test(
           test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh),
+      cmocka_unit_test(
+          test_pouch_public_scan_query_explicit_engine_bypasses_refresh_fallback),
       cmocka_unit_test(
           test_pouch_public_scan_query_keys_can_be_configured_by_endpoint),
       cmocka_unit_test(
