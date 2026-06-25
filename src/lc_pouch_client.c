@@ -5936,6 +5936,7 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
   }
   scan_req.start_after = req->cursor;
   scan_req.limit = (size_t)req->limit;
+  scan_req.exclude_deleted_state = 1;
   visit.scan.client = client;
   visit.scan.dst = dst;
   visit.namespace_name = namespace_name;
@@ -6223,6 +6224,7 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
   }
   scan_req.start_after = req->cursor;
   scan_req.limit = (size_t)req->limit;
+  scan_req.exclude_deleted_state = 1;
   scan_context.handler = handler;
   scan_context.handler_context = context;
 

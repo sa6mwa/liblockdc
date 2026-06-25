@@ -1835,6 +1835,7 @@ indexed document and key-query namespace isolation,
 indexed document and key-query pagination,
 indexed owner-selector document and key-query pagination,
 indexed owner-selector query-hidden suppression and unhide visibility,
+indexed owner-selector removal suppression,
 indexed document and key-query `refresh=wait_for` against open readers,
 indexed owner low-match queries over larger namespaces with candidate counts,
 transaction attachment

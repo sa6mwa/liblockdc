@@ -101,6 +101,7 @@ typedef struct lc_pouch_scan_meta_req {
   const char *start_after;
   size_t limit;
   int include_hidden;
+  int exclude_deleted_state;
 } lc_pouch_scan_meta_req;
 
 typedef struct lc_pouch_scan_meta_row {
