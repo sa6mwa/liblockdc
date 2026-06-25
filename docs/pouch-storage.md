@@ -1829,10 +1829,12 @@ retry exhaustion terminal behavior across reopen, read-only queue stats while a
 delivery is invisible, explicit handler acknowledgement, watch snapshots, direct
 subscribe-with-state, direct
 dequeue-wait polling for later enqueues, batch dequeue without duplicate acked
-delivery, managed consumer state-save through both blocking `run()` and
-asynchronous `start()`/`wait()`, managed failure redelivery, managed explicit
-defer redelivery, and cross-client CAS. The optional e2e shard still covers
-broader consumer-service behavior.
+delivery, queue transaction commit/rollback including mixed state plus queue
+decisions, cross-namespace transaction commit/rollback, managed consumer
+state-save through both blocking `run()` and asynchronous `start()`/`wait()`,
+managed failure redelivery, managed explicit acknowledgement and defer
+redelivery, and cross-client CAS. The optional e2e shard still covers broader
+consumer-service behavior.
 
 Current disk unit coverage includes queue nack and extend allocator-failure
 paths, TTL expiry, retry-exhaustion replay paths that prove failed
