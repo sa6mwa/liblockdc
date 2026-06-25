@@ -6,12 +6,7 @@ function(lc_add_fuzz_target target_name)
   add_executable(${target_name} ${ARGN})
   target_link_libraries(${target_name} PRIVATE lc_static)
   target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
-  set_target_properties(${target_name}
-    PROPERTIES
-      C_STANDARD 99
-      C_STANDARD_REQUIRED ON
-      C_EXTENSIONS ON
-  )
+  lc_configure_c_test_target(${target_name})
   target_compile_options(${target_name} PRIVATE
     $<$<COMPILE_LANG_AND_ID:C,Clang>:-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g>
   )
