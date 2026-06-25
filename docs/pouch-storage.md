@@ -1839,7 +1839,7 @@ indexed owner-selector document and key-query pagination,
 indexed owner-selector query-hidden suppression and unhide visibility,
 indexed owner-selector removal suppression,
 scan and indexed key/key+owner-selector removal suppression,
-scan and indexed pagination across removed-state candidates,
+scan and indexed row/key pagination across removed-state candidates,
 indexed document and key-query `refresh=wait_for` against open readers,
 indexed owner low-match queries over larger namespaces with candidate counts,
 transaction attachment
