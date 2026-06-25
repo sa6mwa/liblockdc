@@ -1845,6 +1845,7 @@ delivery, queue transaction commit/rollback including mixed state plus queue
 decisions, prepared mixed replay/commit, and expired mixed recovery after
 reopen, cross-namespace transaction commit/rollback and prepared replay after
 reopen, expired cross-namespace prepared transaction rollback on reopen,
+transaction target-backend mismatch fencing through the public endpoint,
 managed consumer state-save through both blocking `run()` and asynchronous
 `start()`/`wait()`, managed failure redelivery, managed explicit
 acknowledgement and defer redelivery, and cross-client CAS. The optional e2e

@@ -9763,6 +9763,84 @@ static void test_pouch_public_transaction_rollback_discards_update(
   cleanup_pouch_root(root);
 }
 
+static void
+test_pouch_public_transaction_rejects_wrong_target_backend_hash(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "txn-target-backend-mismatch");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&decision_res, 0, sizeof(decision_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/txn-target-backend";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "integration-txn-target-backend-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":2}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "integration/txn-target-backend";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-txn-target-backend-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  decision_req.target_backend_hash = "not-this-pouch-backend";
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "backend_mismatch");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  assert_client_state_text(client, "integration/txn-target-backend",
+                           "{\"value\":1}", &error);
+
+  lc_lease_close(lease);
+  lease = NULL;
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_transaction_commit_across_namespaces(
     void **state) {
   char root[256];
@@ -11014,6 +11092,8 @@ int main(void) {
           test_pouch_public_transaction_prepare_survives_reopen),
       cmocka_unit_test(
           test_pouch_public_transaction_rollback_discards_update),
+      cmocka_unit_test(
+          test_pouch_public_transaction_rejects_wrong_target_backend_hash),
       cmocka_unit_test(
           test_pouch_public_transaction_commit_across_namespaces),
       cmocka_unit_test(
