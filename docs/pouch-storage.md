@@ -1823,11 +1823,11 @@ Current default local integration coverage in `tests/integration` exercises
 public `pouch://` clients sharing one disk root for state and attachment
 persistence, query-hidden metadata versioning and persistence, attachment
 prevent-overwrite and overwrite semantics, attachment delete/delete-all
-semantics, client-level attachment APIs, queue visibility handoff, stale
-delivery fencing, nack redelivery, delayed nack redelivery, client-level nack
-retry exhaustion terminal behavior across reopen, read-only queue stats while a
-delivery is invisible, explicit handler acknowledgement, watch snapshots, direct
-subscribe-with-state, direct
+semantics, client-level attachment APIs, transaction attachment replay/commit,
+queue visibility handoff, stale delivery fencing, nack redelivery, delayed nack
+redelivery, client-level nack retry exhaustion terminal behavior across reopen,
+read-only queue stats while a delivery is invisible, explicit handler
+acknowledgement, watch snapshots, direct subscribe-with-state, direct
 dequeue-wait polling for later enqueues, batch dequeue without duplicate acked
 delivery, queue transaction commit/rollback including mixed state plus queue
 decisions, prepared mixed replay/commit, and expired mixed recovery after
