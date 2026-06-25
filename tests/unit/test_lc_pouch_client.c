@@ -5524,6 +5524,94 @@ static void test_pouch_endpoint_scan_query_filters_owner_selector(
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_scan_query_filters_key_selector(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-scan-key");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha, "{\"value\":1}", &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo, "{\"value\":2}", &error);
+  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  pouch_save_query_json(charlie, "{\"value\":3}", &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"bravo\"}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_null(strstr(text, "alpha"));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
+  assert_null(strstr(text, "charlie"));
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"bravo\"}";
+  req.engine = "scan";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_int_equal(res.index_seq, 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.cursor = "bravo";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 0U);
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":0}");
+  lc_query_res_cleanup(&res);
+
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson(
     void **state) {
   char root[256];
@@ -5702,6 +5790,93 @@ static void test_pouch_endpoint_index_query_filters_owner_selector(
   free(text);
   lc_sink_close(sink);
   lc_query_res_cleanup(&res);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_index_query_filters_key_selector(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-key");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha, "{\"value\":1}", &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo, "{\"value\":2}", &error);
+  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  pouch_save_query_json(charlie, "{\"value\":3}", &error);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"bravo\"}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_null(strstr(text, "alpha"));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
+  assert_null(strstr(text, "charlie"));
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{\"key\":\"bravo\"}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.cursor = "bravo";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 0U);
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":0}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
   alpha->close(alpha);
   bravo->close(bravo);
   charlie->close(charlie);
@@ -6239,12 +6414,12 @@ static void test_pouch_endpoint_scan_query_rejects_lql_selector(void **state) {
   assert_int_equal(rc, LC_OK);
 
   lc_query_req_init(&req);
-  req.selector_json = "{\"key\":\"alpha\"}";
+  req.selector_json = "{\"value\":\"alpha\"}";
   req.engine = "scan";
   rc = client->query(client, &req, sink, &res, &error);
   assert_pouch_unsupported(rc, &error,
-                           "pouch scan query supports only match-all or "
-                           "owner selector");
+                           "pouch scan query supports only match-all, key, "
+                           "or owner selector");
 
   lc_sink_close(sink);
   client->close(client);
@@ -6893,12 +7068,12 @@ static void test_pouch_endpoint_scan_query_keys_rejects_lql_selector(
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
   lc_query_req_init(&req);
-  req.selector_json = "{\"key\":\"alpha\"}";
+  req.selector_json = "{\"value\":\"alpha\"}";
   req.engine = "scan";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_pouch_unsupported(
       rc, &error,
-      "pouch scan query_keys supports only match-all or owner selector");
+      "pouch scan query_keys supports only match-all, key, or owner selector");
   assert_int_equal(capture.key_count, 0U);
 
   client->close(client);
@@ -7067,11 +7242,11 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   lc_query_req_init(&query_req);
-  query_req.selector_json = "{\"key\":\"alpha\"}";
+  query_req.selector_json = "{\"value\":\"alpha\"}";
   rc = client->query(client, &query_req, sink, &query_res, &error);
   assert_pouch_unsupported(rc, &error,
-                           "pouch index query supports only match-all or "
-                           "owner selector");
+                           "pouch index query supports only match-all, key, "
+                           "or owner selector");
   lc_sink_close(sink);
 
   memset(&key_handler, 0, sizeof(key_handler));
@@ -7081,8 +7256,8 @@ static void test_pouch_endpoint_reports_local_unsupported_surfaces(
   rc = client->query_keys(client, &query_req, &key_handler, NULL, &query_res,
                           &error);
   assert_pouch_unsupported(rc, &error,
-                           "pouch index query_keys supports only match-all or "
-                           "owner selector");
+                           "pouch index query_keys supports only match-all, "
+                           "key, or owner selector");
 
   lc_namespace_config_req_init(&namespace_req);
   namespace_req.namespace_name = "default";
@@ -8136,12 +8311,14 @@ int main(void) {
           test_pouch_endpoint_scan_query_streams_documents_with_paging),
       cmocka_unit_test(
           test_pouch_endpoint_scan_query_filters_owner_selector),
+      cmocka_unit_test(test_pouch_endpoint_scan_query_filters_key_selector),
       cmocka_unit_test(
           test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson),
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_streams_documents),
       cmocka_unit_test(
           test_pouch_endpoint_index_query_filters_owner_selector),
+      cmocka_unit_test(test_pouch_endpoint_index_query_filters_key_selector),
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_waits_for_refresh),
       cmocka_unit_test(test_pouch_endpoint_default_index_query_keys_pages),

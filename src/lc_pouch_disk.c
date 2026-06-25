@@ -4384,11 +4384,20 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
     return rc;
   }
 
-  start_key = req->start_after != NULL ? req->start_after : "";
-  if (lc_pouch_disk_query_index_find(store, req->namespace_name, start_key,
-                                     &start_index) &&
-      req->start_after != NULL) {
-    start_index++;
+  if (req->key != NULL) {
+    if (req->start_after != NULL && strcmp(req->start_after, req->key) >= 0) {
+      start_index = store->query_meta_index_count;
+    } else {
+      (void)lc_pouch_disk_query_index_find(store, req->namespace_name,
+                                           req->key, &start_index);
+    }
+  } else {
+    start_key = req->start_after != NULL ? req->start_after : "";
+    if (lc_pouch_disk_query_index_find(store, req->namespace_name, start_key,
+                                       &start_index) &&
+        req->start_after != NULL) {
+      start_index++;
+    }
   }
 
   for (index = start_index; index < store->query_meta_index_count; ++index) {
@@ -4402,6 +4411,17 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
     }
     if (namespace_cmp < 0) {
       continue;
+    }
+    if (req->key != NULL) {
+      int key_cmp;
+
+      key_cmp = strcmp(entry->key, req->key);
+      if (key_cmp > 0) {
+        break;
+      }
+      if (key_cmp < 0) {
+        continue;
+      }
     }
     if (entry->deleted ||
         (!req->include_hidden && entry->meta.has_query_hidden &&
@@ -4443,6 +4463,17 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
     }
     if (namespace_cmp < 0) {
       continue;
+    }
+    if (req->key != NULL) {
+      int key_cmp;
+
+      key_cmp = strcmp(entry->key, req->key);
+      if (key_cmp > 0) {
+        break;
+      }
+      if (key_cmp < 0) {
+        continue;
+      }
     }
     if (entry->deleted ||
         (!req->include_hidden && entry->meta.has_query_hidden &&
@@ -4556,11 +4587,20 @@ static int lc_pouch_disk_scan_meta_keys(
     return rc;
   }
 
-  start_key = req->start_after != NULL ? req->start_after : "";
-  if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
-                                       &start_index) &&
-      req->start_after != NULL) {
-    start_index++;
+  if (req->key != NULL) {
+    if (req->start_after != NULL && strcmp(req->start_after, req->key) >= 0) {
+      start_index = store->query_summary_entry_count;
+    } else {
+      (void)lc_pouch_disk_query_summary_find(store, req->namespace_name,
+                                             req->key, &start_index);
+    }
+  } else {
+    start_key = req->start_after != NULL ? req->start_after : "";
+    if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
+                                         &start_index) &&
+        req->start_after != NULL) {
+      start_index++;
+    }
   }
 
   for (index = start_index; index < store->query_summary_entry_count; ++index) {
@@ -4574,6 +4614,17 @@ static int lc_pouch_disk_scan_meta_keys(
     }
     if (namespace_cmp < 0) {
       continue;
+    }
+    if (req->key != NULL) {
+      int key_cmp;
+
+      key_cmp = strcmp(entry->key, req->key);
+      if (key_cmp > 0) {
+        break;
+      }
+      if (key_cmp < 0) {
+        continue;
+      }
     }
     if (entry->deleted ||
         (!req->include_hidden && entry->has_query_hidden &&
@@ -4614,6 +4665,17 @@ static int lc_pouch_disk_scan_meta_keys(
     }
     if (namespace_cmp < 0) {
       continue;
+    }
+    if (req->key != NULL) {
+      int key_cmp;
+
+      key_cmp = strcmp(entry->key, req->key);
+      if (key_cmp > 0) {
+        break;
+      }
+      if (key_cmp < 0) {
+        continue;
+      }
     }
     if (entry->deleted ||
         (!req->include_hidden && entry->has_query_hidden &&
@@ -4720,11 +4782,20 @@ static int lc_pouch_disk_query_index_scan(
     return rc;
   }
 
-  start_key = req->start_after != NULL ? req->start_after : "";
-  if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
-                                       &start_index) &&
-      req->start_after != NULL) {
-    start_index++;
+  if (req->key != NULL) {
+    if (req->start_after != NULL && strcmp(req->start_after, req->key) >= 0) {
+      start_index = store->query_summary_entry_count;
+    } else {
+      (void)lc_pouch_disk_query_summary_find(store, req->namespace_name,
+                                             req->key, &start_index);
+    }
+  } else {
+    start_key = req->start_after != NULL ? req->start_after : "";
+    if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
+                                         &start_index) &&
+        req->start_after != NULL) {
+      start_index++;
+    }
   }
 
   for (index = start_index; index < store->query_summary_entry_count; ++index) {
@@ -4738,6 +4809,17 @@ static int lc_pouch_disk_query_index_scan(
     }
     if (namespace_cmp < 0) {
       continue;
+    }
+    if (req->key != NULL) {
+      int key_cmp;
+
+      key_cmp = strcmp(entry->key, req->key);
+      if (key_cmp > 0) {
+        break;
+      }
+      if (key_cmp < 0) {
+        continue;
+      }
     }
     if (entry->deleted ||
         (entry->has_query_hidden && entry->query_hidden)) {
@@ -4773,6 +4855,17 @@ static int lc_pouch_disk_query_index_scan(
     }
     if (namespace_cmp < 0) {
       continue;
+    }
+    if (req->key != NULL) {
+      int key_cmp;
+
+      key_cmp = strcmp(entry->key, req->key);
+      if (key_cmp > 0) {
+        break;
+      }
+      if (key_cmp < 0) {
+        continue;
+      }
     }
     if (entry->deleted ||
         (entry->has_query_hidden && entry->query_hidden)) {
@@ -4881,11 +4974,20 @@ static int lc_pouch_disk_query_index_keys_scan(
     return rc;
   }
 
-  start_key = req->start_after != NULL ? req->start_after : "";
-  if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
-                                       &start_index) &&
-      req->start_after != NULL) {
-    start_index++;
+  if (req->key != NULL) {
+    if (req->start_after != NULL && strcmp(req->start_after, req->key) >= 0) {
+      start_index = store->query_summary_entry_count;
+    } else {
+      (void)lc_pouch_disk_query_summary_find(store, req->namespace_name,
+                                             req->key, &start_index);
+    }
+  } else {
+    start_key = req->start_after != NULL ? req->start_after : "";
+    if (lc_pouch_disk_query_summary_find(store, req->namespace_name, start_key,
+                                         &start_index) &&
+        req->start_after != NULL) {
+      start_index++;
+    }
   }
 
   for (index = start_index; index < store->query_summary_entry_count; ++index) {
@@ -4899,6 +5001,17 @@ static int lc_pouch_disk_query_index_keys_scan(
     }
     if (namespace_cmp < 0) {
       continue;
+    }
+    if (req->key != NULL) {
+      int key_cmp;
+
+      key_cmp = strcmp(entry->key, req->key);
+      if (key_cmp > 0) {
+        break;
+      }
+      if (key_cmp < 0) {
+        continue;
+      }
     }
     if (entry->deleted ||
         (entry->has_query_hidden && entry->query_hidden)) {
@@ -4934,6 +5047,17 @@ static int lc_pouch_disk_query_index_keys_scan(
     }
     if (namespace_cmp < 0) {
       continue;
+    }
+    if (req->key != NULL) {
+      int key_cmp;
+
+      key_cmp = strcmp(entry->key, req->key);
+      if (key_cmp > 0) {
+        break;
+      }
+      if (key_cmp < 0) {
+        continue;
+      }
     }
     if (entry->deleted ||
         (entry->has_query_hidden && entry->query_hidden)) {

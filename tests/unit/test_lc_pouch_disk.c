@@ -2887,6 +2887,28 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   assert_false(scan.truncated);
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
 
+  memset(&capture, 0, sizeof(capture));
+  req.key = "delta";
+  req.start_after = NULL;
+  req.limit = 8U;
+  rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "delta");
+  assert_int_equal(capture.versions[0], 50L);
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = "delta";
+  rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 0U);
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -3054,6 +3076,30 @@ static void test_metadata_key_scan_orders_paginates_and_replays(void **state) {
   assert_string_equal(capture.keys[0], "alpha");
   assert_string_equal(capture.keys[1], "bravo");
   assert_string_equal(capture.keys[2], "hidden");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.key = "bravo";
+  req.start_after = NULL;
+  req.limit = 8U;
+  req.include_hidden = 0;
+  rc = store->scan_meta_keys(store, &req, capture_query_key, &capture, &scan,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = "bravo";
+  rc = store->scan_meta_keys(store, &req, capture_query_key, &capture, &scan,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 0U);
   assert_false(scan.truncated);
   assert_null(scan.next_start_after);
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
@@ -3369,6 +3415,31 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   assert_null(scan.next_start_after);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  memset(&capture, 0, sizeof(capture));
+  req.key = "bravo";
+  req.start_after = NULL;
+  req.limit = 8U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_int_equal(capture.versions[0], 2L);
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = "bravo";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 0U);
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -3466,6 +3537,30 @@ static void test_query_index_keys_scan_avoids_metadata_row_copies(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 1U);
   assert_string_equal(capture.keys[0], "bravo");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.key = "bravo";
+  req.start_after = NULL;
+  req.limit = 8U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&capture, 0, sizeof(capture));
+  req.start_after = "bravo";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 0U);
   assert_false(scan.truncated);
   assert_null(scan.next_start_after);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);

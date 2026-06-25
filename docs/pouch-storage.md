@@ -647,24 +647,26 @@ Scan mode acceptance criteria:
 The first public query surfaces are `query_keys` and `query` with the match-all
 selector `{}`. In indexed mode these calls route through a storage-owned index
 scan primitive and return the current `index_seq`. Before `liblql` integration,
-indexed mode also accepts the exact owner selector form `{"owner":"..."}` and
-routes it through storage-owned owner postings. Scan mode accepts the same
-pre-LQL selector set, but resolves owner equality by walking the ordered
-full-summary scan route instead of consulting owner postings. The current disk
-backend keeps the sorted metadata projection as the authoritative in-memory
-index for match-all scans, while `query.index` remains a durable sidecar
-accelerator that can be validated against the store log and truncated at the
-last verified record. Indexed scans must never trust sidecar rows that do not
-match current metadata, and key-only scans must agree with document scans even
-after a sidecar tail fault. Later field postings and `liblql` predicates must
-extend this boundary with storage-owned index segments/postings and candidate
-iteration, rather than falling back to a single full-log scan. Scan-mode
-key-only queries use a storage key-scan primitive when the backend provides
-one, so configured scan mode does not copy full metadata rows for `query_keys`.
-Key-only scan and indexed-scan primitives copy only visible keys before
-invoking callbacks. The current disk backend serves both primitives from the
-query-summary projection rather than the full metadata row array, so
-`query_keys` does not pay for metadata row copies.
+indexed mode also accepts exact key selector form `{"key":"..."}` and exact
+owner selector form `{"owner":"..."}`. Exact keys route through the sorted
+query-summary projection; exact owners route through storage-owned owner
+postings. Scan mode accepts the same pre-LQL selector set, but resolves equality
+by walking ordered full-summary or metadata scan routes instead of consulting
+postings. The current disk backend keeps the sorted metadata projection as the
+authoritative in-memory index for match-all and exact-key scans, while
+`query.index` remains a durable sidecar accelerator that can be validated
+against the store log and truncated at the last verified record. Indexed scans
+must never trust sidecar rows that do not match current metadata, and key-only
+scans must agree with document scans even after a sidecar tail fault. Later
+field postings and `liblql` predicates must extend this boundary with
+storage-owned index segments/postings and candidate iteration, rather than
+falling back to a single full-log scan. Scan-mode key-only queries use a storage
+key-scan primitive when the backend provides one, so configured scan mode does
+not copy full metadata rows for `query_keys`. Key-only scan and indexed-scan
+primitives copy only visible keys before invoking callbacks. The current disk
+backend serves both primitives from the query-summary projection rather than
+the full metadata row array, so `query_keys` does not pay for metadata row
+copies.
 Indexed match-all document scans also page over the query-summary projection
 and copy only the row fields currently required by query callbacks: key, ETag,
 owner, version, update timestamp, and query-hidden state. Document payloads are
@@ -682,8 +684,8 @@ payload in the namespace.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
-returns `keys` as the return mode. Exact owner selectors filter that same
-ordered scan before limits and cursors are applied. Both `query_keys` and
+returns `keys` as the return mode. Exact key and owner selectors filter that
+same ordered scan before limits and cursors are applied. Both `query_keys` and
 `query` report local metadata such as `query_candidates`. `query` streams NDJSON
 document rows in the same ordered page, embeds JSON state payloads as
 `document`, emits `null` for non-JSON or empty state payloads, and returns
@@ -697,8 +699,8 @@ scanning the indexed projection. Explicit scan mode remains available for
 full-log/full-summary scanning through the ordered metadata summary API, but it
 does not accept refresh hints because no durable query index is consulted.
 Non-empty field selection, non-document scan return modes, and LQL selectors
-beyond exact owner equality remain unsupported until the indexed/LQL query slice
-lands.
+beyond exact key or owner equality remain unsupported until the indexed/LQL
+query slice lands.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
@@ -982,9 +984,9 @@ summaries that were refreshed from authoritative log state. Additional
 term/range postings should extend this boundary rather than bypass it.
 Indexed mode is the preferred default; scan mode is a configured backend mode
 or configured fallback. The persistent format should not encode LQL-specific
-query plans. Pre-LQL scan support is intentionally limited to match-all
-`query_keys` and match-all document `query`; predicate evaluation requires the
-later query/index integration.
+query plans. Pre-LQL scan support is intentionally limited to match-all and
+exact key/owner equality for `query_keys` and document `query`; richer
+predicate evaluation requires the later query/index integration.
 
 Query refresh contracts are storage-visible. A query that waits for a flush or
 refresh target must observe committed summary records without requiring a full
