@@ -1826,12 +1826,13 @@ prevent-overwrite and overwrite semantics, attachment delete/delete-all
 semantics, client-level attachment APIs, queue visibility handoff, stale
 delivery fencing, nack redelivery, delayed nack redelivery, client-level nack
 retry exhaustion terminal behavior across reopen, read-only queue stats while a
-delivery is invisible,
-acknowledgement, watch snapshots, direct subscribe-with-state, direct
+delivery is invisible, explicit handler acknowledgement, watch snapshots, direct
+subscribe-with-state, direct
 dequeue-wait polling for later enqueues, batch dequeue without duplicate acked
 delivery, managed consumer state-save through both blocking `run()` and
-asynchronous `start()`/`wait()`, managed failure redelivery, and cross-client
-CAS. The optional e2e shard still covers broader consumer-service behavior.
+asynchronous `start()`/`wait()`, managed failure redelivery, managed explicit
+defer redelivery, and cross-client CAS. The optional e2e shard still covers
+broader consumer-service behavior.
 
 Current disk unit coverage includes queue nack and extend allocator-failure
 paths, TTL expiry, retry-exhaustion replay paths that prove failed
