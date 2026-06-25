@@ -1824,7 +1824,8 @@ public `pouch://` clients sharing one disk root for state and attachment
 persistence, query-hidden metadata versioning and persistence, attachment
 prevent-overwrite and overwrite semantics, attachment delete/delete-all
 semantics, client-level attachment APIs, transaction attachment replay
-commit/rollback, transaction attachment-delete replay commit, queue visibility
+commit/rollback, transaction attachment-delete replay commit/rollback,
+queue visibility
 handoff, stale delivery fencing, nack redelivery, delayed nack redelivery,
 client-level nack retry exhaustion terminal behavior across reopen, read-only
 queue stats while a delivery is invisible, explicit handler
