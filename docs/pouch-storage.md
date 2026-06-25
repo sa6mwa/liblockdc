@@ -1845,9 +1845,10 @@ Current disk unit coverage includes queue nack and extend allocator-failure
 paths, TTL expiry, retry-exhaustion replay paths that prove failed
 redelivery-control mutations leave the active lease ackable and terminal queue
 states remain terminal after reopen, forked cross-process CAS contention that
-proves exactly one independent process can update a stale state ETag, and
-forked queue dequeue contention that proves a single message is leased to only
-one independent process.
+proves exactly one independent process can update a stale state ETag,
+retention sweep replay idempotence after reopen, and forked queue dequeue
+contention that proves a single message is leased to only one independent
+process.
 
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a

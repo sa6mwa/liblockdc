@@ -4169,6 +4169,25 @@ static void test_retention_sweep_deletes_expired_metadata_and_state(
 
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  memset(&sweep, 0, sizeof(sweep));
+  rc = store->retention_sweep(store, &req, &sweep, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(sweep.scanned_metadata, 1UL);
+  assert_int_equal(sweep.expired_metadata, 0UL);
+  assert_int_equal(sweep.deleted_metadata, 0UL);
+  assert_int_equal(sweep.deleted_state, 0UL);
+  assert_int_equal(sweep.failed_keys, 0UL);
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_REMOVE),
+                   2U);
+  assert_int_equal(
+      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 1U);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
