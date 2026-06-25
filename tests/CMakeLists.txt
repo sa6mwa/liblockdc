@@ -78,6 +78,17 @@ set_tests_properties(release_werror_contract_test PROPERTIES
   TIMEOUT 10
 )
 
+add_test(NAME release_compile_werror_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -DLOCKDC_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+    -P "${CMAKE_SOURCE_DIR}/tests/release_compile_werror_test.cmake"
+)
+set_tests_properties(release_compile_werror_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
+)
+
 add_test(NAME pouch_storage_allocator_contract_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
