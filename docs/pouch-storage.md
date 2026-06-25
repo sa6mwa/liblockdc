@@ -1876,8 +1876,10 @@ states remain terminal after reopen, forked cross-process CAS contention that
 proves exactly one independent process can update a stale state ETag,
 retention sweep replay idempotence after reopen, and forked queue dequeue
 contention that proves a single message is leased to only one independent
-process. A source-level allocator contract also rejects raw platform allocation
-calls in the storage interface and disk-log backend.
+process, plus `if_needed` compaction skip reasons for both below-min-log-size
+and below-obsolete-threshold stores. A source-level allocator contract also
+rejects raw platform allocation calls in the storage interface and disk-log
+backend.
 
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a
