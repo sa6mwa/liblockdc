@@ -557,6 +557,91 @@ static long bench_pouch_owner_zero_count(long rows) {
   return ((rows - 1L) / 10L) + 1L;
 }
 
+static long bench_pouch_owner_zero_live_after_removed_count(long rows) {
+  long owner_rows;
+
+  owner_rows = bench_pouch_owner_zero_count(rows);
+  return (owner_rows + 1L) / 2L;
+}
+
+static int bench_pouch_seed_query_rows_by_owner_with_removed(
+    const char *root, long rows, lc_error *error) {
+  char endpoint[320];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_remove_req remove_req;
+  lc_lease *lease;
+  lc_source *source;
+  char key[96];
+  char owner[32];
+  char json[96];
+  long i;
+  int rc;
+
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  source = NULL;
+  lease = NULL;
+  rc = lc_client_open(&config, &client, error);
+  if (rc != LC_OK) {
+    return 1;
+  }
+  lc_acquire_req_init(&acquire);
+  lc_update_opts_init(&update_opts);
+  lc_remove_req_init(&remove_req);
+  acquire.ttl_seconds = 3600L;
+  update_opts.content_type = "application/json";
+  for (i = 0; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/query/%08ld", i);
+    snprintf(owner, sizeof(owner), "bench-owner-%02ld", i % 10L);
+    snprintf(json, sizeof(json), "{\"value\":%ld}", i);
+    lease = NULL;
+    source = NULL;
+    acquire.key = key;
+    acquire.owner = owner;
+    rc = client->acquire(client, &acquire, &lease, error);
+    if (rc == LC_OK) {
+      source = bench_source_from_text(json, error);
+      if (source == NULL) {
+        rc = LC_ERR_NOMEM;
+      }
+    }
+    if (rc != LC_OK) {
+      if (source != NULL) {
+        lc_source_close(source);
+      }
+      if (lease != NULL) {
+        lease->close(lease);
+      }
+      client->close(client);
+      return 1;
+    }
+    rc = lease->update(lease, source, &update_opts, error);
+    lc_source_close(source);
+    source = NULL;
+    if (rc == LC_OK && i % 10L == 0L && (i / 10L) % 2L == 1L) {
+      remove_req.if_state_etag = lease->state_etag;
+      rc = lease->remove(lease, &remove_req, error);
+    }
+    lease->close(lease);
+    lease = NULL;
+    if (rc != LC_OK) {
+      client->close(client);
+      return 1;
+    }
+  }
+  client->close(client);
+  return 0;
+}
+
 static int bench_pouch_seed_public_query_rows_by_owner(const char *root,
                                                        long rows,
                                                        lc_error *error) {
@@ -2568,6 +2653,108 @@ static int bench_pouch_index_query_keys_owner(long iterations) {
   return bench_pouch_query_owner_selector(iterations, 0, 1);
 }
 
+static int bench_pouch_index_query_owner_removed_selector(long iterations,
+                                                          int keys_only) {
+  char root[256];
+  char endpoint[320];
+  char selector[64];
+  char expected_metadata[64];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_sink *sink;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  bench_query_key_count count;
+  long expected_rows;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root),
+                        keys_only ? "index-query-keys-owner-removed"
+                                  : "index-query-owner-removed");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_query_rows_by_owner_with_removed(root, iterations,
+                                                        &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  expected_rows = bench_pouch_owner_zero_live_after_removed_count(iterations);
+  snprintf(selector, sizeof(selector), "{\"owner\":\"bench-owner-00\"}");
+  snprintf(expected_metadata, sizeof(expected_metadata),
+           "{\"query_candidates\":%ld}", expected_rows);
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.selector_json = selector;
+  req.limit = iterations;
+  if (keys_only) {
+    memset(&handler, 0, sizeof(handler));
+    memset(&count, 0, sizeof(count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &count, &res, &error);
+    if (rc == LC_OK && count.rows != expected_rows) {
+      fprintf(stderr,
+              "pouch removed owner selector streamed %ld keys, expected %ld\n",
+              count.rows, expected_rows);
+      rc = LC_ERR_PROTOCOL;
+    }
+  } else {
+    sink = NULL;
+    rc = lc_sink_to_file("/dev/null", &sink, &error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, &error);
+      lc_sink_close(sink);
+    }
+  }
+  if (rc == LC_OK && res.index_seq == 0UL) {
+    fprintf(stderr,
+            "pouch removed owner selector did not report an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK &&
+      (res.metadata_json == NULL ||
+       strcmp(res.metadata_json, expected_metadata) != 0)) {
+    fprintf(stderr,
+            "pouch removed owner selector returned metadata %s, expected %s\n",
+            res.metadata_json != NULL ? res.metadata_json : "(null)",
+            expected_metadata);
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_index_query_owner_removed(long iterations) {
+  return bench_pouch_index_query_owner_removed_selector(iterations, 0);
+}
+
+static int bench_pouch_index_query_keys_owner_removed(long iterations) {
+  return bench_pouch_index_query_owner_removed_selector(iterations, 1);
+}
+
 static int bench_pouch_scan_query_key_owner(long iterations) {
   return bench_pouch_query_key_owner_selector(iterations, 1, 0);
 }
@@ -2970,6 +3157,8 @@ static void print_usage(const char *argv0) {
   fprintf(stderr, "pouch-index-query-keys-key|");
   fprintf(stderr, "pouch-scan-query-keys-owner|");
   fprintf(stderr, "pouch-index-query-keys-owner|");
+  fprintf(stderr, "pouch-index-query-owner-removed|");
+  fprintf(stderr, "pouch-index-query-keys-owner-removed|");
   fprintf(stderr, "pouch-scan-query-keys-key-owner|");
   fprintf(stderr, "pouch-index-query-keys-key-owner|");
   fprintf(stderr, "pouch-key-lock-contention]\n");
@@ -3030,6 +3219,10 @@ int main(int argc, char **argv) {
        bench_pouch_scan_query_keys_owner},
       {"pouch-index-query-keys-owner", 1000L,
        bench_pouch_index_query_keys_owner},
+      {"pouch-index-query-owner-removed", 1000L,
+       bench_pouch_index_query_owner_removed},
+      {"pouch-index-query-keys-owner-removed", 1000L,
+       bench_pouch_index_query_keys_owner_removed},
       {"pouch-scan-query-keys-key-owner", 1000L,
        bench_pouch_scan_query_keys_key_owner},
       {"pouch-index-query-keys-key-owner", 1000L,
