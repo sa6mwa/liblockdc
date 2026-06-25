@@ -730,6 +730,10 @@ typedef struct lc_pouch_allocator {
 keeps allocation ownership clear and allows storage tests to fail on accidental
 platform allocation.
 
+This is enforced by a local CTest source contract over the storage interface and
+disk-log backend. The allocator implementation itself is the only intentional
+place that may wrap platform allocation functions for the default allocator.
+
 Required allocator-backed structures:
 
 - growable byte buffers
@@ -1851,7 +1855,8 @@ states remain terminal after reopen, forked cross-process CAS contention that
 proves exactly one independent process can update a stale state ETag,
 retention sweep replay idempotence after reopen, and forked queue dequeue
 contention that proves a single message is leased to only one independent
-process.
+process. A source-level allocator contract also rejects raw platform allocation
+calls in the storage interface and disk-log backend.
 
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a
