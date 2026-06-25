@@ -235,6 +235,27 @@ static void seed_pouch_staged_state(lc_client *client, lc_lease *lease,
   lc_pouch_put_state_res_cleanup(&handle->pouch_allocator, &res);
 }
 
+static char *pouch_backend_hash(lc_client *client, lc_error *error) {
+  lc_client_handle *handle;
+  char *hash;
+  int rc;
+
+  handle = (lc_client_handle *)client;
+  hash = NULL;
+  rc = handle->pouch_store->backend_hash(handle->pouch_store, &hash, error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(hash);
+  assert_true(hash[0] != '\0');
+  return hash;
+}
+
+static void pouch_backend_hash_free(lc_client *client, char *hash) {
+  lc_client_handle *handle;
+
+  handle = (lc_client_handle *)client;
+  lc_pouch_free(&handle->pouch_allocator, hash);
+}
+
 static void partial_pouch_rollback_participant(lc_client *client,
                                                const char *namespace_name,
                                                const char *key,
@@ -7530,6 +7551,148 @@ static void test_pouch_endpoint_txn_commit_promotes_staged_state(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_txn_commit_accepts_target_backend_hash(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  char *backend_hash;
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "txn-target-backend-ok");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&decision_res, 0, sizeof(decision_res));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+  backend_hash = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "txn/target-backend-ok";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":1}");
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "txn-target-backend-ok-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, lease, "{\"value\":2}", &error);
+
+  backend_hash = pouch_backend_hash(client, &error);
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "txn/target-backend-ok";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "txn-target-backend-ok-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  decision_req.target_backend_hash = backend_hash;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "committed");
+  lc_txn_decision_res_cleanup(&decision_res);
+  pouch_backend_hash_free(client, backend_hash);
+  backend_hash = NULL;
+  lc_lease_close(lease);
+  lease = NULL;
+
+  assert_pouch_client_state_text(client, "txn/target-backend-ok",
+                                 "{\"value\":2}", &error);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_txn_commit_rejects_wrong_target_backend_hash(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "txn-target-backend-conflict");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&decision_res, 0, sizeof(decision_res));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "txn/target-backend-conflict";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("{\"value\":1}");
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  acquire.owner = "txn-owner";
+  acquire.txn_id = "txn-target-backend-conflict-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  seed_pouch_staged_state(client, lease, "{\"value\":2}", &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "txn/target-backend-conflict";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "txn-target-backend-conflict-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  decision_req.target_backend_hash = "not-this-pouch-backend";
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 409L);
+  assert_string_equal(error.server_code, "backend_mismatch");
+  lc_error_cleanup(&error);
+  lc_lease_close(lease);
+  lease = NULL;
+
+  assert_pouch_client_state_text(client, "txn/target-backend-conflict",
+                                 "{\"value\":1}", &error);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_pouch_endpoint_txn_rollback_discards_staged_state(
     void **state) {
   char root[256];
@@ -8497,6 +8660,10 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_reports_local_unsupported_surfaces),
       cmocka_unit_test(test_pouch_endpoint_txn_commit_promotes_staged_state),
+      cmocka_unit_test(
+          test_pouch_endpoint_txn_commit_accepts_target_backend_hash),
+      cmocka_unit_test(
+          test_pouch_endpoint_txn_commit_rejects_wrong_target_backend_hash),
       cmocka_unit_test(
           test_pouch_endpoint_txn_rollback_discards_staged_state),
       cmocka_unit_test(test_pouch_endpoint_txn_commit_spans_namespaces),
