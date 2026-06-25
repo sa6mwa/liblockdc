@@ -1790,6 +1790,47 @@ static void test_pouch_public_scan_query_key_selector_filters_candidates(
   lc_sink_close(sink);
   sink = NULL;
 
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json =
+      "{\"key\":\"integration/scan-key/bravo\",\"owner\":\"scan-key-owner-b\"}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_null(strstr(text, "integration/scan-key/alpha"));
+  assert_non_null(strstr(text, "\"key\":\"integration/scan-key/bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"ordinal\":2}"));
+  assert_null(strstr(text, "integration/scan-key/charlie"));
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  assert_int_equal(query_res.index_seq, 0UL);
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json =
+      "{\"key\":\"integration/scan-key/bravo\",\"owner\":\"scan-key-owner-a\"}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_string_equal(text, "");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  assert_int_equal(query_res.index_seq, 0UL);
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
   handler.begin = query_key_capture_begin;
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
@@ -1807,6 +1848,19 @@ static void test_pouch_public_scan_query_key_selector_filters_candidates(
   assert_int_equal(query_res.index_seq, 0UL);
 
   lc_query_res_cleanup(&query_res);
+  memset(&capture, 0, sizeof(capture));
+  query_req.selector_json =
+      "{\"key\":\"integration/scan-key/bravo\",\"owner\":\"scan-key-owner-a\"}";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 0U);
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  assert_int_equal(query_res.index_seq, 0UL);
+  lc_query_res_cleanup(&query_res);
+
   lc_release_req_init(&release_req);
   rc = alpha->release(alpha, &release_req, &error);
   assert_lc_ok(rc, &error);
@@ -2519,6 +2573,49 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   lc_sink_close(sink);
   sink = NULL;
 
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json =
+      "{\"key\":\"integration/index-key/bravo\","
+      "\"owner\":\"index-key-owner-b\"}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_null(strstr(text, "integration/index-key/alpha"));
+  assert_non_null(strstr(text, "\"key\":\"integration/index-key/bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"ordinal\":2}"));
+  assert_null(strstr(text, "integration/index-key/charlie"));
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(query_res.index_seq > 0UL);
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json =
+      "{\"key\":\"integration/index-key/bravo\","
+      "\"owner\":\"index-key-owner-a\"}";
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_string_equal(text, "");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  assert_true(query_res.index_seq > 0UL);
+  free(text);
+  text = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_sink_close(sink);
+  sink = NULL;
+
   handler.begin = query_key_capture_begin;
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
@@ -2536,6 +2633,20 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   assert_true(query_res.index_seq > 0UL);
 
   lc_query_res_cleanup(&query_res);
+  memset(&capture, 0, sizeof(capture));
+  query_req.selector_json =
+      "{\"key\":\"integration/index-key/bravo\","
+      "\"owner\":\"index-key-owner-a\"}";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 0U);
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":0}");
+  assert_true(query_res.index_seq > 0UL);
+  lc_query_res_cleanup(&query_res);
+
   lc_release_req_init(&release_req);
   rc = alpha->release(alpha, &release_req, &error);
   assert_lc_ok(rc, &error);
