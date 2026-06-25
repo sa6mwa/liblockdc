@@ -5336,6 +5336,142 @@ static void test_pouch_public_mixed_state_queue_transaction_rollback(
   cleanup_pouch_root(root);
 }
 
+static void
+test_pouch_public_expired_mixed_state_queue_transaction_recovers(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_message *message;
+  lc_message *redelivery;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "mixed-state-queue-txn-expired");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  message = NULL;
+  redelivery = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "integration/mixed-expired-state";
+  acquire.owner = "seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"state\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "mixed-expired-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("mixed-expired-work", &error);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  acquire.owner = "mixed-expired-owner";
+  acquire.txn_id = "integration-mixed-state-queue-expired-1";
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"state\":2}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "mixed-expired-jobs";
+  dequeue_req.owner = "mixed-expired-worker";
+  dequeue_req.txn_id = "integration-mixed-state-queue-expired-1";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "integration/mixed-expired-state";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-mixed-state-queue-expired-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  decision_req.expires_at_unix = 1L;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "prepared");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+  client->close(client);
+  client = NULL;
+
+  open_pouch_client(endpoint, &client, &error);
+  assert_client_state_text(client, "integration/mixed-expired-state",
+                           "{\"state\":1}", &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "mixed-expired-jobs";
+  dequeue_req.owner = "mixed-expired-worker-2";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue(client, &dequeue_req, &redelivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(redelivery);
+  assert_string_equal(redelivery->message_id, enqueue_res.message_id);
+  rc = redelivery->ack(redelivery, &error);
+  assert_lc_ok(rc, &error);
+  redelivery = NULL;
+
+  lc_txn_replay_req_init(&replay_req);
+  replay_req.txn_id = "integration-mixed-state-queue-expired-1";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_lc_server_error(rc, &error, 404L);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_txn_replay_res_cleanup(&replay_res);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_initial_delay_hides_until_visible(
     void **state) {
   char root[256];
@@ -8872,6 +9008,8 @@ int main(void) {
           test_pouch_public_mixed_state_queue_transaction_commit),
       cmocka_unit_test(
           test_pouch_public_mixed_state_queue_transaction_rollback),
+      cmocka_unit_test(
+          test_pouch_public_expired_mixed_state_queue_transaction_recovers),
       cmocka_unit_test(
           test_pouch_public_queue_initial_delay_hides_until_visible),
       cmocka_unit_test(test_pouch_public_queue_ttl_expiry_removes_candidate),
