@@ -765,6 +765,41 @@ static int pouch_consumer_ack_handle(void *context,
   return LC_OK;
 }
 
+static int pouch_consumer_auto_ack_handle(void *context,
+                                          lc_consumer_message *message,
+                                          lc_error *error) {
+  pouch_consumer_ack_test *state;
+  lc_sink *sink;
+  size_t written;
+  int rc;
+
+  state = (pouch_consumer_ack_test *)context;
+  assert_non_null(state);
+  assert_non_null(message);
+  assert_non_null(message->message);
+  assert_false(message->with_state);
+  assert_null(message->state);
+  assert_int_equal(state->handled, 0U);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  assert_lc_ok(rc, error);
+  written = 0U;
+  rc = message->message->write_payload(message->message, sink, &written,
+                                       error);
+  assert_lc_ok(rc, error);
+  assert_int_equal(written, strlen("auto-work"));
+  assert_sink_text(sink, "auto-work", error);
+  lc_sink_close(sink);
+
+  snprintf(state->message_id, sizeof(state->message_id), "%s",
+           message->message->message_id);
+  state->handled += 1U;
+  rc = lc_consumer_service_stop(state->service);
+  assert_int_equal(rc, LC_OK);
+  return LC_OK;
+}
+
 static int pouch_consumer_defer_handle(void *context,
                                        lc_consumer_message *message,
                                        lc_error *error) {
@@ -10249,6 +10284,94 @@ static void test_pouch_public_consumer_service_explicit_ack(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_consumer_service_auto_ack(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer_config;
+  lc_consumer_service_config service_config;
+  lc_consumer_service *service;
+  pouch_consumer_ack_test consumer_state;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_message *after_ack;
+  lc_dequeue_req dequeue_req;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "consumer-auto-ack");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  source = NULL;
+  service = NULL;
+  after_ack = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&consumer_state, 0, sizeof(consumer_state));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &client, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "managed-auto-ack";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 3600L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("auto-work", &error);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_consumer_config_init(&consumer_config);
+  lc_consumer_service_config_init(&service_config);
+  consumer_config.request.queue = "managed-auto-ack";
+  consumer_config.request.owner = "managed-auto-worker";
+  consumer_config.request.visibility_timeout_seconds = 30L;
+  consumer_config.request.wait_seconds = 1L;
+  consumer_config.handle = pouch_consumer_auto_ack_handle;
+  consumer_config.context = &consumer_state;
+  service_config.consumers = &consumer_config;
+  service_config.consumer_count = 1U;
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(service);
+  consumer_state.service = service;
+  rc = service->run(service, &error);
+  assert_lc_ok(rc, &error);
+  service->close(service);
+  service = NULL;
+
+  assert_int_equal(consumer_state.handled, 1U);
+  assert_string_equal(consumer_state.message_id, enqueue_res.message_id);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "managed-auto-ack";
+  rc = client->queue_stats(client, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "managed-auto-ack";
+  dequeue_req.owner = "managed-auto-verifier";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &after_ack, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(after_ack);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_consumer_service_explicit_defer_redelivery(
     void **state) {
   char root[256];
@@ -10474,6 +10597,7 @@ int main(void) {
           test_pouch_public_consumer_service_polls_later_enqueue),
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
       cmocka_unit_test(test_pouch_public_consumer_service_explicit_ack),
+      cmocka_unit_test(test_pouch_public_consumer_service_auto_ack),
       cmocka_unit_test(
           test_pouch_public_consumer_service_explicit_defer_redelivery),
       cmocka_unit_test(test_pouch_public_acquire_for_update_stages_state),
