@@ -1834,7 +1834,8 @@ query-index sidecars, indexed document and key-query replay after reopen,
 transaction attachment
 replay commit/rollback, transaction attachment-delete replay commit/rollback,
 reserved internal namespace rejection through public state, queue, query,
-flush, config, and default-namespace paths,
+flush, config, and default-namespace paths while internal transaction records
+remain usable,
 scan-engine fallback and explicit bypass for refresh requests, queue visibility
 handoff, stale delivery fencing, nack redelivery, delayed nack redelivery,
 abandoned delivery handle failover, client-level nack retry exhaustion terminal

@@ -1609,6 +1609,10 @@ static void test_pouch_public_rejects_reserved_namespaces(void **state) {
   lc_acquire_req acquire_req;
   lc_enqueue_req enqueue_req;
   lc_enqueue_res enqueue_res;
+  lc_release_req release_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
   lc_query_req query_req;
   lc_query_res query_res;
   lc_index_flush_req flush_req;
@@ -1629,6 +1633,7 @@ static void test_pouch_public_rejects_reserved_namespaces(void **state) {
   source = NULL;
   sink = NULL;
   memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&decision_res, 0, sizeof(decision_res));
   memset(&query_res, 0, sizeof(query_res));
   memset(&flush_res, 0, sizeof(flush_res));
   memset(&namespace_res, 0, sizeof(namespace_res));
@@ -1709,6 +1714,55 @@ static void test_pouch_public_rejects_reserved_namespaces(void **state) {
   assert_null(lease);
   lc_error_cleanup(&error);
   reserved_default_client->close(reserved_default_client);
+  reserved_default_client = NULL;
+
+  lc_error_init(&error);
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "integration/reserved-internal-txn";
+  acquire_req.owner = "seed";
+  acquire_req.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":1}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire_req.owner = "txn-owner";
+  acquire_req.txn_id = "integration-reserved-internal-txn-1";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"value\":2}", &error);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  memset(&participant, 0, sizeof(participant));
+  participant.namespace_name = "default";
+  participant.key = "integration/reserved-internal-txn";
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = "integration-reserved-internal-txn-1";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_string_equal(decision_res.state, "committed");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+  assert_client_state_text(client, "integration/reserved-internal-txn",
+                           "{\"value\":2}", &error);
+  client->close(client);
+  client = NULL;
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_error_cleanup(&error);
 
   cleanup_pouch_root(root);
 }
