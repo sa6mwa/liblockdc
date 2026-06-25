@@ -1833,6 +1833,7 @@ queries, scan-mode corrupt/future/absent
 query-index sidecars, indexed document and key-query replay after reopen,
 indexed document and key-query namespace isolation,
 indexed document and key-query pagination,
+indexed document and key-query `refresh=wait_for` against open readers,
 indexed owner low-match queries over larger namespaces with candidate counts,
 transaction attachment
 replay commit/rollback, transaction attachment-delete replay commit/rollback,

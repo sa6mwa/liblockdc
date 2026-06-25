@@ -3694,6 +3694,119 @@ static void test_pouch_public_index_query_paginates_documents_and_keys(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_index_query_wait_for_refreshes_open_reader(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *writer;
+  lc_client *reader;
+  lc_lease *doc_lease;
+  lc_lease *key_lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "index-query-wait-for-refresh");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  reader = NULL;
+  doc_lease = NULL;
+  key_lease = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_client(endpoint, &reader, &error);
+  open_pouch_client(endpoint, &writer, &error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "wait-for-writer";
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+
+  acquire.key = "integration/index-wait/doc";
+  rc = writer->acquire(writer, &acquire, &doc_lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"refresh\":\"doc\"}", &error);
+  rc = doc_lease->update(doc_lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/index-wait/key";
+  rc = writer->acquire(writer, &acquire, &key_lease, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"refresh\":\"key\"}", &error);
+  rc = key_lease->update(key_lease, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  lc_release_req_init(&release_req);
+  rc = doc_lease->release(doc_lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  doc_lease = NULL;
+  rc = key_lease->release(key_lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  key_lease = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{\"key\":\"integration/index-wait/doc\"}";
+  query_req.refresh = "wait_for";
+  rc = reader->query(reader, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/index-wait/doc\""));
+  assert_non_null(strstr(text, "\"document\":{\"refresh\":\"doc\"}"));
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(query_res.index_seq > 0UL);
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{\"key\":\"integration/index-wait/key\"}";
+  query_req.refresh = "wait_for";
+  rc = reader->query_keys(reader, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "integration/index-wait/key");
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(query_res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&query_res);
+  writer->close(writer);
+  reader->close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_index_query_documents_refreshes_open_reader(
     void **state) {
   char root[256];
@@ -11577,6 +11690,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_index_query_isolates_namespaces),
       cmocka_unit_test(
           test_pouch_public_index_query_paginates_documents_and_keys),
+      cmocka_unit_test(
+          test_pouch_public_index_query_wait_for_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_index_query_documents_refreshes_open_reader),
       cmocka_unit_test(
