@@ -3225,8 +3225,7 @@ static void test_metadata_scan_can_exclude_removed_state(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_metadata_key_scan_paginates_across_removed_state(
-    void **state) {
+static void test_metadata_scan_paginates_across_removed_state(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -3241,6 +3240,7 @@ static void test_metadata_key_scan_paginates_across_removed_state(
   lc_pouch_store_meta_res stored;
   lc_pouch_scan_meta_req req;
   lc_pouch_scan_meta_res scan;
+  scan_capture rows;
   key_capture keys;
   int removed;
   lc_error error;
@@ -3260,6 +3260,7 @@ static void test_metadata_key_scan_paginates_across_removed_state(
   memset(&stored, 0, sizeof(stored));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
   memset(&keys, 0, sizeof(keys));
   store = NULL;
   source = NULL;
@@ -3349,6 +3350,35 @@ static void test_metadata_key_scan_paginates_across_removed_state(
   req.namespace_name = "default";
   req.exclude_deleted_state = 1;
   req.limit = 1U;
+  rc = store->scan_meta(store, &req, capture_scan_row, &rows, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "alpha");
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  memset(&rows, 0, sizeof(rows));
+  req.start_after = "alpha";
+  rc = store->scan_meta(store, &req, capture_scan_row, &rows, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "charlie");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "charlie");
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  memset(&rows, 0, sizeof(rows));
+  req.start_after = "charlie";
+  rc = store->scan_meta(store, &req, capture_scan_row, &rows, &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "delta");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  req.start_after = NULL;
   rc = store->scan_meta_keys(store, &req, capture_query_key, &keys, &scan,
                              &error);
   assert_int_equal(rc, LC_OK);
@@ -4234,6 +4264,7 @@ static void test_query_owner_index_paginates_across_removed_state(
   lc_pouch_store_meta_res stored;
   lc_pouch_query_owner_scan_req req;
   lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
   key_capture keys;
   int removed;
   lc_error error;
@@ -4253,6 +4284,7 @@ static void test_query_owner_index_paginates_across_removed_state(
   memset(&stored, 0, sizeof(stored));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
   memset(&keys, 0, sizeof(keys));
   store = NULL;
   source = NULL;
@@ -4341,6 +4373,41 @@ static void test_query_owner_index_paginates_across_removed_state(
   req.namespace_name = "default";
   req.owner = "page-owner";
   req.limit = 1U;
+  rc = store->query_owner_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "alpha");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&rows, 0, sizeof(rows));
+  req.start_after = "alpha";
+  rc = store->query_owner_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "charlie");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "charlie");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&rows, 0, sizeof(rows));
+  req.start_after = "charlie";
+  rc = store->query_owner_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "delta");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  req.start_after = NULL;
   rc = store->query_owner_keys_scan(store, &req, capture_query_key, &keys,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
@@ -12858,8 +12925,7 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_forces_full_log_replay),
       cmocka_unit_test(test_metadata_key_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_metadata_scan_can_exclude_removed_state),
-      cmocka_unit_test(
-          test_metadata_key_scan_paginates_across_removed_state),
+      cmocka_unit_test(test_metadata_scan_paginates_across_removed_state),
       cmocka_unit_test(
           test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(
