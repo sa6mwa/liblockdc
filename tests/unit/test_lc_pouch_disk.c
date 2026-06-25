@@ -3110,6 +3110,121 @@ static void test_metadata_key_scan_orders_paginates_and_replays(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_metadata_scan_can_exclude_removed_state(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res alpha_state;
+  lc_pouch_put_state_res removed_state;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_scan_meta_req req;
+  lc_pouch_scan_meta_res scan;
+  scan_capture scan_rows;
+  key_capture scan_keys;
+  int removed;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "meta-scan-exclude-removed");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&alpha_state, 0, sizeof(alpha_state));
+  memset(&removed_state, 0, sizeof(removed_state));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&scan_rows, 0, sizeof(scan_rows));
+  memset(&scan_keys, 0, sizeof(scan_keys));
+  store = NULL;
+  source = NULL;
+  removed = 0;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  put_opts.content_type = "application/json";
+  source = source_from_text("{\"live\":\"alpha\"}");
+  rc = store->write_state(store, "default", "alpha", source, &put_opts,
+                          &alpha_state, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"live\":\"removed\"}");
+  rc = store->write_state(store, "default", "removed", source, &put_opts,
+                          &removed_state, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = alpha_state.new_state_etag;
+  meta.version = alpha_state.new_version;
+  meta.fencing_token = alpha_state.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-removed";
+  meta.state_etag = removed_state.new_state_etag;
+  meta.version = removed_state.new_version;
+  meta.fencing_token = removed_state.new_version;
+  rc = store->store_meta(store, "default", "removed", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  rc = store->remove_state(store, "default", "removed",
+                           removed_state.new_state_etag, &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(removed);
+
+  req.namespace_name = "default";
+  rc = store->scan_meta(store, &req, capture_scan_row, &scan_rows, &scan,
+                        &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(scan_rows.count, 2U);
+  assert_string_equal(scan_rows.keys[0], "alpha");
+  assert_string_equal(scan_rows.keys[1], "removed");
+  assert_false(scan.truncated);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  memset(&scan_rows, 0, sizeof(scan_rows));
+  req.exclude_deleted_state = 1;
+  rc = store->scan_meta(store, &req, capture_scan_row, &scan_rows, &scan,
+                        &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(scan_rows.count, 1U);
+  assert_string_equal(scan_rows.keys[0], "alpha");
+  assert_false(scan.truncated);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  rc = store->scan_meta_keys(store, &req, capture_query_key, &scan_keys, &scan,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(scan_keys.count, 1U);
+  assert_string_equal(scan_keys.keys[0], "alpha");
+  assert_false(scan.truncated);
+  lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &removed_state);
+  lc_pouch_put_state_res_cleanup(&allocator, &alpha_state);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_staged_state_rejects_pathlike_transaction_ids(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -12232,6 +12347,7 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_metadata_scan_forces_full_log_replay),
       cmocka_unit_test(test_metadata_key_scan_orders_paginates_and_replays),
+      cmocka_unit_test(test_metadata_scan_can_exclude_removed_state),
       cmocka_unit_test(
           test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(
