@@ -423,10 +423,10 @@ static int bench_pouch_drain_and_count(lc_source *source, size_t expected,
   return total == expected ? 0 : 1;
 }
 
-static int bench_pouch_store_row(lc_pouch_store *store,
-                                 const lc_pouch_allocator *allocator,
-                                 const char *key, const char *json,
-                                 lc_error *error) {
+static int bench_pouch_store_row_for_owner(lc_pouch_store *store,
+                                           const lc_pouch_allocator *allocator,
+                                           const char *key, const char *owner,
+                                           const char *json, lc_error *error) {
   lc_source *source;
   lc_pouch_put_state_opts opts;
   lc_pouch_put_state_res put_res;
@@ -449,7 +449,7 @@ static int bench_pouch_store_row(lc_pouch_store *store,
     lc_pouch_put_state_res_cleanup(allocator, &put_res);
     return 1;
   }
-  meta.owner = "bench-owner";
+  meta.owner = (char *)(owner != NULL ? owner : "bench-owner");
   meta.lease_id = "bench-lease";
   meta.txn_id = "bench-txn";
   meta.state_etag = put_res.new_state_etag;
@@ -460,6 +460,14 @@ static int bench_pouch_store_row(lc_pouch_store *store,
   lc_pouch_store_meta_res_cleanup(allocator, &meta_res);
   lc_pouch_put_state_res_cleanup(allocator, &put_res);
   return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_store_row(lc_pouch_store *store,
+                                 const lc_pouch_allocator *allocator,
+                                 const char *key, const char *json,
+                                 lc_error *error) {
+  return bench_pouch_store_row_for_owner(store, allocator, key, "bench-owner",
+                                         json, error);
 }
 
 static int bench_pouch_seed_query_rows(const char *root, long rows,
@@ -511,6 +519,109 @@ static int bench_pouch_seed_query_rows_with_allocator(
   }
   rc = store->close(store, error);
   return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_seed_query_rows_by_owner(
+    const char *root, long rows, const lc_pouch_allocator *allocator,
+    lc_error *error) {
+  lc_pouch_store *store;
+  char key[96];
+  char owner[32];
+  char json[96];
+  long i;
+  int rc;
+
+  store = NULL;
+  rc = lc_pouch_disk_open(root, allocator, &store, error);
+  if (rc != LC_OK) {
+    return 1;
+  }
+  for (i = 0; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/query/%08ld", i);
+    snprintf(owner, sizeof(owner), "bench-owner-%02ld", i % 10L);
+    snprintf(json, sizeof(json), "{\"value\":%ld}", i);
+    if (bench_pouch_store_row_for_owner(store, allocator, key, owner, json,
+                                        error) != 0) {
+      store->close(store, error);
+      return 1;
+    }
+  }
+  rc = store->close(store, error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static long bench_pouch_owner_zero_count(long rows) {
+  if (rows <= 0L) {
+    return 0L;
+  }
+  return ((rows - 1L) / 10L) + 1L;
+}
+
+static int bench_pouch_seed_public_query_rows_by_owner(const char *root,
+                                                       long rows,
+                                                       lc_error *error) {
+  char endpoint[320];
+  char key[96];
+  char owner[32];
+  char json[96];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_lease *lease;
+  lc_source *source;
+  long i;
+  int rc;
+
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  rc = lc_client_open(&config, &client, error);
+  if (rc != LC_OK) {
+    return 1;
+  }
+  lc_acquire_req_init(&acquire);
+  lc_update_opts_init(&update_opts);
+  acquire.ttl_seconds = 3600L;
+  update_opts.content_type = "application/json";
+  lease = NULL;
+  source = NULL;
+  for (i = 0; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/query/%08ld", i);
+    snprintf(owner, sizeof(owner), "bench-owner-%02ld", i % 10L);
+    snprintf(json, sizeof(json), "{\"value\":%ld}", i);
+    lease = NULL;
+    source = NULL;
+    acquire.key = key;
+    acquire.owner = owner;
+    rc = client->acquire(client, &acquire, &lease, error);
+    if (rc == LC_OK) {
+      source = bench_source_from_text(json, error);
+      if (source == NULL) {
+        rc = LC_ERR_NOMEM;
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lease->update(lease, source, &update_opts, error);
+    }
+    if (source != NULL) {
+      lc_source_close(source);
+    }
+    if (lease != NULL) {
+      lease->close(lease);
+    }
+    if (rc != LC_OK) {
+      client->close(client);
+      return 1;
+    }
+  }
+  client->close(client);
+  return 0;
 }
 
 typedef struct bench_scan_count {
@@ -1620,6 +1731,14 @@ static void bench_pouch_exact_key_for_rows(long rows, char *buffer,
   snprintf(buffer, buffer_size, "bench/query/%08ld", target);
 }
 
+static void bench_pouch_exact_owner_for_rows(long rows, char *buffer,
+                                             size_t buffer_size) {
+  long target;
+
+  target = rows > 1L ? rows / 2L : 0L;
+  snprintf(buffer, buffer_size, "bench-owner-%02ld", target % 10L);
+}
+
 static int bench_pouch_index_scan_key(long iterations) {
   char root[256];
   char key[96];
@@ -1670,6 +1789,110 @@ static int bench_pouch_index_scan_key(long iterations) {
   return rc == LC_OK && count.rows == 1L ? 0 : 1;
 }
 
+static int bench_pouch_index_scan_owner(long iterations) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_pouch_query_owner_scan_req req;
+  lc_pouch_query_index_scan_res res;
+  bench_scan_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "index-scan-owner");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  bench_pouch_allocator(&allocator);
+  if (bench_pouch_seed_query_rows_by_owner(root, iterations, &allocator,
+                                           &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  bench_alloc_metrics_reset();
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&count, 0, sizeof(count));
+  req.namespace_name = "bench";
+  req.owner = "bench-owner-00";
+  req.limit = (size_t)iterations;
+  rc = store->query_owner_scan(store, &req, bench_scan_count_visit, &count,
+                               &res, &error);
+  if (rc == LC_OK && res.index_seq == 0UL) {
+    fprintf(stderr, "pouch-index-scan-owner did not report an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &res);
+  store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK && count.rows == bench_pouch_owner_zero_count(iterations)
+             ? 0
+             : 1;
+}
+
+static int bench_pouch_index_scan_key_owner(long iterations) {
+  char root[256];
+  char key[96];
+  char owner[32];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res res;
+  bench_scan_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "index-scan-key-owner");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  bench_pouch_allocator(&allocator);
+  if (bench_pouch_seed_query_rows_by_owner(root, iterations, &allocator,
+                                           &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  bench_alloc_metrics_reset();
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  bench_pouch_exact_key_for_rows(iterations, key, sizeof(key));
+  bench_pouch_exact_owner_for_rows(iterations, owner, sizeof(owner));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&count, 0, sizeof(count));
+  req.namespace_name = "bench";
+  req.key = key;
+  req.owner = owner;
+  req.limit = (size_t)iterations;
+  rc = store->query_index_scan(store, &req, bench_scan_count_visit, &count,
+                               &res, &error);
+  if (rc == LC_OK && res.index_seq == 0UL) {
+    fprintf(stderr,
+            "pouch-index-scan-key-owner did not report an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &res);
+  store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK && count.rows == 1L ? 0 : 1;
+}
+
 static int bench_pouch_index_keys_key(long iterations) {
   char root[256];
   char key[96];
@@ -1711,6 +1934,110 @@ static int bench_pouch_index_keys_key(long iterations) {
                                     &res, &error);
   if (rc == LC_OK && res.index_seq == 0UL) {
     fprintf(stderr, "pouch-index-keys-key did not report an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &res);
+  store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK && count.rows == 1L ? 0 : 1;
+}
+
+static int bench_pouch_index_keys_owner(long iterations) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_pouch_query_owner_scan_req req;
+  lc_pouch_query_index_scan_res res;
+  bench_scan_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "index-keys-owner");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  bench_pouch_allocator(&allocator);
+  if (bench_pouch_seed_query_rows_by_owner(root, iterations, &allocator,
+                                           &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  bench_alloc_metrics_reset();
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&count, 0, sizeof(count));
+  req.namespace_name = "bench";
+  req.owner = "bench-owner-00";
+  req.limit = (size_t)iterations;
+  rc = store->query_owner_keys_scan(store, &req, bench_key_count_visit, &count,
+                                    &res, &error);
+  if (rc == LC_OK && res.index_seq == 0UL) {
+    fprintf(stderr, "pouch-index-keys-owner did not report an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &res);
+  store->close(store, &error);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK && count.rows == bench_pouch_owner_zero_count(iterations)
+             ? 0
+             : 1;
+}
+
+static int bench_pouch_index_keys_key_owner(long iterations) {
+  char root[256];
+  char key[96];
+  char owner[32];
+  lc_pouch_allocator allocator;
+  lc_pouch_store *store;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res res;
+  bench_scan_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root), "index-keys-key-owner");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  bench_pouch_allocator(&allocator);
+  if (bench_pouch_seed_query_rows_by_owner(root, iterations, &allocator,
+                                           &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  bench_alloc_metrics_reset();
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  bench_pouch_exact_key_for_rows(iterations, key, sizeof(key));
+  bench_pouch_exact_owner_for_rows(iterations, owner, sizeof(owner));
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&count, 0, sizeof(count));
+  req.namespace_name = "bench";
+  req.key = key;
+  req.owner = owner;
+  req.limit = (size_t)iterations;
+  rc = store->query_index_keys_scan(store, &req, bench_key_count_visit, &count,
+                                    &res, &error);
+  if (rc == LC_OK && res.index_seq == 0UL) {
+    fprintf(stderr,
+            "pouch-index-keys-key-owner did not report an index sequence\n");
     rc = LC_ERR_PROTOCOL;
   }
   lc_pouch_query_index_scan_res_cleanup(&allocator, &res);
@@ -1887,6 +2214,239 @@ static int bench_pouch_scan_query_keys_key(long iterations) {
 
 static int bench_pouch_index_query_keys_key(long iterations) {
   return bench_pouch_query_key_selector(iterations, 0, 1);
+}
+
+static int bench_pouch_query_owner_selector(long iterations, int scan_mode,
+                                            int keys_only) {
+  char root[256];
+  char endpoint[320];
+  char selector[64];
+  char expected_metadata[64];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_sink *sink;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  bench_query_key_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root),
+                        scan_mode ? "scan-query-owner" : "index-query-owner");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_public_query_rows_by_owner(root, iterations, &error) !=
+      0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  snprintf(selector, sizeof(selector), "{\"owner\":\"bench-owner-00\"}");
+  snprintf(expected_metadata, sizeof(expected_metadata),
+           "{\"query_candidates\":%ld}", bench_pouch_owner_zero_count(iterations));
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  if (scan_mode) {
+    config.pouch_query_engine = "scan";
+  }
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.selector_json = selector;
+  req.limit = iterations;
+  if (keys_only) {
+    memset(&handler, 0, sizeof(handler));
+    memset(&count, 0, sizeof(count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &count, &res, &error);
+    if (rc == LC_OK &&
+        count.rows != bench_pouch_owner_zero_count(iterations)) {
+      fprintf(stderr, "pouch owner selector streamed %ld keys, expected %ld\n",
+              count.rows, bench_pouch_owner_zero_count(iterations));
+      rc = LC_ERR_PROTOCOL;
+    }
+  } else {
+    sink = NULL;
+    rc = lc_sink_to_file("/dev/null", &sink, &error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, &error);
+      lc_sink_close(sink);
+    }
+  }
+  if (rc == LC_OK && scan_mode && res.index_seq != 0UL) {
+    fprintf(stderr, "pouch scan owner selector reported an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK && !scan_mode && res.index_seq == 0UL) {
+    fprintf(stderr,
+            "pouch index owner selector did not report an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK &&
+      (res.metadata_json == NULL ||
+       strcmp(res.metadata_json, expected_metadata) != 0)) {
+    fprintf(stderr, "pouch owner selector returned metadata %s, expected %s\n",
+            res.metadata_json != NULL ? res.metadata_json : "(null)",
+            expected_metadata);
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_query_key_owner_selector(long iterations, int scan_mode,
+                                                int keys_only) {
+  char root[256];
+  char endpoint[320];
+  char key[96];
+  char owner[32];
+  char selector[192];
+  char expected_metadata[64];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_sink *sink;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  bench_query_key_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root),
+                        scan_mode ? "scan-query-key-owner"
+                                  : "index-query-key-owner");
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_public_query_rows_by_owner(root, iterations, &error) !=
+      0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  bench_pouch_exact_key_for_rows(iterations, key, sizeof(key));
+  bench_pouch_exact_owner_for_rows(iterations, owner, sizeof(owner));
+  snprintf(selector, sizeof(selector), "{\"key\":\"%s\",\"owner\":\"%s\"}",
+           key, owner);
+  snprintf(expected_metadata, sizeof(expected_metadata),
+           "{\"query_candidates\":1}");
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  if (scan_mode) {
+    config.pouch_query_engine = "scan";
+  }
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.selector_json = selector;
+  req.limit = iterations;
+  if (keys_only) {
+    memset(&handler, 0, sizeof(handler));
+    memset(&count, 0, sizeof(count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &count, &res, &error);
+    if (rc == LC_OK && count.rows != 1L) {
+      fprintf(stderr,
+              "pouch key+owner selector streamed %ld keys, expected 1\n",
+              count.rows);
+      rc = LC_ERR_PROTOCOL;
+    }
+  } else {
+    sink = NULL;
+    rc = lc_sink_to_file("/dev/null", &sink, &error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, &error);
+      lc_sink_close(sink);
+    }
+  }
+  if (rc == LC_OK && scan_mode && res.index_seq != 0UL) {
+    fprintf(stderr, "pouch scan key+owner selector reported an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK && !scan_mode && res.index_seq == 0UL) {
+    fprintf(stderr,
+            "pouch index key+owner selector did not report an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK &&
+      (res.metadata_json == NULL ||
+       strcmp(res.metadata_json, expected_metadata) != 0)) {
+    fprintf(stderr,
+            "pouch key+owner selector returned metadata %s, expected %s\n",
+            res.metadata_json != NULL ? res.metadata_json : "(null)",
+            expected_metadata);
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_scan_query_owner(long iterations) {
+  return bench_pouch_query_owner_selector(iterations, 1, 0);
+}
+
+static int bench_pouch_index_query_owner(long iterations) {
+  return bench_pouch_query_owner_selector(iterations, 0, 0);
+}
+
+static int bench_pouch_scan_query_keys_owner(long iterations) {
+  return bench_pouch_query_owner_selector(iterations, 1, 1);
+}
+
+static int bench_pouch_index_query_keys_owner(long iterations) {
+  return bench_pouch_query_owner_selector(iterations, 0, 1);
+}
+
+static int bench_pouch_scan_query_key_owner(long iterations) {
+  return bench_pouch_query_key_owner_selector(iterations, 1, 0);
+}
+
+static int bench_pouch_index_query_key_owner(long iterations) {
+  return bench_pouch_query_key_owner_selector(iterations, 0, 0);
+}
+
+static int bench_pouch_scan_query_keys_key_owner(long iterations) {
+  return bench_pouch_query_key_owner_selector(iterations, 1, 1);
+}
+
+static int bench_pouch_index_query_keys_key_owner(long iterations) {
+  return bench_pouch_query_key_owner_selector(iterations, 0, 1);
 }
 
 static int bench_pouch_index_query(long iterations) {
@@ -2263,11 +2823,19 @@ static void print_usage(const char *argv0) {
   fprintf(stderr, "pouch-compaction|pouch-retention|pouch-scan-meta|");
   fprintf(stderr, "pouch-open-rebuild|pouch-index-scan|");
   fprintf(stderr, "pouch-index-keys|pouch-index-scan-key|");
-  fprintf(stderr, "pouch-index-keys-key|pouch-scan-query|");
+  fprintf(stderr, "pouch-index-keys-key|pouch-index-scan-owner|");
+  fprintf(stderr, "pouch-index-keys-owner|pouch-index-scan-key-owner|");
+  fprintf(stderr, "pouch-index-keys-key-owner|pouch-scan-query|");
   fprintf(stderr, "pouch-index-query|pouch-scan-query-key|");
-  fprintf(stderr, "pouch-index-query-key|pouch-scan-query-keys|");
+  fprintf(stderr, "pouch-index-query-key|pouch-scan-query-owner|");
+  fprintf(stderr, "pouch-index-query-owner|pouch-scan-query-key-owner|");
+  fprintf(stderr, "pouch-index-query-key-owner|pouch-scan-query-keys|");
   fprintf(stderr, "pouch-index-query-keys|pouch-scan-query-keys-key|");
   fprintf(stderr, "pouch-index-query-keys-key|");
+  fprintf(stderr, "pouch-scan-query-keys-owner|");
+  fprintf(stderr, "pouch-index-query-keys-owner|");
+  fprintf(stderr, "pouch-scan-query-keys-key-owner|");
+  fprintf(stderr, "pouch-index-query-keys-key-owner|");
   fprintf(stderr, "pouch-key-lock-contention]\n");
 }
 
@@ -2299,16 +2867,36 @@ int main(int argc, char **argv) {
       {"pouch-index-keys", 1000L, bench_pouch_index_keys},
       {"pouch-index-scan-key", 1000L, bench_pouch_index_scan_key},
       {"pouch-index-keys-key", 1000L, bench_pouch_index_keys_key},
+      {"pouch-index-scan-owner", 1000L, bench_pouch_index_scan_owner},
+      {"pouch-index-keys-owner", 1000L, bench_pouch_index_keys_owner},
+      {"pouch-index-scan-key-owner", 1000L,
+       bench_pouch_index_scan_key_owner},
+      {"pouch-index-keys-key-owner", 1000L,
+       bench_pouch_index_keys_key_owner},
       {"pouch-scan-query", 1000L, bench_pouch_scan_query},
       {"pouch-index-query", 1000L, bench_pouch_index_query},
       {"pouch-scan-query-key", 1000L, bench_pouch_scan_query_key},
       {"pouch-index-query-key", 1000L, bench_pouch_index_query_key},
+      {"pouch-scan-query-owner", 1000L, bench_pouch_scan_query_owner},
+      {"pouch-index-query-owner", 1000L, bench_pouch_index_query_owner},
+      {"pouch-scan-query-key-owner", 1000L,
+       bench_pouch_scan_query_key_owner},
+      {"pouch-index-query-key-owner", 1000L,
+       bench_pouch_index_query_key_owner},
       {"pouch-scan-query-keys", 1000L, bench_pouch_scan_query_keys},
       {"pouch-index-query-keys", 1000L, bench_pouch_index_query_keys},
       {"pouch-scan-query-keys-key", 1000L,
        bench_pouch_scan_query_keys_key},
       {"pouch-index-query-keys-key", 1000L,
        bench_pouch_index_query_keys_key},
+      {"pouch-scan-query-keys-owner", 1000L,
+       bench_pouch_scan_query_keys_owner},
+      {"pouch-index-query-keys-owner", 1000L,
+       bench_pouch_index_query_keys_owner},
+      {"pouch-scan-query-keys-key-owner", 1000L,
+       bench_pouch_scan_query_keys_key_owner},
+      {"pouch-index-query-keys-key-owner", 1000L,
+       bench_pouch_index_query_keys_key_owner},
       {"pouch-key-lock-contention", 1000L,
        bench_pouch_key_lock_contention}};
   const char *scenario;

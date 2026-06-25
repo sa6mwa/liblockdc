@@ -1703,7 +1703,9 @@ direct indexed summary scans, direct key-only indexed scans, public indexed
 document query streaming, public scan-mode document query streaming, public
 indexed key streaming, public scan-mode key streaming, exact-key indexed
 summary/key scans, exact-key public document and key queries in both scan and
-indexed modes, and retention sweep throughput over metadata/state rows. The
+indexed modes, exact-owner and key+owner indexed summary/key scans, exact-owner
+and key+owner public document and key queries in both scan and indexed modes,
+and retention sweep throughput over metadata/state rows. The
 native harness also includes a hot-key contention case that repeatedly contends
 two store handles on one key and verifies that lock-contention diagnostics
 advance under that workload.
