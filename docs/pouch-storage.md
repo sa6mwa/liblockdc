@@ -1829,7 +1829,8 @@ persistence, query-hidden metadata versioning and persistence, attachment
 prevent-overwrite and overwrite semantics, attachment delete/delete-all
 semantics, client-level attachment APIs, endpoint query-engine/fallback
 override for document and key queries, scan-mode corrupt/future/absent
-query-index sidecars, transaction attachment
+query-index sidecars, indexed document and key-query replay after reopen,
+transaction attachment
 replay commit/rollback, transaction attachment-delete replay commit/rollback,
 scan-engine fallback and explicit bypass for refresh requests, queue visibility
 handoff, stale delivery fencing, nack redelivery, delayed nack redelivery,
