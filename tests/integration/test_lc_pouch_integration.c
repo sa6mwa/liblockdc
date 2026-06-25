@@ -4680,6 +4680,7 @@ static void test_pouch_public_queue_transaction_ack_rollback_redelivers(
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "rolled_back");
   lc_txn_decision_res_cleanup(&decision_res);
+  assert_client_state_empty(client, participant_key, &error);
 
   lc_dequeue_req_init(&dequeue_req);
   dequeue_req.queue = "txn-jobs";
@@ -4778,6 +4779,8 @@ static void test_pouch_public_queue_transaction_ack_commit_removes(
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "committed");
   lc_txn_decision_res_cleanup(&decision_res);
+  assert_client_state_text(client, participant_key, "{\"acked\":true}",
+                           &error);
 
   lc_dequeue_req_init(&dequeue_req);
   dequeue_req.queue = "txn-jobs";
