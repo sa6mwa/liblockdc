@@ -3543,6 +3543,157 @@ static void test_pouch_public_index_query_isolates_namespaces(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_index_query_paginates_documents_and_keys(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *leases[3];
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  char *text;
+  const char *keys[3];
+  const char *payloads[3];
+  size_t index;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "index-query-pagination");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  text = NULL;
+  keys[0] = "integration/index-page/alpha";
+  keys[1] = "integration/index-page/bravo";
+  keys[2] = "integration/index-page/charlie";
+  payloads[0] = "{\"page\":\"alpha\"}";
+  payloads[1] = "{\"page\":\"bravo\"}";
+  payloads[2] = "{\"page\":\"charlie\"}";
+  memset(leases, 0, sizeof(leases));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_client(endpoint, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.owner = "index-page-writer";
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  for (index = 0U; index < 3U; ++index) {
+    acquire.key = keys[index];
+    rc = client->acquire(client, &acquire, &leases[index], &error);
+    assert_lc_ok(rc, &error);
+    source = source_from_text(payloads[index], &error);
+    rc = leases[index]->update(leases[index], source, &update_opts, &error);
+    lc_source_close(source);
+    source = NULL;
+    assert_lc_ok(rc, &error);
+  }
+
+  lc_release_req_init(&release_req);
+  for (index = 0U; index < 3U; ++index) {
+    rc = leases[index]->release(leases[index], &release_req, &error);
+    assert_lc_ok(rc, &error);
+    leases[index] = NULL;
+  }
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 2L;
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_non_null(strstr(text, "\"key\":\"integration/index-page/alpha\""));
+  assert_non_null(strstr(text, "\"document\":{\"page\":\"alpha\"}"));
+  assert_non_null(strstr(text, "\"key\":\"integration/index-page/bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"page\":\"bravo\"}"));
+  assert_null(strstr(text, "integration/index-page/charlie"));
+  assert_string_equal(query_res.cursor, "integration/index-page/bravo");
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(query_res.index_seq > 0UL);
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.cursor = "integration/index-page/bravo";
+  query_req.limit = 2L;
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_lc_ok(rc, &error);
+  text = sink_text(sink, &error);
+  assert_null(strstr(text, "integration/index-page/alpha"));
+  assert_null(strstr(text, "integration/index-page/bravo"));
+  assert_non_null(strstr(text, "\"key\":\"integration/index-page/charlie\""));
+  assert_non_null(strstr(text, "\"document\":{\"page\":\"charlie\"}"));
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(query_res.index_seq > 0UL);
+  free(text);
+  text = NULL;
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = 2L;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "integration/index-page/alpha");
+  assert_string_equal(capture.keys[1], "integration/index-page/bravo");
+  assert_string_equal(query_res.cursor, "integration/index-page/bravo");
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(query_res.index_seq > 0UL);
+  lc_query_res_cleanup(&query_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.cursor = "integration/index-page/bravo";
+  query_req.limit = 2L;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "integration/index-page/charlie");
+  assert_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(query_res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&query_res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_index_query_documents_refreshes_open_reader(
     void **state) {
   char root[256];
@@ -11424,6 +11575,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_index_query_keys_replays_after_reopen),
       cmocka_unit_test(test_pouch_public_index_query_isolates_namespaces),
+      cmocka_unit_test(
+          test_pouch_public_index_query_paginates_documents_and_keys),
       cmocka_unit_test(
           test_pouch_public_index_query_documents_refreshes_open_reader),
       cmocka_unit_test(
