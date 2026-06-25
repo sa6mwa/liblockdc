@@ -2653,8 +2653,9 @@ static int bench_pouch_index_query_keys_owner(long iterations) {
   return bench_pouch_query_owner_selector(iterations, 0, 1);
 }
 
-static int bench_pouch_index_query_owner_removed_selector(long iterations,
-                                                          int keys_only) {
+static int bench_pouch_query_owner_removed_selector(long iterations,
+                                                    int scan_mode,
+                                                    int keys_only) {
   char root[256];
   char endpoint[320];
   char selector[64];
@@ -2672,8 +2673,12 @@ static int bench_pouch_index_query_owner_removed_selector(long iterations,
   int rc;
 
   bench_pouch_root_path(root, sizeof(root),
-                        keys_only ? "index-query-keys-owner-removed"
-                                  : "index-query-owner-removed");
+                        scan_mode ? (keys_only
+                                         ? "scan-query-keys-owner-removed"
+                                         : "scan-query-owner-removed")
+                                  : (keys_only
+                                         ? "index-query-keys-owner-removed"
+                                         : "index-query-owner-removed"));
   bench_pouch_cleanup_root(root);
   lc_error_init(&error);
   if (bench_pouch_seed_query_rows_by_owner_with_removed(root, iterations,
@@ -2693,6 +2698,9 @@ static int bench_pouch_index_query_owner_removed_selector(long iterations,
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
+  if (scan_mode) {
+    config.pouch_query_engine = "scan";
+  }
   client = NULL;
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {
@@ -2726,7 +2734,12 @@ static int bench_pouch_index_query_owner_removed_selector(long iterations,
       lc_sink_close(sink);
     }
   }
-  if (rc == LC_OK && res.index_seq == 0UL) {
+  if (rc == LC_OK && scan_mode && res.index_seq != 0UL) {
+    fprintf(stderr,
+            "pouch scan removed owner selector reported an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK && !scan_mode && res.index_seq == 0UL) {
     fprintf(stderr,
             "pouch removed owner selector did not report an index sequence\n");
     rc = LC_ERR_PROTOCOL;
@@ -2747,12 +2760,20 @@ static int bench_pouch_index_query_owner_removed_selector(long iterations,
   return rc == LC_OK ? 0 : 1;
 }
 
+static int bench_pouch_scan_query_owner_removed(long iterations) {
+  return bench_pouch_query_owner_removed_selector(iterations, 1, 0);
+}
+
 static int bench_pouch_index_query_owner_removed(long iterations) {
-  return bench_pouch_index_query_owner_removed_selector(iterations, 0);
+  return bench_pouch_query_owner_removed_selector(iterations, 0, 0);
+}
+
+static int bench_pouch_scan_query_keys_owner_removed(long iterations) {
+  return bench_pouch_query_owner_removed_selector(iterations, 1, 1);
 }
 
 static int bench_pouch_index_query_keys_owner_removed(long iterations) {
-  return bench_pouch_index_query_owner_removed_selector(iterations, 1);
+  return bench_pouch_query_owner_removed_selector(iterations, 0, 1);
 }
 
 static int bench_pouch_scan_query_key_owner(long iterations) {
@@ -3157,7 +3178,9 @@ static void print_usage(const char *argv0) {
   fprintf(stderr, "pouch-index-query-keys-key|");
   fprintf(stderr, "pouch-scan-query-keys-owner|");
   fprintf(stderr, "pouch-index-query-keys-owner|");
+  fprintf(stderr, "pouch-scan-query-owner-removed|");
   fprintf(stderr, "pouch-index-query-owner-removed|");
+  fprintf(stderr, "pouch-scan-query-keys-owner-removed|");
   fprintf(stderr, "pouch-index-query-keys-owner-removed|");
   fprintf(stderr, "pouch-scan-query-keys-key-owner|");
   fprintf(stderr, "pouch-index-query-keys-key-owner|");
@@ -3219,8 +3242,12 @@ int main(int argc, char **argv) {
        bench_pouch_scan_query_keys_owner},
       {"pouch-index-query-keys-owner", 1000L,
        bench_pouch_index_query_keys_owner},
+      {"pouch-scan-query-owner-removed", 1000L,
+       bench_pouch_scan_query_owner_removed},
       {"pouch-index-query-owner-removed", 1000L,
        bench_pouch_index_query_owner_removed},
+      {"pouch-scan-query-keys-owner-removed", 1000L,
+       bench_pouch_scan_query_keys_owner_removed},
       {"pouch-index-query-keys-owner-removed", 1000L,
        bench_pouch_index_query_keys_owner_removed},
       {"pouch-scan-query-keys-key-owner", 1000L,
