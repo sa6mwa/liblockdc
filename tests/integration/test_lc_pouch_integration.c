@@ -7430,6 +7430,109 @@ static void test_pouch_public_queue_visibility_redelivery(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_public_queue_closed_handle_redelivers_after_visibility(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *producer;
+  lc_client *worker_a;
+  lc_client *worker_b;
+  lc_source *source;
+  lc_message *first_delivery;
+  lc_message *early_delivery;
+  lc_message *redelivery;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "queue-closed-handle-redelivery");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  producer = NULL;
+  worker_a = NULL;
+  worker_b = NULL;
+  source = NULL;
+  first_delivery = NULL;
+  early_delivery = NULL;
+  redelivery = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats, 0, sizeof(stats));
+
+  open_pouch_client(endpoint, &producer, &error);
+  open_pouch_client(endpoint, &worker_a, &error);
+  open_pouch_client(endpoint, &worker_b, &error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "closed-handle-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 1L;
+  enqueue_req.ttl_seconds = 60L;
+  enqueue_req.max_attempts = 3;
+  source = source_from_text("closed-handle-work", &error);
+  rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_lc_ok(rc, &error);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "closed-handle-jobs";
+  dequeue_req.owner = "closed-worker-a";
+  dequeue_req.visibility_timeout_seconds = 1L;
+  rc = worker_a->dequeue(worker_a, &dequeue_req, &first_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(first_delivery);
+  assert_string_equal(first_delivery->message_id, enqueue_res.message_id);
+  assert_int_equal(first_delivery->attempts, 1);
+  first_delivery->close(first_delivery);
+  first_delivery = NULL;
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "closed-handle-jobs";
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 1);
+  assert_null(stats.head_message_id);
+  lc_queue_stats_res_cleanup(&stats);
+
+  dequeue_req.owner = "closed-worker-b";
+  rc = worker_b->dequeue(worker_b, &dequeue_req, &early_delivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_null(early_delivery);
+
+  sleep(2U);
+  rc = worker_b->dequeue(worker_b, &dequeue_req, &redelivery, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(redelivery);
+  assert_string_equal(redelivery->message_id, enqueue_res.message_id);
+  assert_int_equal(redelivery->attempts, 2);
+  assert_int_equal(redelivery->failure_attempts, 0);
+
+  rc = redelivery->ack(redelivery, &error);
+  assert_lc_ok(rc, &error);
+  redelivery = NULL;
+
+  memset(&stats, 0, sizeof(stats));
+  rc = producer->queue_stats(producer, &stats_req, &stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(stats.available);
+  assert_int_equal(stats.pending_candidates, 0);
+  assert_null(stats.head_message_id);
+
+  lc_queue_stats_res_cleanup(&stats);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  producer->close(producer);
+  worker_a->close(worker_a);
+  worker_b->close(worker_b);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_queue_nack_delay_redelivery(void **state) {
   char root[256];
   char endpoint[320];
@@ -10719,6 +10822,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_queue_inflight_ttl_expiry_rejects_ack),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
+      cmocka_unit_test(
+          test_pouch_public_queue_closed_handle_redelivers_after_visibility),
       cmocka_unit_test(test_pouch_public_queue_nack_delay_redelivery),
       cmocka_unit_test(test_pouch_public_queue_retry_exhaustion_terminal),
       cmocka_unit_test(test_pouch_public_queue_stats_is_read_only),
