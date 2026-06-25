@@ -7507,13 +7507,20 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
 
 static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   char root[256];
+  char key[64];
+  char payload[4096];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
   lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res put_res;
   lc_pouch_compaction_res skipped;
   lc_pouch_compaction_res failed;
   lc_error error;
   off_t before_log_size;
+  off_t live_log_size;
+  size_t index;
   int rc;
 
   (void)state;
@@ -7521,9 +7528,13 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   test_cleanup_root(root);
   test_allocator_init(&allocator, &tracked);
   memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&put_res, 0, sizeof(put_res));
   memset(&skipped, 0, sizeof(skipped));
   memset(&failed, 0, sizeof(failed));
+  memset(payload, 'l', sizeof(payload));
   store = NULL;
+  source = NULL;
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
@@ -7541,6 +7552,35 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   assert_int_equal(test_log_size(root), before_log_size);
   lc_pouch_compaction_res_cleanup(&allocator, &skipped);
 
+  state_opts.content_type = "application/octet-stream";
+  for (index = 0U; index < 20U; ++index) {
+    snprintf(key, sizeof(key), "live-key-%02lu", (unsigned long)index);
+    rc = lc_source_from_memory(payload, sizeof(payload), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = store->write_state(store, "default", key, source, &state_opts,
+                            &put_res, &error);
+    lc_source_close(source);
+    source = NULL;
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+    memset(&put_res, 0, sizeof(put_res));
+  }
+  live_log_size = test_log_size(root);
+  assert_true(live_log_size > before_log_size);
+
+  memset(&skipped, 0, sizeof(skipped));
+  rc = store->compact(store, "if_needed", &skipped, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(skipped.mode, "if_needed");
+  assert_string_equal(skipped.skip_reason, "below-obsolete-threshold");
+  assert_int_equal(skipped.accepted, 1);
+  assert_int_equal(skipped.compacted, 0);
+  assert_int_equal(skipped.skipped, 1);
+  assert_int_equal(skipped.before_log_bytes, (unsigned long)live_log_size);
+  assert_int_equal(skipped.after_log_bytes, skipped.before_log_bytes);
+  assert_int_equal(test_log_size(root), live_log_size);
+  lc_pouch_compaction_res_cleanup(&allocator, &skipped);
+
   rc = store->compact(store, "later", &failed, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_error_cleanup(&error);
@@ -7552,7 +7592,7 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   assert_int_equal(rc, LC_ERR_NOMEM);
   assert_null(failed.mode);
   assert_null(failed.skip_reason);
-  assert_int_equal(test_log_size(root), before_log_size);
+  assert_int_equal(test_log_size(root), live_log_size);
   lc_error_cleanup(&error);
   memset(&error, 0, sizeof(error));
 
