@@ -1823,10 +1823,10 @@ Current default local integration coverage in `tests/integration` exercises
 public `pouch://` clients sharing one disk root for state and attachment
 persistence, query-hidden metadata versioning and persistence, attachment
 prevent-overwrite and overwrite semantics, attachment delete/delete-all
-semantics, client-level attachment APIs, scan-mode corrupt/absent query-index
-sidecars, transaction attachment replay commit/rollback, transaction
-attachment-delete replay commit/rollback, explicit scan-engine fallback bypass
-for refresh requests, queue visibility
+semantics, client-level attachment APIs, endpoint query-engine override,
+scan-mode corrupt/absent query-index sidecars, transaction attachment replay
+commit/rollback, transaction attachment-delete replay commit/rollback,
+explicit scan-engine fallback bypass for refresh requests, queue visibility
 handoff, stale delivery fencing, nack redelivery, delayed nack redelivery,
 client-level nack retry exhaustion terminal behavior across reopen, read-only
 queue stats while a delivery is invisible, explicit handler
