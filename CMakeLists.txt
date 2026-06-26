@@ -75,7 +75,7 @@ set(LOCKDC_LONEJSON_VERSION "0.35.0" CACHE STRING "Pinned lonejson release used 
 set(LOCKDC_LONEJSON_ABI_VERSION "19" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.4.1" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
-set(LOCKDC_CPKT_VERSION "0.4.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version.")
+set(LOCKDC_CPKT_VERSION "0.5.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version.")
 set(LOCKDC_ABI_VERSION "1" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
