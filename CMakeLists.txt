@@ -497,6 +497,7 @@ if(LOCKDC_BUILD_SHARED)
         BUILD_RPATH_USE_ORIGIN ON
         BUILD_WITH_INSTALL_RPATH ON
         INSTALL_RPATH "${lockdc_shared_install_rpath}"
+        INSTALL_NAME_DIR "@rpath"
         INSTALL_RPATH_USE_LINK_PATH OFF
     )
     lc_add_release_privacy_scan(lc_shared)

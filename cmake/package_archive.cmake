@@ -29,7 +29,6 @@ endfunction()
 lockdc_import_cache_path(LOCKDC_EXTERNAL_ROOT)
 lockdc_import_cache_path(LOCKDC_DEPENDENCY_BUILD_ROOT)
 lockdc_import_cache_path(CMAKE_STRIP)
-lockdc_import_cache_path(CMAKE_INSTALL_NAME_TOOL)
 lockdc_import_cache_path(LOCKDC_OTOOL)
 
 file(REMOVE_RECURSE "${package_root}")
@@ -61,12 +60,9 @@ if(NOT lockdc_dev_install_result EQUAL 0)
     message(FATAL_ERROR "failed to install development package payload")
 endif()
 
-function(lockdc_fix_darwin_install_names package_root)
+function(lockdc_find_darwin_otool)
     if(NOT LOCKDC_TARGET_ID MATCHES "apple-darwin$")
         return()
-    endif()
-    if(NOT CMAKE_INSTALL_NAME_TOOL OR NOT EXISTS "${CMAKE_INSTALL_NAME_TOOL}")
-        message(FATAL_ERROR "CMAKE_INSTALL_NAME_TOOL is required for Darwin package fixups")
     endif()
     if(NOT LOCKDC_OTOOL OR NOT EXISTS "${LOCKDC_OTOOL}")
         if(DEFINED ENV{OSXCROSS_ROOT} AND NOT "$ENV{OSXCROSS_ROOT}" STREQUAL "")
@@ -79,19 +75,48 @@ function(lockdc_fix_darwin_install_names package_root)
         find_program(LOCKDC_OTOOL NAMES arm64-apple-darwin25-otool otool HINTS "${_lockdc_osxcross_bin_hint}")
     endif()
     if(NOT LOCKDC_OTOOL OR NOT EXISTS "${LOCKDC_OTOOL}")
-        message(FATAL_ERROR "otool is required for Darwin package fixups")
+        message(FATAL_ERROR "otool is required for Darwin package verification")
     endif()
+    set(LOCKDC_OTOOL "${LOCKDC_OTOOL}" PARENT_SCOPE)
+endfunction()
+
+function(lockdc_assert_darwin_dependency_path dylib dependency_path otool_output)
+    if(NOT dependency_path MATCHES "^/")
+        return()
+    endif()
+    if(dependency_path MATCHES "^/usr/lib/" OR dependency_path MATCHES "^/System/Library/")
+        return()
+    endif()
+    message(FATAL_ERROR
+        "Darwin package dylib contains non-system absolute dependency path "
+        "'${dependency_path}' in ${dylib}\n${otool_output}")
+endfunction()
+
+function(lockdc_verify_darwin_macho_metadata package_root)
+    if(NOT LOCKDC_TARGET_ID MATCHES "apple-darwin$")
+        return()
+    endif()
+
+    lockdc_find_darwin_otool()
 
     file(GLOB _lockdc_dylibs LIST_DIRECTORIES false "${package_root}/lib/*.dylib")
     foreach(_lockdc_dylib IN LISTS _lockdc_dylibs)
-        get_filename_component(_lockdc_dylib_name "${_lockdc_dylib}" NAME)
+        if(IS_SYMLINK "${_lockdc_dylib}")
+            continue()
+        endif()
         execute_process(
-            COMMAND "${CMAKE_INSTALL_NAME_TOOL}" -id "@rpath/${_lockdc_dylib_name}" "${_lockdc_dylib}"
+            COMMAND "${LOCKDC_OTOOL}" -D "${_lockdc_dylib}"
             RESULT_VARIABLE _lockdc_id_result
+            OUTPUT_VARIABLE _lockdc_id_output
             ERROR_VARIABLE _lockdc_id_error
         )
         if(NOT _lockdc_id_result EQUAL 0)
-            message(FATAL_ERROR "failed to rewrite install name for ${_lockdc_dylib}\n${_lockdc_id_error}")
+            message(FATAL_ERROR "failed to inspect Darwin dylib install name ${_lockdc_dylib}\n${_lockdc_id_error}")
+        endif()
+        if(NOT _lockdc_id_output MATCHES "\n@rpath/")
+            message(FATAL_ERROR
+                "Darwin package dylib install name is not @rpath-relative: ${_lockdc_dylib}\n"
+                "${_lockdc_id_output}")
         endif()
 
         execute_process(
@@ -107,6 +132,9 @@ function(lockdc_fix_darwin_install_names package_root)
         string(REPLACE "\n" ";" _lockdc_otool_lines "${_lockdc_otool_output}")
         foreach(_lockdc_otool_line IN LISTS _lockdc_otool_lines)
             string(STRIP "${_lockdc_otool_line}" _lockdc_dependency_line)
+            if(_lockdc_dependency_line MATCHES ":$")
+                continue()
+            endif()
             if(NOT _lockdc_dependency_line MATCHES "^/")
                 continue()
             endif()
@@ -114,29 +142,27 @@ function(lockdc_fix_darwin_install_names package_root)
             if(_lockdc_dependency_path STREQUAL "")
                 continue()
             endif()
-            if(_lockdc_dependency_path MATCHES "^/usr/lib/" OR
-               _lockdc_dependency_path MATCHES "^/System/Library/")
-                continue()
-            endif()
-            get_filename_component(_lockdc_dependency_name "${_lockdc_dependency_path}" NAME)
-            if(EXISTS "${package_root}/lib/${_lockdc_dependency_name}")
-                execute_process(
-                    COMMAND "${CMAKE_INSTALL_NAME_TOOL}"
-                        -change "${_lockdc_dependency_path}" "@rpath/${_lockdc_dependency_name}" "${_lockdc_dylib}"
-                    RESULT_VARIABLE _lockdc_change_result
-                    ERROR_VARIABLE _lockdc_change_error
-                )
-                if(NOT _lockdc_change_result EQUAL 0)
-                    message(FATAL_ERROR
-                        "failed to rewrite Darwin dependency ${_lockdc_dependency_path} in ${_lockdc_dylib}\n"
-                        "${_lockdc_change_error}")
-                endif()
-            endif()
+            lockdc_assert_darwin_dependency_path(
+                "${_lockdc_dylib}" "${_lockdc_dependency_path}" "${_lockdc_otool_output}")
         endforeach()
+
+        execute_process(
+            COMMAND "${LOCKDC_OTOOL}" -l "${_lockdc_dylib}"
+            RESULT_VARIABLE _lockdc_load_result
+            OUTPUT_VARIABLE _lockdc_load_output
+            ERROR_VARIABLE _lockdc_load_error
+        )
+        if(NOT _lockdc_load_result EQUAL 0)
+            message(FATAL_ERROR "failed to inspect Darwin dylib load commands ${_lockdc_dylib}\n${_lockdc_load_error}")
+        endif()
+        if(_lockdc_load_output MATCHES "path /")
+            message(FATAL_ERROR
+                "Darwin package dylib contains absolute rpath: ${_lockdc_dylib}\n${_lockdc_load_output}")
+        endif()
     endforeach()
 endfunction()
 
-lockdc_fix_darwin_install_names("${package_root}")
+lockdc_verify_darwin_macho_metadata("${package_root}")
 
 function(lockdc_strip_packaged_artifact artifact_path)
     if(NOT CMAKE_STRIP OR NOT EXISTS "${CMAKE_STRIP}")
@@ -145,7 +171,7 @@ function(lockdc_strip_packaged_artifact artifact_path)
     if(NOT EXISTS "${artifact_path}" OR IS_SYMLINK "${artifact_path}")
         return()
     endif()
-    if(LOCKDC_TARGET_ID MATCHES "apple-darwin$" AND artifact_path MATCHES "\\.a$")
+    if(LOCKDC_TARGET_ID MATCHES "apple-darwin$")
         return()
     endif()
 

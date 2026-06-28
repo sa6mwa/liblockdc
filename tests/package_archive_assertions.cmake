@@ -27,6 +27,12 @@ endfunction()
 
 function(assert_shared_library_runpath extract_root archive_path shared_lib_name)
     if(shared_lib_name MATCHES "\\.dylib$")
+        string(REGEX MATCH "^lib[^.]+\\.[0-9]+\\." _darwin_versioned_name_match "${shared_lib_name}")
+        if(NOT _darwin_versioned_name_match)
+            message(FATAL_ERROR
+                "Darwin archive shared-library validation expects a versioned dylib name: "
+                "lib/${shared_lib_name} in ${archive_path}")
+        endif()
         if(DEFINED ENV{OSXCROSS_ROOT} AND NOT "$ENV{OSXCROSS_ROOT}" STREQUAL "")
             set(_lockdc_osxcross_bin_hint "$ENV{OSXCROSS_ROOT}/bin")
         elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
@@ -41,6 +47,59 @@ function(assert_shared_library_runpath extract_root archive_path shared_lib_name
         if(NOT LOCKDC_OTOOL_BIN)
             message(FATAL_ERROR "otool is required for Darwin archive shared-library validation")
         endif()
+
+        execute_process(
+            COMMAND "${LOCKDC_OTOOL_BIN}" -D "${extract_root}/lib/${shared_lib_name}"
+            RESULT_VARIABLE otool_id_result
+            OUTPUT_VARIABLE otool_id_output
+            ERROR_VARIABLE otool_id_error
+        )
+        if(NOT otool_id_result EQUAL 0)
+            message(FATAL_ERROR
+                "failed to inspect Darwin shared library install name in ${archive_path}\n"
+                "${otool_id_output}${otool_id_error}")
+        endif()
+        string(REGEX REPLACE "\n$" "" otool_id_output "${otool_id_output}")
+        if(NOT otool_id_output MATCHES "\n@rpath/")
+            message(FATAL_ERROR
+                "archive Darwin shared library install name is not @rpath-relative in "
+                "lib/${shared_lib_name}: ${archive_path}\n${otool_id_output}")
+        endif()
+        if(otool_id_output MATCHES "\n@rpath/liblockdc\\.dylib($|\n)")
+            message(FATAL_ERROR
+                "archive Darwin shared library has an unversioned install name in "
+                "lib/${shared_lib_name}: ${archive_path}\n${otool_id_output}")
+        endif()
+
+        execute_process(
+            COMMAND "${LOCKDC_OTOOL_BIN}" -L "${extract_root}/lib/${shared_lib_name}"
+            RESULT_VARIABLE otool_deps_result
+            OUTPUT_VARIABLE otool_deps_output
+            ERROR_VARIABLE otool_deps_error
+        )
+        if(NOT otool_deps_result EQUAL 0)
+            message(FATAL_ERROR
+                "failed to inspect Darwin shared library dependencies in ${archive_path}\n"
+                "${otool_deps_output}${otool_deps_error}")
+        endif()
+        string(REGEX REPLACE "\n$" "" otool_deps_output "${otool_deps_output}")
+        string(REPLACE "\n" ";" otool_deps_lines "${otool_deps_output}")
+        foreach(otool_deps_line IN LISTS otool_deps_lines)
+            string(STRIP "${otool_deps_line}" dependency_line)
+            if(dependency_line MATCHES ":$")
+                continue()
+            endif()
+            if(NOT dependency_line MATCHES "^/")
+                continue()
+            endif()
+            string(REGEX MATCH "^[^ \t]+" dependency_path "${dependency_line}")
+            if(dependency_path MATCHES "^/usr/lib/" OR dependency_path MATCHES "^/System/Library/")
+                continue()
+            endif()
+            message(FATAL_ERROR
+                "archive Darwin shared library contains non-system absolute dependency path "
+                "'${dependency_path}' in lib/${shared_lib_name}: ${archive_path}\n${otool_deps_output}")
+        endforeach()
 
         execute_process(
             COMMAND "${LOCKDC_OTOOL_BIN}" -l "${extract_root}/lib/${shared_lib_name}"

@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,11 @@
 
 #define POUCH_TEST_QUERY_INDEX_HEADER_SIZE 64U
 #define POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET 56U
+#if ULONG_MAX > 0xffffffffUL
+#define POUCH_TEST_FUTURE_UNIX 4102444800L
+#else
+#define POUCH_TEST_FUTURE_UNIX 2147483647L
+#endif
 
 static void assert_lc_ok(int rc, lc_error *error) {
   if (rc != LC_OK) {
@@ -114,7 +120,11 @@ static unsigned long pouch_test_get_u32(const unsigned char *src) {
 }
 
 static unsigned long pouch_test_get_u64(const unsigned char *src) {
+#if ULONG_MAX > 0xffffffffUL
   return pouch_test_get_u32(src) | (pouch_test_get_u32(src + 4) << 32);
+#else
+  return pouch_test_get_u32(src);
+#endif
 }
 
 static void pouch_test_put_u32(unsigned char *dst, unsigned long value) {
@@ -6126,7 +6136,7 @@ test_pouch_public_transaction_attachment_replay_commit_publishes(void **state) {
   decision_req.txn_id = acquire.txn_id;
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
-  decision_req.expires_at_unix = 4102444800L;
+  decision_req.expires_at_unix = POUCH_TEST_FUTURE_UNIX;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "prepared");
@@ -6258,7 +6268,7 @@ test_pouch_public_transaction_attachment_replay_rollback_discards(
   decision_req.txn_id = acquire.txn_id;
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
-  decision_req.expires_at_unix = 4102444800L;
+  decision_req.expires_at_unix = POUCH_TEST_FUTURE_UNIX;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "prepared");
@@ -6792,7 +6802,7 @@ test_pouch_public_transaction_attachment_delete_replay_commit_removes(
   decision_req.txn_id = acquire.txn_id;
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
-  decision_req.expires_at_unix = 4102444800L;
+  decision_req.expires_at_unix = POUCH_TEST_FUTURE_UNIX;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "prepared");
@@ -6922,7 +6932,7 @@ test_pouch_public_transaction_attachment_delete_replay_rollback_keeps(
   decision_req.txn_id = acquire.txn_id;
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
-  decision_req.expires_at_unix = 4102444800L;
+  decision_req.expires_at_unix = POUCH_TEST_FUTURE_UNIX;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "prepared");
@@ -8650,7 +8660,7 @@ static void test_pouch_public_mixed_state_queue_transaction_replay_commit(
   decision_req.txn_id = "integration-mixed-state-queue-replay-commit-1";
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
-  decision_req.expires_at_unix = 4102444800L;
+  decision_req.expires_at_unix = POUCH_TEST_FUTURE_UNIX;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "prepared");
@@ -11362,7 +11372,7 @@ static void test_pouch_public_transaction_prepare_survives_reopen(
   decision_req.txn_id = "integration-txn-prepare-1";
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
-  decision_req.expires_at_unix = 4102444800L;
+  decision_req.expires_at_unix = POUCH_TEST_FUTURE_UNIX;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "prepared");
@@ -11886,7 +11896,7 @@ test_pouch_public_transaction_prepare_replays_across_namespaces(void **state) {
   decision_req.txn_id = "integration-cross-namespace-prepare-replay-1";
   decision_req.participants = participants;
   decision_req.participant_count = 2U;
-  decision_req.expires_at_unix = 4102444800L;
+  decision_req.expires_at_unix = POUCH_TEST_FUTURE_UNIX;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "prepared");

@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,11 @@
 #define TEST_POUCH_QUERY_INDEX_HEADER_SIZE 64U
 #define TEST_POUCH_QUERY_INDEX_PAYLOAD_LENGTH_OFFSET 44U
 #define TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET 56U
+#if ULONG_MAX > 0xffffffffUL
+#define TEST_FUTURE_UNIX 4102444800L
+#else
+#define TEST_FUTURE_UNIX 2147483647L
+#endif
 
 typedef struct pouch_value_doc {
   lonejson_int64 value;
@@ -70,10 +76,15 @@ static off_t test_query_index_size(const char *root) {
 }
 
 static unsigned long test_get_u64(const unsigned char *bytes) {
+#if ULONG_MAX > 0xffffffffUL
   return ((unsigned long)bytes[0]) | ((unsigned long)bytes[1] << 8) |
          ((unsigned long)bytes[2] << 16) | ((unsigned long)bytes[3] << 24) |
          ((unsigned long)bytes[4] << 32) | ((unsigned long)bytes[5] << 40) |
          ((unsigned long)bytes[6] << 48) | ((unsigned long)bytes[7] << 56);
+#else
+  return ((unsigned long)bytes[0]) | ((unsigned long)bytes[1] << 8) |
+         ((unsigned long)bytes[2] << 16) | ((unsigned long)bytes[3] << 24);
+#endif
 }
 
 static void test_put_u64(unsigned char *bytes, unsigned long value) {
@@ -81,10 +92,17 @@ static void test_put_u64(unsigned char *bytes, unsigned long value) {
   bytes[1] = (unsigned char)((value >> 8) & 0xffU);
   bytes[2] = (unsigned char)((value >> 16) & 0xffU);
   bytes[3] = (unsigned char)((value >> 24) & 0xffU);
+#if ULONG_MAX > 0xffffffffUL
   bytes[4] = (unsigned char)((value >> 32) & 0xffU);
   bytes[5] = (unsigned char)((value >> 40) & 0xffU);
   bytes[6] = (unsigned char)((value >> 48) & 0xffU);
   bytes[7] = (unsigned char)((value >> 56) & 0xffU);
+#else
+  bytes[4] = 0U;
+  bytes[5] = 0U;
+  bytes[6] = 0U;
+  bytes[7] = 0U;
+#endif
 }
 
 static int test_bytes_contains(const unsigned char *haystack,
@@ -651,7 +669,7 @@ static int attach_reject_load_meta(lc_pouch_store *self,
   out->meta.lease_id = strdup("lease-a");
   out->meta.txn_id = strdup("txn-a");
   out->meta.version = 7L;
-  out->meta.lease_expires_at_unix = 4102444800L;
+  out->meta.lease_expires_at_unix = TEST_FUTURE_UNIX;
   out->meta.fencing_token = 11L;
   assert_non_null(out->namespace_name);
   assert_non_null(out->key);
@@ -8291,7 +8309,7 @@ static void test_pouch_endpoint_txn_recovery_preserves_valid_prepare(
   decision_req.txn_id = "txn-valid-prepare-1";
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
-  decision_req.expires_at_unix = 4102444800L;
+  decision_req.expires_at_unix = TEST_FUTURE_UNIX;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.state, "prepared");

@@ -89,6 +89,16 @@ set_tests_properties(release_compile_werror_test PROPERTIES
   TIMEOUT 10
 )
 
+add_test(NAME darwin_macho_lifecycle_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/darwin_macho_lifecycle_contract_test.cmake"
+)
+set_tests_properties(darwin_macho_lifecycle_contract_test PROPERTIES
+  LABELS "unit;local;packaging"
+  TIMEOUT 10
+)
+
 add_test(NAME pouch_storage_allocator_contract_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}

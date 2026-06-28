@@ -3,6 +3,7 @@
 #include "lc_mutate_stream.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -304,7 +305,11 @@ static void lc_pouch_txn_put_u32(unsigned char *dst, unsigned long value) {
 
 static void lc_pouch_txn_put_u64(unsigned char *dst, unsigned long value) {
   lc_pouch_txn_put_u32(dst, value & 0xffffffffUL);
+#if ULONG_MAX > 0xffffffffUL
   lc_pouch_txn_put_u32(dst + 4, (value >> 32) & 0xffffffffUL);
+#else
+  lc_pouch_txn_put_u32(dst + 4, 0UL);
+#endif
 }
 
 static unsigned long lc_pouch_txn_get_u32(const unsigned char *src) {
@@ -313,7 +318,11 @@ static unsigned long lc_pouch_txn_get_u32(const unsigned char *src) {
 }
 
 static unsigned long lc_pouch_txn_get_u64(const unsigned char *src) {
+#if ULONG_MAX > 0xffffffffUL
   return lc_pouch_txn_get_u32(src) | (lc_pouch_txn_get_u32(src + 4) << 32);
+#else
+  return lc_pouch_txn_get_u32(src);
+#endif
 }
 
 static const char *lc_pouch_txn_state_name(unsigned long state) {

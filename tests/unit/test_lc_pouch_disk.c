@@ -504,7 +504,11 @@ static unsigned long test_get_u32(const unsigned char *src) {
 }
 
 static unsigned long test_get_u64(const unsigned char *src) {
+#if ULONG_MAX > 0xffffffffUL
   return test_get_u32(src) | (test_get_u32(src + 4) << 32);
+#else
+  return test_get_u32(src);
+#endif
 }
 
 static size_t count_log_records_of_type(const char *root, unsigned long type) {
@@ -641,7 +645,11 @@ static void test_put_u32(unsigned char *dst, unsigned long value) {
 
 static void test_put_u64(unsigned char *dst, unsigned long value) {
   test_put_u32(dst, value & 0xffffffffUL);
+#if ULONG_MAX > 0xffffffffUL
   test_put_u32(dst + 4, (value >> 32) & 0xffffffffUL);
+#else
+  test_put_u32(dst + 4, 0UL);
+#endif
 }
 
 static unsigned long test_crc32_update(unsigned long crc,
