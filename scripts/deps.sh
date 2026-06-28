@@ -184,26 +184,26 @@ pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_
 cpkt_asset_name="c.pkt.systems-$cpkt_version-${preset#deps-}.tar.gz"
 cpkt_download_url="https://github.com/sa6mwa/c.pkt.systems/releases/download/v$cpkt_version/$cpkt_asset_name"
 case "$cpkt_asset_name" in
-  c.pkt.systems-0.5.0-x86_64-linux-gnu.tar.gz)
-    cpkt_asset_hash=737e1bc3992f00e9d4c71c6cae87db8dce669ce795b42ba769e686ff263cfaea
+  c.pkt.systems-0.6.0-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=0e3f96cef656ad927ff952e5fb195fabaea551150017df0368f6fd30c5fa8039
     ;;
-  c.pkt.systems-0.5.0-x86_64-linux-musl.tar.gz)
-    cpkt_asset_hash=435c25dfa05e831c5183ed0628730749625aa68804e21a3615937d36d11b7384
+  c.pkt.systems-0.6.0-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=76956e0a903b115323107af17f83a899ed010c276f25ea5c0e3c4c90d341d773
     ;;
-  c.pkt.systems-0.5.0-aarch64-linux-gnu.tar.gz)
-    cpkt_asset_hash=e7163bea53ec8b72bd88b6387289eddc6d11383e8903ae756b06aea03853ee9d
+  c.pkt.systems-0.6.0-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=350421ac3fc8b35374886766ad183601d3f6f4eed0f666b411e4666d1a13f3d8
     ;;
-  c.pkt.systems-0.5.0-aarch64-linux-musl.tar.gz)
-    cpkt_asset_hash=ee19c298dffe5b9b3d304d416de95a897c547f9489eb52493500576c0d36830f
+  c.pkt.systems-0.6.0-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=c45330b50f6551378d85306b6deba177d52184128983a3af6acb5cd7e180c826
     ;;
-  c.pkt.systems-0.5.0-armhf-linux-gnu.tar.gz)
-    cpkt_asset_hash=b6f12112207232ef16123d19535d36d73c9a0c75fdd9c1566684f2f36b384d94
+  c.pkt.systems-0.6.0-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=b29c74a1d3ebba2420dea732f07708a7d67f08e9dde2bd3c21a9ca93dd50bad2
     ;;
-  c.pkt.systems-0.5.0-armhf-linux-musl.tar.gz)
-    cpkt_asset_hash=2de19d4fb76379a7585382ac6b77d3d9a70c505f8ef9334a5ff531336c84b368
+  c.pkt.systems-0.6.0-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=692a0def17b680d9f5f80ffa8894d89366527ca2c8c1d3eff72973368d770bf8
     ;;
-  c.pkt.systems-0.5.0-arm64-apple-darwin.tar.gz)
-    cpkt_asset_hash=ebf1caf096df8c17067df2bd02efe65793ad98f65dafb5f29384ce6a6269a829
+  c.pkt.systems-0.6.0-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=59007ba861b657e2433c97b063355d40b71173d52f84bc5dd6ed98dfeffcbfb1
     ;;
   *)
     printf 'unsupported c.pkt.systems release asset: %s\n' "$cpkt_asset_name" >&2
