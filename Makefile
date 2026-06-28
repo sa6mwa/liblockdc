@@ -31,15 +31,17 @@ FUZZ_TIME ?= 30
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__format \
-	__asan __coverage __fuzz __benchmarks \
-	__package __package-source __package-checksums __clean-dist \
+	__asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate \
+	__package __package-source __package-source-smoke __package-checksums __package-verify __clean-dist \
+	__lua-rock __lua-test __lua-env \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __release-matrix __release-package-only __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
-	asan coverage fuzz benchmarks \
-	package package-source package-checksums verify-release-archives clean-dist \
+	asan coverage fuzz fuzz-smoke benchmarks bench-gate \
+	package package-source package-source-smoke package-checksums package-verify verify-release-archives clean-dist \
+	lua-rock lua-test lua-env \
 	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release release-matrix clean
 
 help:
@@ -69,11 +71,18 @@ help:
 		'make asan               Compatibility alias for test-debug.' \
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
+		'make fuzz-smoke         Build fuzz targets and run short bounded corpus passes (FUZZ_TIME=5).' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
+		'make bench-gate         Compatibility alias for benchmarks.' \
 		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive, source archive, and Lua source rock to dist/.' \
 		'make package-source     Build the source-only release archive.' \
+		'make package-source-smoke  Build and verify the source-only release archive.' \
 		'make package-checksums  Refresh the dist/ checksum manifest.' \
+		'make package-verify     Build release packages and run package verification.' \
 		'make verify-release-archives  Assert the complete shipped Linux release archive set and checksums.' \
+		'make lua-rock           Build the Lua release package and source rock artifacts.' \
+		'make lua-test           Run local Lua layout, SDK, facade, and binding smoke tests.' \
+		'make lua-env            Print shell exports for the repo-local Lua rock tree.' \
 		'make clean-dist         Reset dist/ release artifacts.' \
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
@@ -235,11 +244,22 @@ fuzz:
 __fuzz:
 	bash ./scripts/fuzz.sh $(FUZZ_TIME)
 
+fuzz-smoke:
+	$(TIMED) fuzz-smoke $(MAKE) __fuzz-smoke
+
+__fuzz-smoke:
+	bash ./scripts/fuzz.sh 5
+
 benchmarks:
 	$(TIMED) benchmarks $(MAKE) __benchmarks
 
 __benchmarks: __build-x86_64-linux-gnu-release
 	./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench $(BENCH_ITERS) all
+
+bench-gate:
+	$(TIMED) bench-gate $(MAKE) __bench-gate
+
+__bench-gate: __benchmarks
 
 package:
 	$(TIMED) package $(MAKE) __package
@@ -255,6 +275,12 @@ package-source:
 __package-source: __build-x86_64-linux-gnu-release
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
 
+package-source-smoke:
+	$(TIMED) package-source-smoke $(MAKE) __package-source-smoke
+
+__package-source-smoke: __package-source
+	bash ./scripts/test_release_source.sh $(ROOT) $$(ls -t $(DIST_DIR)/liblockdc-*.tar.gz | grep -v -- 'liblockdc-lua-' | grep -v -- '-linux-' | grep -v -- '-apple-darwin' | head -n1)
+
 package-checksums:
 	$(TIMED) package-checksums $(MAKE) __package-checksums
 
@@ -263,6 +289,32 @@ __package-checksums: __deps-release
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_checksums.cmake
+
+package-verify:
+	$(TIMED) package-verify $(MAKE) __package-verify
+
+__package-verify:
+	bash ./scripts/package-verify.sh
+
+lua-rock:
+	$(TIMED) lua-rock $(MAKE) __lua-rock
+
+__lua-rock: __build-x86_64-linux-gnu-release
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
+
+lua-test:
+	$(TIMED) lua-test $(MAKE) __lua-test
+
+__lua-test: __build-debug
+	$(CTEST) --test-dir $(DEBUG_BUILD_DIR) -R '^lua_(binding_source_layout|external_sdk_contract|facade_unit|binding_core_smoke)_test$$' --output-on-failure
+
+lua-env:
+	$(TIMED) lua-env $(MAKE) __lua-env
+
+__lua-env:
+	@printf 'export LOCKDC_PREFIX=%s\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/package/liblockdc-$$(sed -n '"'"'s/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p'"'"' $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake)-x86_64-linux-gnu'
+	@printf 'export LUA_PATH=%s\n' '$(ROOT)/lua/?.lua;$(ROOT)/lua/?/init.lua;;'
+	@printf 'export LUA_CPATH=%s\n' '$(ROOT)/build/luarocks/lib/lua/5.5/?.so;;'
 
 verify-release-archives:
 	release_presets='x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release'; \

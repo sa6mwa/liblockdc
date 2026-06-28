@@ -878,6 +878,17 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(dependency_download_timeout_test PROPERTIES RUN_SERIAL TRUE)
 
+    add_test(NAME discover_target_tools_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/discover_target_tools_test.cmake
+    )
+    set_tests_properties(discover_target_tools_test PROPERTIES
+        LABELS "unit;local;packaging"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)

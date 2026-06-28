@@ -2,13 +2,13 @@
 set -eu
 
 usage() {
-  echo "usage: scripts/discover_target_tools.sh --build-dir DIR --target-id TARGET --tool TOOL" >&2
+  echo "usage: scripts/discover_target_tools.sh --build-dir DIR --target-id TARGET [--tool TOOL]" >&2
   exit 2
 }
 
 build_dir=
 target_id=
-tool=
+requested_tool=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -24,7 +24,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --tool)
       [ "$#" -ge 2 ] || usage
-      tool=$2
+      requested_tool=$2
       shift 2
       ;;
     *)
@@ -35,7 +35,6 @@ done
 
 [ -n "$build_dir" ] || usage
 [ -n "$target_id" ] || usage
-[ -n "$tool" ] || usage
 
 case "$target_id" in
   *apple-darwin) ;;
@@ -47,7 +46,7 @@ esac
 
 cache_file=$build_dir/CMakeCache.txt
 [ -f "$cache_file" ] || {
-  echo "missing CMake cache: $cache_file" >&2
+  echo "external-tool-unavailable: missing CMake cache: $cache_file" >&2
   exit 1
 }
 
@@ -57,6 +56,26 @@ cache_value() {
 
 is_executable() {
   [ -n "$1" ] && [ -x "$1" ]
+}
+
+find_executable() {
+  local candidate
+  for candidate in "$@"; do
+    if is_executable "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_path_executable() {
+  local name=$1
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return 0
+  fi
+  return 1
 }
 
 compiler=$(cache_value CMAKE_C_COMPILER || true)
@@ -90,73 +109,115 @@ if [ -n "$osxcross_root" ]; then
   osxcross_bin=$osxcross_root/bin
 fi
 
-case "$tool" in
-  otool)
-    explicit=$(cache_value LOCKDC_OTOOL || true)
-    explicit_alt=$(cache_value CPKT_OTOOL || true)
-    cmake_tool=$(cache_value CMAKE_OTOOL || true)
-    tool_name=otool
-    ;;
-  install_name_tool)
-    explicit=
-    explicit_alt=
-    cmake_tool=$(cache_value CMAKE_INSTALL_NAME_TOOL || true)
-    tool_name=install_name_tool
-    ;;
-  strip)
-    explicit=
-    explicit_alt=
-    cmake_tool=$(cache_value CMAKE_STRIP || true)
-    tool_name=strip
-    ;;
-  ld|linker)
-    explicit=
-    explicit_alt=
-    cmake_tool=$(cache_value CMAKE_LINKER || true)
-    tool_name=ld
-    ;;
-  *)
-    echo "unsupported target tool: $tool" >&2
-    exit 2
-    ;;
-esac
+discover_tool() {
+  local logical_tool=$1
+  local tool_name=
+  local explicit=
+  local explicit_alt=
+  local cmake_tool=
+  local resolved=
 
-candidates=
-for candidate in \
-  "$explicit" \
-  "$explicit_alt" \
-  "$cmake_tool" \
-  "${compiler_dir:+$compiler_dir/$host-$tool_name}" \
-  "${compiler_dir:+$compiler_dir/$tool_name}" \
-  "${osxcross_bin:+$osxcross_bin/$host-$tool_name}" \
-  "${osxcross_bin:+$osxcross_bin/$tool_name}"
-do
-  if [ -n "$candidate" ]; then
-    candidates="$candidates
-$candidate"
+  case "$logical_tool" in
+    cc)
+      tool_name=clang
+      cmake_tool=$(cache_value CMAKE_C_COMPILER || true)
+      ;;
+    otool)
+      tool_name=otool
+      explicit=$(cache_value LOCKDC_OTOOL || true)
+      explicit_alt=$(cache_value CPKT_OTOOL || true)
+      cmake_tool=$(cache_value CMAKE_OTOOL || true)
+      ;;
+    install_name_tool)
+      tool_name=install_name_tool
+      cmake_tool=$(cache_value CMAKE_INSTALL_NAME_TOOL || true)
+      ;;
+    strip)
+      tool_name=strip
+      cmake_tool=$(cache_value CMAKE_STRIP || true)
+      ;;
+    readelf)
+      tool_name=readelf
+      explicit=$(cache_value LOCKDC_READELF || true)
+      explicit_alt=$(cache_value CPKT_READELF || true)
+      cmake_tool=$(cache_value CMAKE_READELF || true)
+      ;;
+    ld|linker)
+      tool_name=ld
+      cmake_tool=$(cache_value CMAKE_LINKER || true)
+      ;;
+    *)
+      echo "unsupported target tool: $logical_tool" >&2
+      exit 2
+      ;;
+  esac
+
+  resolved=$(find_executable \
+    "$explicit" \
+    "$explicit_alt" \
+    "$cmake_tool" \
+    "${compiler_dir:+$compiler_dir/$host-$tool_name}" \
+    "${compiler_dir:+$compiler_dir/$tool_name}" \
+    "${osxcross_bin:+$osxcross_bin/$host-$tool_name}" \
+    "${osxcross_bin:+$osxcross_bin/$tool_name}" || true)
+
+  if [ -n "$resolved" ]; then
+    printf '%s\n' "$resolved"
+    return 0
   fi
-done
 
-old_ifs=$IFS
-IFS='
-'
-for candidate in $candidates; do
-  if is_executable "$candidate"; then
-    printf '%s\n' "$candidate"
-    IFS=$old_ifs
+  if resolved=$(find_path_executable "$host-$tool_name" || true); then
+    if [ -n "$resolved" ]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+
+  case "$logical_tool" in
+    ld|linker)
+      return 1
+      ;;
+    *)
+      if resolved=$(find_path_executable "$tool_name" || true); then
+        if [ -n "$resolved" ]; then
+          printf '%s\n' "$resolved"
+          return 0
+        fi
+      fi
+      ;;
+  esac
+
+  return 1
+}
+
+print_assignment() {
+  local key=$1
+  local value=$2
+  printf '%s=%s\n' "$key" "$value"
+}
+
+if [ -n "$requested_tool" ]; then
+  if resolved_tool=$(discover_tool "$requested_tool"); then
+    printf '%s\n' "$resolved_tool"
     exit 0
   fi
-done
-IFS=$old_ifs
-
-if command -v "$host-$tool_name" >/dev/null 2>&1; then
-  command -v "$host-$tool_name"
-  exit 0
-fi
-if command -v "$tool_name" >/dev/null 2>&1; then
-  command -v "$tool_name"
-  exit 0
+  echo "external-tool-unavailable: failed to discover $requested_tool for $target_id from $cache_file" >&2
+  exit 1
 fi
 
-echo "external-tool-unavailable: failed to discover $tool for $target_id from $cache_file" >&2
-exit 1
+cc=$(discover_tool cc || true)
+ld=$(discover_tool ld || true)
+otool=$(discover_tool otool || true)
+install_name_tool=$(discover_tool install_name_tool || true)
+strip=$(discover_tool strip || true)
+readelf=$(discover_tool readelf || true)
+
+print_assignment TARGET_ID "$target_id"
+print_assignment TARGET_HOST "$host"
+print_assignment CC "$cc"
+print_assignment LD "$ld"
+print_assignment LINKER "$ld"
+print_assignment OTOOL "$otool"
+print_assignment INSTALL_NAME_TOOL "$install_name_tool"
+print_assignment STRIP "$strip"
+print_assignment READELF "$readelf"

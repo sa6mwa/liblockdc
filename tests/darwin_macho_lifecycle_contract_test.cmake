@@ -96,3 +96,11 @@ assert_contains(
     "${discover_target_tools}"
     "CMAKE_LINKER"
     "target-tool discovery can resolve configured linker")
+assert_contains(
+    "${discover_target_tools}"
+    "TARGET_HOST"
+    "target-tool discovery emits machine-readable assignments")
+assert_contains(
+    "${discover_target_tools}"
+    "ld|linker)"
+    "target-tool discovery has Darwin linker route coverage")
