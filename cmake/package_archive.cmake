@@ -37,6 +37,7 @@ file(MAKE_DIRECTORY "${package_root}/include")
 file(MAKE_DIRECTORY "${package_root}/lib")
 file(MAKE_DIRECTORY "${package_root}/lib/pkgconfig")
 file(MAKE_DIRECTORY "${package_root}/lib/cmake/lockdc")
+file(MAKE_DIRECTORY "${package_root}/share/lockdc")
 file(MAKE_DIRECTORY "${package_root}/share/doc/liblockdc")
 
 if(NOT EXISTS "${LOCKDC_BINARY_DIR}/cmake_install.cmake")
@@ -59,6 +60,102 @@ execute_process(
 if(NOT lockdc_dev_install_result EQUAL 0)
     message(FATAL_ERROR "failed to install development package payload")
 endif()
+
+function(lockdc_read_dependency_manifest_value manifest_path key out_var)
+    if(NOT EXISTS "${manifest_path}")
+        message(FATAL_ERROR "missing dependency manifest: ${manifest_path}")
+    endif()
+    file(STRINGS "${manifest_path}" _lockdc_manifest_line
+         REGEX "^${key}=" LIMIT_COUNT 1)
+    if(NOT _lockdc_manifest_line)
+        message(FATAL_ERROR "dependency manifest ${manifest_path} is missing ${key}")
+    endif()
+    string(REGEX REPLACE "^[^=]*=" "" _lockdc_manifest_value "${_lockdc_manifest_line}")
+    set(${out_var} "${_lockdc_manifest_value}" PARENT_SCOPE)
+endfunction()
+
+function(lockdc_write_sdk_metadata package_root)
+    set(_lockdc_dependency_manifest "${LOCKDC_EXTERNAL_ROOT}/manifest.txt")
+    lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "cpkt_version" _lockdc_cpkt_version)
+    lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "cpkt_asset_name" _lockdc_cpkt_asset_name)
+    lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "cpkt_asset_hash" _lockdc_cpkt_asset_hash)
+    lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "lonejson_asset_name" _lockdc_lonejson_asset_name)
+    lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "lonejson_asset_hash" _lockdc_lonejson_asset_hash)
+
+    set(_lockdc_cpkt_source_url
+        "https://github.com/sa6mwa/c.pkt.systems/releases/download/v${_lockdc_cpkt_version}/${_lockdc_cpkt_asset_name}")
+    set(_lockdc_lonejson_source_url
+        "https://github.com/sa6mwa/lonejson/releases/download/v${LOCKDC_LONEJSON_VERSION}/${_lockdc_lonejson_asset_name}")
+    set(_lockdc_pslog_source_url
+        "https://github.com/sa6mwa/libpslog/releases/download/v${LOCKDC_PSLOG_VERSION}/${LOCKDC_PSLOG_ASSET_NAME}")
+
+    file(WRITE "${package_root}/share/lockdc/package-metadata.cmake"
+        "set(LOCKDC_PACKAGE_NAME \"liblockdc\")\n"
+        "set(LOCKDC_VERSION \"${LOCKDC_VERSION}\")\n"
+        "set(LOCKDC_ABI_VERSION \"${LOCKDC_ABI_VERSION}\")\n"
+        "set(LOCKDC_TARGET_ID \"${LOCKDC_TARGET_ID}\")\n"
+        "set(LOCKDC_SHARED_LIB_NAME \"${LOCKDC_SHARED_LIB_NAME}\")\n"
+        "set(LOCKDC_SHARED_SONAME \"${LOCKDC_SHARED_SONAME}\")\n"
+        "set(LOCKDC_SHARED_LINK_NAME \"${LOCKDC_SHARED_LINK_NAME}\")\n"
+        "set(LOCKDC_DEPENDENCY_MODE \"external\")\n"
+        "set(LOCKDC_METADATA_VERSION \"1\")\n")
+
+    file(WRITE "${package_root}/share/lockdc/dependencies.json" "{\n")
+    file(APPEND "${package_root}/share/lockdc/dependencies.json"
+        "  \"schema\": \"lockdc.dependencies.v1\",\n"
+        "  \"package\": \"liblockdc\",\n"
+        "  \"version\": \"${LOCKDC_VERSION}\",\n"
+        "  \"target_id\": \"${LOCKDC_TARGET_ID}\",\n"
+        "  \"dependency_mode\": \"external\",\n"
+        "  \"dependencies\": [\n")
+
+    set(_lockdc_dependency_rows
+        "openssl|${LOCKDC_OPENSSL_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|Apache-2.0|external-static-consumer"
+        "zlib|${LOCKDC_ZLIB_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|Zlib|external-static-consumer"
+        "curl|${LOCKDC_CURL_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|curl|external-static-consumer"
+        "nghttp2|${LOCKDC_NGHTTP2_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|MIT|external-static-consumer"
+        "libssh2|${LOCKDC_LIBSSH2_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|BSD-3-Clause|external-static-consumer"
+        "libpslog|${LOCKDC_PSLOG_VERSION}|github-release|${LOCKDC_PSLOG_ASSET_NAME}|${_lockdc_pslog_source_url}|${LOCKDC_PSLOG_ASSET_HASH}|MIT|external-static-consumer"
+        "lonejson|${LOCKDC_LONEJSON_VERSION}|github-release|${_lockdc_lonejson_asset_name}|${_lockdc_lonejson_source_url}|${_lockdc_lonejson_asset_hash}|MIT|external-static-consumer"
+    )
+    list(LENGTH _lockdc_dependency_rows _lockdc_dependency_row_count)
+    math(EXPR _lockdc_dependency_last_index "${_lockdc_dependency_row_count} - 1")
+    foreach(_lockdc_dependency_index RANGE 0 ${_lockdc_dependency_last_index})
+        list(GET _lockdc_dependency_rows ${_lockdc_dependency_index} _lockdc_dependency_row)
+        string(REPLACE "|" ";" _lockdc_dependency_fields "${_lockdc_dependency_row}")
+        list(GET _lockdc_dependency_fields 0 _lockdc_dep_name)
+        list(GET _lockdc_dependency_fields 1 _lockdc_dep_version)
+        list(GET _lockdc_dependency_fields 2 _lockdc_dep_source_system)
+        list(GET _lockdc_dependency_fields 3 _lockdc_dep_archive)
+        list(GET _lockdc_dependency_fields 4 _lockdc_dep_source_url)
+        list(GET _lockdc_dependency_fields 5 _lockdc_dep_sha256)
+        list(GET _lockdc_dependency_fields 6 _lockdc_dep_license)
+        list(GET _lockdc_dependency_fields 7 _lockdc_dep_role)
+        if(_lockdc_dependency_index EQUAL _lockdc_dependency_last_index)
+            set(_lockdc_json_comma "")
+        else()
+            set(_lockdc_json_comma ",")
+        endif()
+        file(APPEND "${package_root}/share/lockdc/dependencies.json"
+            "    {\n"
+            "      \"name\": \"${_lockdc_dep_name}\",\n"
+            "      \"version\": \"${_lockdc_dep_version}\",\n"
+            "      \"target_id\": \"${LOCKDC_TARGET_ID}\",\n"
+            "      \"source_system\": \"${_lockdc_dep_source_system}\",\n"
+            "      \"source_url\": \"${_lockdc_dep_source_url}\",\n"
+            "      \"sha256\": \"${_lockdc_dep_sha256}\",\n"
+            "      \"archive_name\": \"${_lockdc_dep_archive}\",\n"
+            "      \"license\": \"${_lockdc_dep_license}\",\n"
+            "      \"bundled\": false,\n"
+            "      \"role\": \"${_lockdc_dep_role}\"\n"
+            "    }${_lockdc_json_comma}\n")
+    endforeach()
+    file(APPEND "${package_root}/share/lockdc/dependencies.json"
+        "  ]\n"
+        "}\n")
+endfunction()
+
+lockdc_write_sdk_metadata("${package_root}")
 
 function(lockdc_find_darwin_otool)
     if(NOT LOCKDC_TARGET_ID MATCHES "apple-darwin$")

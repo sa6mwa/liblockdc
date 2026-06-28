@@ -319,6 +319,7 @@ set(LOCKDC_PUBLIC_VERSION_HEADER "${lc_generated_include_dir}/lc/version.h")
 
 include(LcDependencies)
 lc_configure_dependencies()
+lc_get_pslog_asset_info(LOCKDC_PSLOG_ASSET_NAME LOCKDC_PSLOG_ASSET_HASH)
 
 set(lc_sources
     src/lc_api.c

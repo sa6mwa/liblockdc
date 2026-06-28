@@ -272,6 +272,64 @@ function(assert_packaged_binaries_have_no_sanitizer_runtime extract_root archive
     endforeach()
 endfunction()
 
+function(assert_sdk_metadata extract_root archive_path version target_id shared_lib_name shared_soname shared_link_name)
+    set(metadata_path "${extract_root}/share/lockdc/package-metadata.cmake")
+    set(dependencies_path "${extract_root}/share/lockdc/dependencies.json")
+    if(NOT EXISTS "${metadata_path}")
+        message(FATAL_ERROR "archive missing SDK package metadata: ${archive_path}")
+    endif()
+    if(NOT EXISTS "${dependencies_path}")
+        message(FATAL_ERROR "archive missing SDK dependency provenance: ${archive_path}")
+    endif()
+
+    file(READ "${metadata_path}" metadata_text)
+    foreach(expected_metadata
+            "set(LOCKDC_PACKAGE_NAME \"liblockdc\")"
+            "set(LOCKDC_VERSION \"${version}\")"
+            "set(LOCKDC_TARGET_ID \"${target_id}\")"
+            "set(LOCKDC_SHARED_LIB_NAME \"${shared_lib_name}\")"
+            "set(LOCKDC_SHARED_SONAME \"${shared_soname}\")"
+            "set(LOCKDC_SHARED_LINK_NAME \"${shared_link_name}\")"
+            "set(LOCKDC_DEPENDENCY_MODE \"external\")")
+        string(FIND "${metadata_text}" "${expected_metadata}" metadata_index)
+        if(metadata_index EQUAL -1)
+            message(FATAL_ERROR
+                "archive SDK metadata missing '${expected_metadata}': ${archive_path}\n${metadata_text}")
+        endif()
+    endforeach()
+
+    file(READ "${dependencies_path}" dependencies_text)
+    foreach(expected_dependency
+            "\"schema\": \"lockdc.dependencies.v1\""
+            "\"package\": \"liblockdc\""
+            "\"version\": \"${version}\""
+            "\"target_id\": \"${target_id}\""
+            "\"dependency_mode\": \"external\""
+            "\"name\": \"openssl\""
+            "\"name\": \"zlib\""
+            "\"name\": \"curl\""
+            "\"name\": \"nghttp2\""
+            "\"name\": \"libssh2\""
+            "\"name\": \"libpslog\""
+            "\"name\": \"lonejson\""
+            "\"bundled\": false"
+            "\"role\": \"external-static-consumer\"")
+        string(FIND "${dependencies_text}" "${expected_dependency}" dependency_index)
+        if(dependency_index EQUAL -1)
+            message(FATAL_ERROR
+                "archive dependency provenance missing '${expected_dependency}': ${archive_path}\n${dependencies_text}")
+        endif()
+    endforeach()
+    string(REGEX MATCHALL "\"sha256\": \"[0-9a-f]+\"" dependency_sha_entries "${dependencies_text}")
+    list(LENGTH dependency_sha_entries dependency_sha_count)
+    if(NOT dependency_sha_count EQUAL 7)
+        message(FATAL_ERROR "archive dependency provenance is missing SHA-256 values: ${archive_path}\n${dependencies_text}")
+    endif()
+    if(dependencies_text MATCHES "\"sha256\": \"\"")
+        message(FATAL_ERROR "archive dependency provenance has an empty SHA-256 value: ${archive_path}\n${dependencies_text}")
+    endif()
+endfunction()
+
 function(assert_archive_layout archive_path version target_id shared_lib_name shared_soname shared_link_name)
     if(NOT EXISTS "${archive_path}")
         message(FATAL_ERROR "missing archive: ${archive_path}")
@@ -308,6 +366,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
 
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/LICENSE(\n|$)" "share/doc/liblockdc/LICENSE")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/README.md(\n|$)" "share/doc/liblockdc/README.md")
+    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lockdc/package-metadata\\.cmake(\n|$)" "share/lockdc/package-metadata.cmake")
+    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lockdc/dependencies\\.json(\n|$)" "share/lockdc/dependencies.json")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lc/lc\\.h(\n|$)" "include/lc/lc.h")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lc/version\\.h(\n|$)" "include/lc/version.h")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/pslog(_version)?\\.h(\n|$)" "libpslog headers")
@@ -398,6 +458,7 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
         assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/${shared_link_name}")
     endif()
     assert_shared_library_runpath("${extract_root}/${archive_prefix}" "${archive_path}" "${shared_lib_name}")
+    assert_sdk_metadata("${extract_root}/${archive_prefix}" "${archive_path}" "${version}" "${target_id}" "${shared_lib_name}" "${shared_soname}" "${shared_link_name}")
     if(NOT DEFINED LOCKDC_SANITIZER_INSTRUMENTED OR LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "" OR
        LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "0")
         lockdc_assert_tree_has_no_private_traces("${extract_root}/${archive_prefix}" "${archive_path}")
