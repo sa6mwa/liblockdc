@@ -25,6 +25,7 @@ function(lockdc_import_cache_path var_name)
 endfunction()
 
 lockdc_import_cache_path(CMAKE_C_COMPILER)
+lockdc_import_cache_path(CMAKE_LINKER)
 lockdc_import_cache_path(CMAKE_TOOLCHAIN_FILE)
 lockdc_import_cache_path(CMAKE_BUILD_TYPE)
 lockdc_import_cache_path(LOCKDC_OTOOL)
@@ -37,6 +38,12 @@ endif()
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
+if(NOT CMAKE_LINKER OR NOT EXISTS "${CMAKE_LINKER}")
+    message(FATAL_ERROR "Darwin smoke bundle requires a configured target linker")
+endif()
+
+get_filename_component(lockdc_darwin_tool_bin "${CMAKE_LINKER}" DIRECTORY)
+set(lockdc_darwin_tool_path "${lockdc_darwin_tool_bin}:$ENV{PATH}")
 
 set(bundle_root "${LOCKDC_BINARY_DIR}/darwin-smoke-bundle")
 set(bundle_dist "${bundle_root}/dist")
@@ -160,7 +167,8 @@ if(CMAKE_TOOLCHAIN_FILE)
 endif()
 
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" ${configure_args}
+    COMMAND "${CMAKE_COMMAND}" -E env "PATH=${lockdc_darwin_tool_path}"
+        "${CMAKE_COMMAND}" ${configure_args}
     RESULT_VARIABLE configure_result
     OUTPUT_VARIABLE configure_stdout
     ERROR_VARIABLE configure_stderr
@@ -173,7 +181,8 @@ if(NOT configure_result EQUAL 0)
 endif()
 
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" --build "${consumer_bin_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E env "PATH=${lockdc_darwin_tool_path}"
+        "${CMAKE_COMMAND}" --build "${consumer_bin_dir}"
     RESULT_VARIABLE build_result
     OUTPUT_VARIABLE build_stdout
     ERROR_VARIABLE build_stderr

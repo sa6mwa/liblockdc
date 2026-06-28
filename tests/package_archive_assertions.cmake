@@ -1,4 +1,5 @@
 include("${CMAKE_CURRENT_LIST_DIR}/release_privacy_scan.cmake")
+get_filename_component(LOCKDC_TEST_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
 function(assert_contains archive_listing archive_path pattern description)
     if(NOT archive_listing MATCHES "${pattern}")
@@ -33,19 +34,20 @@ function(assert_shared_library_runpath extract_root archive_path shared_lib_name
                 "Darwin archive shared-library validation expects a versioned dylib name: "
                 "lib/${shared_lib_name} in ${archive_path}")
         endif()
-        if(DEFINED ENV{OSXCROSS_ROOT} AND NOT "$ENV{OSXCROSS_ROOT}" STREQUAL "")
-            set(_lockdc_osxcross_bin_hint "$ENV{OSXCROSS_ROOT}/bin")
-        elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
-            set(_lockdc_osxcross_bin_hint "$ENV{HOME}/.local/cross/osxcross/bin")
-        else()
-            set(_lockdc_osxcross_bin_hint "")
-        endif()
-        find_program(LOCKDC_OTOOL_BIN
-            NAMES arm64-apple-darwin25-otool otool
-            HINTS "${_lockdc_osxcross_bin_hint}"
+        execute_process(
+            COMMAND "${LOCKDC_TEST_ROOT}/scripts/discover_target_tools.sh"
+                --build-dir "${LOCKDC_BINARY_DIR}"
+                --target-id "${LOCKDC_TARGET_ID}"
+                --tool otool
+            RESULT_VARIABLE otool_discovery_result
+            OUTPUT_VARIABLE LOCKDC_OTOOL_BIN
+            ERROR_VARIABLE otool_discovery_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE
         )
-        if(NOT LOCKDC_OTOOL_BIN)
-            message(FATAL_ERROR "otool is required for Darwin archive shared-library validation")
+        if(NOT otool_discovery_result EQUAL 0 OR NOT EXISTS "${LOCKDC_OTOOL_BIN}")
+            message(FATAL_ERROR
+                "external-tool-unavailable: otool is required for Darwin archive shared-library validation\n"
+                "${otool_discovery_error}")
         endif()
 
         execute_process(

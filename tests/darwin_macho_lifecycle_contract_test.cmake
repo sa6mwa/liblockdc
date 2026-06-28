@@ -28,6 +28,9 @@ read_required("${LOCKDC_ROOT}/cmake/package_archive.cmake" package_archive)
 read_required("${LOCKDC_ROOT}/cmake/strip_release_target.cmake" strip_release_target)
 read_required("${LOCKDC_ROOT}/tests/package_archive_assertions.cmake" package_assertions)
 read_required("${LOCKDC_ROOT}/CMakeLists.txt" cmake_lists)
+read_required("${LOCKDC_ROOT}/cmake/toolchains/arm64-apple-darwin.cmake" darwin_toolchain)
+read_required("${LOCKDC_ROOT}/cmake/package_darwin_smoke_bundle.cmake" darwin_smoke_bundle)
+read_required("${LOCKDC_ROOT}/scripts/discover_target_tools.sh" discover_target_tools)
 
 assert_contains(
     "${package_archive}"
@@ -61,3 +64,35 @@ assert_contains(
     "${cmake_lists}"
     "INSTALL_NAME_DIR \"@rpath\""
     "explicit Darwin install-name directory")
+assert_contains(
+    "${darwin_toolchain}"
+    [=[set(ENV{PATH} "${LOCKDC_OSXCROSS_BIN_DIR}:$ENV{PATH}")]=]
+    "osxcross bin directory prepended to configure PATH")
+assert_contains(
+    "${darwin_toolchain}"
+    [=[set(CMAKE_LINKER "${LOCKDC_OSXCROSS_BIN_DIR}/${LOCKDC_OSXCROSS_HOST}-ld"]=]
+    "explicit osxcross Darwin linker")
+assert_contains(
+    "${darwin_toolchain}"
+    [=[set(_lockdc_darwin_linker_flag "-fuse-ld=${CMAKE_LINKER}")]=]
+    "absolute Darwin -fuse-ld linker route")
+assert_contains(
+    "${darwin_smoke_bundle}"
+    [=["PATH=${lockdc_darwin_tool_path}"]=]
+    "Darwin smoke build PATH uses configured linker directory")
+assert_contains(
+    "${package_archive}"
+    "scripts/discover_target_tools.sh"
+    "Darwin package verification uses shared target-tool discovery")
+assert_contains(
+    "${package_assertions}"
+    "scripts/discover_target_tools.sh"
+    "Darwin archive assertions use shared target-tool discovery")
+assert_contains(
+    "${discover_target_tools}"
+    "external-tool-unavailable"
+    "target-tool discovery reports missing tools explicitly")
+assert_contains(
+    "${discover_target_tools}"
+    "CMAKE_LINKER"
+    "target-tool discovery can resolve configured linker")

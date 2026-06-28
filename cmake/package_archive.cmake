@@ -65,17 +65,24 @@ function(lockdc_find_darwin_otool)
         return()
     endif()
     if(NOT LOCKDC_OTOOL OR NOT EXISTS "${LOCKDC_OTOOL}")
-        if(DEFINED ENV{OSXCROSS_ROOT} AND NOT "$ENV{OSXCROSS_ROOT}" STREQUAL "")
-            set(_lockdc_osxcross_bin_hint "$ENV{OSXCROSS_ROOT}/bin")
-        elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
-            set(_lockdc_osxcross_bin_hint "$ENV{HOME}/.local/cross/osxcross/bin")
-        else()
-            set(_lockdc_osxcross_bin_hint "")
+        execute_process(
+            COMMAND "${LOCKDC_ROOT}/scripts/discover_target_tools.sh"
+                --build-dir "${LOCKDC_BINARY_DIR}"
+                --target-id "${LOCKDC_TARGET_ID}"
+                --tool otool
+            RESULT_VARIABLE _lockdc_otool_discovery_result
+            OUTPUT_VARIABLE _lockdc_otool_discovery_output
+            ERROR_VARIABLE _lockdc_otool_discovery_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(_lockdc_otool_discovery_result EQUAL 0 AND EXISTS "${_lockdc_otool_discovery_output}")
+            set(LOCKDC_OTOOL "${_lockdc_otool_discovery_output}")
         endif()
-        find_program(LOCKDC_OTOOL NAMES arm64-apple-darwin25-otool otool HINTS "${_lockdc_osxcross_bin_hint}")
     endif()
     if(NOT LOCKDC_OTOOL OR NOT EXISTS "${LOCKDC_OTOOL}")
-        message(FATAL_ERROR "otool is required for Darwin package verification")
+        message(FATAL_ERROR
+            "external-tool-unavailable: otool is required for Darwin package verification\n"
+            "${_lockdc_otool_discovery_error}")
     endif()
     set(LOCKDC_OTOOL "${LOCKDC_OTOOL}" PARENT_SCOPE)
 endfunction()
