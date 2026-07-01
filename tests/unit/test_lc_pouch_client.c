@@ -5549,6 +5549,7 @@ static void test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys(
   assert_string_equal(capture.keys[1], "bravo");
   assert_string_equal(res.cursor, "bravo");
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.correlation_id, "pouch-query-keys");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_int_equal(res.index_seq, 0UL);
   lc_query_res_cleanup(&res);
@@ -5561,6 +5562,7 @@ static void test_pouch_endpoint_scan_query_keys_pages_ordered_visible_keys(
   assert_string_equal(capture.keys[0], "charlie");
   assert_null(res.cursor);
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.correlation_id, "pouch-query-keys");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   lc_query_res_cleanup(&res);
 
@@ -5625,6 +5627,7 @@ static void test_pouch_endpoint_scan_query_streams_documents_with_paging(
   assert_null(strstr(text, "delta"));
   assert_string_equal(res.cursor, "bravo");
   assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.correlation_id, "pouch-query");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_int_equal(res.index_seq, 0UL);
   free(text);
@@ -5645,6 +5648,7 @@ static void test_pouch_endpoint_scan_query_streams_documents_with_paging(
   assert_null(strstr(text, "delta"));
   assert_null(res.cursor);
   assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.correlation_id, "pouch-query");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   free(text);
   lc_sink_close(sink);
@@ -5970,6 +5974,7 @@ static void test_pouch_endpoint_default_index_query_streams_documents(
   assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
   assert_null(strstr(text, "hidden"));
   assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.correlation_id, "pouch-query");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_true(res.index_seq > 0UL);
 
@@ -6281,6 +6286,7 @@ static void test_pouch_endpoint_default_index_query_keys_pages(
   assert_string_equal(capture.keys[0], "alpha");
   assert_string_equal(res.cursor, "alpha");
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.correlation_id, "pouch-query-keys");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
@@ -6293,6 +6299,7 @@ static void test_pouch_endpoint_default_index_query_keys_pages(
   assert_string_equal(capture.keys[0], "bravo");
   assert_null(res.cursor);
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.correlation_id, "pouch-query-keys");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
 

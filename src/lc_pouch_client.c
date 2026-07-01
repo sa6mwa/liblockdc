@@ -5850,10 +5850,12 @@ static char *lc_pouch_query_candidates_metadata(unsigned long candidates,
 
 static int lc_pouch_query_result_metadata_ready(const lc_query_res *out,
                                                 lc_error *error) {
-  if (out->return_mode != NULL && out->metadata_json != NULL) {
+  if (out->return_mode != NULL && out->metadata_json != NULL &&
+      out->correlation_id != NULL) {
     return LC_OK;
   }
-  if (out->return_mode == NULL) {
+  if (out->return_mode == NULL || out->metadata_json == NULL ||
+      out->correlation_id == NULL) {
     (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
                        "failed to allocate pouch query metadata", NULL, NULL,
                        NULL);
@@ -5972,6 +5974,7 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
     }
   }
   out->return_mode = lc_strdup_local("documents");
+  out->correlation_id = lc_strdup_local("pouch-query");
   out->metadata_json =
       lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
                                          error);
@@ -6130,6 +6133,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     }
   }
   out->return_mode = lc_strdup_local("documents");
+  out->correlation_id = lc_strdup_local("pouch-query");
   out->index_seq = scan_res.index_seq;
   out->metadata_json =
       lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
@@ -6265,6 +6269,7 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
     }
   }
   out->return_mode = lc_strdup_local("keys");
+  out->correlation_id = lc_strdup_local("pouch-query-keys");
   out->metadata_json =
       lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
                                          error);
@@ -6424,6 +6429,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     }
   }
   out->return_mode = lc_strdup_local("keys");
+  out->correlation_id = lc_strdup_local("pouch-query-keys");
   out->index_seq = scan_res.index_seq;
   out->metadata_json =
       lc_pouch_query_candidates_metadata((unsigned long)scan_res.visited,
