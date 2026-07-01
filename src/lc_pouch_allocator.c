@@ -29,7 +29,8 @@ void lc_pouch_allocator_from_lc(const lc_allocator *src,
     return;
   }
   memset(dst, 0, sizeof(*dst));
-  if (src == NULL || src->malloc_fn == NULL || src->free_fn == NULL) {
+  if (src == NULL || src->malloc_fn == NULL || src->realloc_fn == NULL ||
+      src->free_fn == NULL) {
     return;
   }
   dst->malloc_fn = src->malloc_fn;
@@ -69,10 +70,22 @@ void *lc_pouch_calloc(const lc_pouch_allocator *allocator, size_t count,
 
 void *lc_pouch_realloc(const lc_pouch_allocator *allocator, void *ptr,
                        size_t size) {
-  if (allocator != NULL && allocator->realloc_fn != NULL) {
+  if (allocator == NULL ||
+      (allocator->malloc_fn == NULL && allocator->calloc_fn == NULL &&
+       allocator->realloc_fn == NULL && allocator->free_fn == NULL)) {
+    return lc_pouch_default_realloc(NULL, ptr, size);
+  }
+  if (allocator->realloc_fn != NULL) {
     return allocator->realloc_fn(allocator->context, ptr, size);
   }
-  return lc_pouch_default_realloc(NULL, ptr, size);
+  if (ptr == NULL) {
+    return lc_pouch_alloc(allocator, size);
+  }
+  if (size == 0U) {
+    lc_pouch_free(allocator, ptr);
+    return NULL;
+  }
+  return NULL;
 }
 
 void lc_pouch_free(const lc_pouch_allocator *allocator, void *ptr) {

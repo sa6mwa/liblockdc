@@ -62,6 +62,12 @@ typedef struct counting_source {
   size_t position;
 } counting_source;
 
+typedef struct failing_callback_source {
+  const char *prefix;
+  size_t offset;
+  unsigned int reads_before_failure;
+} failing_callback_source;
+
 static void *tracked_malloc(void *context, size_t size) {
   tracked_allocator *tracked;
 
@@ -457,6 +463,53 @@ static void counting_source_init(counting_source *source, size_t length) {
   source->length = length;
 }
 
+static size_t failing_callback_source_read(void *context, void *buffer,
+                                           size_t count, lc_error *error) {
+  failing_callback_source *source;
+  size_t remaining;
+  size_t produced;
+  const char message[] = "intentional pouch disk source failure";
+
+  source = (failing_callback_source *)context;
+  if (source->reads_before_failure == 0U) {
+    if (error != NULL) {
+      lc_error_cleanup(error);
+      error->code = LC_ERR_PROTOCOL;
+      error->message = (char *)malloc(sizeof(message));
+      assert_non_null(error->message);
+      memcpy(error->message, message, sizeof(message));
+    }
+    return 0U;
+  }
+  source->reads_before_failure -= 1U;
+  remaining = strlen(source->prefix) - source->offset;
+  produced = remaining < count ? remaining : count;
+  memcpy(buffer, source->prefix + source->offset, produced);
+  source->offset += produced;
+  return produced;
+}
+
+static lc_source *source_that_fails_after_prefix(const char *prefix) {
+  failing_callback_source *context;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  context = (failing_callback_source *)malloc(sizeof(*context));
+  assert_non_null(context);
+  context->prefix = prefix;
+  context->offset = 0U;
+  context->reads_before_failure = 1U;
+  source = NULL;
+  memset(&error, 0, sizeof(error));
+  rc = lc_source_from_callbacks(failing_callback_source_read, NULL, free,
+                                context, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(source);
+  lc_error_cleanup(&error);
+  return source;
+}
+
 static size_t read_source_count_x(lc_source *source) {
   char buffer[4096];
   size_t total;
@@ -496,6 +549,39 @@ static char *read_source_text(lc_source *source) {
   assert_non_null(copy);
   lc_error_cleanup(&error);
   return copy;
+}
+
+static void test_allocator_from_lc_requires_matching_realloc(void **state) {
+  tracked_allocator tracked;
+  lc_allocator public_allocator;
+  lc_pouch_allocator pouch_allocator;
+  void *ptr;
+  void *grown;
+
+  (void)state;
+  memset(&tracked, 0, sizeof(tracked));
+  lc_allocator_init(&public_allocator);
+  public_allocator.malloc_fn = tracked_malloc;
+  public_allocator.free_fn = tracked_free;
+  public_allocator.context = &tracked;
+
+  lc_pouch_allocator_from_lc(&public_allocator, &pouch_allocator);
+  assert_null(pouch_allocator.malloc_fn);
+  assert_null(pouch_allocator.realloc_fn);
+  assert_null(pouch_allocator.free_fn);
+
+  memset(&pouch_allocator, 0, sizeof(pouch_allocator));
+  pouch_allocator.malloc_fn = tracked_malloc;
+  pouch_allocator.free_fn = tracked_free;
+  pouch_allocator.context = &tracked;
+  ptr = lc_pouch_realloc(&pouch_allocator, NULL, 16U);
+  assert_non_null(ptr);
+  assert_int_equal(tracked.malloc_calls, 1U);
+  grown = lc_pouch_realloc(&pouch_allocator, ptr, 32U);
+  assert_null(grown);
+  assert_int_equal(tracked.realloc_calls, 0U);
+  lc_pouch_free(&pouch_allocator, ptr);
+  assert_int_equal(tracked.free_calls, 1U);
 }
 
 static unsigned long test_get_u32(const unsigned char *src) {
@@ -1146,6 +1232,48 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   lc_error_cleanup(&error);
   assert_true(tracked.malloc_calls > 0U);
   assert_true(tracked.free_calls > 0U);
+  test_cleanup_root(root);
+}
+
+static void test_state_put_propagates_source_failure_before_append(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res res;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "state-source-failure");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&opts, 0, sizeof(opts));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  source = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "application/json";
+  source = source_that_fails_after_prefix("{\"partial\":");
+  rc = store->write_state(store, "default", "source-failure", source, &opts,
+                          &res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message, "intentional pouch disk source failure");
+  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
+                   0U);
+  lc_error_cleanup(&error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
 
@@ -12947,7 +13075,10 @@ static void test_writer_marker_touch_failure_does_not_rollback_commit(
 
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_allocator_from_lc_requires_matching_realloc),
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
+      cmocka_unit_test(
+          test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(

@@ -3911,6 +3911,10 @@ static int lc_pouch_read_source_all(const lc_pouch_allocator *allocator,
   while (1) {
     got = source->read(source, temp, sizeof(temp), error);
     if (got == 0U) {
+      if (error != NULL && error->code != LC_OK) {
+        lc_pouch_free(allocator, buffer);
+        return error->code;
+      }
       break;
     }
     if (got > ((size_t)-1) - length) {
