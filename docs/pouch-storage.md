@@ -578,10 +578,8 @@ mode, and fallback policy when a store/client instance is opened. This is an
 instance-level choice with the same operational role as the server disk store's
 query backend mode: a caller can intentionally run a pouch instance in scan
 mode even though indexed mode is the normal production route. The public client
-can set this through `lc_client_config.pouch_query_engine` and
-`lc_client_config.pouch_query_fallback_engine`, or directly on a pouch endpoint
-with `pouch:///path?query_engine=scan&query_fallback_engine=index`. Endpoint
-settings override the client defaults for that opened store. The disk backend
+sets this directly on a pouch endpoint with
+`pouch:///path?query_engine=scan&query_fallback_engine=index`. The disk backend
 also exposes the same choice through `lc_pouch_disk_open_with_options`, where
 `query_engine=index` is the default, `query_engine=scan` forces the log-backed
 ordered scan route, and `query_fallback_engine` is explicit rather than

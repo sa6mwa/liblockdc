@@ -414,6 +414,7 @@ static lc_client *open_pouch_client_with_limit(const char *endpoint,
 static lc_client *open_pouch_client_with_query_config(
     const char *endpoint, const char *preferred_engine,
     const char *fallback_engine) {
+  char configured_endpoint[512];
   lc_client_config config;
   lc_client *client;
   lc_error error;
@@ -422,12 +423,27 @@ static lc_client *open_pouch_client_with_query_config(
 
   memset(&error, 0, sizeof(error));
   lc_client_config_init(&config);
+  if (preferred_engine != NULL && fallback_engine != NULL) {
+    snprintf(configured_endpoint, sizeof(configured_endpoint),
+             "%s%cquery_engine=%s&query_fallback_engine=%s", endpoint,
+             strchr(endpoint, '?') != NULL ? '&' : '?',
+             preferred_engine, fallback_engine);
+    endpoint = configured_endpoint;
+  } else if (preferred_engine != NULL) {
+    snprintf(configured_endpoint, sizeof(configured_endpoint),
+             "%s%cquery_engine=%s", endpoint,
+             strchr(endpoint, '?') != NULL ? '&' : '?', preferred_engine);
+    endpoint = configured_endpoint;
+  } else if (fallback_engine != NULL) {
+    snprintf(configured_endpoint, sizeof(configured_endpoint),
+             "%s%cquery_fallback_engine=%s", endpoint,
+             strchr(endpoint, '?') != NULL ? '&' : '?', fallback_engine);
+    endpoint = configured_endpoint;
+  }
   endpoints[0] = endpoint;
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "default";
-  config.pouch_query_engine = preferred_engine;
-  config.pouch_query_fallback_engine = fallback_engine;
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(client);
@@ -5127,7 +5143,7 @@ static void test_pouch_endpoint_query_options_configure_scan_mode(
   test_cleanup_root(root);
 }
 
-static void test_pouch_endpoint_query_options_override_client_config(
+static void test_pouch_endpoint_query_options_select_index_mode(
     void **state) {
   char root[256];
   char endpoint[384];
@@ -5141,13 +5157,13 @@ static void test_pouch_endpoint_query_options_override_client_config(
   int rc;
 
   (void)state;
-  test_root_path(root, sizeof(root), "query-mode-url-overrides-config");
+  test_root_path(root, sizeof(root), "query-mode-url-index");
   test_cleanup_root(root);
   test_endpoint_with_query(endpoint, sizeof(endpoint), root,
                            "query_engine=index");
   memset(&error, 0, sizeof(error));
   memset(&query_res, 0, sizeof(query_res));
-  client = open_pouch_client_with_query_config(endpoint, "scan", NULL);
+  client = open_pouch_client(endpoint);
   lease = pouch_acquire_query_key(client, "endpoint-index-doc", &error);
   pouch_save_query_json(lease, "{\"endpoint_index\":true}", &error);
 
@@ -7297,26 +7313,29 @@ static void test_pouch_endpoint_rejects_invalid_query_mode_config(
   test_endpoint(endpoint, sizeof(endpoint), root);
   memset(&error, 0, sizeof(error));
   lc_client_config_init(&config);
+  test_endpoint_with_query(endpoint, sizeof(endpoint), root,
+                           "query_engine=linear");
   endpoints[0] = endpoint;
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.pouch_query_engine = "linear";
   client = NULL;
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(client);
   assert_string_equal(error.message,
-                      "pouch_query_engine must be index or scan");
+                      "pouch endpoint query_engine must be index or scan");
   lc_error_cleanup(&error);
 
   memset(&error, 0, sizeof(error));
-  config.pouch_query_engine = "index";
-  config.pouch_query_fallback_engine = "linear";
+  test_endpoint_with_query(endpoint, sizeof(endpoint), root,
+                           "query_engine=index&query_fallback_engine=linear");
+  endpoints[0] = endpoint;
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(client);
-  assert_string_equal(
-      error.message, "pouch_query_fallback_engine must be none, index, or scan");
+  assert_string_equal(error.message,
+                      "pouch endpoint query_fallback_engine must be none, "
+                      "index, or scan");
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
@@ -8667,7 +8686,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_query_options_configure_scan_mode),
       cmocka_unit_test(
-          test_pouch_endpoint_query_options_override_client_config),
+          test_pouch_endpoint_query_options_select_index_mode),
       cmocka_unit_test(
           test_pouch_endpoint_decodes_percent_encoded_path_and_options),
       cmocka_unit_test(test_pouch_endpoint_rejects_invalid_query_options),

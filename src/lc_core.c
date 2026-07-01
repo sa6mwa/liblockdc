@@ -1199,8 +1199,6 @@ void lc_client_config_init(lc_client_config *config) {
   config->timeout_ms = 30000L;
   config->prefer_http_2 = 1;
   config->http_json_response_limit_bytes = 0U;
-  config->pouch_query_engine = "index";
-  config->pouch_query_fallback_engine = "none";
 }
 
 #define LC_INIT_STRUCT_FUNC(type_name, func_name)                              \
@@ -1356,19 +1354,6 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                         NULL, NULL);
   }
   is_pouch = pouch_endpoint_count == 1U;
-  if (is_pouch &&
-      !lc_pouch_query_engine_supported(config->pouch_query_engine, 0)) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch_query_engine must be index or scan", NULL, NULL,
-                        NULL);
-  }
-  if (is_pouch && !lc_pouch_query_engine_supported(
-                      config->pouch_query_fallback_engine, 1)) {
-    return lc_error_set(
-        error, LC_ERR_INVALID, 0L,
-        "pouch_query_fallback_engine must be none, index, or scan", NULL, NULL,
-        NULL);
-  }
   if (!config->disable_mtls && config->client_bundle_source != NULL) {
     bundle_capture.inner = config->client_bundle_source;
     bundle_capture.allocator = &config->allocator;
@@ -1437,12 +1422,11 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     effective_query_engine =
         pouch_endpoint_options.query_engine != NULL
             ? pouch_endpoint_options.query_engine
-            : lc_pouch_query_engine_default(config->pouch_query_engine);
+            : lc_pouch_query_engine_default(NULL);
     effective_query_fallback_engine =
         pouch_endpoint_options.query_fallback_engine != NULL
             ? pouch_endpoint_options.query_fallback_engine
-            : lc_pouch_query_fallback_default(
-                  config->pouch_query_fallback_engine);
+            : lc_pouch_query_fallback_default(NULL);
     memset(&pouch_open_opts, 0, sizeof(pouch_open_opts));
     pouch_open_opts.query_engine = effective_query_engine;
     pouch_open_opts.query_fallback_engine = effective_query_fallback_engine;

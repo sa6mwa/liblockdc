@@ -659,7 +659,7 @@ static int bench_pouch_seed_public_query_rows_by_owner(const char *root,
   long i;
   int rc;
 
-  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s?query_engine=scan", root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
@@ -2294,7 +2294,6 @@ static int bench_pouch_scan_query(long iterations) {
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
-  config.pouch_query_engine = "scan";
   client = NULL;
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {
@@ -2352,15 +2351,15 @@ static int bench_pouch_query_key_selector(long iterations, int scan_mode,
 
   bench_pouch_exact_key_for_rows(iterations, key, sizeof(key));
   snprintf(selector, sizeof(selector), "{\"key\":\"%s\"}", key);
-  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  snprintf(endpoint, sizeof(endpoint), scan_mode
+                                       ? "pouch://%s?query_engine=scan"
+                                       : "pouch://%s",
+           root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
-  if (scan_mode) {
-    config.pouch_query_engine = "scan";
-  }
   client = NULL;
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {
@@ -2467,15 +2466,15 @@ static int bench_pouch_query_owner_selector(long iterations, int scan_mode,
   snprintf(selector, sizeof(selector), "{\"owner\":\"bench-owner-00\"}");
   snprintf(expected_metadata, sizeof(expected_metadata),
            "{\"query_candidates\":%ld}", bench_pouch_owner_zero_count(iterations));
-  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  snprintf(endpoint, sizeof(endpoint), scan_mode
+                                       ? "pouch://%s?query_engine=scan"
+                                       : "pouch://%s",
+           root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
-  if (scan_mode) {
-    config.pouch_query_engine = "scan";
-  }
   client = NULL;
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {
@@ -2570,15 +2569,15 @@ static int bench_pouch_query_key_owner_selector(long iterations, int scan_mode,
            key, owner);
   snprintf(expected_metadata, sizeof(expected_metadata),
            "{\"query_candidates\":1}");
-  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  snprintf(endpoint, sizeof(endpoint), scan_mode
+                                       ? "pouch://%s?query_engine=scan"
+                                       : "pouch://%s",
+           root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
-  if (scan_mode) {
-    config.pouch_query_engine = "scan";
-  }
   client = NULL;
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {
@@ -2692,15 +2691,15 @@ static int bench_pouch_query_owner_removed_selector(long iterations,
   snprintf(selector, sizeof(selector), "{\"owner\":\"bench-owner-00\"}");
   snprintf(expected_metadata, sizeof(expected_metadata),
            "{\"query_candidates\":%ld}", expected_rows);
-  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  snprintf(endpoint, sizeof(endpoint), scan_mode
+                                       ? "pouch://%s?query_engine=scan"
+                                       : "pouch://%s",
+           root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
-  if (scan_mode) {
-    config.pouch_query_engine = "scan";
-  }
   client = NULL;
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {
@@ -2873,13 +2872,12 @@ static int bench_pouch_scan_query_keys(long iterations) {
     return 1;
   }
 
-  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s?query_engine=scan", root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
-  config.pouch_query_engine = "scan";
   client = NULL;
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {

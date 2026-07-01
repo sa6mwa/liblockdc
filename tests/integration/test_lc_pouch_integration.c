@@ -259,16 +259,18 @@ static void open_pouch_client_with_namespace(const char *endpoint,
 
 static void open_pouch_scan_client(const char *endpoint, lc_client **out,
                                    lc_error *error) {
+  char scan_endpoint[384];
   lc_client_config config;
   const char *endpoints[1];
   int rc;
 
-  endpoints[0] = endpoint;
+  snprintf(scan_endpoint, sizeof(scan_endpoint), "%s%cquery_engine=scan",
+           endpoint, strchr(endpoint, '?') != NULL ? '&' : '?');
+  endpoints[0] = scan_endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "default";
-  config.pouch_query_engine = "scan";
   rc = lc_client_open(&config, out, error);
   assert_lc_ok(rc, error);
   assert_non_null(*out);
@@ -1777,7 +1779,7 @@ static void test_pouch_public_rejects_reserved_namespaces(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_endpoint_query_engine_overrides_client_default(
+static void test_pouch_public_endpoint_query_engine_selects_index(
     void **state) {
   char root[256];
   char writer_endpoint[320];
@@ -1841,7 +1843,6 @@ static void test_pouch_public_endpoint_query_engine_overrides_client_default(
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "default";
-  config.pouch_query_engine = "scan";
   rc = lc_client_open(&config, &reader, &error);
   assert_lc_ok(rc, &error);
 
@@ -1870,7 +1871,7 @@ static void test_pouch_public_endpoint_query_engine_overrides_client_default(
 }
 
 static void
-test_pouch_public_endpoint_query_fallback_overrides_client_default(
+test_pouch_public_endpoint_query_fallback_selects_scan(
     void **state) {
   char root[256];
   char writer_endpoint[320];
@@ -1932,8 +1933,6 @@ test_pouch_public_endpoint_query_fallback_overrides_client_default(
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "default";
-  config.pouch_query_engine = "scan";
-  config.pouch_query_fallback_engine = "index";
   rc = lc_client_open(&config, &reader, &error);
   assert_lc_ok(rc, &error);
 
@@ -1956,7 +1955,7 @@ test_pouch_public_endpoint_query_fallback_overrides_client_default(
 }
 
 static void
-test_pouch_public_endpoint_query_keys_fallback_overrides_client_default(
+test_pouch_public_endpoint_query_keys_fallback_selects_scan(
     void **state) {
   char root[256];
   char writer_endpoint[320];
@@ -2020,8 +2019,6 @@ test_pouch_public_endpoint_query_keys_fallback_overrides_client_default(
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "default";
-  config.pouch_query_engine = "scan";
-  config.pouch_query_fallback_engine = "index";
   rc = lc_client_open(&config, &reader, &error);
   assert_lc_ok(rc, &error);
 
@@ -12690,11 +12687,11 @@ int main(void) {
           test_pouch_public_namespace_config_reports_query_mode),
       cmocka_unit_test(test_pouch_public_rejects_reserved_namespaces),
       cmocka_unit_test(
-          test_pouch_public_endpoint_query_engine_overrides_client_default),
+          test_pouch_public_endpoint_query_engine_selects_index),
       cmocka_unit_test(
-          test_pouch_public_endpoint_query_fallback_overrides_client_default),
+          test_pouch_public_endpoint_query_fallback_selects_scan),
       cmocka_unit_test(
-          test_pouch_public_endpoint_query_keys_fallback_overrides_client_default),
+          test_pouch_public_endpoint_query_keys_fallback_selects_scan),
       cmocka_unit_test(
           test_pouch_public_scan_query_ignores_corrupt_index_sidecar),
       cmocka_unit_test(

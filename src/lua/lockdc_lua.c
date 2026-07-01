@@ -758,10 +758,6 @@ static int lcdc_open(lua_State *L) {
   }
   lua_pop(L, 1);
   config.default_namespace = lcdc_opt_string_field(L, 1, "default_namespace");
-  config.pouch_query_engine =
-      lcdc_opt_string_field(L, 1, "pouch_query_engine");
-  config.pouch_query_fallback_engine =
-      lcdc_opt_string_field(L, 1, "pouch_query_fallback_engine");
   lcdc_opt_integer_field(L, 1, "timeout_ms", &config.timeout_ms);
   lcdc_opt_boolean_field(L, 1, "disable_mtls", &config.disable_mtls);
   lcdc_opt_boolean_field(L, 1, "insecure_skip_verify",
