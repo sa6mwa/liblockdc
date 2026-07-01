@@ -34,6 +34,7 @@ endforeach()
 
 file(READ "${generated_rockspec_path}" rockspec_text)
 file(READ "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh" validate_luarocks_script)
+file(READ "${LOCKDC_ROOT}/scripts/build_lockdc_lua_rock.sh" build_luarock_script)
 foreach(required_snippet
     "package = \"lockdc\""
     "\"lonejson == 0.35.2-1\""
@@ -49,6 +50,30 @@ foreach(required_snippet
         message(FATAL_ERROR
             "generated rockspec is missing expected snippet '${required_snippet}'\n"
             "rockspec:\n${rockspec_text}")
+    endif()
+endforeach()
+
+foreach(required_snippet
+    "-llockdc"
+    "LOCKDC_CFLAGS_EXTRA"
+    "LOCKDC_LIBS_EXTRA")
+    string(FIND "${build_luarock_script}" "${required_snippet}" snippet_index)
+    if(snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "Lua rock builder is missing expected public-SDK linkage snippet '${required_snippet}'")
+    endif()
+endforeach()
+
+foreach(forbidden_snippet
+    "PSLOG_IMPLEMENTATION"
+    "pslog-${LOCKDC_PSLOG_VERSION}.h"
+    "pslog.c"
+    "pslog.o")
+    string(FIND "${build_luarock_script}" "${forbidden_snippet}" snippet_index)
+    if(NOT snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "Lua rock builder embeds pslog implementation instead of using the public SDK ABI.\n"
+            "Unexpected snippet: ${forbidden_snippet}")
     endif()
 endforeach()
 
