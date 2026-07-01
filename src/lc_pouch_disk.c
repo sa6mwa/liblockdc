@@ -6114,6 +6114,10 @@ static int lc_pouch_disk_spool_source_to_temp(
     }
     got = source->read(source, buffer, want, error);
     if (got == 0U) {
+      if (error != NULL && error->code != LC_OK) {
+        close(fd);
+        return error->code;
+      }
       break;
     }
     if ((unsigned long)got > ((unsigned long)-1) - length) {

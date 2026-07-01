@@ -190,6 +190,59 @@ static lc_source *source_from_text(const char *text) {
   return source;
 }
 
+typedef struct failing_source_context {
+  const char *prefix;
+  size_t offset;
+  unsigned int reads_before_failure;
+} failing_source_context;
+
+static size_t failing_source_read(void *context, void *buffer, size_t count,
+                                  lc_error *error) {
+  failing_source_context *source;
+  size_t remaining;
+  size_t chunk;
+  const char message[] = "intentional pouch source failure";
+
+  source = (failing_source_context *)context;
+  if (source->reads_before_failure == 0U) {
+    if (error != NULL) {
+      lc_error_cleanup(error);
+      error->code = LC_ERR_PROTOCOL;
+      error->message = (char *)malloc(sizeof(message));
+      assert_non_null(error->message);
+      memcpy(error->message, message, sizeof(message));
+    }
+    return 0U;
+  }
+  source->reads_before_failure -= 1U;
+  remaining = strlen(source->prefix) - source->offset;
+  chunk = remaining < count ? remaining : count;
+  memcpy(buffer, source->prefix + source->offset, chunk);
+  source->offset += chunk;
+  return chunk;
+}
+
+static lc_source *source_that_fails_after_prefix(const char *prefix) {
+  failing_source_context *context;
+  lc_source *source;
+  lc_error error;
+  int rc;
+
+  context = (failing_source_context *)malloc(sizeof(*context));
+  assert_non_null(context);
+  context->prefix = prefix;
+  context->offset = 0U;
+  context->reads_before_failure = 1U;
+  source = NULL;
+  memset(&error, 0, sizeof(error));
+  rc = lc_source_from_callbacks(failing_source_read, NULL, free, context,
+                                &source, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(source);
+  lc_error_cleanup(&error);
+  return source;
+}
+
 static char *memory_sink_text(lc_sink *sink) {
   const void *bytes;
   size_t length;
@@ -1355,6 +1408,113 @@ static void test_pouch_endpoint_lease_state_lifecycle(void **state) {
   lc_attach_res_cleanup(&alpha_attach_res);
   lc_attach_res_cleanup(&attach_res);
   lc_attach_res_cleanup(&zeta_attach_res);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_source_read_failure_does_not_commit_payload(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_get_res get_res;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list attachment_list;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_release_req release_req;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "source-read-failure");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachment_list, 0, sizeof(attachment_list));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&stats_res, 0, sizeof(stats_res));
+  client = open_pouch_client(endpoint);
+  lease = NULL;
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "partial/source";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+  source = source_that_fails_after_prefix("{\"truncated\":");
+  rc = lease->update(lease, source, &update_opts, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message, "intentional pouch source failure");
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+
+  lc_attach_req_init(&attach_req);
+  attach_req.name = "partial.txt";
+  attach_req.content_type = "text/plain";
+  source = source_that_fails_after_prefix("partial-attachment");
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message, "intentional pouch source failure");
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+  lc_attach_res_cleanup(&attach_res);
+
+  rc = lease->list_attachments(lease, &attachment_list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(attachment_list.count, 0U);
+  lc_attachment_list_cleanup(&attachment_list);
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "partial-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  enqueue_req.ttl_seconds = 3600L;
+  source = source_that_fails_after_prefix("partial-queue");
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message, "intentional pouch source failure");
+  lc_error_cleanup(&error);
+  memset(&error, 0, sizeof(error));
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.queue = "partial-jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  lc_release_req_init(&release_req);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
@@ -8622,6 +8782,8 @@ static void test_pouch_endpoint_txn_recovery_cleans_abandoned_staged_state(
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_endpoint_lease_state_lifecycle),
+      cmocka_unit_test(
+          test_pouch_endpoint_source_read_failure_does_not_commit_payload),
       cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
       cmocka_unit_test(test_pouch_endpoint_lease_mutate_local_updates_state),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_acquire_owner),
