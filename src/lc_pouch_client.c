@@ -96,6 +96,8 @@ static int lc_pouch_validate_active_lease(lc_client_handle *client,
                                           const lc_lease_ref *ref,
                                           lc_pouch_meta_record *record,
                                           lc_error *error);
+static long lc_pouch_now_millis(void);
+static void lc_pouch_sleep_millis(long millis);
 
 typedef struct lc_pouch_acquire_for_update_file_sink {
   FILE *fp;
@@ -2835,7 +2837,11 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   char *lease_id;
   char *generated_txn_id;
   lc_lease *lease;
+  long deadline_ms;
+  long now_ms;
   long now_unix;
+  long remaining_ms;
+  long sleep_ms;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL || req->key == NULL) {
@@ -2848,16 +2854,30 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                         "pouch acquire requires owner", NULL, "missing_owner",
                         NULL);
   }
+  if (req->block_seconds < 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch acquire block_seconds must be non-negative",
+                        NULL, NULL, NULL);
+  }
   client = (lc_client_handle *)self;
   allocator = &client->pouch_allocator;
   namespace_name = NULL;
-  txn_id = req->txn_id;
-  generated_txn_id = NULL;
   rc = lc_pouch_public_namespace(client, req->namespace_name, &namespace_name,
                                  error);
   if (rc != LC_OK) {
     return rc;
   }
+  deadline_ms = 0L;
+  if (req->block_seconds > 0L) {
+    now_ms = lc_pouch_now_millis();
+    if (now_ms > 0L) {
+      deadline_ms = now_ms + req->block_seconds * 1000L;
+    }
+  }
+acquire_retry:
+  txn_id = req->txn_id;
+  generated_txn_id = NULL;
+  lease_id = NULL;
   memset(&existing, 0, sizeof(existing));
   memset(&meta, 0, sizeof(meta));
   memset(&stored, 0, sizeof(stored));
@@ -2875,6 +2895,16 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
   now_unix = lc_pouch_now_unix();
   if (existing.found && existing.meta.lease_expires_at_unix > now_unix) {
+    if (deadline_ms > 0L) {
+      now_ms = lc_pouch_now_millis();
+      if (now_ms > 0L && now_ms < deadline_ms) {
+        remaining_ms = deadline_ms - now_ms;
+        sleep_ms = remaining_ms < 100L ? remaining_ms : 100L;
+        lc_pouch_meta_record_cleanup(allocator, &existing);
+        lc_pouch_sleep_millis(sleep_ms);
+        goto acquire_retry;
+      }
+    }
     lc_pouch_meta_record_cleanup(allocator, &existing);
     return lc_error_set(error, LC_ERR_SERVER, 409L,
                         "pouch lease is already active", NULL, "lease_conflict",
@@ -2921,6 +2951,18 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     lc_client_free(client, lease_id);
     lc_client_free(client, generated_txn_id);
     lc_pouch_meta_record_cleanup(allocator, &existing);
+    if (deadline_ms > 0L && error != NULL && error->code == LC_ERR_SERVER &&
+        error->http_status == 412L && error->server_code != NULL &&
+        strcmp(error->server_code, "precondition_failed") == 0) {
+      now_ms = lc_pouch_now_millis();
+      if (now_ms > 0L && now_ms < deadline_ms) {
+        remaining_ms = deadline_ms - now_ms;
+        sleep_ms = remaining_ms < 100L ? remaining_ms : 100L;
+        lc_error_cleanup(error);
+        lc_pouch_sleep_millis(sleep_ms);
+        goto acquire_retry;
+      }
+    }
     return rc;
   }
   lease = lc_lease_new(client, namespace_name, req->key, req->owner, lease_id,

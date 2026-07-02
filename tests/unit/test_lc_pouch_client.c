@@ -516,6 +516,13 @@ typedef struct delayed_enqueue_context {
   lc_error error;
 } delayed_enqueue_context;
 
+typedef struct delayed_release_context {
+  const char *endpoint;
+  lc_release_op release_op;
+  int rc;
+  lc_error error;
+} delayed_release_context;
+
 static void *delayed_enqueue_main(void *arg) {
   delayed_enqueue_context *ctx;
   lc_client *client;
@@ -538,6 +545,23 @@ static void *delayed_enqueue_main(void *arg) {
   ctx->rc = client->enqueue(client, &req, source, &res, &ctx->error);
   lc_source_close(source);
   lc_enqueue_res_cleanup(&res);
+  client->close(client);
+  return NULL;
+}
+
+static void *delayed_release_main(void *arg) {
+  delayed_release_context *ctx;
+  lc_client *client;
+  lc_release_res res;
+
+  ctx = (delayed_release_context *)arg;
+  memset(&ctx->error, 0, sizeof(ctx->error));
+  memset(&res, 0, sizeof(res));
+  ctx->rc = LC_ERR_TRANSPORT;
+  usleep(200000U);
+  client = open_pouch_client(ctx->endpoint);
+  ctx->rc = client->release(client, &ctx->release_op, &res, &ctx->error);
+  lc_release_res_cleanup(&res);
   client->close(client);
   return NULL;
 }
@@ -1754,6 +1778,73 @@ static void test_pouch_endpoint_rejects_missing_acquire_owner(void **state) {
   rc = lease->release(lease, &release_req, &error);
   assert_int_equal(rc, LC_OK);
   client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_blocking_acquire_waits_for_release(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *first_client;
+  lc_client *second_client;
+  lc_lease *first_lease;
+  lc_lease *second_lease;
+  lc_acquire_req acquire;
+  lc_release_req release_req;
+  delayed_release_context release_ctx;
+  pthread_t thread;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "blocking-acquire-release");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&release_ctx, 0, sizeof(release_ctx));
+  first_client = open_pouch_client(endpoint);
+  second_client = open_pouch_client(endpoint);
+
+  lc_acquire_req_init(&acquire);
+  acquire.key = "blocking-acquire";
+  acquire.owner = "owner-a";
+  acquire.ttl_seconds = 60L;
+  first_lease = NULL;
+  rc = first_client->acquire(first_client, &acquire, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first_lease);
+
+  lc_release_op_init(&release_ctx.release_op);
+  release_ctx.endpoint = endpoint;
+  release_ctx.release_op.lease.namespace_name = first_lease->namespace_name;
+  release_ctx.release_op.lease.key = first_lease->key;
+  release_ctx.release_op.lease.lease_id = first_lease->lease_id;
+  release_ctx.release_op.lease.txn_id = first_lease->txn_id;
+  release_ctx.release_op.lease.fencing_token = first_lease->fencing_token;
+  rc = pthread_create(&thread, NULL, delayed_release_main, &release_ctx);
+  assert_int_equal(rc, 0);
+
+  acquire.owner = "owner-b";
+  acquire.block_seconds = 2L;
+  second_lease = NULL;
+  rc = second_client->acquire(second_client, &acquire, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_lease);
+  assert_string_equal(second_lease->owner, "owner-b");
+  assert_int_equal(second_lease->fencing_token,
+                   first_lease->fencing_token + 1L);
+
+  assert_int_equal(pthread_join(thread, NULL), 0);
+  assert_int_equal(release_ctx.rc, LC_OK);
+  lc_error_cleanup(&release_ctx.error);
+
+  lc_release_req_init(&release_req);
+  rc = second_lease->release(second_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_lease_close(first_lease);
+  second_client->close(second_client);
+  first_client->close(first_client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
@@ -8794,6 +8885,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_lease_save_uses_mapped_lonejson),
       cmocka_unit_test(test_pouch_endpoint_lease_mutate_local_updates_state),
       cmocka_unit_test(test_pouch_endpoint_rejects_missing_acquire_owner),
+      cmocka_unit_test(
+          test_pouch_endpoint_blocking_acquire_waits_for_release),
       cmocka_unit_test(test_pouch_endpoint_generates_implicit_txn_id),
       cmocka_unit_test(
           test_pouch_endpoint_release_is_idempotent_for_stale_refs),
