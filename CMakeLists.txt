@@ -71,8 +71,8 @@ set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release supplied by c.
 set(LOCKDC_CURL_VERSION "8.20.0" CACHE STRING "Pinned curl release supplied by c.pkt.systems.")
 set(LOCKDC_NGHTTP2_VERSION "1.69.0" CACHE STRING "Pinned nghttp2 release supplied by c.pkt.systems.")
 set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release supplied by c.pkt.systems.")
-set(LOCKDC_LONEJSON_VERSION "0.35.2" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
-set(LOCKDC_LONEJSON_ABI_VERSION "19" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
+set(LOCKDC_LONEJSON_VERSION "0.36.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
+set(LOCKDC_LONEJSON_ABI_VERSION "20" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.5.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
 set(LOCKDC_CPKT_VERSION "0.6.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version." FORCE)
@@ -398,7 +398,13 @@ function(lc_configure_library_target target)
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(${target} PRIVATE LC_VERSION_STRING="${LOCKDC_RESOLVED_VERSION}")
+    target_compile_definitions(${target}
+        PUBLIC
+            LONEJSON_WITH_JWT
+            LONEJSON_WITH_OIDC
+        PRIVATE
+            LC_VERSION_STRING="${LOCKDC_RESOLVED_VERSION}"
+    )
     target_link_libraries(${target} PUBLIC ${LOCKDC_SYSTEM_LIBRARIES})
     lc_configure_c_target(${target})
     lc_enable_coverage_if_requested(${target})

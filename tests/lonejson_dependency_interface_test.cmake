@@ -51,6 +51,11 @@ if(NOT lonejson_pc_text MATCHES "(^|\n)Version: ${LOCKDC_LONEJSON_VERSION}(\n|$)
         "lonejson pkg-config metadata does not match configured version "
         "${LOCKDC_LONEJSON_VERSION}")
 endif()
+if(NOT lonejson_pc_text MATCHES "(^|\n)Libs\\.private:[^\n]*-lcrypto([ \t]|\n|$)")
+    message(FATAL_ERROR
+        "lonejson pkg-config metadata does not expose the private crypto "
+        "dependency required by the OIDC/JWT-enabled ABI")
+endif()
 file(READ "${lonejson_root}/lib/cmake/lonejson/lonejsonConfigVersion.cmake" lonejson_cmake_version_text)
 if(NOT lonejson_cmake_version_text MATCHES "PACKAGE_VERSION \"${LOCKDC_LONEJSON_VERSION}\"")
     message(FATAL_ERROR
@@ -102,6 +107,17 @@ function(assert_not_contains text pattern description)
 endfunction()
 
 foreach(symbol IN ITEMS
+    lonejson_jwk_parse_json
+    lonejson_jwks_parse_json
+    lonejson_jwt_decode_compact
+    lonejson_jwt_validate_signature_with_runtime
+    lonejson_oidc_discovery_parse_json
+    lonejson_oidc_fetch_discovery
+    lonejson_oidc_jwks_cache_update_json
+    lonejson_oidc_jwks_cache_refresh
+    lonejson_oidc_validate_bearer_token
+    lonejson_oidc_pkce_challenge_with_runtime
+    lonejson_oidc_pkce_generate_with_runtime
     lonejson_curl_parse_init
     lonejson_curl_write_callback
     lonejson_curl_parse_finish

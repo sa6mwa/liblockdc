@@ -170,6 +170,11 @@ endfunction()
 
 function(lc_add_lonejson)
   find_package(lonejson ${LOCKDC_LONEJSON_VERSION} CONFIG REQUIRED)
+  if(TARGET lonejson::lonejson_static)
+    set_target_properties(lonejson::lonejson_static PROPERTIES
+      INTERFACE_LINK_LIBRARIES lc::openssl_crypto_static
+    )
+  endif()
   lc_add_interface_alias(lc::lonejson_static lonejson::lonejson_static)
   lc_add_interface_alias(lc::lonejson_shared lonejson::lonejson)
 endfunction()

@@ -28,6 +28,7 @@ if(NOT TARGET lockdc::shared AND NOT "@LOCKDC_SHARED_LINK_NAME@" STREQUAL "" AND
   set_target_properties(lockdc::shared PROPERTIES
     IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@"
     INTERFACE_INCLUDE_DIRECTORIES "${lockdc_INCLUDE_DIR}"
+    INTERFACE_COMPILE_DEFINITIONS "LONEJSON_WITH_JWT;LONEJSON_WITH_OIDC"
     INTERFACE_LINK_LIBRARIES "${_lockdc_shared_links}"
   )
 endif()
@@ -53,6 +54,7 @@ if(NOT TARGET lockdc::static AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.a")
   set_target_properties(lockdc::static PROPERTIES
     IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/liblockdc.a"
     INTERFACE_INCLUDE_DIRECTORIES "${lockdc_INCLUDE_DIR}"
+    INTERFACE_COMPILE_DEFINITIONS "LONEJSON_WITH_JWT;LONEJSON_WITH_OIDC"
     INTERFACE_LINK_LIBRARIES "${_lockdc_static_links}"
   )
 endif()
