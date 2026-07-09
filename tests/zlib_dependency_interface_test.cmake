@@ -39,7 +39,7 @@ foreach(path IN ITEMS
 endforeach()
 
 file(READ "${cpkt_manifest}" cpkt_manifest_text)
-string(FIND "${cpkt_manifest_text}" "bundle_version=0.6.0" bundle_version_at)
+string(FIND "${cpkt_manifest_text}" "bundle_version=0.7.0" bundle_version_at)
 if(bundle_version_at EQUAL -1)
     message(FATAL_ERROR "c.pkt.systems manifest is missing bundle version")
 endif()

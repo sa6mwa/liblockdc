@@ -42,6 +42,43 @@ require_path "$lua_package_path"
 require_path "$lua_script"
 require_path "$luarocks_workdir"
 
+install_lonejson_dependency() {
+  case "$lonejson_src_rock" in
+    *.src.rock)
+      if [ -f "$lonejson_src_rock" ]; then
+        require_command unzip
+        require_command tar
+
+        lonejson_unpack_dir="${tree_dir}-lonejson-src"
+        rm -rf "$lonejson_unpack_dir"
+        mkdir -p "$lonejson_unpack_dir"
+        (
+          cd "$lonejson_unpack_dir"
+          unzip -q "$lonejson_src_rock"
+          lonejson_archive="$(find . -maxdepth 1 -type f -name '*.tar.gz' | sed 's#^\./##' | head -n 1)"
+          lonejson_rockspec="$(find . -maxdepth 1 -type f -name '*.rockspec' | sed 's#^\./##' | head -n 1)"
+          if [ -z "$lonejson_archive" ] || [ -z "$lonejson_rockspec" ]; then
+            printf 'invalid lonejson source rock layout: %s\n' "$lonejson_src_rock" >&2
+            exit 1
+          fi
+          tar -xzf "$lonejson_archive"
+          lonejson_source_dir="$(find . -mindepth 1 -maxdepth 1 -type d | sed 's#^\./##' | head -n 1)"
+          if [ -z "$lonejson_source_dir" ]; then
+            printf 'lonejson source rock has no extracted source directory: %s\n' "$lonejson_src_rock" >&2
+            exit 1
+          fi
+          cp "$lonejson_rockspec" "$lonejson_source_dir/"
+          cd "$lonejson_source_dir"
+          "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" make "$lonejson_rockspec"
+        )
+        return 0
+      fi
+      ;;
+  esac
+
+  "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lonejson_src_rock"
+}
+
 export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LOCKDC_PREFIX="$sdk_prefix"
 : "${LONEJSON_LIBDIR:=$sdk_prefix/lib}"
@@ -54,7 +91,7 @@ rm -rf "$tree_dir" "$luarocks_build_root"
 mkdir -p "$tree_dir"
 cd "$luarocks_workdir"
 
-"$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lonejson_src_rock"
+install_lonejson_dependency
 case "$lua_package_path" in
   *.rockspec)
     LOCKDC_LUAROCKS_BUILD_ROOT="$luarocks_build_root" \

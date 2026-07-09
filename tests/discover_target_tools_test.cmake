@@ -110,7 +110,7 @@ write_cache("${host_build}" "")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "OSXCROSS_ROOT=${test_root}/missing-osxcross"
-        "PATH=${host_bin}:$ENV{PATH}"
+        "PATH=${host_bin}:/usr/bin:/bin"
         "${discover_script}"
             --build-dir "${host_build}"
             --target-id arm64-apple-darwin

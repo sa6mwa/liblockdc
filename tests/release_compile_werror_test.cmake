@@ -18,12 +18,30 @@ endif()
 
 file(READ "${compile_commands}" compile_commands_json)
 
+set(lockdc_benchmarks_required TRUE)
+file(STRINGS "${LOCKDC_BINARY_DIR}/CMakeCache.txt" lockdc_build_benchmarks_cache
+    REGEX "^LOCKDC_BUILD_BENCHMARKS(:[^=]+)?="
+    LIMIT_COUNT 1)
+if(lockdc_build_benchmarks_cache)
+    string(REGEX REPLACE "^[^=]+=" "" lockdc_build_benchmarks_value "${lockdc_build_benchmarks_cache}")
+    if(NOT lockdc_build_benchmarks_value)
+        set(lockdc_benchmarks_required FALSE)
+    endif()
+endif()
+
 function(assert_release_output_has_werror output_regex label required)
     string(REGEX MATCH
         "\"command\": [^\n]*\n  \"file\": [^\n]*\n  \"output\": \"${output_regex}\""
         entry
         "${compile_commands_json}"
     )
+    if(entry STREQUAL "")
+        string(REGEX MATCH
+            "\"command\": [^\n]*\n  \"file\": [^\n]*\n  \"output\": \"[^\"]*/${output_regex}\""
+            entry
+            "${compile_commands_json}"
+        )
+    endif()
     if(entry STREQUAL "")
         if(required)
             message(FATAL_ERROR "Expected release compile command for ${label}")
@@ -54,7 +72,7 @@ assert_release_output_has_werror(
 assert_release_output_has_werror(
     "bench/CMakeFiles/lockdc_bench.dir/bench_main.c.o"
     "release benchmarks"
-    TRUE
+    ${lockdc_benchmarks_required}
 )
 assert_release_output_has_werror(
     "CMakeFiles/lockdc_lua_core.dir/src/lua/lockdc_lua.c.o"

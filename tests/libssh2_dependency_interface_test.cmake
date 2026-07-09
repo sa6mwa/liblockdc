@@ -43,6 +43,6 @@ foreach(path IN ITEMS
 endforeach()
 
 file(READ "${cpkt_manifest}" cpkt_manifest_text)
-assert_literal_contains("${cpkt_manifest_text}" "bundle_version=0.6.0" "c.pkt.systems bundle version")
+assert_literal_contains("${cpkt_manifest_text}" "bundle_version=0.7.0" "c.pkt.systems bundle version")
 assert_literal_contains("${cpkt_manifest_text}" "libssh2_version=1.11.1" "libssh2 bundle version")
 assert_literal_contains("${cpkt_manifest_text}" "zlib_version=1.3.2" "zlib bundle version")
