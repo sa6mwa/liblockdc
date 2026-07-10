@@ -22,8 +22,8 @@ not for a normal `luarocks install` flow.
 declared by `lockdc` rather than repackaging a separate `lockd` Lua client or a
 competing JSON binding.
 
-For this release line, the `lockdc` rock declares `lonejson == 0.36.0-1`. That
-matches the native `lonejson 0.36.0` dependency used by the C SDK for mapped
+For this release line, the `lockdc` rock declares `lonejson == 0.41.0-1`. That
+matches the native `lonejson 0.41.0` dependency used by the C SDK for mapped
 state load/save and internal JSON response parsing.
 
 When running from this repository after building and staging the SDK locally,

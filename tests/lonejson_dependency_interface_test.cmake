@@ -51,10 +51,9 @@ if(NOT lonejson_pc_text MATCHES "(^|\n)Version: ${LOCKDC_LONEJSON_VERSION}(\n|$)
         "lonejson pkg-config metadata does not match configured version "
         "${LOCKDC_LONEJSON_VERSION}")
 endif()
-if(NOT lonejson_pc_text MATCHES "(^|\n)Libs\\.private:[^\n]*-lcrypto([ \t]|\n|$)")
+if(lonejson_pc_text MATCHES "(^|\n)Libs\\.private:[^\n]*-lcrypto([ \t]|\n|$)")
     message(FATAL_ERROR
-        "lonejson pkg-config metadata does not expose the private crypto "
-        "dependency required by the OIDC/JWT-enabled ABI")
+        "lonejson pkg-config metadata exposes stale private crypto linkage")
 endif()
 file(READ "${lonejson_root}/lib/cmake/lonejson/lonejsonConfigVersion.cmake" lonejson_cmake_version_text)
 if(NOT lonejson_cmake_version_text MATCHES "PACKAGE_VERSION \"${LOCKDC_LONEJSON_VERSION}\"")
