@@ -88,6 +88,103 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 - [x] Replace ad hoc JSON handling in client paths with lonejson-backed helpers.
 - [x] Add client-driven e2e tests against the root docker-compose lockd environment, including the UDS-backed mem instance.
 
+## Lifecycle and dependency alignment
+
+Latest release targets confirmed on 2026-07-22:
+
+- `lonejson v0.42.0`
+- `libpslog v0.9.0`
+- `c.pkt.systems v0.9.0`
+- `liblql v0.1.0`
+
+### Dependency upgrade and provenance
+
+- [ ] Upgrade the native `lonejson` SDK dependency from `0.41.0` to
+  `0.42.0`, including ABI/SOVERSION, release asset URLs, SHA-256 pins, Lua
+  rock dependency/source-rock pins, dependency interface tests, README, Lua
+  docs, examples, package metadata, and release manifest expectations.
+- [ ] Upgrade `libpslog` from `0.8.0` to `0.9.0`, including all target-specific
+  SDK asset hashes, public logging dependency tests, package metadata,
+  license/provenance entries, and any generated single-header references.
+- [ ] Upgrade `c.pkt.systems` dependency bundles from `0.7.0` to `0.9.0`,
+  including every supported target asset hash, dependency root identity, package
+  verification expectations, and downstream SDK metadata.
+- [ ] Add `liblql v0.1.0` as a first-class lifecycle dependency from
+  `https://github.com/sa6mwa/liblql/releases`, pinned by target ID, exact
+  release asset URL, SHA-256, ABI/SOVERSION, license, CMake metadata, and
+  pkg-config metadata.
+- [ ] Add `liblql` dependency interface tests that verify headers, static and
+  shared libraries, CMake package config, pkg-config metadata, exported symbols,
+  forbidden private artifacts, license/provenance metadata, and stale-cache
+  failure behavior.
+- [ ] Update binary SDK package manifests so `liblql`, `lonejson`, `libpslog`,
+  and `c.pkt.systems` record logical dependency identity, exact upstream release
+  asset URL, SHA-256, target ID, license, bundled/external role, and no local
+  paths.
+
+### Pouch `liblql` integration
+
+- [ ] Replace the current pouch indexed-query placeholder/parser boundary with
+  `liblql` for LQL parsing/evaluation; do not add project-local query parser or
+  expression evaluator code.
+- [ ] Keep pouch storage-owned indexes behind the pouch store boundary; use
+  `liblql` only for query language semantics and predicate/evaluator behavior.
+- [ ] Add observable pouch tests for `liblql`-backed owner/key selectors,
+  pagination, hidden metadata filtering, removed-candidate skipping, malformed
+  LQL diagnostics, oversized query limits, and scan/index fallback parity.
+- [ ] Add package and install-tree smoke consumers proving downstream CMake and
+  pkg-config users can link `liblockdc` with the transitive `liblql` contract.
+
+### Updated lifecycle alignment
+
+- [ ] Align dependency acquisition with the updated lifecycle shared archive
+  cache:
+  `${CPKT_DEPENDENCY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/deps}`.
+  Cache verified immutable archives by SHA-256, publish through atomic rename,
+  keep extracted/build/install state under repo-local `.cache/`, and ensure
+  `make clean` never removes the shared archive cache.
+- [ ] Add a project-owned verified archive acquisition helper and tests for
+  initial download, offline cache hit after deleting local dependency roots,
+  corrupt cached archive rejection, concurrent acquisition, and package privacy
+  rejection of global-cache paths.
+- [ ] Align Linux compiler resolution with the updated Bootlin toolchain policy:
+  no host compiler/binutils fallback for Linux builds, complete pinned Bootlin
+  collections per target, toolchain identity in dependency stamps, and target
+  tool discovery from configured build state.
+- [ ] Update CMake presets and toolchain files for the lifecycle-required
+  `debug`, `debug-lua`, `valgrind`, `fuzz`, release target matrix, and optional
+  Darwin/osxcross behavior; add preset-contract tests for required cache
+  variables and dependency-mode defaults.
+- [ ] Replace sanitizer-as-primary hardening assumptions with the updated native
+  Valgrind gate while preserving any existing useful ASan/UBSan coverage as
+  compatibility or optional hardening.
+- [ ] Align fuzzing with the updated pinned AFL++ GCC-plugin lifecycle for
+  native x86_64 Linux only; ensure fuzz targets never rely on host Clang/GCC as
+  the project compiler.
+- [ ] Update Make command surfaces so `make help` is authoritative and includes
+  the updated lifecycle targets: `finalize-slice`, `prerelease`,
+  `prerelease-live`, `prerelease-hardening`, `release-matrix`, `valgrind`, and
+  any compatibility aliases retained for existing documented commands.
+- [ ] Add or update lifecycle migration documentation while the repo is in
+  transition, recording old command behavior, new lifecycle command, preserved
+  behavior, verification added, removed/deprecated behavior, and decisions still
+  needed.
+
+### Verification gates
+
+- [ ] Run narrow dependency gates after each pin change: shell syntax, dry-run
+  target mapping, upstream checksum manifest comparison, dependency interface
+  CTest, and install-tree consumer checks.
+- [ ] Run lifecycle-alignment gates after command/toolchain/cache changes:
+  preset contract tests, target-tool discovery tests, cache contract tests,
+  `make build`, `make test`, and `make valgrind`.
+- [ ] Run broader gates before declaring the dependency/lifecycle migration
+  complete: `make test-all`, `make package-verify`, `make lua-test`, fuzz smoke
+  when AFL++ is available, deterministic e2e when relevant, and release artifact
+  privacy/relocatability scans.
+- [ ] Inspect and classify generated state after verification; commit only the
+  coherent dependency/lifecycle changes and leave generated caches untracked.
+
 ## Current release-readiness focus
 
 - [ ] Keep API examples aligned with the receiver-function public surface.
