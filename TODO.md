@@ -290,8 +290,8 @@ Latest release targets confirmed on 2026-07-23:
       `snapshots/`, `markers/`, and queue notification directories, while
       keeping shared lock/backend identity paths explicit.
       - [x] Establish the initial active-segment scaffold and manifest-open
-        record during namespace writes; root-level `store.log` remains the
-        temporary write target until the active segment write cutover lands.
+        record during namespace writes; the root-level `store.log` placeholder
+        is not an authoritative record source.
     - [ ] Implement manifest append/replay for segment open, segment seal,
       snapshot install, obsolete segment, and obsolete snapshot records.
       - [x] Append text manifest lifecycle records for current active-segment
@@ -323,8 +323,7 @@ Latest release targets confirmed on 2026-07-23:
         refs so read sources are no longer hard-wired to `store.log` and can
         follow namespace segment paths during the write cutover.
       - [x] Append ordinary memory and fd-backed records to the namespace
-        active segment as a byte-identical shadow while root `store.log`
-        remains the temporary authoritative replay source.
+        active segment during the segmented write cutover.
       - [x] Move custom object-copy and queue-fd append paths to the namespace
         active segment shadow before segment replay becomes authoritative.
       - [x] Remove root `store.log` replay/import fallback; active namespace
@@ -336,8 +335,7 @@ Latest release targets confirmed on 2026-07-23:
         snapshot compaction, opening the next segment generation when no active
         tail remains.
       - [x] Store live state, object, and queue payload refs from namespace
-        segment append locations instead of root `store.log` offsets, while
-        root writes remain a temporary refresh/compatibility signal.
+        segment append locations instead of root `store.log` offsets.
       - [x] Refresh independent handles from authoritative namespace segment
         generation when segments exist, instead of depending on root
         `store.log` size changes.
@@ -381,6 +379,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Retry cleanup for manifest-obsolete segment and snapshot files
         during logstore collection/replay, while preserving active snapshot
         sets and tolerating already-missing obsolete files.
+      - [x] Stop installing compacted root `store.log` replacements; compaction
+        now preserves high-water state in internal namespace snapshots and
+        refreshes readers from identity-based segmented log generations.
     - [ ] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.

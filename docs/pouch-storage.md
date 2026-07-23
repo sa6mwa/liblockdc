@@ -186,12 +186,11 @@ Integration-derived compatibility boundaries:
   clean decision records, and wake query/queue observers without relying on an
   in-memory transaction manager.
 
-These addendum points are the minimum parity checklist for any later segmented
-pouch backend. The current single-log implementation may collapse segments,
-manifest, and snapshots into one file, but it must still preserve the same
-observable boundaries: linear replay, pending-before-visible, forced refresh on
-uncertainty, streaming payload copy, conservative compaction, and queue/query
-visibility through committed storage records.
+These addendum points are the minimum parity checklist for the segmented pouch
+backend. The implementation must preserve the same observable boundaries:
+linear replay, pending-before-visible, forced refresh on uncertainty, streaming
+payload copy, conservative compaction, and queue/query visibility through
+committed storage records.
 
 ## Design Invariants From The Existing Disk Store
 
@@ -504,17 +503,17 @@ locks, same-process contention counts, and the process-wide lock descriptor
 cache exposes hits, misses, evictions, closes, current size, and capacity so hot
 key contention and descriptor reuse are observable.
 Read diagnostics expose a bounded process-wide read-file descriptor cache for
-the current single-log store. State reads, object reads, and queue dequeue
-payload reads borrow an idle descriptor when possible, seek it to the live
-payload span, and return it to the cache when the `lc_source` closes. Active
-read sources keep their own descriptor and are never closed by cache eviction.
-Before reusing a cached descriptor, the backend validates that its device/inode
-still matches the current `store.log` path, so compaction or log replacement
-cannot route a new reader to obsolete bytes while older active readers continue
-to read from their original descriptor. A read source may outlive the store
-handle that created it; store close marks the cache owner closed, and later
-source close must close its descriptor directly instead of reinserting it into
-the cache through freed store state.
+segmented payload files. State reads, object reads, and queue dequeue payload
+reads borrow an idle descriptor for the recorded body path when possible, seek
+it to the live payload span, and return it to the cache when the `lc_source`
+closes. Active read sources keep their own descriptor and are never closed by
+cache eviction. Before reusing a cached descriptor, the backend validates that
+its device/inode still matches the recorded body path, so compaction or
+obsolete-file cleanup cannot route a new reader to unexpected bytes while older
+active readers continue to read from their original descriptor. A read source
+may outlive the store handle that created it; store close marks the cache owner
+closed, and later source close must close its descriptor directly instead of
+reinserting it into the cache through freed store state.
 
 ## Performance Model
 
@@ -535,25 +534,23 @@ moved out of the foreground path whenever correctness allows it:
 - all hot allocations use pouch-owned buffers, pools, or slabs so allocation
   behavior is measurable and controllable.
 
-Current implementation milestone: the first C disk backend uses a single
-`store.log` plus `writer.lock`. It auto-compacts under the writer lock by
-copying the current live heads into `store.compact.tmp`, fsyncing the temporary
-log, replay-validating the temporary log, and atomically renaming it over
-`store.log`. The validated temporary file descriptor becomes the live log fd
-after install, so in-memory offsets and future appends stay tied to the exact
-bytes that were validated. This is deliberately simpler than the final
-segmented manifest/snapshot design, but it proves the critical append-log
-invariants: payload spans are copied with bounded buffers, existing read
-sources keep their old file descriptor alive across rename, foreground writers
-stay serialized, corrupt tails remain replay-truncated, and monotonic tokens
-survive compaction through a private high-water record.
+Current implementation milestone: the C disk backend writes authoritative
+records to per-namespace logstore segments and installs compacted live heads as
+manifested namespace snapshots. Compaction runs under the writer lock, backs up
+the active segment set, streams live payload spans with bounded buffers into
+fresh segment files, installs those files as snapshots, and marks superseded
+segments or snapshots obsolete in the manifest. The root `store.log` file is a
+non-authoritative placeholder and is not replaced during compaction. Monotonic
+tokens survive compaction through a private high-water record in the internal
+backend namespace logstore.
 Idle read descriptors are cached separately from active read sources. The cache
 is a performance artifact only: entries are bounded, allocator-backed, reusable
 across state/object/queue payload reads, and discarded when their descriptor no
-longer names the active log file.
+longer names the recorded body file.
 Opening a store also removes stale `store.compact.tmp` and
 `query.index.compact.tmp` files while holding the writer lock, so crash leftovers
-from an interrupted compaction do not accumulate or confuse later runs.
+from older or interrupted compaction attempts do not accumulate or confuse later
+runs.
 The private backend control surface now exposes explicit compaction diagnostics:
 `force` runs the same live-head rewrite immediately, while `if_needed` applies
 the auto-compaction thresholds and returns a concrete skip reason without
@@ -562,9 +559,9 @@ query-index bytes, record counts, and live-record counts so tests and future
 management tooling can treat compaction as observable behavior rather than an
 implicit side effect.
 
-The single-log milestone is not the v1 search-performance shape. A searchable
-pouch store must not use full-log scanning as the preferred indexed-query path.
-Before public query/LQL support ships, the disk backend must grow
+Segmented storage alone is not the v1 search-performance shape. A searchable
+pouch store must not use full-history scanning as the preferred indexed-query
+path. Before public query/LQL support ships, the disk backend must grow
 append-friendly index storage: compactable index segments or equivalent
 Lucene-style sidecar files with term/range postings, per-field summary columns,
 deleted/live filters, and stable key ordering. The authoritative object state
@@ -1027,11 +1024,10 @@ Refresh should:
 4. Replay unread committed records in deterministic order.
 5. Track writer marker snapshots to skip unnecessary scans.
 
-When the current implementation uses a single compactable log file, refresh
-must also detect that the open log file descriptor no longer matches the active
-`store.log` path. Another handle may have compacted by renaming a replacement
-log over the old path. A reader must reopen the active log before deciding that
-its local replay offset is current.
+The current segmented implementation compares an identity-based logstore
+generation derived from active snapshot and segment files. Size alone is not a
+sufficient generation signal because compaction can replace one history with
+different files of the same total byte length.
 
 Writer markers are small files touched after commit. They are an optimization:
 if no marker changed, a reader can often skip segment scanning. The marker
@@ -1296,16 +1292,16 @@ Compaction creates a snapshot segment containing the current live records from
 candidate sealed segments and the installed prior snapshot. It never mutates
 existing segment contents.
 
-The current single-log backend implements the same logical reclaim rule without
-segments: when the durable log is large enough and the replayed record count is
-more than twice the compacted live-head count, the writer rewrites the log to a
-temporary replacement. The compacted log contains a private high-water record
-for `next_version`, the latest non-deleted state heads, live metadata, live
+When the durable segmented history is large enough and the replayed record
+count is more than twice the compacted live-head count, the writer builds
+manifested snapshot files containing a private high-water record for
+`next_version`, the latest non-deleted state heads, live metadata, live
 attachments, and live queue messages. Superseded records and deletion
 tombstones are omitted because observable state, CAS failures on deleted heads,
-and queue/attachment absence are preserved without them. If temporary snapshot
-construction, replay validation, or rename fails, the original log remains the
-source of truth and indexes are rebuilt from it before returning.
+and queue/attachment absence are preserved without them. If snapshot
+construction or manifest install fails, active segment backups are restored and
+indexes are rebuilt from the still-authoritative segmented history before
+returning.
 
 Compaction flow:
 

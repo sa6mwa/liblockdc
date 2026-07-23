@@ -33,6 +33,7 @@
 #define TEST_POUCH_RECORD_OBJECT_PUT 5U
 #define TEST_POUCH_RECORD_QUEUE_PUT 7U
 #define TEST_POUCH_RECORD_STATE_LINK 10U
+#define TEST_POUCH_RECORD_HIGH_WATER 11U
 #define TEST_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
 #define TEST_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
 #define TEST_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
@@ -607,8 +608,8 @@ static unsigned long test_get_u64(const unsigned char *src) {
 #endif
 }
 
-static size_t count_log_records_of_type(const char *root, unsigned long type) {
-  char log_path[512];
+static size_t count_log_records_at_path_of_type(const char *log_path,
+                                                unsigned long type) {
   unsigned char header[TEST_POUCH_HEADER_SIZE];
   unsigned long payload_len;
   unsigned long record_type;
@@ -616,7 +617,6 @@ static size_t count_log_records_of_type(const char *root, unsigned long type) {
   ssize_t got;
   int fd;
 
-  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   fd = open(log_path, O_RDONLY);
   assert_true(fd >= 0);
   count = 0U;
@@ -642,6 +642,13 @@ static size_t count_log_records_of_type(const char *root, unsigned long type) {
   }
   close(fd);
   return count;
+}
+
+static size_t count_log_records_of_type(const char *root, unsigned long type) {
+  char log_path[512];
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  return count_log_records_at_path_of_type(log_path, type);
 }
 
 static size_t count_namespace_segment_records_of_type(
@@ -7368,7 +7375,7 @@ static void test_scan_meta_ignores_corrupt_query_sidecar(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_sidecar_compacts_with_store_log(void **state) {
+static void test_query_index_sidecar_compacts_with_segments(void **state) {
   char root[256];
   char owner[2048];
   lc_pouch_allocator allocator;
@@ -8278,7 +8285,7 @@ static void test_object_copy_source_open_failure_leaves_destination_unchanged(
   test_cleanup_root(root);
 }
 
-static void test_object_copy_refreshes_after_log_replacement(void **state) {
+static void test_object_copy_refreshes_after_segment_compaction(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -9012,6 +9019,7 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   char manifest_path[512];
   char manifest_text[1024];
   char snapshot_path[512];
+  char backend_snapshot_path[512];
   char payload[4096];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -9079,6 +9087,12 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   assert_true(compacted.before_record_count > compacted.after_record_count);
   assert_true(compacted.after_record_count <= compacted.live_record_count);
   assert_true(compacted.after_log_bytes < compacted.before_log_bytes);
+  assert_int_equal(test_log_size(root), 0);
+  test_snapshot_path(root, "%2elockd", 1UL, backend_snapshot_path,
+                     sizeof(backend_snapshot_path));
+  assert_int_equal(count_log_records_at_path_of_type(
+                       backend_snapshot_path, TEST_POUCH_RECORD_HIGH_WATER),
+                   1U);
   test_manifest_path(root, "default", manifest_path, sizeof(manifest_path));
   test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
   assert_non_null(strstr(manifest_text, "open seg-0000000000000001.log\n"));
@@ -9332,7 +9346,7 @@ static void test_compaction_preserves_promoted_staged_state_link(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_independent_handle_refreshes_after_log_replacement(
+static void test_independent_handle_refreshes_after_segment_compaction(
     void **state) {
   char root[256];
   char payload[4096];
@@ -12414,7 +12428,7 @@ static void test_lock_status_reports_global_writer_lock_counters(
 
   rc = second->lock_status(second, &status, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(status.log_reopens >= 1UL);
+  assert_int_equal(status.log_reopens, 0UL);
   assert_true(status.replay_refreshes >= 1UL);
   lc_pouch_lock_status_cleanup(&allocator, &status);
 
@@ -14675,7 +14689,7 @@ int main(void) {
       cmocka_unit_test(
           test_query_index_keys_truncates_partial_sidecar_field),
       cmocka_unit_test(test_scan_meta_ignores_corrupt_query_sidecar),
-      cmocka_unit_test(test_query_index_sidecar_compacts_with_store_log),
+      cmocka_unit_test(test_query_index_sidecar_compacts_with_segments),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
       cmocka_unit_test(
           test_object_overwrite_allocation_failure_replays_cleanly),
@@ -14688,7 +14702,7 @@ int main(void) {
       cmocka_unit_test(test_object_copy_rename_preserves_payload_metadata),
       cmocka_unit_test(
           test_object_copy_source_open_failure_leaves_destination_unchanged),
-      cmocka_unit_test(test_object_copy_refreshes_after_log_replacement),
+      cmocka_unit_test(test_object_copy_refreshes_after_segment_compaction),
       cmocka_unit_test(
           test_queue_dequeue_skips_replay_after_same_handle_enqueue),
       cmocka_unit_test(test_queue_dequeue_honors_start_after_cursor),
@@ -14703,7 +14717,7 @@ int main(void) {
       cmocka_unit_test(
           test_compaction_preserves_promoted_staged_state_link),
       cmocka_unit_test(
-          test_independent_handle_refreshes_after_log_replacement),
+          test_independent_handle_refreshes_after_segment_compaction),
       cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
       cmocka_unit_test(test_queue_mutations_touch_wake_marker),
       cmocka_unit_test(test_queue_transaction_apply_touches_wake_marker),
