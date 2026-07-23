@@ -333,6 +333,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Stop appending ordinary memory-backed records (metadata puts and
         removes, state removes/links, object removes, queue metadata records)
         to root `store.log`; append them only to namespace segments.
+      - [x] Stop appending fd-backed state/object/queue payload records to
+        root `store.log`; namespace segments are now the only record
+        destination for those append paths.
     - [ ] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
       set changes, and preserve corrupt-tail truncation semantics per segment.
@@ -352,6 +355,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Make current compaction segment-aware by backing up active segments,
         writing compacted live records into fresh active segments, restoring on
         failure, and reading live payloads from recorded body paths.
+      - [x] Count active namespace segment bytes in compaction thresholds and
+        result stats so `if_needed` and reported log sizes follow the
+        segmented write path instead of root `store.log`.
     - [ ] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.

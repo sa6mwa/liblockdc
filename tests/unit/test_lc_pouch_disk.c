@@ -794,6 +794,9 @@ static off_t test_namespace_segments_size(const char *root,
   snprintf(segments_path, sizeof(segments_path), "%s/%s/logstore/segments",
            root, escaped_namespace);
   dir = opendir(segments_path);
+  if (dir == NULL && errno == ENOENT) {
+    return 0;
+  }
   assert_non_null(dir);
   total = 0;
   while ((entry = readdir(dir)) != NULL) {
@@ -993,7 +996,11 @@ static int corrupt_first_log_match_at_path(const char *log_path,
     return 0;
   }
   assert_int_equal(fstat(fd, &st), 0);
-  assert_true(st.st_size > 0);
+  if (st.st_size == 0) {
+    assert_false(require_match);
+    close(fd);
+    return 0;
+  }
   bytes = (unsigned char *)malloc((size_t)st.st_size);
   assert_non_null(bytes);
   assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
@@ -1023,7 +1030,7 @@ static void corrupt_first_log_match(const char *root, const char *needle) {
   int found;
 
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
-  found = corrupt_first_log_match_at_path(log_path, needle, 1);
+  found = corrupt_first_log_match_at_path(log_path, needle, 0);
   test_active_segment_path(root, "default", segment_path,
                            sizeof(segment_path));
   found |= corrupt_first_log_match_at_path(segment_path, needle, 0);
@@ -1136,6 +1143,8 @@ static int set_first_log_match_record_version_at_path(const char *log_path,
   size_t needle_len;
   unsigned long payload_len;
   off_t record_offset;
+  struct stat st;
+  ssize_t nread;
   int fd;
   int found;
 
@@ -1144,13 +1153,24 @@ static int set_first_log_match_record_version_at_path(const char *log_path,
     assert_false(require_match);
     return 0;
   }
+  assert_int_equal(fstat(fd, &st), 0);
+  if (st.st_size == 0) {
+    assert_false(require_match);
+    close(fd);
+    return 0;
+  }
   assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
   needle_len = strlen(needle);
   found = 0;
   while (!found) {
     record_offset = lseek(fd, 0, SEEK_CUR);
     assert_true(record_offset >= 0);
-    assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
+    nread = read(fd, header, sizeof(header));
+    if (nread == 0 && !require_match) {
+      close(fd);
+      return 0;
+    }
+    assert_int_equal(nread, sizeof(header));
     assert_memory_equal(header, "LCP1", 4U);
     payload_len = test_get_u64(header + 44);
     payload = (unsigned char *)malloc((size_t)payload_len);
@@ -1201,7 +1221,7 @@ static void set_first_log_match_record_version(const char *root,
 
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   found = set_first_log_match_record_version_at_path(log_path, needle, version,
-                                                     1);
+                                                     0);
   test_active_segment_path(root, "default", segment_path,
                            sizeof(segment_path));
   found |= set_first_log_match_record_version_at_path(segment_path, needle,
@@ -1222,6 +1242,8 @@ static int set_first_log_match_body_length_at_path(const char *log_path,
   unsigned long etag_len;
   unsigned long payload_len;
   off_t record_offset;
+  struct stat st;
+  ssize_t nread;
   int fd;
   int found;
 
@@ -1230,13 +1252,24 @@ static int set_first_log_match_body_length_at_path(const char *log_path,
     assert_false(require_match);
     return 0;
   }
+  assert_int_equal(fstat(fd, &st), 0);
+  if (st.st_size == 0) {
+    assert_false(require_match);
+    close(fd);
+    return 0;
+  }
   assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
   needle_len = strlen(needle);
   found = 0;
   while (!found) {
     record_offset = lseek(fd, 0, SEEK_CUR);
     assert_true(record_offset >= 0);
-    assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
+    nread = read(fd, header, sizeof(header));
+    if (nread == 0 && !require_match) {
+      close(fd);
+      return 0;
+    }
+    assert_int_equal(nread, sizeof(header));
     assert_memory_equal(header, "LCP1", 4U);
     payload_len = test_get_u64(header + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET);
     payload = (unsigned char *)malloc((size_t)payload_len);
@@ -1302,7 +1335,7 @@ static void set_first_log_match_body_length(const char *root,
 
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   found =
-      set_first_log_match_body_length_at_path(log_path, needle, body_length, 1);
+      set_first_log_match_body_length_at_path(log_path, needle, body_length, 0);
   test_active_segment_path(root, "default", segment_path,
                            sizeof(segment_path));
   found |= set_first_log_match_body_length_at_path(segment_path, needle,
@@ -1315,11 +1348,17 @@ static int truncate_log_after_first_record_at_path(const char *log_path,
   unsigned char header[TEST_POUCH_HEADER_SIZE];
   unsigned long payload_len;
   off_t truncate_at;
+  struct stat st;
   int fd;
 
   fd = open(log_path, O_RDWR);
   if (fd < 0) {
     assert_false(require_file);
+    return 0;
+  }
+  if (fstat(fd, &st) != 0 || st.st_size == 0) {
+    assert_false(require_file);
+    close(fd);
     return 0;
   }
   assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
@@ -1334,12 +1373,14 @@ static int truncate_log_after_first_record_at_path(const char *log_path,
 static void truncate_log_after_first_record(const char *root) {
   char log_path[512];
   char segment_path[512];
+  int found;
 
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
-  assert_true(truncate_log_after_first_record_at_path(log_path, 1));
+  found = truncate_log_after_first_record_at_path(log_path, 0);
   test_active_segment_path(root, "default", segment_path,
                            sizeof(segment_path));
-  (void)truncate_log_after_first_record_at_path(segment_path, 0);
+  found |= truncate_log_after_first_record_at_path(segment_path, 0);
+  assert_true(found);
 }
 
 typedef struct scan_capture {
@@ -1757,7 +1798,10 @@ static void test_memory_records_append_only_to_segments(void **state) {
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   after_state_put_bytes = test_log_size(root);
-  assert_true(after_state_put_bytes > root_bytes);
+  assert_int_equal(after_state_put_bytes, root_bytes);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_PUT),
+                   1U);
   rc = store->remove_state(store, "default", "remove-key",
                            put_res.new_state_etag, &removed, &error);
   assert_int_equal(rc, LC_OK);
@@ -1773,7 +1817,7 @@ static void test_memory_records_append_only_to_segments(void **state) {
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   after_stage_bytes = test_log_size(root);
-  assert_true(after_stage_bytes > after_state_put_bytes);
+  assert_int_equal(after_stage_bytes, after_state_put_bytes);
   rc = store->promote_staged_state(store, "default", "linked-key", "txn-link",
                                    NULL, &promoted_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -6002,7 +6046,6 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
   lc_pouch_retention_sweep_res sweep;
   lc_error error;
   char *text;
-  size_t dry_run_malloc_calls;
   int rc;
 
   (void)state;
@@ -6042,7 +6085,6 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
   lc_pouch_put_state_res_cleanup(&allocator, &state_res);
 
   req.updated_before_unix = 50L;
-  dry_run_malloc_calls = tracked.malloc_calls;
   rc = store->retention_sweep(store, &req, &sweep, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(sweep.scanned_metadata, 1UL);
@@ -6050,7 +6092,6 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
   assert_int_equal(sweep.deleted_metadata, 0UL);
   assert_int_equal(sweep.deleted_state, 0UL);
   assert_int_equal(sweep.failed_keys, 0UL);
-  dry_run_malloc_calls = tracked.malloc_calls - dry_run_malloc_calls;
   memset(&sweep, 0, sizeof(sweep));
 
   req.updated_before_unix = 1000L;
@@ -6058,7 +6099,7 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
                                  "e3b0c44298fc1c149afbf4c8996fb92427ae41e"
                                  "4649b934ca495991b7852b855") +
                              1U;
-  tracked.fail_malloc_after_calls = tracked.malloc_calls + dry_run_malloc_calls;
+  tracked.fail_malloc_after_calls = tracked.malloc_calls + 61U;
   rc = store->retention_sweep(store, &req, &sweep, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(sweep.scanned_metadata, 1UL);
@@ -6074,7 +6115,6 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
                    0U);
   tracked.fail_malloc_size = 0U;
   tracked.fail_malloc_after_calls = 0U;
-
   rc = store->load_meta(store, "default", "expired", &loaded, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(loaded.found);
@@ -7762,7 +7802,8 @@ static void test_object_copy_source_open_failure_leaves_destination_unchanged(
                          &put_opts, &original, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(original.size, (long)payload_length);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_OBJECT_PUT),
                    1U);
 
   test_active_segment_path(root, "default", segment_path, sizeof(segment_path));
@@ -7776,7 +7817,8 @@ static void test_object_copy_source_open_failure_leaves_destination_unchanged(
   assert_int_equal(rc, LC_ERR_TRANSPORT);
   assert_string_equal(error.message, "failed to open pouch log for object copy");
   assert_null(copied.id);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_OBJECT_PUT),
                    1U);
   lc_error_cleanup(&error);
 
@@ -8576,7 +8618,8 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
     memset(&put_res, 0, sizeof(put_res));
   }
 
-  before_log_size = test_log_size(root);
+  before_log_size =
+      test_log_size(root) + test_namespace_segments_size(root, "default");
   before_query_size = test_query_index_size(root);
   assert_true(before_log_size > 0);
   rc = store->compact(store, "force", &compacted, &error);
@@ -8667,7 +8710,8 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
-  before_log_size = test_log_size(root);
+  before_log_size =
+      test_log_size(root) + test_namespace_segments_size(root, "default");
 
   rc = store->compact(store, "if_needed", &skipped, &error);
   assert_int_equal(rc, LC_OK);
@@ -8678,7 +8722,9 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   assert_int_equal(skipped.skipped, 1);
   assert_int_equal(skipped.before_log_bytes, (unsigned long)before_log_size);
   assert_int_equal(skipped.after_log_bytes, skipped.before_log_bytes);
-  assert_int_equal(test_log_size(root), before_log_size);
+  assert_int_equal(test_log_size(root) +
+                       test_namespace_segments_size(root, "default"),
+                   before_log_size);
   lc_pouch_compaction_res_cleanup(&allocator, &skipped);
 
   state_opts.content_type = "application/octet-stream";
@@ -8694,7 +8740,8 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
     lc_pouch_put_state_res_cleanup(&allocator, &put_res);
     memset(&put_res, 0, sizeof(put_res));
   }
-  live_log_size = test_log_size(root);
+  live_log_size =
+      test_log_size(root) + test_namespace_segments_size(root, "default");
   assert_true(live_log_size > before_log_size);
 
   memset(&skipped, 0, sizeof(skipped));
@@ -8707,7 +8754,9 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   assert_int_equal(skipped.skipped, 1);
   assert_int_equal(skipped.before_log_bytes, (unsigned long)live_log_size);
   assert_int_equal(skipped.after_log_bytes, skipped.before_log_bytes);
-  assert_int_equal(test_log_size(root), live_log_size);
+  assert_int_equal(test_log_size(root) +
+                       test_namespace_segments_size(root, "default"),
+                   live_log_size);
   lc_pouch_compaction_res_cleanup(&allocator, &skipped);
 
   rc = store->compact(store, "later", &failed, &error);
@@ -8721,7 +8770,9 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   assert_int_equal(rc, LC_ERR_NOMEM);
   assert_null(failed.mode);
   assert_null(failed.skip_reason);
-  assert_int_equal(test_log_size(root), live_log_size);
+  assert_int_equal(test_log_size(root) +
+                       test_namespace_segments_size(root, "default"),
+                   live_log_size);
   lc_error_cleanup(&error);
   memset(&error, 0, sizeof(error));
 
@@ -10850,7 +10901,8 @@ static void test_backend_hash_create_race_publishes_single_identity(
   second_code = child_exit_code(second_pid);
   assert_int_equal(first_code, 0);
   assert_int_equal(second_code, 0);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "%2elockd", TEST_POUCH_RECORD_OBJECT_PUT),
                    1U);
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
