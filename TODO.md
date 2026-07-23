@@ -270,8 +270,15 @@ Latest release targets confirmed on 2026-07-23:
       `liblql`.
     - [x] Extend document postings to numeric equality predicates with
       canonical numeric equality keys instead of string-token comparison.
-    - [ ] Extend document postings to numeric range predicates with canonical
-      numeric range ordering semantics.
+    - [x] Extend document postings to numeric range predicates with canonical
+      numeric comparison semantics for key-ordered candidate narrowing.
+    - [ ] Add mixed LQL hint intersection for selectors that combine equality
+      and numeric range children in the same `and` expression; today equality
+      narrowing remains all-equality, while range narrowing still safely
+      reduces candidates before final `liblql` evaluation.
+    - [ ] Add true ordered range traversal if candidate volume requires it;
+      current range narrowing preserves query key/cursor ordering by checking
+      numeric field postings from the key-ordered summary scan.
     - [x] Extend candidate extraction beyond single `eq` selectors to safe
       top-level `and` conjunction/intersection forms over supported scalar
       equality postings; final predicate acceptance remains owned by `liblql`.

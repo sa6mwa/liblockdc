@@ -681,16 +681,20 @@ metadata log can repopulate the summary owner before candidate scans run.
 Large-namespace low-match indexed searches must be able to walk the relevant
 posting/candidate sets without loading every metadata summary or every document
 payload in the namespace.
-The first durable LQL posting slice indexes exact equality candidates for
-strict JSON Pointer document fields with string, boolean, null, and numeric
-values. Numeric equality postings use a canonical equality key so equivalent
-JSON number spellings share candidates instead of comparing raw token text.
-Indexed mode also recognizes top-level full-form `and` conjunctions made only
-of those scalar equality terms and intersects their storage-owned postings
-before loading candidate documents. The client extracts those shapes only as
-candidate hints; final predicate acceptance still runs through `liblql`, and
-numeric range predicates remain on the broader candidate path until range
-ordering is storage owned.
+The first durable LQL posting slices index exact equality candidates for strict
+JSON Pointer document fields with string, boolean, null, and numeric values,
+plus numeric range candidate checks over those field postings. Numeric equality
+and range bounds use canonical numeric keys so equivalent JSON number spellings
+compare consistently instead of relying on raw token text. Indexed mode also
+recognizes top-level full-form `and` conjunctions made only of scalar equality
+terms and intersects their storage-owned postings before loading candidate
+documents. Range-only selectors preserve existing key/cursor ordering by
+checking numeric postings from the key-ordered summary scan rather than using
+value-sorted postings as the primary result order. The client extracts those
+shapes only as candidate hints; final predicate acceptance still runs through
+`liblql`. Mixed equality/range `and` selectors remain conservative: range hints
+can narrow candidates, while equality hints currently remain limited to
+all-equality `and` selectors until mixed-hint intersection is added.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and

@@ -133,12 +133,22 @@ typedef struct lc_pouch_document_eq_term {
   const char *value;
 } lc_pouch_document_eq_term;
 
+typedef struct lc_pouch_document_range_term {
+  const char *field;
+  const char *gt;
+  const char *gte;
+  const char *lt;
+  const char *lte;
+} lc_pouch_document_range_term;
+
 typedef struct lc_pouch_query_index_scan_req {
   const char *namespace_name;
   const char *key;
   const char *owner;
   const lc_pouch_document_eq_term *document_eq_terms;
   size_t document_eq_term_count;
+  const lc_pouch_document_range_term *document_range_terms;
+  size_t document_range_term_count;
   const char *start_after;
   size_t limit;
 } lc_pouch_query_index_scan_req;
