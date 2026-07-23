@@ -6113,6 +6113,101 @@ test_pouch_endpoint_default_index_query_streams_documents(void **state) {
 }
 
 static void
+test_pouch_endpoint_index_query_skips_removed_candidates(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *removed;
+  lc_remove_op remove_op;
+  lc_remove_res remove_res;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-removed-candidates");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&remove_res, 0, sizeof(remove_res));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha, "{\"value\":1}", &error);
+  removed = pouch_acquire_query_key(client, "removed", &error);
+  pouch_save_query_json(removed, "{\"value\":9}", &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo, "{\"value\":2}", &error);
+
+  lc_remove_op_init(&remove_op);
+  remove_op.lease.namespace_name = removed->namespace_name;
+  remove_op.lease.key = removed->key;
+  remove_op.lease.lease_id = removed->lease_id;
+  remove_op.lease.txn_id = removed->txn_id;
+  remove_op.lease.fencing_token = removed->fencing_token;
+  remove_op.if_state_etag = removed->state_etag;
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(remove_res.removed);
+  lc_remove_res_cleanup(&remove_res);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":1}"));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
+  assert_null(strstr(text, "removed"));
+  assert_string_equal(res.return_mode, "documents");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  memset(&res, 0, sizeof(res));
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&req);
+  req.selector_json = "{}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&res);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  removed->close(removed);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_pouch_endpoint_index_query_filters_owner_selector(void **state) {
   char root[256];
   char endpoint[320];
@@ -9099,6 +9194,8 @@ int main(void) {
           test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson),
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_streams_documents),
+      cmocka_unit_test(
+          test_pouch_endpoint_index_query_skips_removed_candidates),
       cmocka_unit_test(test_pouch_endpoint_index_query_filters_owner_selector),
       cmocka_unit_test(test_pouch_endpoint_index_query_filters_key_selector),
       cmocka_unit_test(
