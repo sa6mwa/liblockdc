@@ -330,6 +330,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Refresh independent handles from authoritative namespace segment
         generation when segments exist, instead of depending on root
         `store.log` size changes.
+      - [x] Stop appending ordinary memory-backed records (metadata puts and
+        removes, state removes/links, object removes, queue metadata records)
+        to root `store.log`; append them only to namespace segments.
     - [ ] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
       set changes, and preserve corrupt-tail truncation semantics per segment.

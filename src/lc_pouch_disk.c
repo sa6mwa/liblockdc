@@ -431,7 +431,7 @@ static int lc_pouch_disk_append_segment_memory_shadow(
     lc_pouch_disk_store *store, const char *namespace_name,
     const unsigned char *header, const char *key, const char *content_type,
     const char *etag, const unsigned char *body, size_t body_length,
-    lc_error *error);
+    unsigned long *body_offset_out, lc_error *error);
 static int lc_pouch_disk_append_segment_fd_shadow(
     lc_pouch_disk_store *store, const char *namespace_name,
     const unsigned char *header, const char *key, const char *content_type,
@@ -7254,8 +7254,13 @@ static int lc_pouch_disk_append_segment_memory_shadow(
     lc_pouch_disk_store *store, const char *namespace_name,
     const unsigned char *header, const char *key, const char *content_type,
     const char *etag, const unsigned char *body, size_t body_length,
-    lc_error *error) {
+    unsigned long *body_offset_out, lc_error *error) {
   char *segment_path;
+  unsigned long ns_len;
+  unsigned long key_len;
+  unsigned long ct_len;
+  unsigned long etag_len;
+  off_t start;
   int fd;
   int rc;
 
@@ -7263,6 +7268,12 @@ static int lc_pouch_disk_append_segment_memory_shadow(
       store, namespace_name, &segment_path, &fd, error);
   if (rc != LC_OK) {
     return rc;
+  }
+  start = lseek(fd, 0, SEEK_END);
+  if (start < 0) {
+    close(fd);
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to seek pouch segment");
   }
   rc = LC_OK;
   if (!lc_pouch_write_all(fd, header, LC_POUCH_HEADER_SIZE) ||
@@ -7278,6 +7289,14 @@ static int lc_pouch_disk_append_segment_memory_shadow(
   }
   if (close(fd) != 0 && rc == LC_OK) {
     rc = lc_pouch_set_errno(error, "failed to close pouch segment");
+  }
+  if (rc == LC_OK && body_offset_out != NULL) {
+    ns_len = (unsigned long)strlen(namespace_name);
+    key_len = (unsigned long)strlen(key);
+    ct_len = content_type != NULL ? (unsigned long)strlen(content_type) : 0UL;
+    etag_len = etag != NULL ? (unsigned long)strlen(etag) : 0UL;
+    *body_offset_out = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
+                       key_len + ct_len + etag_len;
   }
   lc_pouch_free(&store->allocator, segment_path);
   return rc;
@@ -7359,7 +7378,6 @@ static int lc_pouch_disk_append_record(
   unsigned long etag_len;
   unsigned long payload_len;
   unsigned long crc;
-  off_t start;
   int rc;
 
   rc = lc_pouch_disk_ensure_namespace_logstore(store, namespace_name, error);
@@ -7381,11 +7399,6 @@ static int lc_pouch_disk_append_record(
     return lc_pouch_set_invalid(error,
                                 "pouch log record exceeds inline limits");
   }
-  start = lseek(store->log_fd, 0, SEEK_END);
-  if (start < 0) {
-    return lc_pouch_set_errno(error, "failed to seek pouch log");
-  }
-
   memset(header, 0, sizeof(header));
   memcpy(header, LC_POUCH_LOG_MAGIC, 4U);
   lc_pouch_put_u32(header + 4, LC_POUCH_HEADER_SIZE);
@@ -7418,26 +7431,10 @@ static int lc_pouch_disk_append_record(
 
   rc = lc_pouch_disk_append_segment_memory_shadow(
       store, namespace_name, header, key, content_type, etag, body,
-      body_length, error);
+      body_length, body_offset_out, error);
   if (rc != LC_OK) {
     return rc;
   }
-  if (!lc_pouch_write_all(store->log_fd, header, sizeof(header)) ||
-      !lc_pouch_write_all(store->log_fd, namespace_name, ns_len) ||
-      !lc_pouch_write_all(store->log_fd, key, key_len) ||
-      (ct_len > 0UL &&
-       !lc_pouch_write_all(store->log_fd, content_type, ct_len)) ||
-      (etag_len > 0UL && !lc_pouch_write_all(store->log_fd, etag, etag_len)) ||
-      (body_length > 0U &&
-       !lc_pouch_write_all(store->log_fd, body, body_length))) {
-    return lc_pouch_set_errno(error, "failed to append pouch log record");
-  }
-  rc = lc_pouch_disk_fsync_record(store, "failed to fsync pouch log", error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  *body_offset_out = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
-                     key_len + ct_len + etag_len;
   store->replayed_log_size = (unsigned long)-1;
   store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_record_count++;

@@ -644,6 +644,71 @@ static size_t count_log_records_of_type(const char *root, unsigned long type) {
   return count;
 }
 
+static size_t count_namespace_segment_records_of_type(
+    const char *root, const char *escaped_namespace, unsigned long type) {
+  char segments_path[2048];
+  char segment_path[2048];
+  unsigned char header[TEST_POUCH_HEADER_SIZE];
+  unsigned long payload_len;
+  unsigned long record_type;
+  DIR *dir;
+  struct dirent *entry;
+  size_t count;
+  ssize_t got;
+  int fd;
+
+  snprintf(segments_path, sizeof(segments_path), "%s/%s/logstore/segments",
+           root, escaped_namespace);
+  dir = opendir(segments_path);
+  if (dir == NULL) {
+    assert_true(errno == ENOENT || errno == ENOTDIR);
+    return 0U;
+  }
+  count = 0U;
+  while ((entry = readdir(dir)) != NULL) {
+    size_t name_index;
+    int valid_segment;
+
+    valid_segment = strncmp(entry->d_name, "seg-", 4U) == 0 &&
+                    strlen(entry->d_name) == 24U &&
+                    strcmp(entry->d_name + 20U, ".log") == 0;
+    for (name_index = 4U; valid_segment && name_index < 20U; ++name_index) {
+      valid_segment = entry->d_name[name_index] >= '0' &&
+                      entry->d_name[name_index] <= '9';
+    }
+    if (!valid_segment) {
+      continue;
+    }
+    assert_true(test_join_path_buf(segment_path, sizeof(segment_path),
+                                   segments_path, entry->d_name));
+    fd = open(segment_path, O_RDONLY);
+    assert_true(fd >= 0);
+    for (;;) {
+      got = read(fd, header, sizeof(header));
+      if (got == 0) {
+        break;
+      }
+      if (got != (ssize_t)sizeof(header)) {
+        break;
+      }
+      if (memcmp(header, "LCP1", 4U) != 0) {
+        break;
+      }
+      record_type = test_get_u32(header + 8);
+      payload_len = test_get_u64(header + 44);
+      if (record_type == type) {
+        count++;
+      }
+      if (lseek(fd, (off_t)payload_len, SEEK_CUR) < 0) {
+        break;
+      }
+    }
+    close(fd);
+  }
+  assert_int_equal(closedir(dir), 0);
+  return count;
+}
+
 static size_t count_query_index_records_of_type(const char *root,
                                                 unsigned long type) {
   char index_path[512];
@@ -1631,6 +1696,103 @@ static void test_segment_generation_refreshes_independent_handle(
   test_cleanup_root(root);
 }
 
+static void test_memory_records_append_only_to_segments(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_put_state_res removed_res;
+  lc_pouch_put_state_res staged_res;
+  lc_pouch_put_state_res promoted_res;
+  lc_error error;
+  off_t root_bytes;
+  off_t after_state_put_bytes;
+  off_t after_stage_bytes;
+  int removed;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "segment-memory-records");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&removed_res, 0, sizeof(removed_res));
+  memset(&staged_res, 0, sizeof(staged_res));
+  memset(&promoted_res, 0, sizeof(promoted_res));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  removed = 0;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  root_bytes = test_log_size(root);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "meta-key", &meta, NULL,
+                         &meta_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_log_size(root), root_bytes);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_META_PUT),
+                   1U);
+
+  rc = store->delete_meta(store, "default", "meta-key", meta_res.etag, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_log_size(root), root_bytes);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_META_REMOVE),
+                   1U);
+
+  source = source_from_text("remove-me");
+  rc = store->write_state(store, "default", "remove-key", source, NULL,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  after_state_put_bytes = test_log_size(root);
+  assert_true(after_state_put_bytes > root_bytes);
+  rc = store->remove_state(store, "default", "remove-key",
+                           put_res.new_state_etag, &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(removed);
+  assert_int_equal(test_log_size(root), after_state_put_bytes);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_REMOVE),
+                   1U);
+
+  source = source_from_text("linked-body");
+  rc = store->stage_state(store, "default", "linked-key", "txn-link", source,
+                          NULL, &staged_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  after_stage_bytes = test_log_size(root);
+  assert_true(after_stage_bytes > after_state_put_bytes);
+  rc = store->promote_staged_state(store, "default", "linked-key", "txn-link",
+                                   NULL, &promoted_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_log_size(root), after_stage_bytes);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_LINK),
+                   1U);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &promoted_res);
+  lc_pouch_put_state_res_cleanup(&allocator, &staged_res);
+  lc_pouch_put_state_res_cleanup(&allocator, &removed_res);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_replay_recovers_state_from_namespace_segment(void **state) {
   char root[256];
   char log_path[512];
@@ -2450,7 +2612,8 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
   assert_non_null(promoted.new_state_etag);
   assert_string_equal(promoted.new_state_etag, staged.new_state_etag);
   assert_int_equal(promoted.bytes, 9L);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_LINK),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_LINK),
                    1U);
 
   rc = store->load_staged_state(store, "default", "lease-key", "txn-1",
@@ -2500,7 +2663,8 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
                       second_staged.new_state_etag);
   assert_string_not_equal(second_promoted.new_state_etag,
                           promoted.new_state_etag);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_LINK),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_LINK),
                    2U);
 
   source = source_from_text("discard-me");
@@ -4409,8 +4573,9 @@ static void test_staged_state_rejects_pathlike_transaction_ids(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
                    0U);
-  assert_int_equal(
-      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 0U);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_REMOVE),
+                   0U);
   lc_error_cleanup(&error);
 
   rc = store->close(store, &error);
@@ -5745,10 +5910,12 @@ static void test_retention_sweep_deletes_expired_metadata_and_state(
   assert_int_equal(sweep.deleted_metadata, 2UL);
   assert_int_equal(sweep.deleted_state, 1UL);
   assert_int_equal(sweep.failed_keys, 0UL);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_REMOVE),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_META_REMOVE),
                    2U);
-  assert_int_equal(
-      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 1U);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_REMOVE),
+                   1U);
 
   rc = store->load_meta(store, "default", "expired", &loaded, &error);
   assert_int_equal(rc, LC_OK);
@@ -5805,10 +5972,12 @@ static void test_retention_sweep_deletes_expired_metadata_and_state(
   assert_int_equal(sweep.deleted_metadata, 0UL);
   assert_int_equal(sweep.deleted_state, 0UL);
   assert_int_equal(sweep.failed_keys, 0UL);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_REMOVE),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_META_REMOVE),
                    2U);
-  assert_int_equal(
-      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 1U);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_REMOVE),
+                   1U);
 
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
@@ -5897,10 +6066,12 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
   assert_int_equal(sweep.deleted_metadata, 0UL);
   assert_int_equal(sweep.deleted_state, 0UL);
   assert_int_equal(sweep.failed_keys, 1UL);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_REMOVE),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_META_REMOVE),
                    0U);
-  assert_int_equal(
-      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 0U);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_REMOVE),
+                   0U);
   tracked.fail_malloc_size = 0U;
   tracked.fail_malloc_after_calls = 0U;
 
@@ -5929,10 +6100,12 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
   assert_int_equal(sweep.deleted_metadata, 1UL);
   assert_int_equal(sweep.deleted_state, 1UL);
   assert_int_equal(sweep.failed_keys, 0UL);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_META_REMOVE),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_META_REMOVE),
                    1U);
-  assert_int_equal(
-      count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_REMOVE), 1U);
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_REMOVE),
+                   1U);
 
   rc = store->load_meta(store, "default", "expired", &loaded, &error);
   assert_int_equal(rc, LC_OK);
@@ -6721,6 +6894,7 @@ static void test_query_index_sidecar_compacts_with_store_log(void **state) {
   lc_pouch_meta meta;
   lc_pouch_store_meta_res stored;
   lc_pouch_store_meta_res updated;
+  lc_pouch_compaction_res compacted;
   lc_pouch_query_index_scan_req req;
   lc_pouch_query_index_scan_res scan;
   key_capture capture;
@@ -6737,6 +6911,7 @@ static void test_query_index_sidecar_compacts_with_store_log(void **state) {
   memset(&meta, 0, sizeof(meta));
   memset(&stored, 0, sizeof(stored));
   memset(&updated, 0, sizeof(updated));
+  memset(&compacted, 0, sizeof(compacted));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
   memset(&capture, 0, sizeof(capture));
@@ -6759,6 +6934,10 @@ static void test_query_index_sidecar_compacts_with_store_log(void **state) {
     stored = updated;
     memset(&updated, 0, sizeof(updated));
   }
+  rc = store->compact(store, "force", &compacted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(compacted.compacted);
+  lc_pouch_compaction_res_cleanup(&allocator, &compacted);
 
   sidecar_records = count_query_index_records_of_type(
       root, TEST_POUCH_QUERY_INDEX_RECORD_META);
@@ -8598,7 +8777,8 @@ static void test_compaction_preserves_promoted_staged_state_link(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(promoted.new_state_etag, staged.new_state_etag);
   assert_int_equal(promoted.bytes, 128L * 1024L);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_LINK),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_LINK),
                    1U);
 
   for (index = 0U; index < 80U; ++index) {
@@ -8612,7 +8792,8 @@ static void test_compaction_preserves_promoted_staged_state_link(void **state) {
     lc_pouch_put_state_res_cleanup(&allocator, &churned);
     memset(&churned, 0, sizeof(churned));
   }
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_LINK),
+  assert_int_equal(count_namespace_segment_records_of_type(
+                       root, "default", TEST_POUCH_RECORD_STATE_LINK),
                    0U);
 
   rc = store->read_state(store, "default", "linked-key", &body, &info,
@@ -13930,6 +14111,7 @@ int main(void) {
       cmocka_unit_test(
           test_segment_payload_refs_survive_root_log_truncation),
       cmocka_unit_test(test_segment_generation_refreshes_independent_handle),
+      cmocka_unit_test(test_memory_records_append_only_to_segments),
       cmocka_unit_test(test_replay_recovers_state_from_namespace_segment),
       cmocka_unit_test(test_replay_repairs_missing_namespace_manifest),
       cmocka_unit_test(test_segment_rotation_replays_multiple_segments),
