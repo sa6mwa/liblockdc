@@ -242,6 +242,7 @@ typedef struct lc_pouch_disk_store {
   size_t queue_entry_capacity;
   long next_version;
   unsigned long replayed_log_size;
+  unsigned long replayed_segment_generation;
   unsigned long replayed_query_index_size;
   unsigned long replayed_record_count;
   unsigned long replayed_query_index_record_count;
@@ -489,6 +490,10 @@ static void lc_pouch_disk_segment_replay_paths_cleanup(
 static int lc_pouch_disk_collect_active_segment_paths(
     lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
     lc_error *error);
+static int lc_pouch_disk_active_segment_generation(lc_pouch_disk_store *store,
+                                                   int *found,
+                                                   unsigned long *generation,
+                                                   lc_error *error);
 static int lc_pouch_disk_segment_replay_paths_add(
     lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
     char *path);
@@ -2641,6 +2646,8 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
   struct flock lock;
   struct stat st;
   struct stat path_st;
+  unsigned long segment_generation;
+  int found_segments;
   int new_fd;
   int rc;
 
@@ -2671,12 +2678,32 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
     close(store->log_fd);
     store->log_fd = new_fd;
     store->replayed_log_size = (unsigned long)-1;
+    store->replayed_segment_generation = (unsigned long)-1;
     store->lock_log_reopens++;
     if (fstat(store->log_fd, &st) != 0) {
       lock.l_type = F_UNLCK;
       (void)fcntl(store->lock_fd, F_SETLK, &lock);
       return lc_pouch_set_errno(error, "failed to stat reopened pouch log");
     }
+  }
+  rc = lc_pouch_disk_active_segment_generation(store, &found_segments,
+                                               &segment_generation, error);
+  if (rc != LC_OK) {
+    lock.l_type = F_UNLCK;
+    (void)fcntl(store->lock_fd, F_SETLK, &lock);
+    return rc;
+  }
+  if (found_segments) {
+    if (segment_generation == store->replayed_segment_generation) {
+      return LC_OK;
+    }
+    store->lock_replay_refreshes++;
+    rc = lc_pouch_disk_replay(store, error);
+    if (rc != LC_OK) {
+      lock.l_type = F_UNLCK;
+      (void)fcntl(store->lock_fd, F_SETLK, &lock);
+    }
+    return rc;
   }
   if ((unsigned long)st.st_size == store->replayed_log_size) {
     return LC_OK;
@@ -2693,8 +2720,18 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
 static int lc_pouch_disk_mark_replayed_to_current_size(
     lc_pouch_disk_store *store, lc_error *error) {
   struct stat st;
+  unsigned long segment_generation;
+  int found_segments;
   int rc;
 
+  rc = lc_pouch_disk_active_segment_generation(store, &found_segments,
+                                               &segment_generation, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (found_segments) {
+    store->replayed_segment_generation = segment_generation;
+  }
   if (fstat(store->log_fd, &st) != 0) {
     return lc_pouch_set_errno(error, "failed to stat pouch log");
   }
@@ -2711,6 +2748,7 @@ static int lc_pouch_disk_mark_replayed_to_current_size(
 static int lc_pouch_disk_force_replay_locked(lc_pouch_disk_store *store,
                                              lc_error *error) {
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_segment_generation = (unsigned long)-1;
   return lc_pouch_disk_replay(store, error);
 }
 
@@ -7401,6 +7439,7 @@ static int lc_pouch_disk_append_record(
   *body_offset_out = (unsigned long)start + LC_POUCH_HEADER_SIZE + ns_len +
                      key_len + ct_len + etag_len;
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_record_count++;
   return LC_OK;
 }
@@ -7428,6 +7467,7 @@ static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
     return LC_ERR_TRANSPORT;
   }
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_record_count++;
   return LC_OK;
 }
@@ -7614,6 +7654,7 @@ static int lc_pouch_disk_append_fd_record(
     lc_pouch_free(&store->allocator, segment_body_path);
   }
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_record_count++;
   return LC_OK;
 }
@@ -8610,6 +8651,7 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     store->query_index_fd = old_query_fd;
     store->replayed_record_count = old_record_count;
     store->replayed_log_size = old_replayed_size;
+    store->replayed_segment_generation = (unsigned long)-1;
     (void)lc_pouch_disk_replay(store, NULL);
     close(temp_fd);
     close(temp_query_fd);
@@ -8627,6 +8669,7 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     store->query_index_fd = old_query_fd;
     store->replayed_record_count = old_record_count;
     store->replayed_log_size = old_replayed_size;
+    store->replayed_segment_generation = (unsigned long)-1;
     (void)lc_pouch_disk_replay(store, NULL);
     close(temp_fd);
     close(temp_query_fd);
@@ -8648,6 +8691,7 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     store->replayed_query_index_record_count = 0UL;
     store->replayed_record_count = old_record_count;
     store->replayed_log_size = old_replayed_size;
+    store->replayed_segment_generation = (unsigned long)-1;
     (void)lc_pouch_disk_replay(store, NULL);
     close(temp_fd);
     unlink(temp_path);
@@ -8871,6 +8915,7 @@ static int lc_pouch_disk_append_object_copy_record(
     lc_pouch_free(&store->allocator, segment_path);
   }
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_record_count++;
   return LC_OK;
 }
@@ -10499,10 +10544,109 @@ static int lc_pouch_disk_collect_active_segment_paths(
   return LC_OK;
 }
 
+static int lc_pouch_disk_active_segment_generation(lc_pouch_disk_store *store,
+                                                   int *found,
+                                                   unsigned long *generation,
+                                                   lc_error *error) {
+  DIR *root_dir;
+  struct dirent *entry;
+  unsigned long total;
+  int rc;
+
+  if (found != NULL) {
+    *found = 0;
+  }
+  if (generation != NULL) {
+    *generation = 0UL;
+  }
+  root_dir = opendir(store->root_path);
+  if (root_dir == NULL) {
+    return lc_pouch_set_errno(error, "failed to open pouch root directory");
+  }
+  total = 0UL;
+  rc = LC_OK;
+  while ((entry = readdir(root_dir)) != NULL) {
+    DIR *segments_dir;
+    struct dirent *segment_entry;
+    char segments_path[4096];
+    int wrote;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    wrote = snprintf(segments_path, sizeof(segments_path),
+                     "%s/%s/logstore/segments", store->root_path,
+                     entry->d_name);
+    if (wrote < 0 || (size_t)wrote >= sizeof(segments_path)) {
+      rc = lc_pouch_set_invalid(error, "pouch segment path is too long");
+      break;
+    }
+    segments_dir = opendir(segments_path);
+    if (segments_dir == NULL) {
+      if (errno == ENOENT || errno == ENOTDIR) {
+        continue;
+      }
+      rc = lc_pouch_set_errno(error, "failed to open pouch segments directory");
+      break;
+    }
+    while ((segment_entry = readdir(segments_dir)) != NULL) {
+      char segment_path[4096];
+      struct stat st;
+      unsigned long ignored_number;
+
+      if (!lc_pouch_disk_segment_name_parse(segment_entry->d_name,
+                                            &ignored_number)) {
+        continue;
+      }
+      wrote = snprintf(segment_path, sizeof(segment_path), "%s/%s",
+                       segments_path, segment_entry->d_name);
+      if (wrote < 0 || (size_t)wrote >= sizeof(segment_path)) {
+        rc = lc_pouch_set_invalid(error, "pouch segment path is too long");
+        break;
+      }
+      if (stat(segment_path, &st) != 0) {
+        if (errno == ENOENT || errno == ENOTDIR) {
+          continue;
+        }
+        rc = lc_pouch_set_errno(error, "failed to stat pouch segment");
+        break;
+      }
+      if (!S_ISREG(st.st_mode) || st.st_size <= 0) {
+        continue;
+      }
+      if ((unsigned long)st.st_size > (unsigned long)-1 - total) {
+        rc = lc_pouch_set_invalid(error, "pouch segment generation overflow");
+        break;
+      }
+      total += (unsigned long)st.st_size;
+    }
+    if (closedir(segments_dir) != 0 && rc == LC_OK) {
+      rc = lc_pouch_set_errno(error,
+                              "failed to close pouch segments directory");
+    }
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  if (closedir(root_dir) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch root directory");
+  }
+  if (rc == LC_OK) {
+    if (total > 0UL && found != NULL) {
+      *found = 1;
+    }
+    if (generation != NULL) {
+      *generation = total;
+    }
+  }
+  return rc;
+}
+
 static int lc_pouch_disk_replay_active_segments(lc_pouch_disk_store *store,
                                                 int *found,
                                                 lc_error *error) {
   lc_pouch_disk_segment_replay_paths paths;
+  unsigned long segment_generation;
   size_t index;
   int rc;
 
@@ -10520,9 +10664,10 @@ static int lc_pouch_disk_replay_active_segments(lc_pouch_disk_store *store,
   if (found != NULL) {
     *found = 1;
   }
+  segment_generation = 0UL;
   for (index = 0U; index < paths.count; ++index) {
     lc_pouch_disk_replay_input input;
-    unsigned long ignored_offset;
+    unsigned long segment_offset;
     int fd;
 
     fd = open(paths.items[index], O_RDWR);
@@ -10533,15 +10678,23 @@ static int lc_pouch_disk_replay_active_segments(lc_pouch_disk_store *store,
     input.store = store;
     input.fd = fd;
     input.path = paths.items[index];
-    ignored_offset = 0UL;
+    segment_offset = 0UL;
     rc = lc_pouch_disk_replay_input_records(&input, index == 0U, 1,
-                                            &ignored_offset, error);
+                                            &segment_offset, error);
     if (close(fd) != 0 && rc == LC_OK) {
       rc = lc_pouch_set_errno(error, "failed to close pouch segment");
     }
     if (rc != LC_OK) {
       break;
     }
+    if (segment_offset > (unsigned long)-1 - segment_generation) {
+      rc = lc_pouch_set_invalid(error, "pouch segment generation overflow");
+      break;
+    }
+    segment_generation += segment_offset;
+  }
+  if (rc == LC_OK) {
+    store->replayed_segment_generation = segment_generation;
   }
   lc_pouch_disk_segment_replay_paths_cleanup(store, &paths);
   return rc;
@@ -10575,6 +10728,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
     return rc;
   }
   store->replayed_log_size = offset;
+  store->replayed_segment_generation = 0UL;
   return LC_OK;
 }
 
@@ -12609,6 +12763,7 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
   }
   lc_pouch_free(&store->allocator, segment_path);
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_record_count++;
   return LC_OK;
 }
@@ -14153,6 +14308,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->lock_fd = -1;
   store->query_index_fd = -1;
   store->replayed_log_size = (unsigned long)-1;
+  store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_query_index_size = (unsigned long)-1;
   store->next_version = 1L;
   store->pub.impl = store;

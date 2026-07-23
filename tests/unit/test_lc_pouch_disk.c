@@ -1574,6 +1574,63 @@ static void test_segment_payload_refs_survive_root_log_truncation(
   test_cleanup_root(root);
 }
 
+static void test_segment_generation_refreshes_independent_handle(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *writer;
+  lc_pouch_store *reader;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "segment-generation-refresh");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&info, 0, sizeof(info));
+  memset(&error, 0, sizeof(error));
+  writer = NULL;
+  reader = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"fresh\":true}");
+  rc = writer->write_state(writer, "default", "shared", source, NULL,
+                           &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  truncate_store_log(root);
+
+  rc = reader->read_state(reader, "default", "shared", &read_body, &info,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "{\"fresh\":true}");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = reader->close(reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = writer->close(writer, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_replay_recovers_state_from_namespace_segment(void **state) {
   char root[256];
   char log_path[512];
@@ -13872,6 +13929,7 @@ int main(void) {
       cmocka_unit_test(test_state_write_creates_segmented_namespace_logstore),
       cmocka_unit_test(
           test_segment_payload_refs_survive_root_log_truncation),
+      cmocka_unit_test(test_segment_generation_refreshes_independent_handle),
       cmocka_unit_test(test_replay_recovers_state_from_namespace_segment),
       cmocka_unit_test(test_replay_repairs_missing_namespace_manifest),
       cmocka_unit_test(test_segment_rotation_replays_multiple_segments),
