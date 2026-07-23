@@ -5686,6 +5686,10 @@ typedef struct lc_pouch_query_keys_scan_context {
   struct lc_pouch_lql_document_filter *filter;
   lc_client_handle *client;
   const char *namespace_name;
+  size_t output_limit;
+  size_t emitted_count;
+  int has_more;
+  char *cursor;
 } lc_pouch_query_keys_scan_context;
 
 typedef struct lc_pouch_lql_document_filter {
@@ -5698,6 +5702,10 @@ typedef struct lc_pouch_query_scan_context {
   lc_client_handle *client;
   lc_sink *dst;
   lc_pouch_lql_document_filter *filter;
+  size_t output_limit;
+  size_t emitted_count;
+  int has_more;
+  char *cursor;
 } lc_pouch_query_scan_context;
 
 typedef struct lc_pouch_query_row_meta_json {
@@ -5911,6 +5919,92 @@ static int lc_pouch_lql_document_filter_match(
   return rc;
 }
 
+static int lc_pouch_query_cursor_prepare(char **cursor, const char *key,
+                                         lc_error *error) {
+  char *copy;
+
+  if (cursor == NULL || key == NULL) {
+    return LC_OK;
+  }
+  copy = lc_strdup_local(key);
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query cursor", NULL, NULL,
+                        NULL);
+  }
+  lc_free_with_allocator(NULL, *cursor);
+  *cursor = copy;
+  return LC_OK;
+}
+
+static int lc_pouch_query_scan_prepare_emit(
+    lc_pouch_query_scan_context *scan, const char *key, int *emit,
+    lc_error *error) {
+  if (emit != NULL) {
+    *emit = 0;
+  }
+  if (scan == NULL || key == NULL || emit == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query emit tracking requires context, key, and "
+                        "output",
+                        NULL, NULL, NULL);
+  }
+  if (scan->output_limit > 0U && scan->emitted_count >= scan->output_limit) {
+    scan->has_more = 1;
+    return LC_OK;
+  }
+  if (scan->output_limit > 0U) {
+    if (lc_pouch_query_cursor_prepare(&scan->cursor, key, error) != LC_OK) {
+      return LC_ERR_NOMEM;
+    }
+  }
+  *emit = 1;
+  return LC_OK;
+}
+
+static int lc_pouch_query_keys_prepare_emit(
+    lc_pouch_query_keys_scan_context *scan, const char *key, int *emit,
+    lc_error *error) {
+  if (emit != NULL) {
+    *emit = 0;
+  }
+  if (scan == NULL || key == NULL || emit == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query_keys emit tracking requires context, key, "
+                        "and output",
+                        NULL, NULL, NULL);
+  }
+  if (scan->output_limit > 0U && scan->emitted_count >= scan->output_limit) {
+    scan->has_more = 1;
+    return LC_OK;
+  }
+  if (scan->output_limit > 0U) {
+    if (lc_pouch_query_cursor_prepare(&scan->cursor, key, error) != LC_OK) {
+      return LC_ERR_NOMEM;
+    }
+  }
+  *emit = 1;
+  return LC_OK;
+}
+
+static void
+lc_pouch_query_scan_context_cleanup(lc_pouch_query_scan_context *scan) {
+  if (scan == NULL) {
+    return;
+  }
+  lc_free_with_allocator(NULL, scan->cursor);
+  scan->cursor = NULL;
+}
+
+static void lc_pouch_query_keys_scan_context_cleanup(
+    lc_pouch_query_keys_scan_context *scan) {
+  if (scan == NULL) {
+    return;
+  }
+  lc_free_with_allocator(NULL, scan->cursor);
+  scan->cursor = NULL;
+}
+
 static int lc_pouch_query_keys_scan_visit(void *context,
                                           const lc_pouch_scan_meta_row *row,
                                           lc_error *error) {
@@ -5918,6 +6012,7 @@ static int lc_pouch_query_keys_scan_visit(void *context,
   lc_pouch_state_info state;
   lc_source *body;
   int embed_json;
+  int emit;
   int matched;
   int rc;
   size_t key_len;
@@ -5956,6 +6051,13 @@ static int lc_pouch_query_keys_scan_visit(void *context,
     if (!matched) {
       return LC_OK;
     }
+    rc = lc_pouch_query_keys_prepare_emit(scan, row->key, &emit, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (!emit) {
+      return LC_OK;
+    }
   }
   if (scan->handler->begin != NULL &&
       !scan->handler->begin(scan->handler_context, error)) {
@@ -5972,6 +6074,9 @@ static int lc_pouch_query_keys_scan_visit(void *context,
       !scan->handler->end(scan->handler_context, error)) {
     return lc_pouch_query_keys_callback_failed(
         error, "pouch query_keys end callback failed");
+  }
+  if (scan->filter != NULL && scan->filter->enabled) {
+    scan->emitted_count++;
   }
   return LC_OK;
 }
@@ -6114,6 +6219,7 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
   unsigned char *payload;
   size_t payload_len;
   int embed_json;
+  int emit;
   int matched;
   int rc;
 
@@ -6155,6 +6261,23 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
       lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
       return LC_OK;
     }
+    rc = lc_pouch_query_scan_prepare_emit(scan, row->key, &emit, error);
+    if (rc != LC_OK) {
+      lc_client_free(scan->client, payload);
+      if (body != NULL) {
+        body->close(body);
+      }
+      lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      return rc;
+    }
+    if (!emit) {
+      lc_client_free(scan->client, payload);
+      if (body != NULL) {
+        body->close(body);
+      }
+      lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      return LC_OK;
+    }
     rc = lc_pouch_query_write_row_prefix(scan->dst, row->key, &state, error);
     if (rc == LC_OK) {
       rc = lc_pouch_sink_write_all(scan->dst, payload, payload_len, error);
@@ -6167,6 +6290,9 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
       body->close(body);
     }
     lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+    if (rc == LC_OK) {
+      scan->emitted_count++;
+    }
     return rc;
   }
 
@@ -6344,11 +6470,12 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
     scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
-  scan_req.limit = (size_t)req->limit;
+  scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
   scan_req.exclude_deleted_state = 1;
   visit.scan.client = client;
   visit.scan.dst = dst;
   visit.scan.filter = &filter;
+  visit.scan.output_limit = (size_t)req->limit;
   visit.namespace_name = namespace_name;
 
   rc = client->pouch_store->scan_meta(client->pouch_store, &scan_req,
@@ -6358,16 +6485,21 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
     lc_client_free(client, key_selector);
     lc_client_free(client, owner_selector);
     lc_pouch_lql_document_filter_cleanup(&filter);
+    lc_pouch_query_scan_context_cleanup(&visit.scan);
     lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
     return rc;
   }
 
-  if (scan_res.next_start_after != NULL) {
+  if (filter.enabled && visit.scan.has_more && visit.scan.cursor != NULL) {
+    out->cursor = visit.scan.cursor;
+    visit.scan.cursor = NULL;
+  } else if (!filter.enabled && scan_res.next_start_after != NULL) {
     out->cursor = lc_strdup_local(scan_res.next_start_after);
     if (out->cursor == NULL) {
       lc_client_free(client, key_selector);
       lc_client_free(client, owner_selector);
       lc_pouch_lql_document_filter_cleanup(&filter);
+      lc_pouch_query_scan_context_cleanup(&visit.scan);
       lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch query cursor", NULL, NULL,
@@ -6382,6 +6514,7 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
     lc_client_free(client, key_selector);
     lc_client_free(client, owner_selector);
     lc_pouch_lql_document_filter_cleanup(&filter);
+    lc_pouch_query_scan_context_cleanup(&visit.scan);
     lc_query_res_cleanup(out);
     lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
     return LC_ERR_NOMEM;
@@ -6389,6 +6522,7 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
   lc_client_free(client, key_selector);
   lc_client_free(client, owner_selector);
   lc_pouch_lql_document_filter_cleanup(&filter);
+  lc_pouch_query_scan_context_cleanup(&visit.scan);
   lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
 }
@@ -6506,10 +6640,11 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
-  scan_req.limit = (size_t)req->limit;
+  scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
   visit.scan.client = client;
   visit.scan.dst = dst;
   visit.scan.filter = &filter;
+  visit.scan.output_limit = (size_t)req->limit;
   visit.namespace_name = namespace_name;
 
   if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER) {
@@ -6523,7 +6658,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     owner_req.namespace_name = namespace_name;
     owner_req.owner = owner_selector;
     owner_req.start_after = req->cursor;
-    owner_req.limit = (size_t)req->limit;
+    owner_req.limit = filter.enabled ? 0U : (size_t)req->limit;
     rc = client->pouch_store->query_owner_scan(client->pouch_store, &owner_req,
                                                lc_pouch_query_scan_visit_row,
                                                &visit, &scan_res, error);
@@ -6536,16 +6671,21 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     lc_client_free(client, key_selector);
     lc_client_free(client, owner_selector);
     lc_pouch_lql_document_filter_cleanup(&filter);
+    lc_pouch_query_scan_context_cleanup(&visit.scan);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
     return rc;
   }
 
-  if (scan_res.next_start_after != NULL) {
+  if (filter.enabled && visit.scan.has_more && visit.scan.cursor != NULL) {
+    out->cursor = visit.scan.cursor;
+    visit.scan.cursor = NULL;
+  } else if (!filter.enabled && scan_res.next_start_after != NULL) {
     out->cursor = lc_strdup_local(scan_res.next_start_after);
     if (out->cursor == NULL) {
       lc_client_free(client, key_selector);
       lc_client_free(client, owner_selector);
       lc_pouch_lql_document_filter_cleanup(&filter);
+      lc_pouch_query_scan_context_cleanup(&visit.scan);
       lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator,
                                             &scan_res);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -6562,6 +6702,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     lc_client_free(client, key_selector);
     lc_client_free(client, owner_selector);
     lc_pouch_lql_document_filter_cleanup(&filter);
+    lc_pouch_query_scan_context_cleanup(&visit.scan);
     lc_query_res_cleanup(out);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
     return LC_ERR_NOMEM;
@@ -6569,6 +6710,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   lc_client_free(client, key_selector);
   lc_client_free(client, owner_selector);
   lc_pouch_lql_document_filter_cleanup(&filter);
+  lc_pouch_query_scan_context_cleanup(&visit.scan);
   lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
 }
@@ -6672,13 +6814,14 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
     scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
-  scan_req.limit = (size_t)req->limit;
+  scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
   scan_req.exclude_deleted_state = 1;
   scan_context.handler = handler;
   scan_context.handler_context = context;
   scan_context.filter = &filter;
   scan_context.client = client;
   scan_context.namespace_name = namespace_name;
+  scan_context.output_limit = (size_t)req->limit;
 
   if (client->pouch_store->scan_meta_keys != NULL) {
     rc = client->pouch_store->scan_meta_keys(client->pouch_store, &scan_req,
@@ -6693,16 +6836,22 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
     lc_client_free(client, key_selector);
     lc_client_free(client, owner_selector);
     lc_pouch_lql_document_filter_cleanup(&filter);
+    lc_pouch_query_keys_scan_context_cleanup(&scan_context);
     lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
     return rc;
   }
 
-  if (scan_res.next_start_after != NULL) {
+  if (filter.enabled && scan_context.has_more &&
+      scan_context.cursor != NULL) {
+    out->cursor = scan_context.cursor;
+    scan_context.cursor = NULL;
+  } else if (!filter.enabled && scan_res.next_start_after != NULL) {
     out->cursor = lc_strdup_local(scan_res.next_start_after);
     if (out->cursor == NULL) {
       lc_client_free(client, key_selector);
       lc_client_free(client, owner_selector);
       lc_pouch_lql_document_filter_cleanup(&filter);
+      lc_pouch_query_keys_scan_context_cleanup(&scan_context);
       lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch query_keys cursor", NULL,
@@ -6717,6 +6866,7 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
     lc_client_free(client, key_selector);
     lc_client_free(client, owner_selector);
     lc_pouch_lql_document_filter_cleanup(&filter);
+    lc_pouch_query_keys_scan_context_cleanup(&scan_context);
     lc_query_res_cleanup(out);
     lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
     return LC_ERR_NOMEM;
@@ -6724,6 +6874,7 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
   lc_client_free(client, key_selector);
   lc_client_free(client, owner_selector);
   lc_pouch_lql_document_filter_cleanup(&filter);
+  lc_pouch_query_keys_scan_context_cleanup(&scan_context);
   lc_pouch_scan_meta_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
 }
@@ -6843,12 +6994,13 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
-  scan_req.limit = (size_t)req->limit;
+  scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
   scan_context.handler = handler;
   scan_context.handler_context = context;
   scan_context.filter = &filter;
   scan_context.client = client;
   scan_context.namespace_name = namespace_name;
+  scan_context.output_limit = (size_t)req->limit;
 
   if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER) {
     if (client->pouch_store->query_owner_keys_scan == NULL) {
@@ -6861,7 +7013,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     owner_req.namespace_name = namespace_name;
     owner_req.owner = owner_selector;
     owner_req.start_after = req->cursor;
-    owner_req.limit = (size_t)req->limit;
+    owner_req.limit = filter.enabled ? 0U : (size_t)req->limit;
     rc = client->pouch_store->query_owner_keys_scan(
         client->pouch_store, &owner_req, lc_pouch_query_keys_index_visit,
         &scan_context, &scan_res, error);
@@ -6874,16 +7026,22 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     lc_client_free(client, key_selector);
     lc_client_free(client, owner_selector);
     lc_pouch_lql_document_filter_cleanup(&filter);
+    lc_pouch_query_keys_scan_context_cleanup(&scan_context);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
     return rc;
   }
 
-  if (scan_res.next_start_after != NULL) {
+  if (filter.enabled && scan_context.has_more &&
+      scan_context.cursor != NULL) {
+    out->cursor = scan_context.cursor;
+    scan_context.cursor = NULL;
+  } else if (!filter.enabled && scan_res.next_start_after != NULL) {
     out->cursor = lc_strdup_local(scan_res.next_start_after);
     if (out->cursor == NULL) {
       lc_client_free(client, key_selector);
       lc_client_free(client, owner_selector);
       lc_pouch_lql_document_filter_cleanup(&filter);
+      lc_pouch_query_keys_scan_context_cleanup(&scan_context);
       lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator,
                                             &scan_res);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -6900,6 +7058,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     lc_client_free(client, key_selector);
     lc_client_free(client, owner_selector);
     lc_pouch_lql_document_filter_cleanup(&filter);
+    lc_pouch_query_keys_scan_context_cleanup(&scan_context);
     lc_query_res_cleanup(out);
     lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
     return LC_ERR_NOMEM;
@@ -6907,6 +7066,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   lc_client_free(client, key_selector);
   lc_client_free(client, owner_selector);
   lc_pouch_lql_document_filter_cleanup(&filter);
+  lc_pouch_query_keys_scan_context_cleanup(&scan_context);
   lc_pouch_query_index_scan_res_cleanup(&client->pouch_allocator, &scan_res);
   return LC_OK;
 }

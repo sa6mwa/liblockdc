@@ -254,6 +254,20 @@ Latest release targets confirmed on 2026-07-23:
 - [x] Keep API examples aligned with the receiver-function public surface.
 - [x] Keep the Lua rock dependency boundary aligned with the pinned
   `lonejson` release.
+- [x] Audit `docs/pouch-storage.md` against the current pouch code/tests after
+  the `liblql v0.2.0` upgrade.
+  - [x] Fix LQL document predicate pagination so scan and indexed `query` /
+    `query_keys` apply `limit` to matched rows, not pre-filter storage
+    candidates, and return cursors only when another matching row exists.
+  - [ ] Add storage-owned field/range posting indexes for low-match public LQL
+    document predicates; the current `liblql` path evaluates document
+    candidates correctly but does not yet satisfy the design goal that indexed
+    LQL searches walk relevant posting/candidate sets instead of broad summary
+    candidates.
+  - [ ] Revisit the segmented manifest/snapshot implementation order once the
+    single-log compaction milestone is release-stable; the current disk backend
+    deliberately implements the simpler single-log milestone documented in the
+    design notes.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
 - [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
   introduced.
