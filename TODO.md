@@ -282,10 +282,37 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Extend candidate extraction beyond single `eq` selectors to safe
       top-level `and` conjunction/intersection forms over supported scalar
       equality postings; final predicate acceptance remains owned by `liblql`.
-  - [ ] Revisit the segmented manifest/snapshot implementation order once the
-    single-log compaction milestone is release-stable; the current disk backend
-    deliberately implements the simpler single-log milestone documented in the
-    design notes.
+  - [ ] Cut pouch disk storage over to the unreleased fresh segmented
+    per-namespace logstore format; no legacy `store.log` compatibility or
+    import migration is required because pouch has not shipped.
+    - [ ] Create the per-namespace layout under
+      `<root>/<namespace>/logstore/` with `manifest/`, `segments/`,
+      `snapshots/`, `markers/`, and queue notification directories, while
+      keeping shared lock/backend identity paths explicit.
+    - [ ] Implement manifest append/replay for segment open, segment seal,
+      snapshot install, obsolete segment, and obsolete snapshot records.
+    - [ ] Implement manifest repair for missing manifests, manifestless
+      segments, crash-incomplete manifests, and legacy open-only manifests
+      produced during the new segmented development path.
+    - [ ] Move writes from the root-level `store.log` to active namespace
+      segments, including active segment creation, sealing thresholds, fsync
+      boundaries, and writer marker refresh.
+    - [ ] Replay installed snapshots plus non-obsolete segment tails in
+      deterministic order, reset replay projections after snapshot or obsolete
+      set changes, and preserve corrupt-tail truncation semantics per segment.
+    - [ ] Implement snapshot compaction and cleanup: capture live refs,
+      validate drift before install, protect live state-link targets, mark old
+      segments/snapshots obsolete, and retry obsolete-file cleanup.
+    - [ ] Move durable query summary/posting sidecars into the segmented
+      lifecycle so index rebuild, compaction, and crash recovery are tied to
+      namespace log generations.
+    - [ ] Add focused recovery tests for fresh segmented stores, reopen,
+      corrupt tails, manifest repair, snapshot install, obsolete cleanup,
+      state-link protection, and query/index rebuild from authoritative
+      namespace history.
+    - [ ] Add performance benchmarks that compare segmented pouch against the
+      Go lockd disk backend on large data and indexed low-match LQL workloads
+      after segmented correctness tests are stable.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
 - [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
   introduced.
