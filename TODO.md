@@ -90,7 +90,7 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 
 ## Lifecycle and dependency alignment
 
-Latest release targets confirmed on 2026-07-22:
+Latest release targets confirmed on 2026-07-23:
 
 - `lonejson v0.42.0`
 - `libpslog v0.9.0`
@@ -140,6 +140,9 @@ Latest release targets confirmed on 2026-07-22:
     the `v0.1.0` spooled evaluator gap directly; if a later `liblql` release
     starts evaluating that selector, the probe fails and forces the pouch
     backend to replace the unsupported boundary with real liblql evaluation.
+  - [x] Reconfirm on 2026-07-23 that `liblql v0.1.0` is still the latest
+    upstream release, so the general evaluator path remains an upstream
+    dependency blocker rather than repo-local incomplete integration.
 - [x] Keep pouch storage-owned indexes behind the pouch store boundary; use
   `liblql` only for query language semantics and predicate/evaluator behavior.
 - [x] Add observable pouch tests for `liblql`-backed owner/key selectors,
