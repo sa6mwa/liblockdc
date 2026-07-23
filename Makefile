@@ -94,7 +94,7 @@ help:
 		'make prerelease         Run deterministic local prerelease confidence: finalize-slice, test-all, package-verify, and lua-test.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
 		'make prerelease-hardening  Run prerelease plus fuzz smoke, benchmark gate, and release matrix.' \
-		'make release            Run the clean-slate final release workflow: tests, e2e, benchmarks, package generation, and final release verification; fuzz is included when Clang/libFuzzer is available.' \
+		'make release            Run the clean-slate final release workflow: tests, AFL++ fuzzing, e2e, benchmarks, package generation, and final release verification.' \
 		'make release-matrix     Rebuild, test, package, and verify the release matrix while reusing existing build and dependency caches.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
 

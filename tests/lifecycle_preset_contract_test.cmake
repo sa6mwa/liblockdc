@@ -143,6 +143,7 @@ assert_configure_cache(fuzz LOCKDC_TARGET_OS linux)
 assert_configure_cache(fuzz LOCKDC_TARGET_LIBC gnu)
 assert_configure_cache_absent(fuzz CMAKE_C_COMPILER)
 assert_configure_cache_absent(fuzz CMAKE_CXX_COMPILER)
+assert_configure_toolchain(fuzz "$\{sourceDir\}/cmake/toolchains/fuzz-aflpp.cmake")
 
 assert_configure_toolchain(x86_64-linux-gnu-release "$\{sourceDir\}/cmake/toolchains/x86_64-linux-gnu.cmake")
 assert_configure_toolchain(x86_64-linux-musl-release "$\{sourceDir\}/cmake/toolchains/x86_64-linux-musl.cmake")

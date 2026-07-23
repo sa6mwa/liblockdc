@@ -178,6 +178,7 @@
     {
       "name": "fuzz",
       "inherits": "debug",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/fuzz-aflpp.cmake",
       "cacheVariables": {
         "CMAKE_C_FLAGS_DEBUG": "-O1 -g -fno-omit-frame-pointer",
         "LOCKDC_TARGET_ARCH": "x86_64",

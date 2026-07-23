@@ -56,10 +56,10 @@ add_test(NAME pouch_liblql_storage_boundary
     -P "${CMAKE_SOURCE_DIR}/tests/pouch_liblql_storage_boundary_test.cmake"
 )
 
-add_test(NAME release_target_clang_guard_test
+add_test(NAME release_fuzz_targeting_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
-    -P "${CMAKE_SOURCE_DIR}/tests/release_target_clang_guard_test.cmake"
+    -P "${CMAKE_SOURCE_DIR}/tests/release_fuzz_targeting_test.cmake"
 )
 
 add_test(NAME lua_binding_source_layout_test

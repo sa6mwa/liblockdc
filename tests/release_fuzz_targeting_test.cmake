@@ -5,7 +5,6 @@ endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "LOCKDC_RELEASE_DRY_RUN=1"
-        "LOCKDC_RELEASE_CLANG_BIN=__missing_clang__"
         bash "${LOCKDC_ROOT}/scripts/release.sh"
     WORKING_DIRECTORY "${LOCKDC_ROOT}"
     RESULT_VARIABLE release_result
@@ -25,7 +24,7 @@ foreach(expected
     "[release] __test-debug"
     "[release] __test-host"
     "[release] __cross-test"
-    "[release] skipping __fuzz: clang not available (__missing_clang__)"
+    "[release] __fuzz"
     "[release] __test-e2e"
     "[release] __benchmarks"
     "[release] __release-package-only"

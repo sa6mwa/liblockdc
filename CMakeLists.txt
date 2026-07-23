@@ -61,7 +61,7 @@ cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS
     OFF
 )
 option(LOCKDC_BUILD_BENCHMARKS "Build local benchmark targets." ON)
-option(LOCKDC_BUILD_FUZZERS "Build clang/libFuzzer targets for parser and stream hardening." OFF)
+option(LOCKDC_BUILD_FUZZERS "Build AFL++ targets for parser and stream hardening." OFF)
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
 option(LOCKDC_RELEASE_WERROR "Treat warnings as errors for lockdc release builds." ON)
 option(LOCKDC_INSTALL "Enable install rules." ON)
@@ -114,8 +114,8 @@ if(NOT LOCKDC_ABI_VERSION MATCHES "^[0-9]+$")
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)
-    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
-        message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires Clang as the C compiler")
+    if(NOT DEFINED LOCKDC_AFLPP_ROOT OR LOCKDC_AFLPP_ROOT STREQUAL "")
+        message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires the pinned AFL++ lifecycle toolchain")
     endif()
     if(NOT LOCKDC_BUILD_STATIC)
         message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires LOCKDC_BUILD_STATIC=ON")
@@ -231,52 +231,17 @@ function(lc_enable_coverage_if_requested target)
 endfunction()
 
 function(lc_enable_fuzz_instrumentation_if_requested target)
-    get_target_property(target_type ${target} TYPE)
-    if(LOCKDC_BUILD_FUZZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+    if(LOCKDC_BUILD_FUZZERS)
         target_compile_definitions(${target} PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1)
-        target_compile_options(${target} PRIVATE
-            -fsanitize=fuzzer-no-link,address,undefined
-            -fno-omit-frame-pointer
-            -g
-        )
-        if(NOT target_type STREQUAL "STATIC_LIBRARY")
-            target_link_options(${target} PRIVATE -fsanitize=fuzzer-no-link,address,undefined)
-        endif()
     endif()
 endfunction()
 
 function(lc_assert_fuzz_toolchain_supported)
-    set(fuzz_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/fuzz-toolchain-probe")
-    set(fuzz_probe_source "${fuzz_probe_dir}/probe.c")
-    set(fuzz_probe_binary "${fuzz_probe_dir}/probe")
-
-    file(MAKE_DIRECTORY "${fuzz_probe_dir}")
-    file(WRITE "${fuzz_probe_source}" [=[
-int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) {
-    (void)data;
-    (void)size;
-    return 0;
-}
-]=])
-
-    execute_process(
-        COMMAND "${CMAKE_C_COMPILER}"
-            -v
-            -fsanitize=fuzzer,address
-            -fno-omit-frame-pointer
-            "${fuzz_probe_source}"
-            -o "${fuzz_probe_binary}"
-        RESULT_VARIABLE fuzz_probe_result
-        OUTPUT_VARIABLE fuzz_probe_stdout
-        ERROR_VARIABLE fuzz_probe_stderr
-    )
-
-    if(NOT fuzz_probe_result EQUAL 0)
-        message(FATAL_ERROR
-            "LOCKDC_BUILD_FUZZERS=ON requires a C toolchain that can link -fsanitize=fuzzer,address. "
-            "The selected compiler is '${CMAKE_C_COMPILER}'. Install the matching compiler-rt/libFuzzer runtime "
-            "for this Clang toolchain or use a Clang toolchain that provides those libraries.\n"
-            "clang output:\n${fuzz_probe_stdout}\n${fuzz_probe_stderr}")
+    if(NOT DEFINED LOCKDC_AFLPP_ROOT OR LOCKDC_AFLPP_ROOT STREQUAL "")
+        message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires the pinned AFL++ lifecycle toolchain")
+    endif()
+    if(NOT EXISTS "${LOCKDC_AFLPP_ROOT}/bin/afl-fuzz")
+        message(FATAL_ERROR "Pinned AFL++ afl-fuzz is missing: ${LOCKDC_AFLPP_ROOT}/bin/afl-fuzz")
     endif()
 endfunction()
 

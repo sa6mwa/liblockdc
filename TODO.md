@@ -193,12 +193,17 @@ Latest release targets confirmed on 2026-07-22:
 - [x] Replace sanitizer-as-primary hardening assumptions with the updated native
   Valgrind gate while preserving any existing useful ASan/UBSan coverage as
   compatibility or optional hardening.
-- [ ] Align fuzzing with the updated pinned AFL++ GCC-plugin lifecycle for
+- [x] Align fuzzing with the updated pinned AFL++ GCC-plugin lifecycle for
   native x86_64 Linux only; ensure fuzz targets never rely on host Clang/GCC as
   the project compiler.
   - [x] Remove the explicit host `clang` compiler override from the
     compatibility `fuzz` preset and assert native `x86_64-linux-gnu` target
     metadata in the preset contract.
+  - [x] Vendor the pinned `scripts/cpkt-aflpp.sh` resolver, add the
+    `fuzz-aflpp` toolchain file, and make the `fuzz` preset compile through
+    AFL++ wrappers backed by the Bootlin x86_64 GNU collection.
+  - [x] Replace libFuzzer-only smoke execution with an AFL-compatible harness
+    and bounded `make fuzz-smoke` AFL++ runs across committed corpora.
 - [x] Update Make command surfaces so `make help` is authoritative and includes
   the updated lifecycle targets: `finalize-slice`, `prerelease`,
   `prerelease-live`, `prerelease-hardening`, `release-matrix`, `valgrind`, and
