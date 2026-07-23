@@ -403,6 +403,8 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
     lc_pouch_disk_store *store, lc_pouch_disk_queue_entry *entry,
     int payload_fd, unsigned long payload_offset, unsigned long payload_length,
     lc_error *error);
+static int lc_pouch_write_all(int fd, const void *bytes, size_t count);
+static int lc_pouch_disk_fsync(lc_pouch_disk_store *store, int fd, int kind);
 static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
                                                   long version,
                                                   lc_error *error);
@@ -977,6 +979,182 @@ static int lc_pouch_disk_ensure_directory(const char *path,
     return lc_pouch_set_invalid(error, message);
   }
   return LC_OK;
+}
+
+static char *lc_pouch_disk_make_namespace_path(lc_pouch_disk_store *store,
+                                               const char *namespace_name) {
+  size_t root_len;
+  size_t ns_len;
+  size_t total_len;
+  char *path;
+  char *cursor;
+
+  root_len = strlen(store->root_path);
+  ns_len = lc_pouch_disk_lock_escaped_length(namespace_name);
+  total_len = root_len + 1U + ns_len;
+  path = (char *)lc_pouch_alloc(&store->allocator, total_len + 1U);
+  if (path == NULL) {
+    return NULL;
+  }
+  cursor = path;
+  memcpy(cursor, store->root_path, root_len);
+  cursor += root_len;
+  *cursor++ = '/';
+  lc_pouch_disk_lock_escape(cursor, namespace_name);
+  return path;
+}
+
+static int lc_pouch_disk_ensure_namespace_segment_manifest(
+    lc_pouch_disk_store *store, const char *manifest_log_path,
+    const char *segment_path, lc_error *error) {
+  static const char manifest_line[] = "open seg-0000000000000001.log\n";
+  struct stat st;
+  int fd;
+  int should_append;
+  int rc;
+
+  should_append = 1;
+  if (stat(manifest_log_path, &st) == 0 && st.st_size > 0) {
+    should_append = 0;
+  } else if (errno != ENOENT && errno != 0) {
+    return lc_pouch_set_errno(error, "failed to stat pouch manifest");
+  }
+  fd = open(segment_path, O_RDWR | O_CREAT, 0666);
+  if (fd < 0) {
+    return lc_pouch_set_errno(error, "failed to create pouch segment");
+  }
+  if (close(fd) != 0) {
+    return lc_pouch_set_errno(error, "failed to close pouch segment");
+  }
+  if (!should_append) {
+    return LC_OK;
+  }
+  fd = open(manifest_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+  if (fd < 0) {
+    return lc_pouch_set_errno(error, "failed to open pouch manifest");
+  }
+  rc = LC_OK;
+  if (!lc_pouch_write_all(fd, manifest_line, sizeof(manifest_line) - 1U)) {
+    rc = lc_pouch_set_errno(error, "failed to append pouch manifest");
+  } else if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG) != 0) {
+    rc = lc_pouch_set_errno(error, "failed to fsync pouch manifest");
+  }
+  if (close(fd) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch manifest");
+  }
+  return rc;
+}
+
+static int lc_pouch_disk_ensure_namespace_logstore(
+    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
+  char *namespace_path;
+  char *logstore_path;
+  char *manifest_path;
+  char *segments_path;
+  char *snapshots_path;
+  char *markers_path;
+  char *queue_notify_path;
+  char *manifest_log_path;
+  char *segment_path;
+  int rc;
+
+  namespace_path = NULL;
+  logstore_path = NULL;
+  manifest_path = NULL;
+  segments_path = NULL;
+  snapshots_path = NULL;
+  markers_path = NULL;
+  queue_notify_path = NULL;
+  manifest_log_path = NULL;
+  segment_path = NULL;
+  rc = LC_OK;
+
+  if (store == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_set_invalid(error,
+                                "pouch namespace logstore requires namespace");
+  }
+  namespace_path = lc_pouch_disk_make_namespace_path(store, namespace_name);
+  if (namespace_path == NULL) {
+    rc = lc_pouch_set_nomem(error,
+                            "failed to allocate pouch namespace path");
+    goto cleanup;
+  }
+  logstore_path =
+      lc_pouch_join_path(&store->allocator, namespace_path, "logstore");
+  manifest_path =
+      lc_pouch_join_path(&store->allocator, logstore_path, "manifest");
+  segments_path =
+      lc_pouch_join_path(&store->allocator, logstore_path, "segments");
+  snapshots_path =
+      lc_pouch_join_path(&store->allocator, logstore_path, "snapshots");
+  markers_path =
+      lc_pouch_join_path(&store->allocator, logstore_path, "markers");
+  queue_notify_path =
+      lc_pouch_join_path(&store->allocator, logstore_path, "queue-notify");
+  manifest_log_path =
+      lc_pouch_join_path(&store->allocator, manifest_path, "manifest.log");
+  segment_path =
+      lc_pouch_join_path(&store->allocator, segments_path,
+                         "seg-0000000000000001.log");
+  if (logstore_path == NULL || manifest_path == NULL ||
+      segments_path == NULL || snapshots_path == NULL ||
+      markers_path == NULL || queue_notify_path == NULL ||
+      manifest_log_path == NULL || segment_path == NULL) {
+    rc = lc_pouch_set_nomem(error,
+                            "failed to allocate pouch namespace logstore path");
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      namespace_path, "failed to create pouch namespace directory", error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      logstore_path, "failed to create pouch namespace logstore directory",
+      error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      manifest_path, "failed to create pouch manifest directory", error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      segments_path, "failed to create pouch segments directory", error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      snapshots_path, "failed to create pouch snapshots directory", error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      markers_path, "failed to create pouch markers directory", error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      queue_notify_path, "failed to create pouch queue notification directory",
+      error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_disk_ensure_namespace_segment_manifest(
+      store, manifest_log_path, segment_path, error);
+
+cleanup:
+  lc_pouch_free(&store->allocator, segment_path);
+  lc_pouch_free(&store->allocator, manifest_log_path);
+  lc_pouch_free(&store->allocator, queue_notify_path);
+  lc_pouch_free(&store->allocator, markers_path);
+  lc_pouch_free(&store->allocator, snapshots_path);
+  lc_pouch_free(&store->allocator, segments_path);
+  lc_pouch_free(&store->allocator, manifest_path);
+  lc_pouch_free(&store->allocator, logstore_path);
+  lc_pouch_free(&store->allocator, namespace_path);
+  return rc;
 }
 
 static int lc_pouch_disk_ensure_lock_namespace(lc_pouch_disk_store *store,
@@ -6710,6 +6888,10 @@ static int lc_pouch_disk_append_record(
   off_t start;
   int rc;
 
+  rc = lc_pouch_disk_ensure_namespace_logstore(store, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   ns_len = (unsigned long)strlen(namespace_name);
   key_len = (unsigned long)strlen(key);
   ct_len = content_type != NULL ? (unsigned long)strlen(content_type) : 0UL;
@@ -6892,6 +7074,10 @@ static int lc_pouch_disk_append_fd_record(
   off_t start;
   int rc;
 
+  rc = lc_pouch_disk_ensure_namespace_logstore(store, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   ns_len = (unsigned long)strlen(namespace_name);
   key_len = (unsigned long)strlen(key);
   ct_len = content_type != NULL ? (unsigned long)strlen(content_type) : 0UL;

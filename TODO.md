@@ -285,10 +285,13 @@ Latest release targets confirmed on 2026-07-23:
   - [ ] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
-    - [ ] Create the per-namespace layout under
+    - [x] Create the per-namespace layout under
       `<root>/<namespace>/logstore/` with `manifest/`, `segments/`,
       `snapshots/`, `markers/`, and queue notification directories, while
       keeping shared lock/backend identity paths explicit.
+      - [x] Establish the initial active-segment scaffold and manifest-open
+        record during namespace writes; root-level `store.log` remains the
+        temporary write target until the active segment write cutover lands.
     - [ ] Implement manifest append/replay for segment open, segment seal,
       snapshot install, obsolete segment, and obsolete snapshot records.
     - [ ] Implement manifest repair for missing manifests, manifestless

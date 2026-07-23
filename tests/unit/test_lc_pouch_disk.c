@@ -364,21 +364,31 @@ static void test_remove_lock_tree(const char *root) {
 }
 
 static void test_cleanup_root(const char *root) {
+  DIR *dir;
+  struct dirent *entry;
   char path[512];
+  struct stat st;
 
-  test_remove_writer_markers(root);
-  test_remove_queue_wake_markers(root);
-  test_remove_lock_tree(root);
-  snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/store.log", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/writer.lock", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/query.index", root);
-  unlink(path);
+  dir = opendir(root);
+  if (dir == NULL) {
+    rmdir(root);
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 ||
+        strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    if (!test_join_path_buf(path, sizeof(path), root, entry->d_name)) {
+      continue;
+    }
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+      test_cleanup_root(path);
+    } else {
+      unlink(path);
+    }
+  }
+  closedir(dir);
   rmdir(root);
 }
 
@@ -1238,6 +1248,72 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   lc_error_cleanup(&error);
   assert_true(tracked.malloc_calls > 0U);
   assert_true(tracked.free_calls > 0U);
+  test_cleanup_root(root);
+}
+
+static void test_state_write_creates_segmented_namespace_logstore(
+    void **state) {
+  char root[256];
+  char path[512];
+  char manifest_text[128];
+  struct stat st;
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "segmented-namespace-layout");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"value\":1}");
+  opts.content_type = "application/json";
+  rc = store->write_state(store, "team.alpha", "alpha", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  snprintf(path, sizeof(path), "%s/team%%2ealpha/logstore/manifest", root);
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(S_ISDIR(st.st_mode));
+  snprintf(path, sizeof(path), "%s/team%%2ealpha/logstore/segments", root);
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(S_ISDIR(st.st_mode));
+  snprintf(path, sizeof(path), "%s/team%%2ealpha/logstore/snapshots", root);
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(S_ISDIR(st.st_mode));
+  snprintf(path, sizeof(path), "%s/team%%2ealpha/logstore/markers", root);
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(S_ISDIR(st.st_mode));
+  snprintf(path, sizeof(path), "%s/team%%2ealpha/logstore/queue-notify", root);
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(S_ISDIR(st.st_mode));
+  snprintf(path, sizeof(path),
+           "%s/team%%2ealpha/logstore/segments/seg-0000000000000001.log",
+           root);
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(S_ISREG(st.st_mode));
+  snprintf(path, sizeof(path),
+           "%s/team%%2ealpha/logstore/manifest/manifest.log", root);
+  test_read_file_text(path, manifest_text, sizeof(manifest_text));
+  assert_string_equal(manifest_text, "open seg-0000000000000001.log\n");
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
 
@@ -13083,6 +13159,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_allocator_from_lc_requires_matching_realloc),
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
+      cmocka_unit_test(test_state_write_creates_segmented_namespace_logstore),
       cmocka_unit_test(
           test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
