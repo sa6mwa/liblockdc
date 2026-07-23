@@ -1305,6 +1305,7 @@ static void test_state_write_creates_segmented_namespace_logstore(
            root);
   assert_int_equal(stat(path, &st), 0);
   assert_true(S_ISREG(st.st_mode));
+  assert_true(st.st_size > (off_t)TEST_POUCH_HEADER_SIZE);
   snprintf(path, sizeof(path),
            "%s/team%%2ealpha/logstore/manifest/manifest.log", root);
   test_read_file_text(path, manifest_text, sizeof(manifest_text));
