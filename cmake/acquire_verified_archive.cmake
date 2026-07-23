@@ -116,6 +116,19 @@ if(NOT lockdc_cache_hit)
             "cache_path=${lockdc_archive_path}")
     endif()
 
+    if(DEFINED LOCKDC_ARCHIVE_TEST_DELAY_BEFORE_PUBLISH
+       AND NOT LOCKDC_ARCHIVE_TEST_DELAY_BEFORE_PUBLISH STREQUAL "")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E sleep
+                "${LOCKDC_ARCHIVE_TEST_DELAY_BEFORE_PUBLISH}"
+            RESULT_VARIABLE lockdc_archive_delay_result)
+        if(NOT lockdc_archive_delay_result EQUAL 0)
+            file(REMOVE "${lockdc_tmp_path}")
+            message(FATAL_ERROR
+                "test pre-publish delay failed for ${LOCKDC_ARCHIVE_COMPONENT}")
+        endif()
+    endif()
+
     file(RENAME "${lockdc_tmp_path}" "${lockdc_archive_path}")
 endif()
 

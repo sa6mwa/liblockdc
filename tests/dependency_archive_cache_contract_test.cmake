@@ -73,6 +73,123 @@ if(NOT offline_sha256 STREQUAL expected_sha256)
     message(FATAL_ERROR "offline verified archive cache hit produced wrong hash")
 endif()
 
+set(concurrent_source_archive "${source_dir}/fake-concurrent-1.0.tar.gz")
+set(concurrent_name "fake-concurrent-1.0.tar.gz")
+set(concurrent_local_root "${test_root}/concurrent-local")
+set(concurrent_done_marker "${test_root}/concurrent.done")
+file(MAKE_DIRECTORY "${concurrent_local_root}")
+file(WRITE "${concurrent_source_archive}" "verified concurrent archive payload\n")
+file(SHA256 "${concurrent_source_archive}" concurrent_sha256)
+set(concurrent_global_archive
+    "${cache_root}/archives/sha256/${concurrent_sha256}/${concurrent_name}")
+set(concurrent_observed_tmp_marker "${test_root}/concurrent-observed-tmp")
+set(concurrent_observer_script "${test_root}/concurrent-observer.cmake")
+file(WRITE "${concurrent_observer_script}" "
+if(NOT DEFINED LOCKDC_FINAL_ARCHIVE OR LOCKDC_FINAL_ARCHIVE STREQUAL \"\")
+    message(FATAL_ERROR \"LOCKDC_FINAL_ARCHIVE is required\")
+endif()
+if(NOT DEFINED LOCKDC_EXPECTED_SHA256 OR LOCKDC_EXPECTED_SHA256 STREQUAL \"\")
+    message(FATAL_ERROR \"LOCKDC_EXPECTED_SHA256 is required\")
+endif()
+if(NOT DEFINED LOCKDC_DONE_MARKER OR LOCKDC_DONE_MARKER STREQUAL \"\")
+    message(FATAL_ERROR \"LOCKDC_DONE_MARKER is required\")
+endif()
+if(NOT DEFINED LOCKDC_OBSERVED_TMP_MARKER OR LOCKDC_OBSERVED_TMP_MARKER STREQUAL \"\")
+    message(FATAL_ERROR \"LOCKDC_OBSERVED_TMP_MARKER is required\")
+endif()
+get_filename_component(observer_archive_dir \"\${LOCKDC_FINAL_ARCHIVE}\" DIRECTORY)
+set(observer_seen_tmp OFF)
+while(NOT EXISTS \"\${LOCKDC_DONE_MARKER}\")
+    if(EXISTS \"\${LOCKDC_FINAL_ARCHIVE}\")
+        file(SHA256 \"\${LOCKDC_FINAL_ARCHIVE}\" observer_sha256)
+        string(TOLOWER \"\${observer_sha256}\" observer_sha256)
+        if(NOT observer_sha256 STREQUAL LOCKDC_EXPECTED_SHA256)
+            message(FATAL_ERROR
+                \"concurrent cache observer saw unverified final archive: \${LOCKDC_FINAL_ARCHIVE}\")
+        endif()
+    endif()
+    file(GLOB observer_tmp_paths \"\${observer_archive_dir}/*.tmp.*\")
+    if(observer_tmp_paths)
+        set(observer_seen_tmp ON)
+    endif()
+    execute_process(COMMAND \"${CMAKE_COMMAND}\" -E sleep 0.05)
+endwhile()
+if(observer_seen_tmp)
+    file(WRITE \"\${LOCKDC_OBSERVED_TMP_MARKER}\" \"observed temporary archive\\n\")
+endif()
+")
+
+set(concurrent_runner "${test_root}/run-concurrent-acquire.sh")
+file(WRITE "${concurrent_runner}" "#!/bin/sh
+set -eu
+\"${CMAKE_COMMAND}\" \\
+  -DLOCKDC_FINAL_ARCHIVE=\"${concurrent_global_archive}\" \\
+  -DLOCKDC_EXPECTED_SHA256=\"${concurrent_sha256}\" \\
+  -DLOCKDC_DONE_MARKER=\"${concurrent_done_marker}\" \\
+  -DLOCKDC_OBSERVED_TMP_MARKER=\"${concurrent_observed_tmp_marker}\" \\
+  -P \"${concurrent_observer_script}\" > \"${test_root}/concurrent-observer.log\" 2>&1 &
+observer_pid=$!
+pids=\"\"
+i=1
+while [ \"$i\" -le 6 ]; do
+  \"${CMAKE_COMMAND}\" \\
+    -DLOCKDC_ARCHIVE_COMPONENT=fake-concurrent \\
+    -DLOCKDC_ARCHIVE_URL=\"file://${concurrent_source_archive}\" \\
+    -DLOCKDC_ARCHIVE_SHA256=\"${concurrent_sha256}\" \\
+    -DLOCKDC_ARCHIVE_NAME=\"${concurrent_name}\" \\
+    -DLOCKDC_ARCHIVE_OUTPUT=\"${concurrent_local_root}/worker-$i/${concurrent_name}\" \\
+    -DLOCKDC_ARCHIVE_ALLOW_FILE_URL=ON \\
+    -DLOCKDC_ARCHIVE_TEST_DELAY_BEFORE_PUBLISH=1 \\
+    -DCPKT_DEPENDENCY_CACHE=\"${cache_root}\" \\
+    -P \"${helper}\" > \"${test_root}/concurrent-worker-$i.log\" 2>&1 &
+  pids=\"$pids $!\"
+  i=$((i + 1))
+done
+worker_status=0
+for pid in $pids; do
+  if ! wait \"$pid\"; then
+    worker_status=1
+  fi
+done
+printf 'done\\n' > \"${concurrent_done_marker}\"
+if ! wait \"$observer_pid\"; then
+  worker_status=1
+fi
+exit \"$worker_status\"
+")
+execute_process(COMMAND chmod +x "${concurrent_runner}")
+execute_process(
+    COMMAND "${concurrent_runner}"
+    RESULT_VARIABLE concurrent_result
+    OUTPUT_VARIABLE concurrent_output
+    ERROR_VARIABLE concurrent_error)
+if(NOT concurrent_result EQUAL 0)
+    message(FATAL_ERROR
+        "concurrent verified archive acquisition stress failed\n"
+        "stdout:\n${concurrent_output}\n"
+        "stderr:\n${concurrent_error}")
+endif()
+if(NOT EXISTS "${concurrent_global_archive}")
+    message(FATAL_ERROR "concurrent verified archive acquisition did not publish the global archive")
+endif()
+file(SHA256 "${concurrent_global_archive}" concurrent_global_sha256)
+if(NOT concurrent_global_sha256 STREQUAL concurrent_sha256)
+    message(FATAL_ERROR "concurrent verified archive acquisition published the wrong hash")
+endif()
+foreach(worker_index RANGE 1 6)
+    set(worker_archive "${concurrent_local_root}/worker-${worker_index}/${concurrent_name}")
+    if(NOT EXISTS "${worker_archive}")
+        message(FATAL_ERROR "concurrent worker ${worker_index} did not receive a local archive")
+    endif()
+    file(SHA256 "${worker_archive}" worker_sha256)
+    if(NOT worker_sha256 STREQUAL concurrent_sha256)
+        message(FATAL_ERROR "concurrent worker ${worker_index} received the wrong archive hash")
+    endif()
+endforeach()
+if(NOT EXISTS "${concurrent_observed_tmp_marker}")
+    message(FATAL_ERROR "concurrent cache observer did not observe a pre-publish temporary archive")
+endif()
+
 file(WRITE "${global_archive}" "corrupt archive payload\n")
 file(REMOVE "${local_archive_offline}")
 run_acquire("${local_archive_offline}" corrupt_result corrupt_output corrupt_error)

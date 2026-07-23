@@ -168,7 +168,7 @@ Latest release targets confirmed on 2026-07-22:
   initial download, offline cache hit after deleting local dependency roots,
   corrupt cached archive rejection, and package privacy rejection of global-cache
   paths.
-- [ ] Add concurrent acquisition stress coverage for the shared dependency
+- [x] Add concurrent acquisition stress coverage for the shared dependency
   archive cache lock path.
 - [ ] Align Linux compiler resolution with the updated Bootlin toolchain policy:
   no host compiler/binutils fallback for Linux builds, complete pinned Bootlin
