@@ -5157,6 +5157,14 @@ static int lc_pouch_client_unsupported(lc_error *error, const char *message) {
   return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
 }
 
+static int lc_pouch_query_selector_error_or_unsupported(lc_error *error,
+                                                        const char *message) {
+  if (error != NULL && error->code != LC_OK && error->message != NULL) {
+    return error->code;
+  }
+  return lc_pouch_client_unsupported(error, message);
+}
+
 static long lc_pouch_now_millis(void) {
   struct timespec ts;
 
@@ -5264,9 +5272,27 @@ typedef struct lc_pouch_legacy_selector_field_visit {
   int valid;
   int top_key_active;
   int saw_top_key;
-  char top_key[6];
+  char top_key[16];
   size_t top_key_len;
 } lc_pouch_legacy_selector_field_visit;
+
+typedef struct lc_pouch_lql_operator_field_visit {
+  int root_is_object;
+  int key_active;
+  int saw_lql_key;
+  char key[16];
+  size_t key_len;
+} lc_pouch_lql_operator_field_visit;
+
+static int lc_pouch_selector_key_is_lql_operator(const char *key) {
+  return strcmp(key, "all") == 0 || strcmp(key, "and") == 0 ||
+         strcmp(key, "or") == 0 || strcmp(key, "not") == 0 ||
+         strcmp(key, "eq") == 0 || strcmp(key, "in") == 0 ||
+         strcmp(key, "exists") == 0 || strcmp(key, "gt") == 0 ||
+         strcmp(key, "gte") == 0 || strcmp(key, "lt") == 0 ||
+         strcmp(key, "lte") == 0 || strcmp(key, "before") == 0 ||
+         strcmp(key, "after") == 0 || strcmp(key, "since") == 0;
+}
 
 static lonejson_status lc_pouch_legacy_selector_root_object_begin(
     void *user, const lonejson_value_path *path, lonejson_error *error) {
@@ -5400,6 +5426,98 @@ lc_pouch_legacy_selector_has_only_exact_fields(lonejson *runtime,
   return status == LONEJSON_STATUS_OK && visit.root_is_object && visit.valid;
 }
 
+static lonejson_status lc_pouch_lql_operator_root_object_begin(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_operator_field_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_lql_operator_field_visit *)user;
+  if (visit != NULL && path != NULL && path->segment_count == 0U) {
+    visit->root_is_object = 1;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_operator_key_begin(void *user, const lonejson_value_path *path,
+                                lonejson_error *error) {
+  lc_pouch_lql_operator_field_visit *visit;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_operator_field_visit *)user;
+  if (visit != NULL) {
+    visit->key_active = 1;
+    visit->key_len = 0U;
+    visit->key[0] = '\0';
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_operator_key_chunk(void *user, const lonejson_value_path *path,
+                                const char *data, size_t len,
+                                lonejson_error *error) {
+  lc_pouch_lql_operator_field_visit *visit;
+  size_t index;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_operator_field_visit *)user;
+  if (visit == NULL || !visit->key_active) {
+    return LONEJSON_STATUS_OK;
+  }
+  for (index = 0U; index < len; ++index) {
+    if (visit->key_len >= sizeof(visit->key) - 1U) {
+      continue;
+    }
+    visit->key[visit->key_len] = data[index];
+    ++visit->key_len;
+  }
+  visit->key[visit->key_len] = '\0';
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_operator_key_end(void *user, const lonejson_value_path *path,
+                              lonejson_error *error) {
+  lc_pouch_lql_operator_field_visit *visit;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_operator_field_visit *)user;
+  if (visit != NULL && visit->key_active) {
+    visit->key_active = 0;
+    if (lc_pouch_selector_key_is_lql_operator(visit->key)) {
+      visit->saw_lql_key = 1;
+    }
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static int lc_pouch_selector_json_has_lql_operator(lonejson *runtime,
+                                                   const char *selector_json) {
+  lc_pouch_lql_operator_field_visit visit;
+  lonejson_path_value_visitor visitor;
+  lonejson_error error;
+  lonejson_status status;
+
+  if (runtime == NULL || selector_json == NULL) {
+    return 0;
+  }
+  memset(&visit, 0, sizeof(visit));
+  visitor = lonejson_default_path_value_visitor();
+  visitor.object_begin = lc_pouch_lql_operator_root_object_begin;
+  visitor.object_key_begin = lc_pouch_lql_operator_key_begin;
+  visitor.object_key_chunk = lc_pouch_lql_operator_key_chunk;
+  visitor.object_key_end = lc_pouch_lql_operator_key_end;
+  lonejson_error_init(&error);
+  status = runtime->visit_path_value_cstr(runtime, selector_json, &visitor,
+                                          &visit, &error);
+  return status == LONEJSON_STATUS_OK && visit.root_is_object &&
+         visit.saw_lql_key;
+}
+
 static int lc_pouch_lql_status_to_error(lql_status status) {
   switch (status) {
   case LQL_STATUS_OK:
@@ -5465,10 +5583,13 @@ static int lc_pouch_lql_assign_exact_term(lql *runtime, lql_selector_node node,
     return lc_pouch_lql_set_error(error, status, &lql_err,
                                   "failed to inspect pouch LQL selector");
   }
-  if (!term.value_present || term.any_count != 0U) {
-    return LC_ERR_INVALID;
-  }
   if (term.field.len == 3U && memcmp(term.field.data, "key", 3U) == 0) {
+    if (!term.value_present || term.any_count != 0U) {
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L, "failed to parse pouch LQL selector",
+          "pouch LQL key equality selector requires exactly one string value",
+          NULL, NULL);
+    }
     if (*has_key) {
       return LC_ERR_INVALID;
     }
@@ -5479,6 +5600,12 @@ static int lc_pouch_lql_assign_exact_term(lql *runtime, lql_selector_node node,
     return LC_OK;
   }
   if (term.field.len == 5U && memcmp(term.field.data, "owner", 5U) == 0) {
+    if (!term.value_present || term.any_count != 0U) {
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L, "failed to parse pouch LQL selector",
+          "pouch LQL owner equality selector requires exactly one string value",
+          NULL, NULL);
+    }
     if (*has_owner) {
       return LC_ERR_INVALID;
     }
@@ -5582,17 +5709,14 @@ lc_pouch_lql_build_exact_selector(lql *runtime, lql_selector_node_kind kind,
                                   const char *field, const char *value,
                                   lql_selector **out, lql_error *error) {
   lql_selector_string_term term;
-  lql_string_view any_values[1];
 
-  (void)any_values;
   memset(&term, 0, sizeof(term));
   term.field.data = field;
   term.field.len = strlen(field);
   term.value_present = 1;
   term.value.data = value;
   term.value.len = strlen(value);
-  return runtime->selector_build_string(runtime, kind, &term, any_values, out,
-                                        error);
+  return runtime->selector_build_string(runtime, kind, &term, NULL, out, error);
 }
 
 static lql_status lc_pouch_lql_build_legacy_selector(
@@ -5695,6 +5819,12 @@ lc_pouch_query_selector_kind_parse(const char *selector_json, char **key_out,
     (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
                        "failed to allocate pouch query selector parser", NULL,
                        NULL, NULL);
+    return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
+  }
+  if (lc_pouch_selector_json_has_lql_operator(runtime, selector_json)) {
+    lql_runtime->destroy(lql_runtime);
+    (void)lc_pouch_lql_set_error(error, lql_status_value, &lql_err,
+                                 "failed to parse pouch LQL selector");
     return LC_POUCH_QUERY_SELECTOR_UNSUPPORTED;
   }
   if (!lc_pouch_legacy_selector_has_only_exact_fields(runtime, selector_json)) {
@@ -6046,7 +6176,7 @@ static int lc_pouch_client_query_scan(lc_client_handle *client,
     if (error != NULL && error->code == LC_ERR_NOMEM) {
       return LC_ERR_NOMEM;
     }
-    return lc_pouch_client_unsupported(
+    return lc_pouch_query_selector_error_or_unsupported(
         error,
         "pouch scan query supports only match-all, key, owner, or key+owner "
         "selector");
@@ -6178,7 +6308,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     if (error != NULL && error->code == LC_ERR_NOMEM) {
       return LC_ERR_NOMEM;
     }
-    return lc_pouch_client_unsupported(
+    return lc_pouch_query_selector_error_or_unsupported(
         error,
         "pouch index query supports only match-all, key, owner, or key+owner "
         "selector");
@@ -6332,7 +6462,7 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
     if (error != NULL && error->code == LC_ERR_NOMEM) {
       return LC_ERR_NOMEM;
     }
-    return lc_pouch_client_unsupported(
+    return lc_pouch_query_selector_error_or_unsupported(
         error, "pouch scan query_keys supports only match-all, key, owner, or "
                "key+owner selector");
   }
@@ -6470,7 +6600,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     if (error != NULL && error->code == LC_ERR_NOMEM) {
       return LC_ERR_NOMEM;
     }
-    return lc_pouch_client_unsupported(
+    return lc_pouch_query_selector_error_or_unsupported(
         error, "pouch index query_keys supports only match-all, key, owner, or "
                "key+owner selector");
   }

@@ -5186,6 +5186,15 @@ static void assert_pouch_unsupported(int rc, lc_error *error,
   lc_error_cleanup(error);
 }
 
+static void assert_pouch_lql_parse_error(int rc, lc_error *error) {
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(error->code, LC_ERR_INVALID);
+  assert_string_equal(error->message, "failed to parse pouch LQL selector");
+  assert_non_null(error->detail);
+  assert_true(error->detail[0] != '\0');
+  lc_error_cleanup(error);
+}
+
 static lc_lease *pouch_acquire_query_key_for_owner(lc_client *client,
                                                    const char *key,
                                                    const char *owner,
@@ -6896,6 +6905,68 @@ static void test_pouch_endpoint_scan_query_rejects_lql_selector(void **state) {
   assert_pouch_unsupported(rc, &error,
                            "pouch scan query supports only match-all, key, "
                            "owner, or key+owner selector");
+
+  lc_sink_close(sink);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
+test_pouch_endpoint_query_reports_malformed_lql_selector(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_sink *sink;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-malformed-lql-selector");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_query_req_init(&req);
+  req.selector_json = "{\"eq\":{\"field\":\"key\"}}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_pouch_lql_parse_error(rc, &error);
+
+  lc_query_req_init(&req);
+  req.selector_json = "{\"eq\":{\"field\":\"key\"}}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_pouch_lql_parse_error(rc, &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+
+  lc_query_req_init(&req);
+  req.selector_json = "{\"eq\":{\"field\":\"key\"}}";
+  req.engine = "scan";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_pouch_lql_parse_error(rc, &error);
+  assert_int_equal(capture.key_count, 0U);
+  assert_int_equal(capture.begin_calls, 0U);
+
+  lc_query_req_init(&req);
+  req.selector_json = "{\"eq\":{\"field\":\"key\"}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_pouch_lql_parse_error(rc, &error);
+  assert_int_equal(capture.key_count, 0U);
+  assert_int_equal(capture.begin_calls, 0U);
 
   lc_sink_close(sink);
   client->close(client);
@@ -9050,6 +9121,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_explicit_index_overrides_scan_config),
       cmocka_unit_test(test_pouch_endpoint_scan_query_rejects_lql_selector),
+      cmocka_unit_test(
+          test_pouch_endpoint_query_reports_malformed_lql_selector),
       cmocka_unit_test(
           test_pouch_endpoint_configured_scan_query_keys_without_hint),
       cmocka_unit_test(
