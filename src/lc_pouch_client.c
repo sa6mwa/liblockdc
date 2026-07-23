@@ -5285,25 +5285,35 @@ typedef struct lc_pouch_lql_operator_field_visit {
   size_t key_len;
 } lc_pouch_lql_operator_field_visit;
 
-typedef struct lc_pouch_lql_eq_hint_visit {
-  int root_is_object;
-  int valid;
-  int key_active;
-  int string_field_active;
-  int string_value_active;
-  int saw_field;
-  int saw_value;
-  int value_supported;
-  size_t root_key_count;
-  size_t eq_key_count;
-  char key[16];
-  size_t key_len;
+typedef struct lc_pouch_lql_eq_hint_term {
   char *field;
   size_t field_len;
   size_t field_capacity;
   char *value;
   size_t value_len;
   size_t value_capacity;
+  int saw_field;
+  int saw_value;
+  int value_supported;
+  size_t wrapper_key_count;
+  size_t eq_key_count;
+} lc_pouch_lql_eq_hint_term;
+
+typedef struct lc_pouch_lql_eq_hint_visit {
+  int root_is_object;
+  int valid;
+  int mode;
+  int key_active;
+  int string_field_active;
+  int string_value_active;
+  int active_term_valid;
+  size_t active_term_index;
+  size_t root_key_count;
+  char key[16];
+  size_t key_len;
+  lc_pouch_lql_eq_hint_term *terms;
+  size_t term_count;
+  size_t term_capacity;
 } lc_pouch_lql_eq_hint_visit;
 
 static int lc_pouch_selector_key_is_lql_operator(const char *key) {
@@ -5542,8 +5552,17 @@ static int lc_pouch_selector_json_has_lql_operator(lonejson *runtime,
          visit.saw_lql_key;
 }
 
-static int lc_pouch_lql_eq_hint_append(lc_pouch_lql_eq_hint_visit *visit,
-                                       char **buffer, size_t *length,
+static void lc_pouch_lql_eq_hint_term_cleanup(
+    lc_pouch_lql_eq_hint_term *term) {
+  if (term == NULL) {
+    return;
+  }
+  lc_free_with_allocator(NULL, term->field);
+  lc_free_with_allocator(NULL, term->value);
+  memset(term, 0, sizeof(*term));
+}
+
+static int lc_pouch_lql_eq_hint_append(char **buffer, size_t *length,
                                        size_t *capacity, const char *data,
                                        size_t data_len) {
   char *grown;
@@ -5573,29 +5592,129 @@ static int lc_pouch_lql_eq_hint_append(lc_pouch_lql_eq_hint_visit *visit,
   memcpy(*buffer + *length, data, data_len);
   *length += data_len;
   (*buffer)[*length] = '\0';
-  (void)visit;
   return 1;
 }
 
-static int lc_pouch_lql_eq_hint_path_is(
-    const lonejson_value_path *path, const char *first, const char *second) {
-  size_t first_len;
-  size_t second_len;
+static int lc_pouch_lql_eq_hint_segment_is(
+    const lonejson_value_path *path, size_t index, const char *value) {
+  size_t value_len;
 
-  if (path == NULL || path->segment_count != (second != NULL ? 2U : 1U)) {
+  if (path == NULL || index >= path->segment_count || value == NULL) {
     return 0;
   }
-  first_len = strlen(first);
-  if (path->segments[0].len != first_len ||
-      memcmp(path->segments[0].data, first, first_len) != 0) {
+  value_len = strlen(value);
+  return path->segments[index].len == value_len &&
+         memcmp(path->segments[index].data, value, value_len) == 0;
+}
+
+static int lc_pouch_lql_eq_hint_parse_index(
+    const lonejson_value_path *path, size_t segment_index, size_t *out) {
+  size_t index;
+  size_t value;
+
+  if (path == NULL || segment_index >= path->segment_count ||
+      path->segments[segment_index].len == 0U) {
     return 0;
   }
-  if (second == NULL) {
+  value = 0U;
+  for (index = 0U; index < path->segments[segment_index].len; ++index) {
+    unsigned char ch;
+
+    ch = (unsigned char)path->segments[segment_index].data[index];
+    if (ch < (unsigned char)'0' || ch > (unsigned char)'9') {
+      return 0;
+    }
+    if (value > (((size_t)-1) - (size_t)(ch - (unsigned char)'0')) / 10U) {
+      return 0;
+    }
+    value = value * 10U + (size_t)(ch - (unsigned char)'0');
+  }
+  if (out != NULL) {
+    *out = value;
+  }
+  return 1;
+}
+
+static int lc_pouch_lql_eq_hint_path_is_and_array(
+    const lonejson_value_path *path) {
+  return path != NULL && path->segment_count == 1U &&
+         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and");
+}
+
+static int lc_pouch_lql_eq_hint_path_is_and_child(
+    const lonejson_value_path *path, size_t *term_index) {
+  return path != NULL && path->segment_count == 2U &&
+         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
+         lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index);
+}
+
+static int lc_pouch_lql_eq_hint_path_is_eq_object(
+    const lonejson_value_path *path, size_t *term_index) {
+  if (path != NULL && path->segment_count == 1U &&
+      lc_pouch_lql_eq_hint_segment_is(path, 0U, "eq")) {
+    if (term_index != NULL) {
+      *term_index = 0U;
+    }
     return 1;
   }
-  second_len = strlen(second);
-  return path->segments[1].len == second_len &&
-         memcmp(path->segments[1].data, second, second_len) == 0;
+  return path != NULL && path->segment_count == 3U &&
+         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
+         lc_pouch_lql_eq_hint_segment_is(path, 2U, "eq") &&
+         lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index);
+}
+
+static int lc_pouch_lql_eq_hint_path_is_eq_member(
+    const lonejson_value_path *path, const char *member, size_t *term_index) {
+  if (path != NULL && path->segment_count == 2U &&
+      lc_pouch_lql_eq_hint_segment_is(path, 0U, "eq") &&
+      lc_pouch_lql_eq_hint_segment_is(path, 1U, member)) {
+    if (term_index != NULL) {
+      *term_index = 0U;
+    }
+    return 1;
+  }
+  return path != NULL && path->segment_count == 4U &&
+         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
+         lc_pouch_lql_eq_hint_segment_is(path, 2U, "eq") &&
+         lc_pouch_lql_eq_hint_segment_is(path, 3U, member) &&
+         lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index);
+}
+
+static int lc_pouch_lql_eq_hint_ensure_term(
+    lc_pouch_lql_eq_hint_visit *visit, size_t term_index) {
+  lc_pouch_lql_eq_hint_term *grown;
+  size_t new_capacity;
+  size_t index;
+
+  if (visit == NULL) {
+    return 0;
+  }
+  if (term_index < visit->term_count) {
+    return 1;
+  }
+  if (term_index + 1U > visit->term_capacity) {
+    new_capacity = visit->term_capacity == 0U ? 4U : visit->term_capacity;
+    while (new_capacity < term_index + 1U) {
+      if (new_capacity > ((size_t)-1) / 2U) {
+        return 0;
+      }
+      new_capacity *= 2U;
+    }
+    grown = (lc_pouch_lql_eq_hint_term *)lc_realloc_with_allocator(
+        NULL, visit->terms, new_capacity * sizeof(visit->terms[0]));
+    if (grown == NULL) {
+      return 0;
+    }
+    memset(grown + visit->term_capacity, 0,
+           (new_capacity - visit->term_capacity) * sizeof(grown[0]));
+    visit->terms = grown;
+    visit->term_capacity = new_capacity;
+  }
+  for (index = visit->term_count; index <= term_index; ++index) {
+    memset(&visit->terms[index], 0, sizeof(visit->terms[index]));
+  }
+  visit->term_count = term_index + 1U;
+  return 1;
 }
 
 static lonejson_status
@@ -5603,12 +5722,19 @@ lc_pouch_lql_eq_hint_root_object_begin(void *user,
                                        const lonejson_value_path *path,
                                        lonejson_error *error) {
   lc_pouch_lql_eq_hint_visit *visit;
+  size_t term_index;
 
   (void)error;
   visit = (lc_pouch_lql_eq_hint_visit *)user;
   if (visit != NULL && path != NULL && path->segment_count == 0U) {
     visit->root_is_object = 1;
-  } else if (visit != NULL && lc_pouch_lql_eq_hint_path_is(path, "eq", "value")) {
+  } else if (visit != NULL &&
+             lc_pouch_lql_eq_hint_path_is_eq_object(path, &term_index)) {
+    if (!lc_pouch_lql_eq_hint_ensure_term(visit, term_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+  } else if (visit != NULL &&
+             !lc_pouch_lql_eq_hint_path_is_and_child(path, &term_index)) {
     visit->valid = 0;
   }
   return LONEJSON_STATUS_OK;
@@ -5621,9 +5747,7 @@ lc_pouch_lql_eq_hint_array_begin(void *user, const lonejson_value_path *path,
 
   (void)error;
   visit = (lc_pouch_lql_eq_hint_visit *)user;
-  if (visit != NULL &&
-      (path == NULL || path->segment_count == 0U ||
-       lc_pouch_lql_eq_hint_path_is(path, "eq", "value"))) {
+  if (visit != NULL && !lc_pouch_lql_eq_hint_path_is_and_array(path)) {
     visit->valid = 0;
   }
   return LONEJSON_STATUS_OK;
@@ -5682,11 +5806,38 @@ lc_pouch_lql_eq_hint_key_end(void *user, const lonejson_value_path *path,
   visit->key_active = 0;
   if (path != NULL && path->segment_count == 0U) {
     visit->root_key_count++;
+    if (strcmp(visit->key, "eq") == 0) {
+      if (visit->mode != 0 && visit->mode != 1) {
+        visit->valid = 0;
+      }
+      visit->mode = 1;
+    } else if (strcmp(visit->key, "and") == 0) {
+      if (visit->mode != 0 && visit->mode != 2) {
+        visit->valid = 0;
+      }
+      visit->mode = 2;
+    } else {
+      visit->valid = 0;
+    }
+  } else if (path != NULL &&
+             lc_pouch_lql_eq_hint_path_is_and_child(path,
+                                                    &visit->active_term_index)) {
+    if (!lc_pouch_lql_eq_hint_ensure_term(visit,
+                                          visit->active_term_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    visit->terms[visit->active_term_index].wrapper_key_count++;
     if (strcmp(visit->key, "eq") != 0) {
       visit->valid = 0;
     }
-  } else if (path != NULL && lc_pouch_lql_eq_hint_path_is(path, "eq", NULL)) {
-    visit->eq_key_count++;
+  } else if (path != NULL &&
+             lc_pouch_lql_eq_hint_path_is_eq_object(
+                 path, &visit->active_term_index)) {
+    if (!lc_pouch_lql_eq_hint_ensure_term(visit,
+                                          visit->active_term_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    visit->terms[visit->active_term_index].eq_key_count++;
     if (strcmp(visit->key, "field") != 0 &&
         strcmp(visit->key, "value") != 0) {
       visit->valid = 0;
@@ -5699,29 +5850,46 @@ static lonejson_status
 lc_pouch_lql_eq_hint_string_begin(void *user, const lonejson_value_path *path,
                                   lonejson_error *error) {
   lc_pouch_lql_eq_hint_visit *visit;
+  lc_pouch_lql_eq_hint_term *term;
+  size_t term_index;
 
   (void)error;
   visit = (lc_pouch_lql_eq_hint_visit *)user;
   if (visit == NULL) {
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
-  if (lc_pouch_lql_eq_hint_path_is(path, "eq", "field")) {
-    visit->string_field_active = 1;
-    visit->field_len = 0U;
-    if (visit->field != NULL) {
-      visit->field[0] = '\0';
-    }
-  } else if (lc_pouch_lql_eq_hint_path_is(path, "eq", "value")) {
-    visit->string_value_active = 1;
-    visit->value_supported = 1;
-    visit->value_len = 0U;
-    if (visit->value != NULL) {
-      visit->value[0] = '\0';
-    }
-    if (!lc_pouch_lql_eq_hint_append(visit, &visit->value, &visit->value_len,
-                                     &visit->value_capacity, "s:", 2U)) {
+  if (lc_pouch_lql_eq_hint_path_is_eq_member(path, "field", &term_index)) {
+    if (!lc_pouch_lql_eq_hint_ensure_term(visit, term_index)) {
       return LONEJSON_STATUS_ALLOCATION_FAILED;
     }
+    term = &visit->terms[term_index];
+    visit->string_field_active = 1;
+    visit->active_term_valid = 1;
+    visit->active_term_index = term_index;
+    term->field_len = 0U;
+    if (term->field != NULL) {
+      term->field[0] = '\0';
+    }
+  } else if (lc_pouch_lql_eq_hint_path_is_eq_member(path, "value",
+                                                    &term_index)) {
+    if (!lc_pouch_lql_eq_hint_ensure_term(visit, term_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    term = &visit->terms[term_index];
+    visit->string_value_active = 1;
+    visit->active_term_valid = 1;
+    visit->active_term_index = term_index;
+    term->value_supported = 1;
+    term->value_len = 0U;
+    if (term->value != NULL) {
+      term->value[0] = '\0';
+    }
+    if (!lc_pouch_lql_eq_hint_append(&term->value, &term->value_len,
+                                     &term->value_capacity, "s:", 2U)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+  } else {
+    visit->valid = 0;
   }
   return LONEJSON_STATUS_OK;
 }
@@ -5738,14 +5906,24 @@ lc_pouch_lql_eq_hint_string_chunk(void *user, const lonejson_value_path *path,
   if (visit == NULL) {
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
+  if (!visit->active_term_valid ||
+      visit->active_term_index >= visit->term_count) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
   if (visit->string_field_active) {
-    if (!lc_pouch_lql_eq_hint_append(visit, &visit->field, &visit->field_len,
-                                     &visit->field_capacity, data, len)) {
+    lc_pouch_lql_eq_hint_term *term;
+
+    term = &visit->terms[visit->active_term_index];
+    if (!lc_pouch_lql_eq_hint_append(&term->field, &term->field_len,
+                                     &term->field_capacity, data, len)) {
       return LONEJSON_STATUS_ALLOCATION_FAILED;
     }
   } else if (visit->string_value_active) {
-    if (!lc_pouch_lql_eq_hint_append(visit, &visit->value, &visit->value_len,
-                                     &visit->value_capacity, data, len)) {
+    lc_pouch_lql_eq_hint_term *term;
+
+    term = &visit->terms[visit->active_term_index];
+    if (!lc_pouch_lql_eq_hint_append(&term->value, &term->value_len,
+                                     &term->value_capacity, data, len)) {
       return LONEJSON_STATUS_ALLOCATION_FAILED;
     }
   }
@@ -5756,21 +5934,34 @@ static lonejson_status
 lc_pouch_lql_eq_hint_string_end(void *user, const lonejson_value_path *path,
                                 lonejson_error *error) {
   lc_pouch_lql_eq_hint_visit *visit;
+  lc_pouch_lql_eq_hint_term *term;
+  size_t term_index;
 
   (void)error;
   visit = (lc_pouch_lql_eq_hint_visit *)user;
   if (visit == NULL) {
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
-  if (lc_pouch_lql_eq_hint_path_is(path, "eq", "field")) {
+  if (lc_pouch_lql_eq_hint_path_is_eq_member(path, "field", &term_index)) {
+    if (term_index >= visit->term_count) {
+      return LONEJSON_STATUS_INVALID_ARGUMENT;
+    }
+    term = &visit->terms[term_index];
     visit->string_field_active = 0;
-    visit->saw_field = 1;
-    if (visit->field == NULL || visit->field[0] != '/') {
+    visit->active_term_valid = 0;
+    term->saw_field = 1;
+    if (term->field == NULL || term->field[0] != '/') {
       visit->valid = 0;
     }
-  } else if (lc_pouch_lql_eq_hint_path_is(path, "eq", "value")) {
+  } else if (lc_pouch_lql_eq_hint_path_is_eq_member(path, "value",
+                                                    &term_index)) {
+    if (term_index >= visit->term_count) {
+      return LONEJSON_STATUS_INVALID_ARGUMENT;
+    }
+    term = &visit->terms[term_index];
     visit->string_value_active = 0;
-    visit->saw_value = 1;
+    visit->active_term_valid = 0;
+    term->saw_value = 1;
   }
   return LONEJSON_STATUS_OK;
 }
@@ -5779,28 +5970,35 @@ static lonejson_status
 lc_pouch_lql_eq_hint_bool_value(void *user, const lonejson_value_path *path,
                                 int value, lonejson_error *error) {
   lc_pouch_lql_eq_hint_visit *visit;
+  lc_pouch_lql_eq_hint_term *term;
   const char *encoded;
+  size_t term_index;
 
   (void)error;
   visit = (lc_pouch_lql_eq_hint_visit *)user;
   if (visit == NULL) {
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
-  if (!lc_pouch_lql_eq_hint_path_is(path, "eq", "value")) {
+  if (!lc_pouch_lql_eq_hint_path_is_eq_member(path, "value", &term_index)) {
+    visit->valid = 0;
     return LONEJSON_STATUS_OK;
   }
-  encoded = value ? "b:1" : "b:0";
-  visit->value_len = 0U;
-  if (visit->value != NULL) {
-    visit->value[0] = '\0';
+  if (!lc_pouch_lql_eq_hint_ensure_term(visit, term_index)) {
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
   }
-  if (!lc_pouch_lql_eq_hint_append(visit, &visit->value, &visit->value_len,
-                                   &visit->value_capacity, encoded,
+  term = &visit->terms[term_index];
+  encoded = value ? "b:1" : "b:0";
+  term->value_len = 0U;
+  if (term->value != NULL) {
+    term->value[0] = '\0';
+  }
+  if (!lc_pouch_lql_eq_hint_append(&term->value, &term->value_len,
+                                   &term->value_capacity, encoded,
                                    strlen(encoded))) {
     return LONEJSON_STATUS_ALLOCATION_FAILED;
   }
-  visit->saw_value = 1;
-  visit->value_supported = 1;
+  term->saw_value = 1;
+  term->value_supported = 1;
   return LONEJSON_STATUS_OK;
 }
 
@@ -5808,25 +6006,32 @@ static lonejson_status
 lc_pouch_lql_eq_hint_null_value(void *user, const lonejson_value_path *path,
                                 lonejson_error *error) {
   lc_pouch_lql_eq_hint_visit *visit;
+  lc_pouch_lql_eq_hint_term *term;
+  size_t term_index;
 
   (void)error;
   visit = (lc_pouch_lql_eq_hint_visit *)user;
   if (visit == NULL) {
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
-  if (!lc_pouch_lql_eq_hint_path_is(path, "eq", "value")) {
+  if (!lc_pouch_lql_eq_hint_path_is_eq_member(path, "value", &term_index)) {
+    visit->valid = 0;
     return LONEJSON_STATUS_OK;
   }
-  visit->value_len = 0U;
-  if (visit->value != NULL) {
-    visit->value[0] = '\0';
-  }
-  if (!lc_pouch_lql_eq_hint_append(visit, &visit->value, &visit->value_len,
-                                   &visit->value_capacity, "z:", 2U)) {
+  if (!lc_pouch_lql_eq_hint_ensure_term(visit, term_index)) {
     return LONEJSON_STATUS_ALLOCATION_FAILED;
   }
-  visit->saw_value = 1;
-  visit->value_supported = 1;
+  term = &visit->terms[term_index];
+  term->value_len = 0U;
+  if (term->value != NULL) {
+    term->value[0] = '\0';
+  }
+  if (!lc_pouch_lql_eq_hint_append(&term->value, &term->value_len,
+                                   &term->value_capacity, "z:", 2U)) {
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  term->saw_value = 1;
+  term->value_supported = 1;
   return LONEJSON_STATUS_OK;
 }
 
@@ -5835,30 +6040,35 @@ lc_pouch_lql_eq_hint_number_begin(void *user, const lonejson_value_path *path,
                                   lonejson_error *error) {
   lc_pouch_lql_eq_hint_visit *visit;
 
+  (void)path;
   (void)error;
   visit = (lc_pouch_lql_eq_hint_visit *)user;
-  if (visit != NULL && lc_pouch_lql_eq_hint_path_is(path, "eq", "value")) {
+  if (visit != NULL) {
     visit->valid = 0;
   }
   return LONEJSON_STATUS_OK;
 }
 
-static int lc_pouch_lql_eq_hint_parse(const char *selector_json,
-                                      char **field_out, char **value_out) {
+static int lc_pouch_lql_eq_hint_parse(
+    const char *selector_json, lc_pouch_document_eq_term **terms_out,
+    size_t *term_count_out) {
   lc_pouch_lql_eq_hint_visit visit;
   lonejson_path_value_visitor visitor;
   lonejson_error error;
   lonejson_status status;
   lonejson *runtime;
+  lc_pouch_document_eq_term *terms;
+  size_t index;
 
-  if (field_out != NULL) {
-    *field_out = NULL;
+  if (terms_out != NULL) {
+    *terms_out = NULL;
   }
-  if (value_out != NULL) {
-    *value_out = NULL;
+  if (term_count_out != NULL) {
+    *term_count_out = 0U;
   }
   runtime = lc_thread_lonejson_runtime();
-  if (runtime == NULL || selector_json == NULL) {
+  if (runtime == NULL || selector_json == NULL || terms_out == NULL ||
+      term_count_out == NULL) {
     return 0;
   }
   memset(&visit, 0, sizeof(visit));
@@ -5879,22 +6089,42 @@ static int lc_pouch_lql_eq_hint_parse(const char *selector_json,
   status = runtime->visit_path_value_cstr(runtime, selector_json, &visitor,
                                           &visit, &error);
   if (status == LONEJSON_STATUS_OK && visit.valid && visit.root_is_object &&
-      visit.root_key_count == 1U && visit.eq_key_count == 2U &&
-      visit.saw_field && visit.saw_value && visit.value_supported &&
-      visit.field != NULL && visit.value != NULL) {
-    if (field_out != NULL) {
-      *field_out = visit.field;
-      visit.field = NULL;
+      visit.root_key_count == 1U && visit.term_count > 0U &&
+      (visit.mode == 1 || visit.mode == 2)) {
+    for (index = 0U; index < visit.term_count; ++index) {
+      lc_pouch_lql_eq_hint_term *term;
+
+      term = &visit.terms[index];
+      if ((visit.mode == 2 && term->wrapper_key_count != 1U) ||
+          term->eq_key_count != 2U || !term->saw_field || !term->saw_value ||
+          !term->value_supported || term->field == NULL ||
+          term->value == NULL) {
+        visit.valid = 0;
+        break;
+      }
     }
-    if (value_out != NULL) {
-      *value_out = visit.value;
-      visit.value = NULL;
+  } else {
+    visit.valid = 0;
+  }
+  if (visit.valid) {
+    terms = (lc_pouch_document_eq_term *)lc_calloc_with_allocator(
+        NULL, visit.term_count, sizeof(terms[0]));
+    if (terms != NULL) {
+      for (index = 0U; index < visit.term_count; ++index) {
+        terms[index].field = visit.terms[index].field;
+        terms[index].value = visit.terms[index].value;
+        visit.terms[index].field = NULL;
+        visit.terms[index].value = NULL;
+      }
+      *terms_out = terms;
+      *term_count_out = visit.term_count;
     }
   }
-  lc_free_with_allocator(NULL, visit.field);
-  lc_free_with_allocator(NULL, visit.value);
-  return field_out != NULL && value_out != NULL && *field_out != NULL &&
-         *value_out != NULL;
+  for (index = 0U; index < visit.term_count; ++index) {
+    lc_pouch_lql_eq_hint_term_cleanup(&visit.terms[index]);
+  }
+  lc_free_with_allocator(NULL, visit.terms);
+  return *terms_out != NULL && *term_count_out > 0U;
 }
 
 static int lc_pouch_lql_status_to_error(lql_status status) {
@@ -6071,8 +6301,8 @@ typedef struct lc_pouch_query_keys_scan_context {
 typedef struct lc_pouch_lql_document_filter {
   lql *runtime;
   lql_selector *selector;
-  char *document_eq_field;
-  char *document_eq_value;
+  lc_pouch_document_eq_term *document_eq_terms;
+  size_t document_eq_term_count;
   int enabled;
 } lc_pouch_lql_document_filter;
 
@@ -6166,6 +6396,8 @@ lc_pouch_lql_capture_decision(void *user,
 
 static void
 lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
+  size_t index;
+
   if (filter == NULL) {
     return;
   }
@@ -6175,8 +6407,11 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
   if (filter->runtime != NULL) {
     filter->runtime->destroy(filter->runtime);
   }
-  lc_free_with_allocator(NULL, filter->document_eq_field);
-  lc_free_with_allocator(NULL, filter->document_eq_value);
+  for (index = 0U; index < filter->document_eq_term_count; ++index) {
+    lc_free_with_allocator(NULL, (char *)filter->document_eq_terms[index].field);
+    lc_free_with_allocator(NULL, (char *)filter->document_eq_terms[index].value);
+  }
+  lc_free_with_allocator(NULL, filter->document_eq_terms);
   memset(filter, 0, sizeof(*filter));
 }
 
@@ -6206,8 +6441,9 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
     return lc_pouch_lql_set_error(error, status, &lql_err,
                                   "failed to parse pouch LQL selector");
   }
-  (void)lc_pouch_lql_eq_hint_parse(selector_json, &filter->document_eq_field,
-                                   &filter->document_eq_value);
+  (void)lc_pouch_lql_eq_hint_parse(selector_json,
+                                   &filter->document_eq_terms,
+                                   &filter->document_eq_term_count);
   filter->enabled = 1;
   return LC_OK;
 }
@@ -7023,8 +7259,8 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   }
   scan_req.start_after = req->cursor;
   scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
-  scan_req.document_eq_field = filter.document_eq_field;
-  scan_req.document_eq_value = filter.document_eq_value;
+  scan_req.document_eq_terms = filter.document_eq_terms;
+  scan_req.document_eq_term_count = filter.document_eq_term_count;
   visit.scan.client = client;
   visit.scan.dst = dst;
   visit.scan.filter = &filter;
@@ -7379,8 +7615,8 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   }
   scan_req.start_after = req->cursor;
   scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
-  scan_req.document_eq_field = filter.document_eq_field;
-  scan_req.document_eq_value = filter.document_eq_value;
+  scan_req.document_eq_terms = filter.document_eq_terms;
+  scan_req.document_eq_term_count = filter.document_eq_term_count;
   scan_context.handler = handler;
   scan_context.handler_context = context;
   scan_context.filter = &filter;

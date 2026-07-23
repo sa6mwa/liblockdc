@@ -128,12 +128,17 @@ typedef int (*lc_pouch_query_index_key_visit_fn)(void *context,
                                                  const char *key,
                                                  lc_error *error);
 
+typedef struct lc_pouch_document_eq_term {
+  const char *field;
+  const char *value;
+} lc_pouch_document_eq_term;
+
 typedef struct lc_pouch_query_index_scan_req {
   const char *namespace_name;
   const char *key;
   const char *owner;
-  const char *document_eq_field;
-  const char *document_eq_value;
+  const lc_pouch_document_eq_term *document_eq_terms;
+  size_t document_eq_term_count;
   const char *start_after;
   size_t limit;
 } lc_pouch_query_index_scan_req;

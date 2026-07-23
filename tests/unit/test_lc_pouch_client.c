@@ -6085,11 +6085,15 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   alpha = pouch_acquire_query_key(client, "alpha", &error);
   pouch_save_query_json(alpha, "{\"value\":\"alpha\",\"n\":1}", &error);
   bravo = pouch_acquire_query_key(client, "bravo", &error);
-  pouch_save_query_json(bravo, "{\"value\":\"beta\",\"n\":2}", &error);
+  pouch_save_query_json(bravo,
+                        "{\"value\":\"beta\",\"kind\":\"selected\",\"n\":2}",
+                        &error);
   charlie = pouch_acquire_query_key(client, "charlie", &error);
   pouch_save_query_json(charlie, "{\"other\":\"alpha\",\"n\":3}", &error);
   delta = pouch_acquire_query_key(client, "delta", &error);
-  pouch_save_query_json(delta, "{\"value\":\"beta\",\"n\":4}", &error);
+  pouch_save_query_json(delta,
+                        "{\"value\":\"beta\",\"kind\":\"other\",\"n\":4}",
+                        &error);
   alpha->close(alpha);
   bravo->close(bravo);
   charlie->close(charlie);
@@ -6229,6 +6233,49 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   lc_sink_close(sink);
   lc_query_res_cleanup(&res);
 
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"/value\",\"value\":\"beta\"}},"
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"selected\"}}]}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_null(strstr(text, "alpha"));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_null(strstr(text, "charlie"));
+  assert_null(strstr(text, "delta"));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"/value\",\"value\":\"beta\"}},"
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"selected\"}}]}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_null(strstr(text, "alpha"));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_null(strstr(text, "charlie"));
+  assert_null(strstr(text, "delta"));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
   handler.begin = query_key_capture_begin;
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
@@ -6271,6 +6318,33 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_null(res.cursor);
   assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_int_equal(res.index_seq, 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"/value\",\"value\":\"beta\"}},"
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"selected\"}}]}";
+  req.engine = "scan";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_int_equal(res.index_seq, 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"/value\",\"value\":\"beta\"}},"
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"selected\"}}]}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
 
   memset(&capture, 0, sizeof(capture));

@@ -682,11 +682,13 @@ Large-namespace low-match indexed searches must be able to walk the relevant
 posting/candidate sets without loading every metadata summary or every document
 payload in the namespace.
 The first durable LQL posting slice indexes exact equality candidates for
-strict JSON Pointer document fields with string, boolean, and null values. The
-client extracts that shape only as a candidate hint; final predicate acceptance
-still runs through `liblql`, and numeric/range predicates remain on the broader
-candidate path until numeric canonicalization and range ordering are storage
-owned.
+strict JSON Pointer document fields with string, boolean, and null values.
+Indexed mode also recognizes top-level full-form `and` conjunctions made only
+of those scalar equality terms and intersects their storage-owned postings
+before loading candidate documents. The client extracts those shapes only as
+candidate hints; final predicate acceptance still runs through `liblql`, and
+numeric/range predicates remain on the broader candidate path until numeric
+canonicalization and range ordering are storage owned.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
