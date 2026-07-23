@@ -9,7 +9,7 @@ behavior is not silently lost.
 | Old command or behavior | New lifecycle surface | Behavior preserved | Verification added | Status |
 | --- | --- | --- | --- | --- |
 | `make test-host` as the ordinary local confidence gate | `make finalize-slice` | Formatting and host release tests remain the pre-commit slice gate. | `lifecycle_command_surface_test` asserts the target and help entry. | Active |
-| Ad hoc ASan/UBSan hardening through `make asan` and `make test-debug` | `make valgrind` | ASan/UBSan compatibility aliases remain available while Valgrind migration is pending. | `lifecycle_command_surface_test` asserts the actionable diagnostic. | Pending Valgrind preset |
+| Ad hoc ASan/UBSan hardening through `make asan` and `make test-debug` | `make valgrind` | ASan/UBSan compatibility aliases remain available while native Memcheck runs through the dedicated lifecycle gate. | `lifecycle_command_surface_test` asserts the runner wiring and dry-run target set. | Active host runner; pending Bootlin compiler policy |
 | Manually choosing release rehearsal commands | `make prerelease` | Deterministic local checks are grouped without requiring live credentials. | `lifecycle_command_surface_test` asserts the graph includes slice, broad tests, package verification, and Lua tests. | Active |
 | No live prerelease gate | `make prerelease-live` | Live-provider checks remain opt-in and are not part of normal local confidence. | `lifecycle_command_surface_test` asserts the `LOCKDC_PRERELEASE_LIVE=1` opt-in diagnostic. | Placeholder until live checks exist |
 | Expensive release rehearsal split across fuzz, benchmark, package, and matrix commands | `make prerelease-hardening` | Existing fuzz smoke, benchmark gate, and release matrix behavior remain available. | `lifecycle_command_surface_test` asserts the hardening graph. | Active |
@@ -27,7 +27,7 @@ behavior is not silently lost.
 | Old command or behavior | New lifecycle surface | Behavior preserved | Verification added | Status |
 | --- | --- | --- | --- | --- |
 | Lua checks ran through the general `debug` preset | `debug-lua` | Lua bindings still build against the debug dependency root; the preset narrows non-Lua work. | `lifecycle_preset_contract_test` asserts configure/build/test preset coverage. | Active |
-| No dedicated Valgrind configure preset | `valgrind` | Debug symbols are preserved without sanitizer instrumentation so Memcheck can inspect runtime behavior. | `lifecycle_preset_contract_test` asserts the preset disables fuzzers and sanitizer debug flags. | Pending Make runner and Bootlin toolchain |
+| No dedicated Valgrind configure preset | `valgrind` | Debug symbols are preserved without sanitizer instrumentation so Memcheck can inspect runtime behavior. | `lifecycle_preset_contract_test` asserts the preset disables fuzzers and sanitizer debug flags; `make valgrind` runs a bounded native unit subset under host Memcheck. | Active preset; pending Bootlin compiler policy |
 | Fuzz preset selected host Clang directly | Pinned AFL++ GCC-plugin lifecycle | Existing fuzz preset remains available as compatibility until the AFL++ resolver is wired. | `lifecycle_preset_contract_test` keeps this gap visible through required preset coverage. | Pending AFL++ migration |
 
 ## Pouch Storage Surface
@@ -40,12 +40,13 @@ behavior is not silently lost.
 
 - No lifecycle command has been removed in this slice.
 - `make asan`, `make test-asan`, and `make build-asan` remain compatibility
-  aliases until the native Valgrind gate is implemented and adopted.
+  aliases after the native Valgrind gate, so existing sanitizer workflows stay
+  available while lifecycle hardening moves to Memcheck.
 
 ## Decisions Still Required
 
 - Whether Valgrind becomes part of `make prerelease` immediately when the
-  Bootlin-backed `valgrind` preset lands, or first runs as a separate hardening
+  Bootlin-backed compiler policy lands, or first stays as a separate hardening
   gate for one migration slice.
 - Whether the existing host-Clang fuzz preset should remain as an explicit
   compatibility alias after the pinned AFL++ lifecycle migration lands.

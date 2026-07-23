@@ -163,7 +163,7 @@ Latest release targets confirmed on 2026-07-22:
 - [ ] Update CMake presets and toolchain files for the lifecycle-required
   Bootlin-backed `valgrind`, pinned AFL++ `fuzz`, release target matrix, and
   optional Darwin/osxcross behavior.
-- [ ] Replace sanitizer-as-primary hardening assumptions with the updated native
+- [x] Replace sanitizer-as-primary hardening assumptions with the updated native
   Valgrind gate while preserving any existing useful ASan/UBSan coverage as
   compatibility or optional hardening.
 - [ ] Align fuzzing with the updated pinned AFL++ GCC-plugin lifecycle for

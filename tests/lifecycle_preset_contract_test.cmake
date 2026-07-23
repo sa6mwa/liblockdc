@@ -132,7 +132,7 @@ foreach(name
 endforeach()
 
 assert_contains(root_makefile "make valgrind" "make help Valgrind surface")
-assert_contains(root_makefile "wire make valgrind to build the valgrind preset" "Valgrind runner migration diagnostic")
+assert_contains(root_makefile "scripts/valgrind.sh" "Valgrind runner command")
 assert_contains(lifecycle_ledger "Preset Surface" "migration ledger preset section")
 assert_contains(lifecycle_ledger "`debug-lua`" "migration ledger debug-lua entry")
 assert_contains(lifecycle_ledger "`valgrind`" "migration ledger valgrind entry")

@@ -4907,13 +4907,13 @@ test_pouch_endpoint_subscribe_waits_for_shared_message(void **state) {
   memset(&consumer, 0, sizeof(consumer));
   memset(&subscribe_state, 0, sizeof(subscribe_state));
   subscribe_state.expected[0] = "delayed";
-  client = open_pouch_client(endpoint);
 
   child = fork();
   assert_true(child >= 0);
   if (child == 0) {
     child_enqueue_after_delay(endpoint, "jobs", "delayed");
   }
+  client = open_pouch_client(endpoint);
 
   lc_dequeue_req_init(&subscribe_req);
   subscribe_req.queue = "jobs";
