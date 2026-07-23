@@ -248,6 +248,7 @@ typedef struct lc_pouch_disk_store {
   unsigned long replayed_query_index_record_count;
   lc_pouch_fsync_stats fsync_stats;
   int defer_record_fsync;
+  int query_index_rebuild_needed;
 } lc_pouch_disk_store;
 
 typedef struct lc_pouch_disk_replay_input {
@@ -4343,15 +4344,27 @@ static int lc_pouch_disk_rebuild_query_index(lc_pouch_disk_store *store,
   }
   for (index = 0U; index < store->state_entry_count; ++index) {
     lc_pouch_disk_state_entry *entry;
+    const char *body_path;
+    int body_fd;
 
     entry = &store->state_entries[index];
     if (entry->deleted) {
       continue;
     }
+    body_path = entry->body_path != NULL ? entry->body_path : store->log_path;
+    body_fd = open(body_path, O_RDONLY);
+    if (body_fd < 0) {
+      return lc_pouch_set_errno(error,
+                                "failed to open pouch state for index rebuild");
+    }
     rc = lc_pouch_disk_update_query_field_index_from_fd(
         store, entry->namespace_name, entry->key, entry->content_type,
-        entry->etag, entry->version, store->log_fd, entry->body_offset,
+        entry->etag, entry->version, body_fd, entry->body_offset,
         entry->body_length, 1, 1, error);
+    if (close(body_fd) != 0 && rc == LC_OK) {
+      rc = lc_pouch_set_errno(error,
+                              "failed to close pouch state for index rebuild");
+    }
     if (rc != LC_OK) {
       return rc;
     }
@@ -9410,6 +9423,16 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
     if (fstat(store->query_index_fd, &st) != 0) {
       return lc_pouch_set_errno(error,
                                 "failed to stat reopened pouch query index");
+    }
+  }
+  if (store->query_index_rebuild_needed) {
+    store->query_index_rebuild_needed = 0;
+    if (lc_pouch_disk_rebuild_query_index(store, error) != LC_OK) {
+      return error != NULL ? error->code : LC_ERR_TRANSPORT;
+    }
+    if (fstat(store->query_index_fd, &st) != 0) {
+      return lc_pouch_set_errno(error,
+                                "failed to stat rebuilt pouch query index");
     }
   }
   if ((unsigned long)st.st_size == store->replayed_query_index_size) {
@@ -14676,7 +14699,14 @@ int lc_pouch_disk_open_with_options(const char *root_path,
     lc_pouch_disk_close(&store->pub, error);
     return lc_pouch_set_errno(error, "failed to open pouch log");
   }
-  store->query_index_fd = open(store->query_index_path, O_RDWR | O_CREAT, 0666);
+  store->query_index_fd = open(store->query_index_path, O_RDWR);
+  if (store->query_index_fd < 0 && errno == ENOENT) {
+    store->query_index_fd =
+        open(store->query_index_path, O_RDWR | O_CREAT, 0666);
+    if (store->query_index_fd >= 0) {
+      store->query_index_rebuild_needed = 1;
+    }
+  }
   if (store->query_index_fd < 0) {
     lc_pouch_disk_close(&store->pub, error);
     return lc_pouch_set_errno(error, "failed to open pouch query index");

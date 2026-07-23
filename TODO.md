@@ -383,12 +383,19 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.
+      - [x] Rebuild query summary and field-posting sidecars from live
+        namespace segment/snapshot body refs when the root sidecar is missing,
+        including closed-store missing-sidecar recovery with no usable
+        `store.log`.
     - [ ] Add focused recovery tests for fresh segmented stores, reopen,
       corrupt tails, manifest repair, snapshot install, obsolete cleanup,
       state-link protection, and query/index rebuild from authoritative
       namespace history.
       - [x] Cover manifest-obsolete snapshot cleanup on reopen without losing
         the active installed snapshot body.
+      - [x] Cover query sidecar field-posting rebuild from authoritative
+        namespace segment bodies after removing `query.index` and truncating
+        the legacy root log.
     - [ ] Add performance benchmarks that compare segmented pouch against the
       Go lockd disk backend on large data and indexed low-match LQL workloads
       after segmented correctness tests are stable.
