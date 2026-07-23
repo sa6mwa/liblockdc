@@ -413,7 +413,7 @@ Latest release targets confirmed on 2026-07-23:
         removed, independent-handle generation refresh, manifest repair,
         corrupt segment tail truncation, snapshot install/tail override,
         obsolete snapshot cleanup, and state-link compaction materialization.
-    - [ ] Add performance benchmarks that compare segmented pouch against the
+    - [x] Add performance benchmarks that compare segmented pouch against the
       Go lockd disk backend on large data and indexed low-match LQL workloads
       after segmented correctness tests are stable.
       - [x] Add local segmented pouch scan-vs-index benchmark cases for
@@ -423,6 +423,9 @@ Latest release targets confirmed on 2026-07-23:
         low-match strict JSON Pointer LQL field selector document and key-only
         query paths, keeping them out of default local `all` runs unless
         `LOCKDC_BENCH_LIVE=1` is set.
+      - [x] Use the benchmark iteration argument as the row-count control so
+        local pouch and live Go disk cases can be run at 1k, 100k, or larger
+        sizes without changing the benchmark binary.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
 - [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
   introduced.
