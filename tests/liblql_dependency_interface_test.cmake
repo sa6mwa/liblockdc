@@ -110,3 +110,138 @@ foreach(symbol IN ITEMS
     assert_contains("${static_symbols}" "${symbol}" "${symbol} in liblql.a")
     assert_contains("${shared_symbols}" "${symbol}" "${symbol} in liblql.so.${LOCKDC_LIBLQL_ABI_VERSION}")
 endforeach()
+
+if(DEFINED LOCKDC_CROSSCOMPILING AND LOCKDC_CROSSCOMPILING)
+    return()
+endif()
+
+if(NOT DEFINED LOCKDC_C_COMPILER OR LOCKDC_C_COMPILER STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_C_COMPILER is required for native liblql evaluator probe")
+endif()
+
+set(liblql_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/liblql-evaluator-gap-probe")
+set(liblql_probe_source "${liblql_probe_dir}/liblql_evaluator_gap_probe.c")
+set(liblql_probe_binary "${liblql_probe_dir}/liblql_evaluator_gap_probe")
+file(MAKE_DIRECTORY "${liblql_probe_dir}")
+file(WRITE "${liblql_probe_source}" [=[
+#include <lql/lql.h>
+
+#include <string.h>
+
+typedef struct probe_reader_state {
+  const unsigned char *data;
+  size_t len;
+  size_t pos;
+} probe_reader_state;
+
+static lql_status probe_read(void *user, unsigned char *buffer, size_t capacity,
+                             size_t *out_len, lql_error *error) {
+  probe_reader_state *state;
+  size_t remaining;
+  size_t take;
+
+  (void)error;
+  state = (probe_reader_state *)user;
+  if (state == 0 || buffer == 0 || out_len == 0) {
+    return LQL_STATUS_INVALID_ARGUMENT;
+  }
+  remaining = state->len - state->pos;
+  take = remaining < capacity ? remaining : capacity;
+  if (take != 0U) {
+    memcpy(buffer, state->data + state->pos, take);
+    state->pos += take;
+  }
+  *out_len = take;
+  return LQL_STATUS_OK;
+}
+
+int main(void) {
+  static const char selector_json[] =
+      "{\"eq\":{\"field\":\"value\",\"value\":\"alpha\"}}";
+  static const unsigned char ndjson[] =
+      "{\"value\":\"alpha\"}\n{\"value\":\"beta\"}\n";
+  probe_reader_state reader;
+  lql *runtime;
+  lql_selector *selector;
+  lql_stream_request request;
+  lql_stream_result result;
+  lql_error error;
+  lql_status status;
+
+  runtime = 0;
+  selector = 0;
+  lql_error_init(&error);
+  status = lql_new(&runtime, &error);
+  if (status != LQL_STATUS_OK) {
+    return 10;
+  }
+  status = runtime->selector_parse_json(runtime, selector_json,
+                                        strlen(selector_json), &selector,
+                                        &error);
+  if (status != LQL_STATUS_OK) {
+    runtime->destroy(runtime);
+    return 11;
+  }
+
+  memset(&reader, 0, sizeof(reader));
+  reader.data = ndjson;
+  reader.len = sizeof(ndjson) - 1U;
+  memset(&request, 0, sizeof(request));
+  request.reader = probe_read;
+  request.reader_user = &reader;
+  request.selector = selector;
+  memset(&result, 0, sizeof(result));
+  lql_error_init(&error);
+  status = runtime->stream_apply_spooled(runtime, &request, &result, &error);
+  runtime->selector_destroy(runtime, selector);
+  runtime->destroy(runtime);
+
+  if (status != LQL_STATUS_UNSUPPORTED) {
+    return 12;
+  }
+  if (strstr(error.message,
+             "direct stream selector is not implemented by scanner") == 0) {
+    return 13;
+  }
+  return 0;
+}
+]=])
+
+execute_process(
+    COMMAND "${LOCKDC_C_COMPILER}"
+        -std=c89
+        -Wall
+        -Wextra
+        -Werror
+        "-I${liblql_root}/include"
+        "${liblql_probe_source}"
+        "-L${liblql_root}/lib"
+        "-Wl,-rpath,${liblql_root}/lib"
+        -llql
+        -o "${liblql_probe_binary}"
+    RESULT_VARIABLE liblql_probe_build_result
+    OUTPUT_VARIABLE liblql_probe_build_stdout
+    ERROR_VARIABLE liblql_probe_build_stderr
+)
+if(NOT liblql_probe_build_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to build native liblql evaluator-gap probe\n"
+        "stdout:\n${liblql_probe_build_stdout}\n"
+        "stderr:\n${liblql_probe_build_stderr}")
+endif()
+
+execute_process(
+    COMMAND "${liblql_probe_binary}"
+    RESULT_VARIABLE liblql_probe_result
+    OUTPUT_VARIABLE liblql_probe_stdout
+    ERROR_VARIABLE liblql_probe_stderr
+)
+if(NOT liblql_probe_result EQUAL 0)
+    message(FATAL_ERROR
+        "liblql evaluator-gap probe no longer matches v0.1.0 expectations; "
+        "enable pouch general selector evaluation instead of preserving the "
+        "unsupported boundary\n"
+        "exit code: ${liblql_probe_result}\n"
+        "stdout:\n${liblql_probe_stdout}\n"
+        "stderr:\n${liblql_probe_stderr}")
+endif()
