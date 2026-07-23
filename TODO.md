@@ -282,7 +282,7 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Extend candidate extraction beyond single `eq` selectors to safe
       top-level `and` conjunction/intersection forms over supported scalar
       equality postings; final predicate acceptance remains owned by `liblql`.
-  - [ ] Cut pouch disk storage over to the unreleased fresh segmented
+  - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
     - [x] Create the per-namespace layout under
@@ -292,7 +292,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Establish the initial active-segment scaffold and manifest-open
         record during namespace writes; the root-level `store.log` placeholder
         is not an authoritative record source.
-    - [ ] Implement manifest append/replay for segment open, segment seal,
+    - [x] Implement manifest append/replay for segment open, segment seal,
       snapshot install, obsolete segment, and obsolete snapshot records.
       - [x] Append text manifest lifecycle records for current active-segment
         open, compaction rewrite, and obsolete compaction-backup events.
