@@ -324,6 +324,9 @@ Latest release targets confirmed on 2026-07-23:
         signal until the write cutover removes it.
       - [x] Rotate active namespace segments by size threshold and route all
         segment-shadow append paths through the shared active-segment opener.
+      - [x] Store live state, object, and queue payload refs from namespace
+        segment append locations instead of root `store.log` offsets, while
+        root writes remain a temporary refresh/compatibility signal.
     - [ ] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
       set changes, and preserve corrupt-tail truncation semantics per segment.

@@ -1464,6 +1464,116 @@ static void test_state_write_creates_segmented_namespace_logstore(
   test_cleanup_root(root);
 }
 
+static void test_segment_payload_refs_survive_root_log_truncation(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_put_object_opts object_opts;
+  lc_pouch_object_selector object_selector;
+  lc_pouch_object_info object_info;
+  lc_pouch_enqueue_opts enqueue_opts;
+  lc_pouch_dequeue_opts dequeue_opts;
+  lc_pouch_queue_message_info enqueued;
+  lc_pouch_queue_message_info dequeued;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "segment-payload-refs");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&object_opts, 0, sizeof(object_opts));
+  memset(&object_selector, 0, sizeof(object_selector));
+  memset(&object_info, 0, sizeof(object_info));
+  memset(&enqueue_opts, 0, sizeof(enqueue_opts));
+  memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&enqueued, 0, sizeof(enqueued));
+  memset(&dequeued, 0, sizeof(dequeued));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("state-segment-body");
+  rc = store->write_state(store, "default", "alpha", source, NULL, &put_res,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  object_opts.name = "payload.txt";
+  object_opts.content_type = "text/plain";
+  source = source_from_text("object-segment-body");
+  rc = store->put_object(store, "default", "alpha", source, &object_opts,
+                         &object_info, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
+
+  enqueue_opts.content_type = "text/plain";
+  enqueue_opts.visibility_timeout_seconds = 30L;
+  enqueue_opts.ttl_seconds = 3600L;
+  enqueue_opts.max_attempts = 3;
+  source = source_from_text("queue-segment-body");
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  truncate_store_log(root);
+
+  rc = store->read_state(store, "default", "alpha", &read_body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "state-segment-body");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  object_selector.name = "payload.txt";
+  rc = store->get_object(store, "default", "alpha", &object_selector,
+                         &read_body, &object_info, &error);
+  assert_int_equal(rc, LC_OK);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "object-segment-body");
+  free(text);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_object_info_cleanup(&allocator, &object_info);
+
+  dequeue_opts.owner = "worker-a";
+  dequeue_opts.visibility_timeout_seconds = 30L;
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
+                              &read_body, &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(read_body);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "queue-segment-body");
+  free(text);
+  lc_source_close(read_body);
+
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_replay_recovers_state_from_namespace_segment(void **state) {
   char root[256];
   char log_path[512];
@@ -7378,6 +7488,7 @@ static void test_object_copy_enforces_expected_etag(void **state) {
 static void test_object_copy_source_open_failure_leaves_destination_unchanged(
     void **state) {
   char root[256];
+  char segment_path[512];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
   lc_pouch_store *store;
@@ -7418,13 +7529,14 @@ static void test_object_copy_source_open_failure_leaves_destination_unchanged(
   assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
                    1U);
 
-  chmod_store_log(root, 0);
+  test_active_segment_path(root, "default", segment_path, sizeof(segment_path));
+  assert_int_equal(chmod(segment_path, 0), 0);
 
   copy_opts.source.name = "large.bin";
   copy_opts.prevent_overwrite = 1;
   rc = store->copy_object(store, "default", "source-key", "dest-key",
                           &copy_opts, &copied, &error);
-  chmod_store_log(root, 0600);
+  assert_int_equal(chmod(segment_path, 0600), 0);
   assert_int_equal(rc, LC_ERR_TRANSPORT);
   assert_string_equal(error.message, "failed to open pouch log for object copy");
   assert_null(copied.id);
@@ -13758,6 +13870,8 @@ int main(void) {
       cmocka_unit_test(test_allocator_from_lc_requires_matching_realloc),
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
       cmocka_unit_test(test_state_write_creates_segmented_namespace_logstore),
+      cmocka_unit_test(
+          test_segment_payload_refs_survive_root_log_truncation),
       cmocka_unit_test(test_replay_recovers_state_from_namespace_segment),
       cmocka_unit_test(test_replay_repairs_missing_namespace_manifest),
       cmocka_unit_test(test_segment_rotation_replays_multiple_segments),
