@@ -151,6 +151,8 @@ Latest release targets confirmed on 2026-07-22:
     plus `query_keys`.
   - [x] Cover signed oversized query limit rejection for scan and index
     document queries plus `query_keys`.
+  - [x] Cover scan/index parity for compound key+owner selectors across
+    document queries and `query_keys`.
 - [x] Add package and install-tree smoke consumers proving downstream CMake and
   pkg-config users can link `liblockdc` with the transitive `liblql` contract.
 

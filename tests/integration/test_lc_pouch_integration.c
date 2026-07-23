@@ -1871,6 +1871,180 @@ static void test_pouch_public_query_rejects_signed_oversized_limits(
   cleanup_pouch_root(index_root);
 }
 
+static void test_pouch_public_compound_selector_scan_index_parity(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *writer;
+  lc_client *scan_client;
+  lc_client *index_client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_source *source;
+  lc_sink *scan_sink;
+  lc_sink *index_sink;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res scan_res;
+  lc_query_res index_res;
+  lc_query_key_handler handler;
+  query_key_capture scan_keys;
+  query_key_capture index_keys;
+  lc_error error;
+  char *scan_text;
+  char *index_text;
+  int rc;
+
+  (void)state;
+  pouch_root_path(root, sizeof(root), "compound-selector-parity");
+  pouch_endpoint(endpoint, sizeof(endpoint), root);
+  cleanup_pouch_root(root);
+  lc_error_init(&error);
+  writer = NULL;
+  scan_client = NULL;
+  index_client = NULL;
+  alpha = NULL;
+  bravo = NULL;
+  charlie = NULL;
+  source = NULL;
+  scan_sink = NULL;
+  index_sink = NULL;
+  scan_text = NULL;
+  index_text = NULL;
+  memset(&scan_res, 0, sizeof(scan_res));
+  memset(&index_res, 0, sizeof(index_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&scan_keys, 0, sizeof(scan_keys));
+  memset(&index_keys, 0, sizeof(index_keys));
+
+  open_pouch_client(endpoint, &writer, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.ttl_seconds = 60L;
+  lc_update_opts_init(&update_opts);
+  update_opts.content_type = "application/json";
+
+  acquire.key = "integration/parity/alpha";
+  acquire.owner = "parity-owner";
+  rc = writer->acquire(writer, &acquire, &alpha, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"parity\":\"alpha\"}", &error);
+  rc = alpha->update(alpha, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/parity/bravo";
+  acquire.owner = "other-owner";
+  rc = writer->acquire(writer, &acquire, &bravo, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"parity\":\"wrong-owner\"}", &error);
+  rc = bravo->update(bravo, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  acquire.key = "integration/parity/charlie";
+  acquire.owner = "parity-owner";
+  rc = writer->acquire(writer, &acquire, &charlie, &error);
+  assert_lc_ok(rc, &error);
+  source = source_from_text("{\"parity\":\"wrong-key\"}", &error);
+  rc = charlie->update(charlie, source, &update_opts, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_lc_ok(rc, &error);
+
+  open_pouch_scan_client(endpoint, &scan_client, &error);
+  open_pouch_client(endpoint, &index_client, &error);
+
+  rc = lc_sink_to_memory(&scan_sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_sink_to_memory(&index_sink, &error);
+  assert_lc_ok(rc, &error);
+  lc_query_req_init(&query_req);
+  query_req.selector_json =
+      "{\"key\":\"integration/parity/alpha\",\"owner\":\"parity-owner\"}";
+  query_req.limit = 4L;
+  rc = scan_client->query(scan_client, &query_req, scan_sink, &scan_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  rc = index_client->query(index_client, &query_req, index_sink, &index_res,
+                           &error);
+  assert_lc_ok(rc, &error);
+  scan_text = sink_text(scan_sink, &error);
+  index_text = sink_text(index_sink, &error);
+  assert_string_equal(scan_text, index_text);
+  assert_non_null(strstr(scan_text, "\"key\":\"integration/parity/alpha\""));
+  assert_non_null(strstr(scan_text, "\"document\":{\"parity\":\"alpha\"}"));
+  assert_null(strstr(scan_text, "wrong-owner"));
+  assert_null(strstr(scan_text, "wrong-key"));
+  assert_null(scan_res.cursor);
+  assert_null(index_res.cursor);
+  assert_string_equal(scan_res.return_mode, "documents");
+  assert_string_equal(index_res.return_mode, "documents");
+  assert_string_equal(scan_res.metadata_json, "{\"query_candidates\":1}");
+  assert_string_equal(index_res.metadata_json, "{\"query_candidates\":1}");
+  assert_int_equal(scan_res.index_seq, 0UL);
+  assert_true(index_res.index_seq > 0UL);
+  free(scan_text);
+  free(index_text);
+  scan_text = NULL;
+  index_text = NULL;
+  lc_query_res_cleanup(&scan_res);
+  lc_query_res_cleanup(&index_res);
+  lc_sink_close(scan_sink);
+  lc_sink_close(index_sink);
+  scan_sink = NULL;
+  index_sink = NULL;
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json =
+      "{\"key\":\"integration/parity/alpha\",\"owner\":\"parity-owner\"}";
+  query_req.limit = 4L;
+  rc = scan_client->query_keys(scan_client, &query_req, &handler, &scan_keys,
+                               &scan_res, &error);
+  assert_lc_ok(rc, &error);
+  rc = index_client->query_keys(index_client, &query_req, &handler, &index_keys,
+                                &index_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(scan_keys.key_count, 1U);
+  assert_int_equal(index_keys.key_count, 1U);
+  assert_string_equal(scan_keys.keys[0], index_keys.keys[0]);
+  assert_string_equal(scan_keys.keys[0], "integration/parity/alpha");
+  assert_null(scan_res.cursor);
+  assert_null(index_res.cursor);
+  assert_string_equal(scan_res.return_mode, "keys");
+  assert_string_equal(index_res.return_mode, "keys");
+  assert_string_equal(scan_res.metadata_json, "{\"query_candidates\":1}");
+  assert_string_equal(index_res.metadata_json, "{\"query_candidates\":1}");
+  assert_int_equal(scan_res.index_seq, 0UL);
+  assert_true(index_res.index_seq > 0UL);
+  lc_query_res_cleanup(&scan_res);
+  lc_query_res_cleanup(&index_res);
+
+  lc_release_req_init(&release_req);
+  rc = alpha->release(alpha, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  alpha = NULL;
+  rc = bravo->release(bravo, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  bravo = NULL;
+  rc = charlie->release(charlie, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  charlie = NULL;
+  writer->close(writer);
+  writer = NULL;
+  scan_client->close(scan_client);
+  index_client->close(index_client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_public_endpoint_query_engine_selects_index(
     void **state) {
   char root[256];
@@ -12802,6 +12976,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_rejects_reserved_namespaces),
       cmocka_unit_test(
           test_pouch_public_query_rejects_signed_oversized_limits),
+      cmocka_unit_test(
+          test_pouch_public_compound_selector_scan_index_parity),
       cmocka_unit_test(
           test_pouch_public_endpoint_query_engine_selects_index),
       cmocka_unit_test(
