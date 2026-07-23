@@ -8,7 +8,8 @@ preset=${1:-deps-x86_64-linux-gnu}
 unset LD_LIBRARY_PATH
 dry_run=${LOCKDC_DEPS_DRY_RUN:-0}
 download_timeout=${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT:-300}
-lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-24}
+lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-25}
+liblql_abi_version=${LOCKDC_LIBLQL_ABI_VERSION:-0}
 
 resolve_host_debug_preset() {
   local compiler triple
@@ -184,26 +185,26 @@ pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_
 cpkt_asset_name="c.pkt.systems-$cpkt_version-${preset#deps-}.tar.gz"
 cpkt_download_url="https://github.com/sa6mwa/c.pkt.systems/releases/download/v$cpkt_version/$cpkt_asset_name"
 case "$cpkt_asset_name" in
-  c.pkt.systems-0.7.0-x86_64-linux-gnu.tar.gz)
-    cpkt_asset_hash=35e50e02ca4b0f7ba7ff0e3683c1c19b1ae07aa0c47b349e52025e45e0e35b28
+  c.pkt.systems-0.9.0-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=0bbb1cbaf60b0a94fb5a6b3756123088b45e2bef9e38079038f22e3c07febb2e
     ;;
-  c.pkt.systems-0.7.0-x86_64-linux-musl.tar.gz)
-    cpkt_asset_hash=4340cba25a7d44810b167ad955ce18ee4f370c1f54914a16bb462463e13051a1
+  c.pkt.systems-0.9.0-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=e867e7d8649bba6d6c4bed254f3a666faa090f8ccb31a3eb10b1323b694f2f21
     ;;
-  c.pkt.systems-0.7.0-aarch64-linux-gnu.tar.gz)
-    cpkt_asset_hash=b0cd27ef2939d3538b324793f0718d6b444cd487df6dfb8835ae15c170d51f42
+  c.pkt.systems-0.9.0-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=3fb1fdeb83bfd58da48a3319dfc2c6d35384265b2db2074b63216240bf0fe2ad
     ;;
-  c.pkt.systems-0.7.0-aarch64-linux-musl.tar.gz)
-    cpkt_asset_hash=7705dda7f17e40afbbfb81f6404715a2064afcfadc009317a7d41863d93960e8
+  c.pkt.systems-0.9.0-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=a915993c294e96c9a84b072bed45384c23f0058c9e18cd5caeba344aaa9b5d39
     ;;
-  c.pkt.systems-0.7.0-armhf-linux-gnu.tar.gz)
-    cpkt_asset_hash=04765c76cec60db56c6efed263dcdd7b8a0929b4eac679b693b62cc5b47b4090
+  c.pkt.systems-0.9.0-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=18738e2d8e9661ebdcc0b54f4f292f0571d04218fceb1f281e051a50928d1694
     ;;
-  c.pkt.systems-0.7.0-armhf-linux-musl.tar.gz)
-    cpkt_asset_hash=dea4ca0fc75517e007484786f3c0168bdc10b6b5eb658808c45032d922d83516
+  c.pkt.systems-0.9.0-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=7f5365014ef2222cb95c08525c0b123afb30b4f220f4edcd669f354a9af4ccab
     ;;
-  c.pkt.systems-0.7.0-arm64-apple-darwin.tar.gz)
-    cpkt_asset_hash=c581c88541ae0d445e546700bfb8721a47708a63a82fa1df152964ededc6a02d
+  c.pkt.systems-0.9.0-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=8bc25d47d30cb40b24eb5d07c2aad7850150fdea680eccadd1c819ce945901af
     ;;
   *)
     printf 'unsupported c.pkt.systems release asset: %s\n' "$cpkt_asset_name" >&2
@@ -214,29 +215,60 @@ esac
 lonejson_asset_name="liblonejson-$lonejson_version-${preset#deps-}.tar.gz"
 lonejson_download_url="https://github.com/sa6mwa/lonejson/releases/download/v$lonejson_version/$lonejson_asset_name"
 case "$lonejson_asset_name" in
-  liblonejson-0.41.0-x86_64-linux-gnu.tar.gz)
-    lonejson_asset_hash=bcd352c413db4186d516b43040c57dc2a2060e2acf38d7d91eca6609043d54a8
+  liblonejson-0.42.0-x86_64-linux-gnu.tar.gz)
+    lonejson_asset_hash=e04f80b907d92f7e38f825fbd339297e85372fc1ce110abb9a93715ee450ece3
     ;;
-  liblonejson-0.41.0-x86_64-linux-musl.tar.gz)
-    lonejson_asset_hash=182a948f752b24a508e08756db9813f4caad8690be762a2a62284d97599fdeed
+  liblonejson-0.42.0-x86_64-linux-musl.tar.gz)
+    lonejson_asset_hash=ca0811bd920f6cf59f82d45e04525b562bba238564e5c5b9a00aa18331b5a5ca
     ;;
-  liblonejson-0.41.0-aarch64-linux-gnu.tar.gz)
-    lonejson_asset_hash=94b9e5eebba46b8c411ac2b5b3f3e029fdcf7b0c57aba673dad10f3a6cd84721
+  liblonejson-0.42.0-aarch64-linux-gnu.tar.gz)
+    lonejson_asset_hash=d7f9c700be6f9af7e46b18d59a0be14a42bd19644a30684b5a1135f96ee2daed
     ;;
-  liblonejson-0.41.0-aarch64-linux-musl.tar.gz)
-    lonejson_asset_hash=61d7078ff9efba013a05da1d96c0847029d45848cebace197e27358b7e9582e6
+  liblonejson-0.42.0-aarch64-linux-musl.tar.gz)
+    lonejson_asset_hash=813950b50620cfa48e01ae0c5b30ae338b79066e750c45cefeb9a86076466903
     ;;
-  liblonejson-0.41.0-armhf-linux-gnu.tar.gz)
-    lonejson_asset_hash=d6fcfa25f93bcd1381351c3e369282cc3375ecf45831bfe6a8b82298fc03ec98
+  liblonejson-0.42.0-armhf-linux-gnu.tar.gz)
+    lonejson_asset_hash=3aeff1901078917a4430dc945c253cf4cec193311f35245b4ef1c62056d181c1
     ;;
-  liblonejson-0.41.0-armhf-linux-musl.tar.gz)
-    lonejson_asset_hash=fc77ebb256581f22a05889110159c7c6a1593bf46556efcc766cfc5899f5c993
+  liblonejson-0.42.0-armhf-linux-musl.tar.gz)
+    lonejson_asset_hash=37ba738c675b41c563b1b03ea322ad1e65dbe76749ebfd294809b50abafb2d32
     ;;
-  liblonejson-0.41.0-arm64-apple-darwin.tar.gz)
-    lonejson_asset_hash=a5221bf60e749eb533854cbe9f6143947415222c1d0fc253b08e4cfc7fb5ed67
+  liblonejson-0.42.0-arm64-apple-darwin.tar.gz)
+    lonejson_asset_hash=b351df4221e16d62b7b86940a6a6a6a4d38fffb850b2d118fca2f9f5a9bb5488
     ;;
   *)
     printf 'unsupported lonejson release asset: %s\n' "$lonejson_asset_name" >&2
+    exit 1
+    ;;
+esac
+
+liblql_version=$(resolve_cmake_cache_string LOCKDC_LIBLQL_VERSION "${LOCKDC_LIBLQL_VERSION:-}")
+liblql_asset_name="liblql-$liblql_version-${preset#deps-}.tar.gz"
+liblql_download_url="https://github.com/sa6mwa/liblql/releases/download/v$liblql_version/$liblql_asset_name"
+case "$liblql_asset_name" in
+  liblql-0.1.0-x86_64-linux-gnu.tar.gz)
+    liblql_asset_hash=4296c0072f76c7a53b53c2ae9f0cbd0c5b20c2955790eae84a75a76b75786146
+    ;;
+  liblql-0.1.0-x86_64-linux-musl.tar.gz)
+    liblql_asset_hash=88b8606fee305755e194a6a0d6ef5ecffe3e0a9890451683da20cce0ebe3b1f1
+    ;;
+  liblql-0.1.0-aarch64-linux-gnu.tar.gz)
+    liblql_asset_hash=79fbfebeed6968a88ce58cda37b17ed3a39f2543a177c7d0bbbc3024dcb6ea5a
+    ;;
+  liblql-0.1.0-aarch64-linux-musl.tar.gz)
+    liblql_asset_hash=407b3a0157d9646eb515a14ea25e45ef1fe1311d4319f34a47e98baf852705db
+    ;;
+  liblql-0.1.0-armhf-linux-gnu.tar.gz)
+    liblql_asset_hash=2d991728cd46b33013300fcd5675047d15ea0b3bb9bcde8ace6dae720fa64c33
+    ;;
+  liblql-0.1.0-armhf-linux-musl.tar.gz)
+    liblql_asset_hash=49fd62676f58c37d8d54e5a050280882326b94bf80642a59bc3c88f4d990c4e6
+    ;;
+  liblql-0.1.0-arm64-apple-darwin.tar.gz)
+    liblql_asset_hash=75630a993625902481dc5422d68994bf1fe5ba07cac160a4b2fa3e64f89d75dc
+    ;;
+  *)
+    printf 'unsupported liblql release asset: %s\n' "$liblql_asset_name" >&2
     exit 1
     ;;
 esac
@@ -277,6 +309,9 @@ libssh2_version=$libssh2_version
 lonejson_version=$lonejson_version
 lonejson_asset_name=$lonejson_asset_name
 lonejson_asset_hash=$lonejson_asset_hash
+liblql_version=$liblql_version
+liblql_asset_name=$liblql_asset_name
+liblql_asset_hash=$liblql_asset_hash
 cmocka_version=$cmocka_version
 pslog_version=$pslog_version"
 
@@ -382,6 +417,30 @@ download_lonejson_bundle() {
   tar -xzf "$archive_path" -C "$extract_root" --strip-components=1
 }
 
+download_liblql_bundle() {
+  local archive_path="$repo_root/.cache/downloads/$liblql_asset_name"
+  local extract_root="$deps_root/liblql/install"
+  local actual_hash
+
+  mkdir -p "$repo_root/.cache/downloads" "$extract_root"
+  if [ ! -f "$archive_path" ]; then
+    curl -fL --connect-timeout "$download_timeout" \
+      --max-time "$download_timeout" \
+      -o "$archive_path" "$liblql_download_url"
+  fi
+
+  actual_hash=$(sha256sum "$archive_path" | awk '{print $1}')
+  if [ "$actual_hash" != "$liblql_asset_hash" ]; then
+    printf 'liblql checksum mismatch for %s\nexpected %s\nactual   %s\n' \
+      "$liblql_asset_name" "$liblql_asset_hash" "$actual_hash" >&2
+    exit 1
+  fi
+
+  rm -rf "$extract_root"
+  mkdir -p "$extract_root"
+  tar -xzf "$archive_path" -C "$extract_root" --strip-components=1
+}
+
 stage_cpkt_component_layout() {
   local cpkt_root="$deps_root/c.pkt.systems/install"
 
@@ -468,6 +527,7 @@ case "$preset" in
     zlib_shared_versioned_path="$deps_root/zlib/install/lib/libz.$zlib_version.${shared_ext}"
     pslog_shared_path="$deps_root/pslog/install/lib/libpslog.0.${shared_ext}"
     lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.${lonejson_abi_version}.${shared_ext}"
+    liblql_shared_path="$deps_root/liblql/install/lib/liblql.${liblql_abi_version}.${shared_ext}"
     ;;
   *)
     shared_ext=so
@@ -479,6 +539,7 @@ case "$preset" in
     zlib_shared_versioned_path="$deps_root/zlib/install/lib/libz.so.$zlib_version"
     pslog_shared_path="$deps_root/pslog/install/lib/libpslog.so.0"
     lonejson_shared_path="$deps_root/lonejson/install/lib/liblonejson.so.${lonejson_abi_version}"
+    liblql_shared_path="$deps_root/liblql/install/lib/liblql.so.${liblql_abi_version}"
     ;;
 esac
 curl_shared_path="$deps_root/curl/install/lib/libcurl.${shared_ext}"
@@ -528,6 +589,12 @@ required_paths=(
   "$deps_root/lonejson/install/lib/pkgconfig/lonejson.pc"
   "$deps_root/lonejson/install/lib/cmake/lonejson/lonejsonConfig.cmake"
   "$deps_root/lonejson/install/lib/cmake/lonejson/lonejsonConfigVersion.cmake"
+  "$deps_root/liblql/install/lib/liblql.a"
+  "$deps_root/liblql/install/include/lql/lql.h"
+  "$liblql_shared_path"
+  "$deps_root/liblql/install/lib/pkgconfig/liblql.pc"
+  "$deps_root/liblql/install/lib/cmake/liblql/liblqlConfig.cmake"
+  "$deps_root/liblql/install/lib/cmake/liblql/liblqlConfigVersion.cmake"
 )
 if [ "$preset" != "deps-arm64-apple-darwin" ]; then
   required_paths+=("$deps_root/cmocka/install/lib/libcmocka.a")
@@ -565,12 +632,14 @@ fi
 reset_dependency_build_root
 stage_cpkt_component_layout
 download_lonejson_bundle
+download_liblql_bundle
 cmake_extra_args+=("-DLOCKDC_ZLIB_VERSION=$zlib_version")
 cmake_extra_args+=("-DLOCKDC_CPKT_VERSION=$cpkt_version")
 cmake --preset "$cmake_preset" --fresh "${cmake_extra_args[@]}"
 cmake --build --preset "$cmake_preset" --target lc_deps
 stage_dependency_license "pslog" "libpslog" "$deps_root/pslog/install/share/doc/libpslog/LICENSE"
 stage_dependency_license "lonejson" "lonejson" "$deps_root/lonejson/install/share/doc/liblonejson/LICENSE"
+stage_dependency_license "liblql" "liblql" "$deps_root/liblql/install/share/doc/liblql/LICENSE"
 prune_dependency_install_trees
 assert_dependency_install_tree_privacy
 printf '%s\n' "$manifest" > "$manifest_path"

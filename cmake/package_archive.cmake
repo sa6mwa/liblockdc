@@ -81,11 +81,15 @@ function(lockdc_write_sdk_metadata package_root)
     lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "cpkt_asset_hash" _lockdc_cpkt_asset_hash)
     lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "lonejson_asset_name" _lockdc_lonejson_asset_name)
     lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "lonejson_asset_hash" _lockdc_lonejson_asset_hash)
+    lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "liblql_asset_name" _lockdc_liblql_asset_name)
+    lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "liblql_asset_hash" _lockdc_liblql_asset_hash)
 
     set(_lockdc_cpkt_source_url
         "https://github.com/sa6mwa/c.pkt.systems/releases/download/v${_lockdc_cpkt_version}/${_lockdc_cpkt_asset_name}")
     set(_lockdc_lonejson_source_url
         "https://github.com/sa6mwa/lonejson/releases/download/v${LOCKDC_LONEJSON_VERSION}/${_lockdc_lonejson_asset_name}")
+    set(_lockdc_liblql_source_url
+        "https://github.com/sa6mwa/liblql/releases/download/v${LOCKDC_LIBLQL_VERSION}/${_lockdc_liblql_asset_name}")
     set(_lockdc_pslog_source_url
         "https://github.com/sa6mwa/libpslog/releases/download/v${LOCKDC_PSLOG_VERSION}/${LOCKDC_PSLOG_ASSET_NAME}")
 
@@ -117,6 +121,7 @@ function(lockdc_write_sdk_metadata package_root)
         "libssh2|${LOCKDC_LIBSSH2_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|BSD-3-Clause|external-static-consumer"
         "libpslog|${LOCKDC_PSLOG_VERSION}|github-release|${LOCKDC_PSLOG_ASSET_NAME}|${_lockdc_pslog_source_url}|${LOCKDC_PSLOG_ASSET_HASH}|MIT|external-static-consumer"
         "lonejson|${LOCKDC_LONEJSON_VERSION}|github-release|${_lockdc_lonejson_asset_name}|${_lockdc_lonejson_source_url}|${_lockdc_lonejson_asset_hash}|MIT|external-static-consumer"
+        "liblql|${LOCKDC_LIBLQL_VERSION}|github-release|${_lockdc_liblql_asset_name}|${_lockdc_liblql_source_url}|${_lockdc_liblql_asset_hash}|MIT|external-static-consumer"
     )
     list(LENGTH _lockdc_dependency_rows _lockdc_dependency_row_count)
     math(EXPR _lockdc_dependency_last_index "${_lockdc_dependency_row_count} - 1")

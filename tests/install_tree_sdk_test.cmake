@@ -52,6 +52,7 @@ endforeach()
 
 foreach(forbidden_path
     "${install_prefix}/include/lonejson.h"
+    "${install_prefix}/include/lql"
     "${install_prefix}/include/pslog.h"
     "${install_prefix}/include/curl"
     "${install_prefix}/include/openssl"
@@ -59,6 +60,7 @@ foreach(forbidden_path
     "${install_prefix}/include/libssh2.h"
     "${install_prefix}/include/zlib.h"
     "${install_prefix}/lib/liblonejson.a"
+    "${install_prefix}/lib/liblql.a"
     "${install_prefix}/lib/libpslog.a"
     "${install_prefix}/lib/libcurl.a"
     "${install_prefix}/lib/libssl.a"
@@ -77,7 +79,7 @@ endforeach()
 
 file(READ "${install_prefix}/lib/cmake/lockdc/lockdcConfig.cmake" lockdc_config_text)
 file(READ "${install_prefix}/lib/pkgconfig/lockdc.pc" lockdc_pkgconfig_text)
-foreach(forbidden_archive_name libssh2.a libssl.a libcrypto.a libz.a libcurl.a libnghttp2.a libpslog.a liblonejson.a)
+foreach(forbidden_archive_name libssh2.a libssl.a libcrypto.a libz.a libcurl.a libnghttp2.a libpslog.a liblonejson.a liblql.a)
     string(FIND "${lockdc_config_text}" "${forbidden_archive_name}" forbidden_archive_index)
     if(NOT forbidden_archive_index EQUAL -1)
         message(FATAL_ERROR
@@ -109,6 +111,7 @@ set(LOCKDC_EXTERNAL_INCLUDE_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 set(LOCKDC_EXTERNAL_LIBRARY_DIRS
@@ -117,6 +120,7 @@ set(LOCKDC_EXTERNAL_LIBRARY_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 
@@ -251,6 +255,7 @@ list(APPEND lockdc_pkgconfig_shared_cflags_list
     "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 list(APPEND lockdc_pkgconfig_shared_libs_list
@@ -258,6 +263,7 @@ list(APPEND lockdc_pkgconfig_shared_libs_list
     "-L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
@@ -267,6 +273,7 @@ if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
         "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
@@ -335,6 +342,7 @@ list(APPEND lockdc_pkgconfig_cflags_list
     "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 list(APPEND lockdc_pkgconfig_libs_list
@@ -343,6 +351,7 @@ list(APPEND lockdc_pkgconfig_libs_list
     "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 

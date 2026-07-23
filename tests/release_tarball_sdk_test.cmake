@@ -111,6 +111,7 @@ endforeach()
 
 foreach(forbidden_path
     "${release_prefix}/include/lonejson.h"
+    "${release_prefix}/include/lql"
     "${release_prefix}/include/pslog.h"
     "${release_prefix}/include/curl"
     "${release_prefix}/include/openssl"
@@ -118,6 +119,7 @@ foreach(forbidden_path
     "${release_prefix}/include/libssh2.h"
     "${release_prefix}/include/zlib.h"
     "${release_prefix}/lib/liblonejson.a"
+    "${release_prefix}/lib/liblql.a"
     "${release_prefix}/lib/libpslog.a"
     "${release_prefix}/lib/libcurl.a"
     "${release_prefix}/lib/libssl.a"
@@ -174,6 +176,7 @@ set(LOCKDC_EXTERNAL_INCLUDE_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 set(LOCKDC_EXTERNAL_LIBRARY_DIRS
@@ -182,6 +185,7 @@ set(LOCKDC_EXTERNAL_LIBRARY_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 
@@ -465,7 +469,7 @@ if(LOCKDC_RUN_DOWNSTREAM_BINARIES)
     set(lockdc_release_runtime_env)
     if(UNIX AND NOT APPLE)
         set(lockdc_release_runtime_env
-            "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+            "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
     endif()
     foreach(binary_name example_static test_static example_shared test_shared)
         execute_process(
@@ -531,6 +535,7 @@ list(APPEND lockdc_pkgconfig_cflags_list
     "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 list(APPEND lockdc_pkgconfig_libs_list
@@ -539,6 +544,7 @@ list(APPEND lockdc_pkgconfig_libs_list
     "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 set(lockdc_direct_link_flags)
@@ -617,6 +623,7 @@ list(APPEND lockdc_pkgconfig_shared_cflags_list
     "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 list(APPEND lockdc_pkgconfig_shared_libs_list
@@ -624,6 +631,7 @@ list(APPEND lockdc_pkgconfig_shared_libs_list
     "-L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")

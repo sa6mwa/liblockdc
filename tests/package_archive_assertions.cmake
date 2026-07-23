@@ -312,6 +312,7 @@ function(assert_sdk_metadata extract_root archive_path version target_id shared_
             "\"name\": \"libssh2\""
             "\"name\": \"libpslog\""
             "\"name\": \"lonejson\""
+            "\"name\": \"liblql\""
             "\"bundled\": false"
             "\"role\": \"external-static-consumer\"")
         string(FIND "${dependencies_text}" "${expected_dependency}" dependency_index)
@@ -322,7 +323,7 @@ function(assert_sdk_metadata extract_root archive_path version target_id shared_
     endforeach()
     string(REGEX MATCHALL "\"sha256\": \"[0-9a-f]+\"" dependency_sha_entries "${dependencies_text}")
     list(LENGTH dependency_sha_entries dependency_sha_count)
-    if(NOT dependency_sha_count EQUAL 7)
+    if(NOT dependency_sha_count EQUAL 8)
         message(FATAL_ERROR "archive dependency provenance is missing SHA-256 values: ${archive_path}\n${dependencies_text}")
     endif()
     if(dependencies_text MATCHES "\"sha256\": \"\"")
@@ -377,6 +378,7 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/libssh2(_publickey|_sftp)?\\.h(\n|$)" "libssh2 headers")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/z(conf|lib)\\.h(\n|$)" "zlib headers")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lonejson\\.h(\n|$)" "lonejson header")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lql(/|\n|$)" "liblql headers")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/liblockdc(/|\n|$)" "engine share/liblockdc path")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lockdc/luarocks(/|\n|$)" "embedded LuaRocks payload")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lua/5\\.5/lockdc(/|\n|$)" "embedded Lua runtime wrapper")
@@ -403,7 +405,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
         libnghttp2
         libssh2
         libz
-        liblonejson)
+        liblonejson
+        liblql)
         assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_archive}\\.a(\n|$)" "${forbidden_dependency_archive} static archive")
     endforeach()
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/pkgconfig/lockdc\\.pc(\n|$)" "pkg-config metadata")
@@ -419,7 +422,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
             libnghttp2
             libssh2
             libz
-            liblonejson)
+            liblonejson
+            liblql)
             assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_library}[^/\n]*\\.dylib" "${forbidden_dependency_library} dylib")
         endforeach()
     else()
@@ -431,7 +435,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
             libnghttp2
             libssh2
             libz
-            liblonejson)
+            liblonejson
+            liblql)
             assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_library}\\.so" "${forbidden_dependency_library} shared library")
         endforeach()
     endif()

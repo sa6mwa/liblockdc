@@ -17,6 +17,14 @@ if(LOCKDC_EXTERNAL_ROOT)
       -DLOCKDC_LONEJSON_ABI_VERSION=${LOCKDC_LONEJSON_ABI_VERSION}
       -P "${CMAKE_SOURCE_DIR}/tests/lonejson_dependency_interface_test.cmake"
   )
+  add_test(NAME liblql_dependency_interface
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+      -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
+      -DLOCKDC_LIBLQL_VERSION=${LOCKDC_LIBLQL_VERSION}
+      -DLOCKDC_LIBLQL_ABI_VERSION=${LOCKDC_LIBLQL_ABI_VERSION}
+      -P "${CMAKE_SOURCE_DIR}/tests/liblql_dependency_interface_test.cmake"
+  )
   add_test(NAME zlib_dependency_interface
     COMMAND "${CMAKE_COMMAND}"
       -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
@@ -166,7 +174,7 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NO
   )
   if(UNIX AND NOT APPLE)
     list(APPEND lockdc_lua_core_smoke_env
-      "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
+      "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
     )
   endif()
   set_tests_properties(lua_binding_core_smoke_test PROPERTIES

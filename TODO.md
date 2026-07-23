@@ -99,25 +99,26 @@ Latest release targets confirmed on 2026-07-22:
 
 ### Dependency upgrade and provenance
 
-- [ ] Upgrade the native `lonejson` SDK dependency from `0.41.0` to
+- [x] Upgrade the native `lonejson` SDK dependency from `0.41.0` to
   `0.42.0`, including ABI/SOVERSION, release asset URLs, SHA-256 pins, Lua
   rock dependency/source-rock pins, dependency interface tests, README, Lua
   docs, examples, package metadata, and release manifest expectations.
-- [ ] Upgrade `libpslog` from `0.8.0` to `0.9.0`, including all target-specific
+- [x] Upgrade `libpslog` from `0.8.0` to `0.9.0`, including all target-specific
   SDK asset hashes, public logging dependency tests, package metadata,
   license/provenance entries, and any generated single-header references.
-- [ ] Upgrade `c.pkt.systems` dependency bundles from `0.7.0` to `0.9.0`,
+- [x] Upgrade `c.pkt.systems` dependency bundles from `0.7.0` to `0.9.0`,
   including every supported target asset hash, dependency root identity, package
   verification expectations, and downstream SDK metadata.
-- [ ] Add `liblql v0.1.0` as a first-class lifecycle dependency from
+- [x] Add `liblql v0.1.0` as a first-class lifecycle dependency from
   `https://github.com/sa6mwa/liblql/releases`, pinned by target ID, exact
   release asset URL, SHA-256, ABI/SOVERSION, license, CMake metadata, and
   pkg-config metadata.
-- [ ] Add `liblql` dependency interface tests that verify headers, static and
+- [x] Add `liblql` dependency interface tests that verify headers, static and
   shared libraries, CMake package config, pkg-config metadata, exported symbols,
-  forbidden private artifacts, license/provenance metadata, and stale-cache
-  failure behavior.
-- [ ] Update binary SDK package manifests so `liblql`, `lonejson`, `libpslog`,
+  forbidden private artifacts, and license/provenance metadata.
+- [ ] Add stale-cache failure behavior coverage for `liblql` once the lifecycle
+  shared archive cache helper lands.
+- [x] Update binary SDK package manifests so `liblql`, `lonejson`, `libpslog`,
   and `c.pkt.systems` record logical dependency identity, exact upstream release
   asset URL, SHA-256, target ID, license, bundled/external role, and no local
   paths.
@@ -132,7 +133,7 @@ Latest release targets confirmed on 2026-07-22:
 - [ ] Add observable pouch tests for `liblql`-backed owner/key selectors,
   pagination, hidden metadata filtering, removed-candidate skipping, malformed
   LQL diagnostics, oversized query limits, and scan/index fallback parity.
-- [ ] Add package and install-tree smoke consumers proving downstream CMake and
+- [x] Add package and install-tree smoke consumers proving downstream CMake and
   pkg-config users can link `liblockdc` with the transitive `liblql` contract.
 
 ### Updated lifecycle alignment

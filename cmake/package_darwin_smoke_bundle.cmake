@@ -103,6 +103,7 @@ set(LOCKDC_EXTERNAL_INCLUDE_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 set(LOCKDC_EXTERNAL_LIBRARY_DIRS
@@ -111,6 +112,7 @@ set(LOCKDC_EXTERNAL_LIBRARY_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 
