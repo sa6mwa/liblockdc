@@ -1689,6 +1689,92 @@ static void test_segment_rotation_replays_multiple_segments(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_segment_replay_truncates_rotated_tail(void **state) {
+  char root[256];
+  char log_path[512];
+  char segment_path[512];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source large_source;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  off_t clean_size;
+  off_t dirty_size;
+  int fd;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "segment-tail-truncate");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&info, 0, sizeof(info));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  counting_source_init(&large_source, 40000U);
+  rc = store->write_state(store, "default", "large-a", &large_source.pub, NULL,
+                          &put_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  counting_source_init(&large_source, 40000U);
+  rc = store->write_state(store, "default", "large-b", &large_source.pub, NULL,
+                          &put_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  source = source_from_text("rotated-tail");
+  rc = store->write_state(store, "default", "tail", source, NULL, &put_res,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  test_segment_path(root, "default", 2UL, segment_path, sizeof(segment_path));
+  clean_size = test_segment_size(root, "default", 2UL);
+  fd = open(segment_path, O_WRONLY | O_APPEND);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, "bad", 3U), 3);
+  assert_int_equal(close(fd), 0);
+  dirty_size = test_segment_size(root, "default", 2UL);
+  assert_int_equal(dirty_size, clean_size + 3);
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  assert_int_equal(unlink(log_path), 0);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_segment_size(root, "default", 2UL), clean_size);
+  rc = store->read_state(store, "default", "tail", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "rotated-tail");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_state_put_propagates_source_failure_before_append(
     void **state) {
   char root[256];
@@ -13586,6 +13672,7 @@ int main(void) {
       cmocka_unit_test(test_replay_recovers_state_from_namespace_segment),
       cmocka_unit_test(test_replay_repairs_missing_namespace_manifest),
       cmocka_unit_test(test_segment_rotation_replays_multiple_segments),
+      cmocka_unit_test(test_segment_replay_truncates_rotated_tail),
       cmocka_unit_test(
           test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),

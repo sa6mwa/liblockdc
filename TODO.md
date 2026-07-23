@@ -330,6 +330,8 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Discover and replay every numbered `seg-*.log` file in each
         namespace, so sealed historical segments and the active tail are both
         authoritative.
+      - [x] Truncate invalid/trailing bytes from namespace segment files during
+        authoritative segment replay, matching root-log corrupt-tail semantics.
     - [ ] Implement snapshot compaction and cleanup: capture live refs,
       validate drift before install, protect live state-link targets, mark old
       segments/snapshots obsolete, and retry obsolete-file cleanup.

@@ -10295,7 +10295,7 @@ static int lc_pouch_disk_replay_active_segments(lc_pouch_disk_store *store,
     unsigned long ignored_offset;
     int fd;
 
-    fd = open(paths.items[index], O_RDONLY);
+    fd = open(paths.items[index], O_RDWR);
     if (fd < 0) {
       rc = lc_pouch_set_errno(error, "failed to open pouch segment");
       break;
@@ -10304,7 +10304,7 @@ static int lc_pouch_disk_replay_active_segments(lc_pouch_disk_store *store,
     input.fd = fd;
     input.path = paths.items[index];
     ignored_offset = 0UL;
-    rc = lc_pouch_disk_replay_input_records(&input, index == 0U, 0,
+    rc = lc_pouch_disk_replay_input_records(&input, index == 0U, 1,
                                             &ignored_offset, error);
     if (close(fd) != 0 && rc == LC_OK) {
       rc = lc_pouch_set_errno(error, "failed to close pouch segment");
