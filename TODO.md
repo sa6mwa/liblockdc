@@ -136,7 +136,7 @@ Latest release targets confirmed on 2026-07-22:
     `filter_file_spooled` return `LQL_STATUS_UNSUPPORTED` with
     `direct stream selector is not implemented by scanner` for a parsed JSON
     AST selector such as `{"eq":{"field":"value","value":"alpha"}}`.
-- [ ] Keep pouch storage-owned indexes behind the pouch store boundary; use
+- [x] Keep pouch storage-owned indexes behind the pouch store boundary; use
   `liblql` only for query language semantics and predicate/evaluator behavior.
 - [ ] Add observable pouch tests for `liblql`-backed owner/key selectors,
   pagination, hidden metadata filtering, removed-candidate skipping, malformed

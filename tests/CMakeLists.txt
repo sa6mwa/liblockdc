@@ -50,6 +50,12 @@ add_test(NAME example_receiver_style
     -P "${CMAKE_SOURCE_DIR}/tests/example_receiver_style_test.cmake"
 )
 
+add_test(NAME pouch_liblql_storage_boundary
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/pouch_liblql_storage_boundary_test.cmake"
+)
+
 add_test(NAME release_target_clang_guard_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
