@@ -125,6 +125,9 @@ Latest release targets confirmed on 2026-07-22:
 
 ### Pouch `liblql` integration
 
+- [x] Route pouch query selector classification through `liblql` parse/build
+  and AST inspection instead of project-local selector token parsing, while
+  preserving the existing legacy JSON selector compatibility surface.
 - [ ] Replace the current pouch indexed-query placeholder/parser boundary with
   `liblql` for LQL parsing/evaluation; do not add project-local query parser or
   expression evaluator code.
