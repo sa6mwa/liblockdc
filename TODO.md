@@ -227,12 +227,20 @@ Latest release targets confirmed on 2026-07-22:
 - [x] Run lifecycle-alignment gates after command/toolchain/cache changes:
   preset contract tests, target-tool discovery tests, cache contract tests,
   `make build`, `make test`, and `make valgrind`.
-- [ ] Run broader gates before declaring the dependency/lifecycle migration
+- [x] Run broader gates before declaring the dependency/lifecycle migration
   complete: `make test-all`, `make package-verify`, `make lua-test`, fuzz smoke
   when AFL++ is available, deterministic e2e when relevant, and release artifact
   privacy/relocatability scans.
-- [ ] Inspect and classify generated state after verification; commit only the
+  - [x] `make test-all`
+  - [x] `make package-verify`
+  - [x] `make lua-test`
+  - [x] `make fuzz-smoke`
+  - [x] `make test-e2e`
+- [x] Inspect and classify generated state after verification; commit only the
   coherent dependency/lifecycle changes and leave generated caches untracked.
+  - [x] Tracked dirty files are limited to the lifecycle/pouch/test/TODO
+    change set; generated state remains ignored under `.cache/`, `build/`,
+    `dist/`, and `devenv/volumes/`.
 
 ## Current release-readiness focus
 

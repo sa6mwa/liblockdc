@@ -57,6 +57,16 @@ static int test_under_valgrind(void) {
   return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
 }
 
+static int test_slow_runtime(void) {
+  const char *value;
+
+  if (test_under_valgrind()) {
+    return 1;
+  }
+  value = getenv("LOCKDC_SLOW_TEST_RUNTIME");
+  return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
 static void test_child_exit(int code) {
   if (test_under_valgrind()) {
     exit(code);
@@ -517,6 +527,19 @@ static lc_client *open_pouch_client(const char *endpoint) {
   return open_pouch_client_with_namespace(endpoint, "default");
 }
 
+static int try_open_pouch_client(const char *endpoint, lc_client **out,
+                                 lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+
+  lc_client_config_init(&config);
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "default";
+  return lc_client_open(&config, out, error);
+}
+
 typedef struct delayed_enqueue_context {
   const char *endpoint;
   const char *queue;
@@ -536,7 +559,11 @@ static void *delayed_enqueue_main(void *arg) {
   memset(&ctx->error, 0, sizeof(ctx->error));
   ctx->rc = LC_ERR_TRANSPORT;
   usleep(200000U);
-  client = open_pouch_client(ctx->endpoint);
+  client = NULL;
+  ctx->rc = try_open_pouch_client(ctx->endpoint, &client, &ctx->error);
+  if (ctx->rc != LC_OK) {
+    return NULL;
+  }
   memset(&res, 0, sizeof(res));
   lc_enqueue_req_init(&req);
   req.queue = ctx->queue;
@@ -979,7 +1006,14 @@ static void child_release_after_delay(const char *endpoint,
   usleep(200000U);
   memset(&error, 0, sizeof(error));
   memset(&res, 0, sizeof(res));
-  client = open_pouch_client(endpoint);
+  client = NULL;
+  rc = try_open_pouch_client(endpoint, &client, &error);
+  if (rc != LC_OK) {
+    fprintf(stderr, "child failed to open pouch client: rc=%d code=%d message=%s\n",
+            rc, error.code, error.message != NULL ? error.message : "(null)");
+    lc_error_cleanup(&error);
+    test_child_exit(24);
+  }
   rc = client->release(client, release_op, &res, &error);
   lc_release_res_cleanup(&res);
   client->close(client);
@@ -1836,7 +1870,7 @@ test_pouch_endpoint_blocking_acquire_waits_for_release(void **state) {
   }
 
   acquire.owner = "owner-b";
-  acquire.block_seconds = test_under_valgrind() ? 15L : 2L;
+  acquire.block_seconds = test_slow_runtime() ? 15L : 2L;
   second_lease = NULL;
   rc = second_client->acquire(second_client, &acquire, &second_lease, &error);
   assert_int_equal(rc, LC_OK);
@@ -3261,7 +3295,7 @@ static void test_pouch_endpoint_dequeue_waits_for_later_enqueue(void **state) {
   dequeue_req.queue = "jobs";
   dequeue_req.owner = "worker-a";
   dequeue_req.visibility_timeout_seconds = 30L;
-  dequeue_req.wait_seconds = 1L;
+  dequeue_req.wait_seconds = test_slow_runtime() ? 15L : 1L;
   message = NULL;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);

@@ -173,6 +173,9 @@ if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT)
 endif()
 
 set(LOCKDC_C_TEST_ENVIRONMENT "")
+if(CMAKE_CROSSCOMPILING)
+    list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LOCKDC_SLOW_TEST_RUNTIME=1")
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT AND LOCKDC_TARGET_LIBC STREQUAL "musl")
     set(lockdc_c_test_runtime_dirs)
     foreach(lockdc_runtime_dir
@@ -199,7 +202,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT AND LOCKDC_TARGET_LIBC S
     list(REMOVE_DUPLICATES lockdc_c_test_runtime_dirs)
     if(lockdc_c_test_runtime_dirs)
         string(JOIN ":" lockdc_c_test_runtime_path ${lockdc_c_test_runtime_dirs})
-        set(LOCKDC_C_TEST_ENVIRONMENT "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}")
+        list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}")
     endif()
 endif()
 
@@ -792,6 +795,11 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
+            -DLOCKDC_TARGET_ARCH=${LOCKDC_TARGET_ARCH}
+            -DLOCKDC_TARGET_OS=${LOCKDC_TARGET_OS}
+            -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/c_only_configure_test.cmake
     )
     set_tests_properties(c_only_configure_test PROPERTIES RUN_SERIAL TRUE)
@@ -800,6 +808,10 @@ if(LOCKDC_BUILD_TESTS)
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -DLOCKDC_TARGET_ARCH=${LOCKDC_TARGET_ARCH}
+            -DLOCKDC_TARGET_OS=${LOCKDC_TARGET_OS}
+            -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/deferred_vendored_install_manifest_test.cmake
     )
     set_tests_properties(deferred_vendored_install_manifest_test PROPERTIES RUN_SERIAL TRUE)

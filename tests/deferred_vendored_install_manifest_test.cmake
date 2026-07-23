@@ -6,6 +6,10 @@ if(NOT DEFINED LOCKDC_C_COMPILER OR LOCKDC_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "LOCKDC_C_COMPILER is required")
 endif()
 
+if(NOT DEFINED LOCKDC_EXTERNAL_ROOT OR LOCKDC_EXTERNAL_ROOT STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_EXTERNAL_ROOT is required")
+endif()
+
 set(test_root "${LOCKDC_ROOT}/build/deferred-vendored-install-manifest-test")
 set(dependency_build_root "${test_root}/deps-build")
 set(configure_build_dir "${test_root}/build")
@@ -25,7 +29,11 @@ execute_process(
         -DLOCKDC_BUILD_EXAMPLES=OFF
         -DLOCKDC_BUILD_BENCHMARKS=OFF
         -DLOCKDC_BUILD_FUZZERS=OFF
+        "-DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}"
         "-DLOCKDC_DEPENDENCY_BUILD_ROOT=${dependency_build_root}"
+        "-DLOCKDC_TARGET_ARCH=${LOCKDC_TARGET_ARCH}"
+        "-DLOCKDC_TARGET_OS=${LOCKDC_TARGET_OS}"
+        "-DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}"
     RESULT_VARIABLE configure_result
     OUTPUT_VARIABLE configure_stdout
     ERROR_VARIABLE configure_stderr

@@ -5,6 +5,7 @@
 #include <lql/lql.h>
 
 #include <errno.h>
+#include <stdint.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,7 +99,7 @@ static int lc_pouch_validate_active_lease(lc_client_handle *client,
                                           const lc_lease_ref *ref,
                                           lc_pouch_meta_record *record,
                                           lc_error *error);
-static long lc_pouch_now_millis(void);
+static int64_t lc_pouch_now_millis(void);
 static void lc_pouch_sleep_millis(long millis);
 
 typedef struct lc_pouch_acquire_for_update_file_sink {
@@ -2829,10 +2830,10 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   char *lease_id;
   char *generated_txn_id;
   lc_lease *lease;
-  long deadline_ms;
-  long now_ms;
+  int64_t deadline_ms;
+  int64_t now_ms;
+  int64_t remaining_ms;
   long now_unix;
-  long remaining_ms;
   long sleep_ms;
   int rc;
 
@@ -2891,7 +2892,7 @@ acquire_retry:
       now_ms = lc_pouch_now_millis();
       if (now_ms > 0L && now_ms < deadline_ms) {
         remaining_ms = deadline_ms - now_ms;
-        sleep_ms = remaining_ms < 100L ? remaining_ms : 100L;
+        sleep_ms = remaining_ms < 100L ? (long)remaining_ms : 100L;
         lc_pouch_meta_record_cleanup(allocator, &existing);
         lc_pouch_sleep_millis(sleep_ms);
         goto acquire_retry;
@@ -2949,7 +2950,7 @@ acquire_retry:
       now_ms = lc_pouch_now_millis();
       if (now_ms > 0L && now_ms < deadline_ms) {
         remaining_ms = deadline_ms - now_ms;
-        sleep_ms = remaining_ms < 100L ? remaining_ms : 100L;
+        sleep_ms = remaining_ms < 100L ? (long)remaining_ms : 100L;
         lc_error_cleanup(error);
         lc_pouch_sleep_millis(sleep_ms);
         goto acquire_retry;
@@ -5165,13 +5166,13 @@ static int lc_pouch_query_selector_error_or_unsupported(lc_error *error,
   return lc_pouch_client_unsupported(error, message);
 }
 
-static long lc_pouch_now_millis(void) {
+static int64_t lc_pouch_now_millis(void) {
   struct timespec ts;
 
   if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-    return 0L;
+    return 0;
   }
-  return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+  return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
 }
 
 static void lc_pouch_sleep_millis(long millis) {
@@ -7315,9 +7316,9 @@ static int lc_pouch_client_dequeue_wait(lc_client *self,
                                         const lc_dequeue_req *req,
                                         int with_state, lc_message **out,
                                         int *terminal_flag, lc_error *error) {
-  long deadline_ms;
-  long now_ms;
-  long remaining_ms;
+  int64_t deadline_ms;
+  int64_t now_ms;
+  int64_t remaining_ms;
   long sleep_ms;
   int rc;
 
@@ -7344,7 +7345,7 @@ static int lc_pouch_client_dequeue_wait(lc_client *self,
       return LC_OK;
     }
     remaining_ms = deadline_ms - now_ms;
-    sleep_ms = remaining_ms < 100L ? remaining_ms : 100L;
+    sleep_ms = remaining_ms < 100L ? (long)remaining_ms : 100L;
     lc_pouch_sleep_millis(sleep_ms);
   }
 }
@@ -7461,9 +7462,9 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
   int index;
   int terminal;
   int rc;
-  long deadline_ms;
-  long now_ms;
-  long remaining_ms;
+  int64_t deadline_ms;
+  int64_t now_ms;
+  int64_t remaining_ms;
   long sleep_ms;
 
   if (self == NULL || req == NULL || req->queue == NULL || consumer == NULL ||
@@ -7510,7 +7511,7 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
         now_ms = lc_pouch_now_millis();
         if (now_ms > 0L && now_ms < deadline_ms) {
           remaining_ms = deadline_ms - now_ms;
-          sleep_ms = remaining_ms < 100L ? remaining_ms : 100L;
+          sleep_ms = remaining_ms < 100L ? (long)remaining_ms : 100L;
           lc_pouch_sleep_millis(sleep_ms);
           continue;
         }
