@@ -1,6 +1,7 @@
 #include "lc_pouch_store.h"
 
 #include "lc_api_internal.h"
+#include "lc_pouch_number.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -304,6 +305,7 @@ typedef struct lc_pouch_disk_field_index_visit {
   long version;
   int append_records;
   int update_memory;
+  int number_active;
   char *field;
   size_t field_len;
   size_t field_capacity;
@@ -7234,6 +7236,93 @@ lc_pouch_disk_field_null_value(void *user, const lonejson_value_path *path,
   return LONEJSON_STATUS_OK;
 }
 
+static lonejson_status
+lc_pouch_disk_field_number_begin(void *user, const lonejson_value_path *path,
+                                 lonejson_error *error) {
+  lc_pouch_disk_field_index_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_disk_field_index_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  visit->value_len = 0U;
+  if (visit->value != NULL) {
+    visit->value[0] = '\0';
+  }
+  visit->number_active = 0;
+  if (!lc_pouch_disk_field_index_set_path(visit, path)) {
+    return LONEJSON_STATUS_OK;
+  }
+  visit->number_active = 1;
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_disk_field_number_chunk(void *user, const lonejson_value_path *path,
+                                 const char *data, size_t len,
+                                 lonejson_error *error) {
+  lc_pouch_disk_field_index_visit *visit;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_disk_field_index_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (!visit->number_active) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (!lc_pouch_disk_field_index_append_buffer(
+          visit, &visit->value, &visit->value_len, &visit->value_capacity,
+          data, len)) {
+    visit->failed = 1;
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_disk_field_number_end(void *user, const lonejson_value_path *path,
+                               lonejson_error *error) {
+  lc_pouch_disk_field_index_visit *visit;
+  char *encoded;
+  int rc;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_disk_field_index_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (!visit->number_active || visit->field == NULL || visit->value == NULL) {
+    return LONEJSON_STATUS_OK;
+  }
+  visit->number_active = 0;
+  encoded = NULL;
+  if (!lc_pouch_number_eq_key(visit->value, visit->value_len, &encoded)) {
+    return LONEJSON_STATUS_OK;
+  }
+  rc = LC_OK;
+  if (visit->append_records) {
+    rc = lc_pouch_disk_append_query_field_value_record(
+        visit->store, visit->namespace_name, visit->key, visit->field, encoded,
+        visit->state_etag, visit->version, NULL);
+  }
+  if (rc == LC_OK && visit->update_memory &&
+      !lc_pouch_disk_query_field_insert(visit->store, visit->namespace_name,
+                                        visit->key, visit->field, encoded,
+                                        visit->state_etag, visit->version)) {
+    rc = LC_ERR_NOMEM;
+  }
+  lc_free_with_allocator(NULL, encoded);
+  if (rc != LC_OK) {
+    visit->failed = 1;
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
 static int lc_pouch_disk_update_query_field_index_from_fd(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *content_type, const char *state_etag, long version, int fd,
@@ -7291,6 +7380,9 @@ static int lc_pouch_disk_update_query_field_index_from_fd(
   visitor.string_begin = lc_pouch_disk_field_string_begin;
   visitor.string_chunk = lc_pouch_disk_field_string_chunk;
   visitor.string_end = lc_pouch_disk_field_string_end;
+  visitor.number_begin = lc_pouch_disk_field_number_begin;
+  visitor.number_chunk = lc_pouch_disk_field_number_chunk;
+  visitor.number_end = lc_pouch_disk_field_number_end;
   visitor.boolean_value = lc_pouch_disk_field_bool_value;
   visitor.null_value = lc_pouch_disk_field_null_value;
   lonejson_error_init(&lj_error);
