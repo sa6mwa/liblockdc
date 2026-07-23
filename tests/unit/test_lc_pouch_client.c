@@ -6090,6 +6090,14 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   pouch_save_query_json(charlie, "{\"other\":\"alpha\",\"n\":3}", &error);
   delta = pouch_acquire_query_key(client, "delta", &error);
   pouch_save_query_json(delta, "{\"value\":\"beta\",\"n\":4}", &error);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  delta->close(delta);
+  alpha = NULL;
+  bravo = NULL;
+  charlie = NULL;
+  delta = NULL;
 
   sink = NULL;
   rc = lc_sink_to_memory(&sink, &error);
@@ -6111,6 +6119,9 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   lc_sink_close(sink);
   lc_query_res_cleanup(&res);
 
+  client->close(client);
+  client = open_pouch_client(endpoint);
+
   sink = NULL;
   memset(&res, 0, sizeof(res));
   rc = lc_sink_to_memory(&sink, &error);
@@ -6190,7 +6201,7 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_null(strstr(text, "charlie"));
   assert_null(strstr(text, "delta"));
   assert_string_equal(res.cursor, "bravo");
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);
@@ -6212,7 +6223,7 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_null(strstr(text, "charlie"));
   assert_non_null(strstr(text, "{\"key\":\"delta\""));
   assert_null(res.cursor);
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);
@@ -6282,7 +6293,7 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "bravo");
   assert_string_equal(res.cursor, "bravo");
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
 
@@ -6296,14 +6307,10 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "delta");
   assert_null(res.cursor);
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
 
   lc_query_res_cleanup(&res);
-  alpha->close(alpha);
-  bravo->close(bravo);
-  charlie->close(charlie);
-  delta->close(delta);
   client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);

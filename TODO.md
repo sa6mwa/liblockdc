@@ -260,10 +260,19 @@ Latest release targets confirmed on 2026-07-23:
     `query_keys` apply `limit` to matched rows, not pre-filter storage
     candidates, and return cursors only when another matching row exists.
   - [ ] Add storage-owned field/range posting indexes for low-match public LQL
-    document predicates; the current `liblql` path evaluates document
-    candidates correctly but does not yet satisfy the design goal that indexed
-    LQL searches walk relevant posting/candidate sets instead of broad summary
-    candidates.
+    document predicates; indexed string/bool/null equality now uses durable
+    candidate postings, while numeric, range, and compound selector shapes still
+    need storage-owned candidate sets instead of broad summary candidates.
+    - [x] Add the first durable candidate-posting slice for full-form LQL
+      exact equality selectors with strict JSON Pointer fields and
+      string/bool/null values; final predicate acceptance remains owned by
+      `liblql`.
+    - [ ] Extend document postings to numeric equality/range predicates with
+      canonical numeric/range ordering semantics instead of string-token
+      comparison.
+    - [ ] Extend candidate extraction beyond single `eq` selectors to safe
+      conjunction/intersection forms once the storage-owned posting algebra is
+      explicit.
   - [ ] Revisit the segmented manifest/snapshot implementation order once the
     single-log compaction milestone is release-stable; the current disk backend
     deliberately implements the simpler single-log milestone documented in the

@@ -772,6 +772,7 @@ static void rewrite_query_index_as_v1_without_owner(const char *root) {
   unsigned long payload_len;
   unsigned long new_payload_len;
   unsigned long crc;
+  unsigned long type;
   ssize_t got;
   int in_fd;
   int out_fd;
@@ -790,15 +791,20 @@ static void rewrite_query_index_as_v1_without_owner(const char *root) {
     }
     assert_int_equal(got, sizeof(header));
     assert_memory_equal(header, "LCQI", 4U);
+    type = test_get_u32(header + 8);
     ns_len = test_get_u32(header + 12);
     key_len = test_get_u32(header + 16);
     owner_len = test_get_u32(header + 20);
     etag_len = test_get_u32(header + 24);
     payload_len = test_get_u64(header + 44);
-    assert_int_equal(payload_len, ns_len + key_len + owner_len + etag_len);
     payload = (unsigned char *)malloc((size_t)payload_len);
     assert_non_null(payload);
     assert_int_equal(read(in_fd, payload, (size_t)payload_len), payload_len);
+    if (type != TEST_POUCH_QUERY_INDEX_RECORD_META) {
+      free(payload);
+      continue;
+    }
+    assert_int_equal(payload_len, ns_len + key_len + owner_len + etag_len);
 
     new_payload_len = ns_len + key_len + etag_len;
     crc = 0xffffffffUL;
