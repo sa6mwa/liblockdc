@@ -136,6 +136,8 @@ Latest release targets confirmed on 2026-07-22:
 - [ ] Add observable pouch tests for `liblql`-backed owner/key selectors,
   pagination, hidden metadata filtering, removed-candidate skipping, malformed
   LQL diagnostics, oversized query limits, and scan/index fallback parity.
+  - [x] Cover `liblql` compound key+owner selectors for scan and index
+    document queries plus `query_keys`.
 - [x] Add package and install-tree smoke consumers proving downstream CMake and
   pkg-config users can link `liblockdc` with the transitive `liblql` contract.
 

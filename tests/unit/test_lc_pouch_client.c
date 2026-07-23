@@ -5902,6 +5902,26 @@ static void test_pouch_endpoint_scan_query_filters_key_selector(void **state) {
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"key\",\"value\":\"bravo\"}},"
+      "{\"eq\":{\"field\":\"owner\",\"value\":\"owner-b\"}}]}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
   req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-a\"}";
   req.engine = "scan";
   rc = client->query(client, &req, sink, &res, &error);
@@ -5928,6 +5948,20 @@ static void test_pouch_endpoint_scan_query_filters_key_selector(void **state) {
   assert_string_equal(capture.keys[0], "bravo");
   assert_null(res.cursor);
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_int_equal(res.index_seq, 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"key\",\"value\":\"bravo\"}},"
+      "{\"eq\":{\"field\":\"owner\",\"value\":\"owner-b\"}}]}";
+  req.cursor = NULL;
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_null(res.cursor);
   assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_int_equal(res.index_seq, 0UL);
   lc_query_res_cleanup(&res);
@@ -6221,6 +6255,25 @@ static void test_pouch_endpoint_index_query_filters_key_selector(void **state) {
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"key\",\"value\":\"bravo\"}},"
+      "{\"eq\":{\"field\":\"owner\",\"value\":\"owner-b\"}}]}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "\"document\":{\"value\":2}"));
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
   req.selector_json = "{\"key\":\"bravo\",\"owner\":\"owner-a\"}";
   rc = client->query(client, &req, sink, &res, &error);
   assert_int_equal(rc, LC_OK);
@@ -6245,6 +6298,20 @@ static void test_pouch_endpoint_index_query_filters_key_selector(void **state) {
   assert_string_equal(capture.keys[0], "bravo");
   assert_null(res.cursor);
   assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"key\",\"value\":\"bravo\"}},"
+      "{\"eq\":{\"field\":\"owner\",\"value\":\"owner-b\"}}]}";
+  req.cursor = NULL;
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_null(res.cursor);
   assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
