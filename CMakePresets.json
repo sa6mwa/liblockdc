@@ -54,8 +54,12 @@
     {
       "name": "valgrind",
       "inherits": "debug",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-gnu.cmake",
       "cacheVariables": {
         "CMAKE_C_FLAGS_DEBUG": "-O1 -g -fno-omit-frame-pointer",
+        "LOCKDC_TARGET_ARCH": "x86_64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "gnu",
         "LOCKDC_BUILD_EXAMPLES": "OFF",
         "LOCKDC_BUILD_BENCHMARKS": "OFF",
         "LOCKDC_BUILD_FUZZERS": "OFF"

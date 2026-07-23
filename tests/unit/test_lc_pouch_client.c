@@ -50,6 +50,20 @@ static void test_endpoint_with_query(char *buffer, size_t buffer_size,
   snprintf(buffer, buffer_size, "pouch://%s?%s", root, query);
 }
 
+static int test_under_valgrind(void) {
+  const char *value;
+
+  value = getenv("LOCKDC_UNDER_VALGRIND");
+  return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
+static void test_child_exit(int code) {
+  if (test_under_valgrind()) {
+    exit(code);
+  }
+  _exit(code);
+}
+
 static void test_cleanup_root(const char *root) {
   char path[512];
 
@@ -511,13 +525,6 @@ typedef struct delayed_enqueue_context {
   lc_error error;
 } delayed_enqueue_context;
 
-typedef struct delayed_release_context {
-  const char *endpoint;
-  lc_release_op release_op;
-  int rc;
-  lc_error error;
-} delayed_release_context;
-
 static void *delayed_enqueue_main(void *arg) {
   delayed_enqueue_context *ctx;
   lc_client *client;
@@ -540,23 +547,6 @@ static void *delayed_enqueue_main(void *arg) {
   ctx->rc = client->enqueue(client, &req, source, &res, &ctx->error);
   lc_source_close(source);
   lc_enqueue_res_cleanup(&res);
-  client->close(client);
-  return NULL;
-}
-
-static void *delayed_release_main(void *arg) {
-  delayed_release_context *ctx;
-  lc_client *client;
-  lc_release_res res;
-
-  ctx = (delayed_release_context *)arg;
-  memset(&ctx->error, 0, sizeof(ctx->error));
-  memset(&res, 0, sizeof(res));
-  ctx->rc = LC_ERR_TRANSPORT;
-  usleep(200000U);
-  client = open_pouch_client(ctx->endpoint);
-  ctx->rc = client->release(client, &ctx->release_op, &res, &ctx->error);
-  lc_release_res_cleanup(&res);
   client->close(client);
   return NULL;
 }
@@ -956,7 +946,7 @@ static void child_enqueue_after_delay(const char *endpoint, const char *queue,
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
-    _exit(21);
+    test_child_exit(21);
   }
   lc_enqueue_req_init(&req);
   req.queue = queue;
@@ -973,7 +963,31 @@ static void child_enqueue_after_delay(const char *endpoint, const char *queue,
   lc_enqueue_res_cleanup(&res);
   client->close(client);
   lc_error_cleanup(&error);
-  _exit(rc == LC_OK ? 0 : 22);
+  test_child_exit(rc == LC_OK ? 0 : 22);
+}
+
+static void child_release_after_delay(const char *endpoint,
+                                      const lc_release_op *release_op,
+                                      lc_client *inherited_first_client,
+                                      lc_client *inherited_second_client,
+                                      lc_lease *inherited_first_lease) {
+  lc_client *client;
+  lc_release_res res;
+  lc_error error;
+  int rc;
+
+  usleep(200000U);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  client = open_pouch_client(endpoint);
+  rc = client->release(client, release_op, &res, &error);
+  lc_release_res_cleanup(&res);
+  client->close(client);
+  lc_lease_close(inherited_first_lease);
+  inherited_second_client->close(inherited_second_client);
+  inherited_first_client->close(inherited_first_client);
+  lc_error_cleanup(&error);
+  test_child_exit(rc == LC_OK ? 0 : 23);
 }
 
 static int watch_test_handle(void *context, const lc_watch_event *event,
@@ -1785,9 +1799,10 @@ test_pouch_endpoint_blocking_acquire_waits_for_release(void **state) {
   lc_lease *second_lease;
   lc_acquire_req acquire;
   lc_release_req release_req;
-  delayed_release_context release_ctx;
-  pthread_t thread;
+  lc_release_op release_op;
   lc_error error;
+  pid_t child;
+  int child_status;
   int rc;
 
   (void)state;
@@ -1795,7 +1810,6 @@ test_pouch_endpoint_blocking_acquire_waits_for_release(void **state) {
   test_cleanup_root(root);
   test_endpoint(endpoint, sizeof(endpoint), root);
   memset(&error, 0, sizeof(error));
-  memset(&release_ctx, 0, sizeof(release_ctx));
   first_client = open_pouch_client(endpoint);
   second_client = open_pouch_client(endpoint);
 
@@ -1808,18 +1822,21 @@ test_pouch_endpoint_blocking_acquire_waits_for_release(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(first_lease);
 
-  lc_release_op_init(&release_ctx.release_op);
-  release_ctx.endpoint = endpoint;
-  release_ctx.release_op.lease.namespace_name = first_lease->namespace_name;
-  release_ctx.release_op.lease.key = first_lease->key;
-  release_ctx.release_op.lease.lease_id = first_lease->lease_id;
-  release_ctx.release_op.lease.txn_id = first_lease->txn_id;
-  release_ctx.release_op.lease.fencing_token = first_lease->fencing_token;
-  rc = pthread_create(&thread, NULL, delayed_release_main, &release_ctx);
-  assert_int_equal(rc, 0);
+  lc_release_op_init(&release_op);
+  release_op.lease.namespace_name = first_lease->namespace_name;
+  release_op.lease.key = first_lease->key;
+  release_op.lease.lease_id = first_lease->lease_id;
+  release_op.lease.txn_id = first_lease->txn_id;
+  release_op.lease.fencing_token = first_lease->fencing_token;
+  child = fork();
+  assert_true(child >= 0);
+  if (child == 0) {
+    child_release_after_delay(endpoint, &release_op, first_client, second_client,
+                              first_lease);
+  }
 
   acquire.owner = "owner-b";
-  acquire.block_seconds = 2L;
+  acquire.block_seconds = test_under_valgrind() ? 15L : 2L;
   second_lease = NULL;
   rc = second_client->acquire(second_client, &acquire, &second_lease, &error);
   assert_int_equal(rc, LC_OK);
@@ -1828,9 +1845,10 @@ test_pouch_endpoint_blocking_acquire_waits_for_release(void **state) {
   assert_int_equal(second_lease->fencing_token,
                    first_lease->fencing_token + 1L);
 
-  assert_int_equal(pthread_join(thread, NULL), 0);
-  assert_int_equal(release_ctx.rc, LC_OK);
-  lc_error_cleanup(&release_ctx.error);
+  child_status = 0;
+  assert_int_equal(waitpid(child, &child_status, 0), child);
+  assert_true(WIFEXITED(child_status));
+  assert_int_equal(WEXITSTATUS(child_status), 0);
 
   lc_release_req_init(&release_req);
   rc = second_lease->release(second_lease, &release_req, &error);
@@ -4919,7 +4937,7 @@ test_pouch_endpoint_subscribe_waits_for_shared_message(void **state) {
   subscribe_req.queue = "jobs";
   subscribe_req.owner = "waiting-subscriber";
   subscribe_req.visibility_timeout_seconds = 30L;
-  subscribe_req.wait_seconds = 3L;
+  subscribe_req.wait_seconds = test_under_valgrind() ? 15L : 3L;
   subscribe_req.page_size = 1;
   consumer.handle = subscribe_test_handle;
   consumer.context = &subscribe_state;

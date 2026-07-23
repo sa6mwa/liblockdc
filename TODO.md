@@ -186,13 +186,16 @@ Latest release targets confirmed on 2026-07-22:
 - [x] Add preset-contract tests for lifecycle-required preset presence, build
   and test preset mirrors, required cache variables, release `LOCKDC_DIST_DIR`
   defaults, `debug-lua`, `valgrind`, and fuzz compatibility visibility.
-- [ ] Update CMake presets and toolchain files for the lifecycle-required
+- [x] Update CMake presets and toolchain files for the lifecycle-required
   Bootlin-backed `valgrind`, pinned AFL++ `fuzz`, release target matrix, and
   optional Darwin/osxcross behavior.
   - [x] Vendor the lifecycle `scripts/cpkt-toolchains.sh` resolver and add the
     shared CMake Bootlin import helper used by the native GNU preset.
   - [x] Apply the shared CMake Bootlin import helper to every Linux release
     toolchain file.
+  - [x] Make the `valgrind` preset use the Bootlin x86_64 GNU lifecycle
+    toolchain and force a fresh configure so stale host-compiler caches cannot
+    satisfy the gate.
 - [x] Replace sanitizer-as-primary hardening assumptions with the updated native
   Valgrind gate while preserving any existing useful ASan/UBSan coverage as
   compatibility or optional hardening.

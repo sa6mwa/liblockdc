@@ -137,6 +137,10 @@ assert_configure_cache(debug-lua LOCKDC_BUILD_LUA_BINDINGS ON)
 assert_configure_cache(debug-lua LOCKDC_BUILD_BENCHMARKS OFF)
 assert_configure_cache(valgrind CMAKE_C_FLAGS_DEBUG "-O1 -g -fno-omit-frame-pointer")
 assert_configure_cache(valgrind LOCKDC_BUILD_FUZZERS OFF)
+assert_configure_cache(valgrind LOCKDC_TARGET_ARCH x86_64)
+assert_configure_cache(valgrind LOCKDC_TARGET_OS linux)
+assert_configure_cache(valgrind LOCKDC_TARGET_LIBC gnu)
+assert_configure_toolchain(valgrind "$\{sourceDir\}/cmake/toolchains/x86_64-linux-gnu.cmake")
 assert_configure_cache(fuzz LOCKDC_BUILD_FUZZERS ON)
 assert_configure_cache(fuzz LOCKDC_TARGET_ARCH x86_64)
 assert_configure_cache(fuzz LOCKDC_TARGET_OS linux)
@@ -151,6 +155,7 @@ assert_configure_toolchain(aarch64-linux-gnu-release "$\{sourceDir\}/cmake/toolc
 assert_configure_toolchain(aarch64-linux-musl-release "$\{sourceDir\}/cmake/toolchains/aarch64-linux-musl.cmake")
 assert_configure_toolchain(armhf-linux-gnu-release "$\{sourceDir\}/cmake/toolchains/armhf-linux-gnu.cmake")
 assert_configure_toolchain(armhf-linux-musl-release "$\{sourceDir\}/cmake/toolchains/armhf-linux-musl.cmake")
+assert_configure_toolchain(arm64-apple-darwin-release "$\{sourceDir\}/cmake/toolchains/arm64-apple-darwin.cmake")
 
 foreach(name
         x86_64-linux-gnu-release
@@ -165,6 +170,9 @@ endforeach()
 
 assert_contains(root_makefile "make valgrind" "make help Valgrind surface")
 assert_contains(root_makefile "scripts/valgrind.sh" "Valgrind runner command")
+file(READ "${LOCKDC_ROOT}/scripts/valgrind.sh" valgrind_script)
+assert_contains(valgrind_script "cmake --fresh --preset \"$preset\"" "Valgrind fresh configure")
+assert_contains(valgrind_script "LOCKDC_UNDER_VALGRIND=1 \"$valgrind_bin\"" "Valgrind test environment marker")
 assert_contains(lifecycle_ledger "Preset Surface" "migration ledger preset section")
 assert_contains(lifecycle_ledger "`debug-lua`" "migration ledger debug-lua entry")
 assert_contains(lifecycle_ledger "`valgrind`" "migration ledger valgrind entry")

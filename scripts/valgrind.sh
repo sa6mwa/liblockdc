@@ -50,7 +50,7 @@ if ! command -v "$valgrind_bin" >/dev/null 2>&1; then
   exit 2
 fi
 
-cmake --preset "$preset"
+cmake --fresh --preset "$preset"
 cmake --build --preset "$preset"
 
 for test_name in "${valgrind_tests[@]}"; do
@@ -69,7 +69,7 @@ for test_name in "${valgrind_tests[@]}"; do
     exit 2
   fi
 
-  "$valgrind_bin" \
+  LOCKDC_UNDER_VALGRIND=1 "$valgrind_bin" \
     --leak-check=full \
     --show-leak-kinds=definite,indirect \
     --track-origins=yes \
