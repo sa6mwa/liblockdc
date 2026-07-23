@@ -178,8 +178,10 @@
       "name": "fuzz",
       "inherits": "debug",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
         "CMAKE_C_FLAGS_DEBUG": "-O1 -g -fno-omit-frame-pointer",
+        "LOCKDC_TARGET_ARCH": "x86_64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "gnu",
         "LOCKDC_BUILD_EXAMPLES": "OFF",
         "LOCKDC_BUILD_TESTS": "OFF",
         "LOCKDC_BUILD_E2E_TESTS": "OFF",

@@ -28,7 +28,7 @@ behavior is not silently lost.
 | --- | --- | --- | --- | --- |
 | Lua checks ran through the general `debug` preset | `debug-lua` | Lua bindings still build against the debug dependency root; the preset narrows non-Lua work. | `lifecycle_preset_contract_test` asserts configure/build/test preset coverage. | Active |
 | No dedicated Valgrind configure preset | `valgrind` | Debug symbols are preserved without sanitizer instrumentation so Memcheck can inspect runtime behavior. | `lifecycle_preset_contract_test` asserts the preset disables fuzzers and sanitizer debug flags; `make valgrind` runs a bounded native unit subset under host Memcheck. | Active preset; pending Bootlin compiler policy |
-| Fuzz preset selected host Clang directly | Pinned AFL++ GCC-plugin lifecycle | Existing fuzz preset remains available as compatibility until the AFL++ resolver is wired. | `lifecycle_preset_contract_test` keeps this gap visible through required preset coverage. | Pending AFL++ migration |
+| Fuzz preset selected host Clang directly | Pinned AFL++ GCC-plugin lifecycle | Existing fuzz preset remains available as native x86_64 compatibility without explicit host compiler selection until the AFL++ resolver is wired. | `lifecycle_preset_contract_test` rejects direct host compiler overrides and keeps the AFL++ gap visible through required preset coverage. | Pending AFL++ migration |
 
 ## Pouch Storage Surface
 
@@ -48,8 +48,8 @@ behavior is not silently lost.
 - Whether Valgrind becomes part of `make prerelease` immediately when the
   Bootlin-backed compiler policy lands, or first stays as a separate hardening
   gate for one migration slice.
-- Whether the existing host-Clang fuzz preset should remain as an explicit
-  compatibility alias after the pinned AFL++ lifecycle migration lands.
+- Whether the existing compatibility fuzz preset should remain as an explicit
+  alias after the pinned AFL++ lifecycle migration lands.
 - Whether live provider checks should exist for `make prerelease-live`; no live
   prerelease checks are currently defined.
 - Whether the migration ledger should be retained as project documentation after

@@ -138,7 +138,7 @@ Latest release targets confirmed on 2026-07-22:
     AST selector such as `{"eq":{"field":"value","value":"alpha"}}`.
 - [x] Keep pouch storage-owned indexes behind the pouch store boundary; use
   `liblql` only for query language semantics and predicate/evaluator behavior.
-- [ ] Add observable pouch tests for `liblql`-backed owner/key selectors,
+- [x] Add observable pouch tests for `liblql`-backed owner/key selectors,
   pagination, hidden metadata filtering, removed-candidate skipping, malformed
   LQL diagnostics, oversized query limits, and scan/index fallback parity.
   - [x] Cover `liblql` compound key+owner selectors for scan and index
@@ -186,6 +186,9 @@ Latest release targets confirmed on 2026-07-22:
 - [ ] Align fuzzing with the updated pinned AFL++ GCC-plugin lifecycle for
   native x86_64 Linux only; ensure fuzz targets never rely on host Clang/GCC as
   the project compiler.
+  - [x] Remove the explicit host `clang` compiler override from the
+    compatibility `fuzz` preset and assert native `x86_64-linux-gnu` target
+    metadata in the preset contract.
 - [x] Update Make command surfaces so `make help` is authoritative and includes
   the updated lifecycle targets: `finalize-slice`, `prerelease`,
   `prerelease-live`, `prerelease-hardening`, `release-matrix`, `valgrind`, and

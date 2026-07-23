@@ -30,6 +30,16 @@ function(json_get out)
     set(${out} "${value}" PARENT_SCOPE)
 endfunction()
 
+function(assert_configure_cache_absent name key)
+    find_named_object_index(index configurePresets "${name}")
+    string(JSON value ERROR_VARIABLE json_error GET "${presets_json}"
+        configurePresets ${index} cacheVariables ${key})
+    if(NOT json_error)
+        message(FATAL_ERROR
+            "configure preset ${name} must not set cache variable ${key}, got ${value}")
+    endif()
+endfunction()
+
 function(find_named_object_index out array_path wanted_name)
     json_length(array_length "${array_path}")
     math(EXPR last_index "${array_length} - 1")
@@ -119,6 +129,11 @@ assert_configure_cache(debug-lua LOCKDC_BUILD_BENCHMARKS OFF)
 assert_configure_cache(valgrind CMAKE_C_FLAGS_DEBUG "-O1 -g -fno-omit-frame-pointer")
 assert_configure_cache(valgrind LOCKDC_BUILD_FUZZERS OFF)
 assert_configure_cache(fuzz LOCKDC_BUILD_FUZZERS ON)
+assert_configure_cache(fuzz LOCKDC_TARGET_ARCH x86_64)
+assert_configure_cache(fuzz LOCKDC_TARGET_OS linux)
+assert_configure_cache(fuzz LOCKDC_TARGET_LIBC gnu)
+assert_configure_cache_absent(fuzz CMAKE_C_COMPILER)
+assert_configure_cache_absent(fuzz CMAKE_CXX_COMPILER)
 
 foreach(name
         x86_64-linux-gnu-release
