@@ -316,6 +316,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Repair non-empty manifests by appending `open` for existing segment
         files that no manifest lifecycle record has mentioned yet, without
         resurrecting manifest-obsoleted files.
+      - [x] Repair crash-incomplete manifest tails by separating unterminated
+        partial records from appended repair records, then replaying the
+        recovered unmentioned segment.
     - [ ] Move writes from the root-level `store.log` to active namespace
       segments, including active segment creation, sealing thresholds, fsync
       boundaries, and writer marker refresh.

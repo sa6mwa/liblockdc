@@ -2074,6 +2074,97 @@ static void test_replay_repairs_missing_namespace_manifest(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_replay_repairs_crash_incomplete_namespace_manifest(
+    void **state) {
+  char root[256];
+  char manifest_path[512];
+  char manifest_text[1024];
+  char repaired_manifest_text[1024];
+  const char partial_open[] = "open seg-000000000";
+  char *open2;
+  size_t prefix_len;
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source large_source;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "manifest-crash-incomplete-repair");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&info, 0, sizeof(info));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  counting_source_init(&large_source, 40000U);
+  rc = store->write_state(store, "default", "large-a", &large_source.pub, NULL,
+                          &put_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  counting_source_init(&large_source, 40000U);
+  rc = store->write_state(store, "default", "large-b", &large_source.pub, NULL,
+                          &put_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  source = source_from_text("manifest-repaired-tail");
+  rc = store->write_state(store, "default", "tail", source, NULL, &put_res,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  test_manifest_path(root, "default", manifest_path, sizeof(manifest_path));
+  test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
+  open2 = strstr(manifest_text, "open seg-0000000000000002.log\n");
+  assert_non_null(open2);
+  prefix_len = (size_t)(open2 - manifest_text);
+  assert_true(prefix_len + sizeof(partial_open) < sizeof(repaired_manifest_text));
+  memcpy(repaired_manifest_text, manifest_text, prefix_len);
+  memcpy(repaired_manifest_text + prefix_len, partial_open,
+         sizeof(partial_open));
+  test_write_text_file(manifest_path, repaired_manifest_text);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
+  assert_non_null(strstr(manifest_text,
+                         "open seg-000000000\n"
+                         "open seg-0000000000000002.log\n"));
+  rc = store->read_state(store, "default", "tail", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "manifest-repaired-tail");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_segment_rotation_replays_multiple_segments(void **state) {
   char root[256];
   char log_path[512];
@@ -14679,6 +14770,8 @@ int main(void) {
       cmocka_unit_test(test_memory_records_append_only_to_segments),
       cmocka_unit_test(test_replay_recovers_state_from_namespace_segment),
       cmocka_unit_test(test_replay_repairs_missing_namespace_manifest),
+      cmocka_unit_test(
+          test_replay_repairs_crash_incomplete_namespace_manifest),
       cmocka_unit_test(test_segment_rotation_replays_multiple_segments),
       cmocka_unit_test(test_segment_replay_truncates_rotated_tail),
       cmocka_unit_test(test_segment_replay_honors_manifest_obsolete),

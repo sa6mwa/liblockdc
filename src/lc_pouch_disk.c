@@ -1491,6 +1491,8 @@ static int lc_pouch_disk_append_manifest_record(lc_pouch_disk_store *store,
   size_t file_len;
   size_t line_len;
   char *line;
+  struct stat st;
+  char tail;
   int fd;
   int rc;
 
@@ -1506,13 +1508,22 @@ static int lc_pouch_disk_append_manifest_record(lc_pouch_disk_store *store,
   memcpy(line + event_len + 1U, file_name, file_len);
   line[line_len - 1U] = '\n';
   line[line_len] = '\0';
-  fd = open(manifest_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+  fd = open(manifest_log_path, O_RDWR | O_CREAT | O_APPEND, 0666);
   if (fd < 0) {
     lc_pouch_free(&store->allocator, line);
     return lc_pouch_set_errno(error, "failed to open pouch manifest");
   }
   rc = LC_OK;
-  if (!lc_pouch_write_all(fd, line, line_len)) {
+  if (fstat(fd, &st) != 0) {
+    rc = lc_pouch_set_errno(error, "failed to stat pouch manifest");
+  } else if (st.st_size > 0 && lseek(fd, st.st_size - 1, SEEK_SET) < 0) {
+    rc = lc_pouch_set_errno(error, "failed to seek pouch manifest tail");
+  } else if (st.st_size > 0 && read(fd, &tail, 1U) != 1) {
+    rc = lc_pouch_set_errno(error, "failed to read pouch manifest tail");
+  } else if (st.st_size > 0 && tail != '\n' &&
+             !lc_pouch_write_all(fd, "\n", 1U)) {
+    rc = lc_pouch_set_errno(error, "failed to terminate pouch manifest tail");
+  } else if (!lc_pouch_write_all(fd, line, line_len)) {
     rc = lc_pouch_set_errno(error, "failed to append pouch manifest");
   } else if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG) != 0) {
     rc = lc_pouch_set_errno(error, "failed to fsync pouch manifest");
@@ -8721,8 +8732,6 @@ static int lc_pouch_disk_repair_manifest_for_segment_path(
   char *logstore_path;
   char *manifest_path;
   char *manifest_log_path;
-  struct stat st;
-  int needs_repair;
   int rc;
 
   marker_at = strstr(segment_path, marker);
@@ -8750,17 +8759,7 @@ static int lc_pouch_disk_repair_manifest_for_segment_path(
   }
   rc = lc_pouch_disk_ensure_directory(
       manifest_path, "failed to create pouch manifest directory", error);
-  needs_repair = 0;
   if (rc == LC_OK) {
-    if (stat(manifest_log_path, &st) == 0) {
-      needs_repair = st.st_size == 0;
-    } else if (errno == ENOENT) {
-      needs_repair = 1;
-    } else {
-      rc = lc_pouch_set_errno(error, "failed to stat pouch manifest");
-    }
-  }
-  if (rc == LC_OK && needs_repair) {
     rc = lc_pouch_disk_append_manifest_event_for_segment_path(
         store, segment_path, "open", error);
   }
