@@ -547,10 +547,10 @@ Idle read descriptors are cached separately from active read sources. The cache
 is a performance artifact only: entries are bounded, allocator-backed, reusable
 across state/object/queue payload reads, and discarded when their descriptor no
 longer names the recorded body file.
-Opening a store also removes stale `store.compact.tmp` and
-`query.index.compact.tmp` files while holding the writer lock, so crash leftovers
-from older or interrupted compaction attempts do not accumulate or confuse later
-runs.
+Opening a store also removes stale `store.compact.tmp`, internal-logstore
+`query.index.compact.tmp`, and earlier root-level query-index temp files while
+holding the writer lock, so crash leftovers from older or interrupted
+compaction attempts do not accumulate or confuse later runs.
 The private backend control surface now exposes explicit compaction diagnostics:
 `force` runs the same live-head rewrite immediately, while `if_needed` applies
 the auto-compaction thresholds and returns a concrete skip reason without
@@ -651,18 +651,19 @@ selector set, but resolves equality by walking ordered full-summary or metadata
 scan routes instead of consulting postings. The current disk backend keeps the
 sorted metadata projection as the authoritative in-memory index for match-all
 and exact-key scans, while
-`query.index` remains a durable sidecar accelerator that can be validated
-against the store log and truncated at the last verified record. Indexed scans
-must never trust sidecar rows that do not match current metadata, and key-only
-scans must agree with document scans even after a sidecar tail fault. Later
-field postings and `liblql` predicates must extend this boundary with
-storage-owned index segments/postings and candidate iteration, rather than
-falling back to a single full-log scan. Scan-mode key-only queries use a storage
-key-scan primitive when the backend provides one, so configured scan mode does
-not copy full metadata rows for `query_keys`. Key-only scan and indexed-scan
-primitives copy only visible keys before invoking callbacks. The current disk
-backend serves both primitives from the query-summary projection rather than
-the full metadata row array, so `query_keys` does not pay for metadata row
+the internal `.lockd` namespace logstore `query.index` remains a durable
+sidecar accelerator that can be validated against current metadata and rebuilt
+from authoritative namespace segments/snapshots. Indexed scans must never trust
+sidecar rows that do not match current metadata, and key-only scans must agree
+with document scans even after a sidecar tail fault. Later field postings and
+`liblql` predicates must extend this boundary with storage-owned index
+segments/postings and candidate iteration, rather than falling back to a single
+full-log scan. Scan-mode key-only queries use a storage key-scan primitive when
+the backend provides one, so configured scan mode does not copy full metadata
+rows for `query_keys`. Key-only scan and indexed-scan primitives copy only
+visible keys before invoking callbacks. The current disk backend serves both
+primitives from the query-summary projection rather than the full metadata row
+array, so `query_keys` does not pay for metadata row
 copies.
 Indexed match-all document scans also page over the query-summary projection
 and copy only the row fields currently required by query callbacks: key, ETag,

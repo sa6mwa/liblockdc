@@ -462,6 +462,17 @@ static void make_pouch_root(const char *suffix, char *root,
   snprintf(endpoint, endpoint_capacity, "pouch://%s", root);
 }
 
+static void pouch_query_index_path(const char *root, char *path,
+                                   size_t path_size) {
+  snprintf(path, path_size, "%s/%%2elockd/logstore/query.index", root);
+}
+
+static void pouch_query_index_temp_path(const char *root, char *path,
+                                        size_t path_size) {
+  pouch_query_index_path(root, path, path_size);
+  strncat(path, ".compact.tmp", path_size - strlen(path) - 1U);
+}
+
 static void cleanup_pouch_root(const char *root) {
   char path[512];
 
@@ -472,10 +483,18 @@ static void cleanup_pouch_root(const char *root) {
   unlink(path);
   snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
   unlink(path);
+  pouch_query_index_temp_path(root, path, sizeof(path));
+  unlink(path);
   snprintf(path, sizeof(path), "%s/store.log", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/query.index", root);
   unlink(path);
+  pouch_query_index_path(root, path, sizeof(path));
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/%%2elockd/logstore", root);
+  rmdir(path);
+  snprintf(path, sizeof(path), "%s/%%2elockd", root);
+  rmdir(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
   unlink(path);
   rmdir(root);

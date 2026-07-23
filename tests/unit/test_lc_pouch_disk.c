@@ -716,6 +716,9 @@ static size_t count_namespace_segment_records_of_type(
   return count;
 }
 
+static void test_query_index_path(const char *root, char *path,
+                                  size_t path_size);
+
 static size_t count_query_index_records_of_type(const char *root,
                                                 unsigned long type) {
   char index_path[512];
@@ -726,7 +729,7 @@ static size_t count_query_index_records_of_type(const char *root,
   ssize_t got;
   int fd;
 
-  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  test_query_index_path(root, index_path, sizeof(index_path));
   fd = open(index_path, O_RDONLY);
   assert_true(fd >= 0);
   count = 0U;
@@ -874,11 +877,16 @@ static void test_manifest_path(const char *root, const char *escaped_namespace,
            escaped_namespace);
 }
 
+static void test_query_index_path(const char *root, char *path,
+                                  size_t path_size) {
+  snprintf(path, path_size, "%s/%%2elockd/logstore/query.index", root);
+}
+
 static off_t test_query_index_size(const char *root) {
   char index_path[512];
   struct stat st;
 
-  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  test_query_index_path(root, index_path, sizeof(index_path));
   assert_int_equal(stat(index_path, &st), 0);
   return st.st_size;
 }
@@ -888,7 +896,7 @@ static void truncate_query_index_tail(const char *root, off_t remove_bytes) {
   off_t size;
   int fd;
 
-  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  test_query_index_path(root, index_path, sizeof(index_path));
   size = test_query_index_size(root);
   assert_true(remove_bytes > 0);
   assert_true(size > remove_bytes);
@@ -1029,7 +1037,7 @@ static void rewrite_query_index_as_v1_without_owner(const char *root) {
   int in_fd;
   int out_fd;
 
-  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  test_query_index_path(root, index_path, sizeof(index_path));
   snprintf(temp_path, sizeof(temp_path), "%s/query.index.v1tmp", root);
   in_fd = open(index_path, O_RDONLY);
   assert_true(in_fd >= 0);
@@ -1154,7 +1162,7 @@ static void corrupt_first_query_index_match(const char *root,
   int fd;
   int found;
 
-  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  test_query_index_path(root, index_path, sizeof(index_path));
   fd = open(index_path, O_RDWR);
   assert_true(fd >= 0);
   assert_int_equal(fstat(fd, &st), 0);
@@ -1191,7 +1199,7 @@ static void set_first_query_index_match_record_version(const char *root,
   int fd;
   int found;
 
-  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  test_query_index_path(root, index_path, sizeof(index_path));
   fd = open(index_path, O_RDWR);
   assert_true(fd >= 0);
   assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
@@ -1636,6 +1644,12 @@ static void test_state_write_creates_segmented_namespace_logstore(
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
+  test_query_index_path(root, path, sizeof(path));
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(S_ISREG(st.st_mode));
+  snprintf(path, sizeof(path), "%s/query.index", root);
+  assert_int_equal(stat(path, &st), -1);
+  assert_int_equal(errno, ENOENT);
 
   source = source_from_text("{\"value\":1}");
   opts.content_type = "application/json";
@@ -6969,7 +6983,7 @@ static void test_query_index_rebuilds_field_postings_from_segments(
   store = NULL;
 
   truncate_store_log(root);
-  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  test_query_index_path(root, index_path, sizeof(index_path));
   assert_int_equal(unlink(index_path), 0);
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
@@ -7181,7 +7195,7 @@ static void test_query_index_keys_recreates_missing_sidecar(void **state) {
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
   assert_true(test_query_index_size(root) > 0);
 
-  snprintf(index_path, sizeof(index_path), "%s/query.index", root);
+  test_query_index_path(root, index_path, sizeof(index_path));
   assert_int_equal(unlink(index_path), 0);
 
   req.namespace_name = "default";
@@ -12272,6 +12286,8 @@ static void test_open_removes_stale_compaction_temps(void **state) {
   char root[256];
   char temp_log[512];
   char temp_query[512];
+  char temp_query_internal[512];
+  char path[512];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
   lc_pouch_store *store;
@@ -12292,8 +12308,17 @@ static void test_open_removes_stale_compaction_temps(void **state) {
   assert_int_equal(mkdir(root, 0777), 0);
   snprintf(temp_log, sizeof(temp_log), "%s/store.compact.tmp", root);
   snprintf(temp_query, sizeof(temp_query), "%s/query.index.compact.tmp", root);
+  snprintf(path, sizeof(path), "%s/%%2elockd", root);
+  assert_int_equal(mkdir(path, 0777), 0);
+  snprintf(path, sizeof(path), "%s/%%2elockd/logstore", root);
+  assert_int_equal(mkdir(path, 0777), 0);
+  test_query_index_path(root, temp_query_internal,
+                        sizeof(temp_query_internal));
+  strncat(temp_query_internal, ".compact.tmp",
+          sizeof(temp_query_internal) - strlen(temp_query_internal) - 1U);
   test_write_marker_file(temp_log);
   test_write_marker_file(temp_query);
+  test_write_marker_file(temp_query_internal);
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
@@ -12302,6 +12327,9 @@ static void test_open_removes_stale_compaction_temps(void **state) {
   assert_int_equal(errno, ENOENT);
   errno = 0;
   assert_int_equal(access(temp_query, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
+  errno = 0;
+  assert_int_equal(access(temp_query_internal, F_OK), -1);
   assert_int_equal(errno, ENOENT);
 
   source = source_from_text("after stale cleanup");

@@ -1061,6 +1061,66 @@ static char *lc_pouch_disk_make_namespace_path(lc_pouch_disk_store *store,
   return path;
 }
 
+static char *lc_pouch_disk_make_query_index_path(lc_pouch_disk_store *store,
+                                                 lc_error *error) {
+  char *namespace_path;
+  char *logstore_path;
+  char *index_path;
+  int rc;
+
+  namespace_path =
+      lc_pouch_disk_make_namespace_path(store, LC_POUCH_BACKEND_NAMESPACE);
+  logstore_path =
+      namespace_path != NULL
+          ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+          : NULL;
+  index_path =
+      logstore_path != NULL
+          ? lc_pouch_join_path(&store->allocator, logstore_path, "query.index")
+          : NULL;
+  if (namespace_path == NULL || logstore_path == NULL || index_path == NULL) {
+    lc_pouch_free(&store->allocator, namespace_path);
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, index_path);
+    (void)lc_pouch_set_nomem(error,
+                             "failed to allocate pouch query index path");
+    return NULL;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      namespace_path, "failed to create pouch backend namespace", error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_ensure_directory(
+        logstore_path, "failed to create pouch backend logstore", error);
+  }
+  lc_pouch_free(&store->allocator, namespace_path);
+  lc_pouch_free(&store->allocator, logstore_path);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, index_path);
+    return NULL;
+  }
+  return index_path;
+}
+
+static char *lc_pouch_disk_make_query_index_temp_path(
+    lc_pouch_disk_store *store) {
+  const char suffix[] = ".compact.tmp";
+  size_t path_len;
+  char *temp_path;
+
+  if (store == NULL || store->query_index_path == NULL) {
+    return NULL;
+  }
+  path_len = strlen(store->query_index_path);
+  temp_path =
+      (char *)lc_pouch_alloc(&store->allocator, path_len + sizeof(suffix));
+  if (temp_path == NULL) {
+    return NULL;
+  }
+  memcpy(temp_path, store->query_index_path, path_len);
+  memcpy(temp_path + path_len, suffix, sizeof(suffix));
+  return temp_path;
+}
+
 static int lc_pouch_disk_segment_name_parse(const char *name,
                                             unsigned long *number_out) {
   static const char prefix[] = "seg-";
@@ -2959,8 +3019,7 @@ static int lc_pouch_disk_cleanup_stale_compaction(lc_pouch_disk_store *store,
 
   temp_path = lc_pouch_join_path(&store->allocator, store->root_path,
                                  "store.compact.tmp");
-  temp_query_path = lc_pouch_join_path(&store->allocator, store->root_path,
-                                       "query.index.compact.tmp");
+  temp_query_path = lc_pouch_disk_make_query_index_temp_path(store);
   if (temp_path == NULL || temp_query_path == NULL) {
     lc_pouch_free(&store->allocator, temp_path);
     lc_pouch_free(&store->allocator, temp_query_path);
@@ -2974,6 +3033,21 @@ static int lc_pouch_disk_cleanup_stale_compaction(lc_pouch_disk_store *store,
     rc = lc_pouch_disk_unlink_if_exists(
         temp_query_path, "failed to remove stale pouch compact query index",
         error);
+  }
+  if (rc == LC_OK) {
+    char *legacy_temp_query_path;
+
+    legacy_temp_query_path = lc_pouch_join_path(
+        &store->allocator, store->root_path, "query.index.compact.tmp");
+    if (legacy_temp_query_path == NULL) {
+      rc = lc_pouch_set_nomem(
+          error, "failed to allocate pouch legacy compact cleanup path");
+    } else {
+      rc = lc_pouch_disk_unlink_if_exists(
+          legacy_temp_query_path,
+          "failed to remove legacy pouch compact query index", error);
+      lc_pouch_free(&store->allocator, legacy_temp_query_path);
+    }
   }
   lc_pouch_free(&store->allocator, temp_path);
   lc_pouch_free(&store->allocator, temp_query_path);
@@ -8786,8 +8860,7 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
   int body_fd;
   size_t index;
 
-  temp_query_path = lc_pouch_join_path(&store->allocator, store->root_path,
-                                       "query.index.compact.tmp");
+  temp_query_path = lc_pouch_disk_make_query_index_temp_path(store);
   memset(&segment_active_paths, 0, sizeof(segment_active_paths));
   memset(&segment_backup_paths, 0, sizeof(segment_backup_paths));
   memset(&segment_compact_paths, 0, sizeof(segment_compact_paths));
@@ -14629,8 +14702,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       lc_pouch_join_path(&store->allocator, root_path, "store.log");
   store->lock_path =
       lc_pouch_join_path(&store->allocator, root_path, "writer.lock");
-  store->query_index_path =
-      lc_pouch_join_path(&store->allocator, root_path, "query.index");
+  store->query_index_path = lc_pouch_disk_make_query_index_path(store, error);
   store->writer_marker_path = lc_pouch_disk_make_writer_marker_path(store);
   store->query_engine = lc_pouch_strdup(&store->allocator, query_engine);
   store->query_fallback_engine =

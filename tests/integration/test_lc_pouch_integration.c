@@ -87,6 +87,16 @@ static void pouch_endpoint_with_query(char *endpoint, size_t endpoint_size,
   snprintf(endpoint, endpoint_size, "pouch://%s?%s", root, query);
 }
 
+static void query_index_path(const char *root, char *path, size_t path_size) {
+  snprintf(path, path_size, "%s/%%2elockd/logstore/query.index", root);
+}
+
+static void query_index_temp_path(const char *root, char *path,
+                                  size_t path_size) {
+  query_index_path(root, path, path_size);
+  strncat(path, ".compact.tmp", path_size - strlen(path) - 1U);
+}
+
 static void cleanup_pouch_root(const char *root) {
   char path[512];
 
@@ -94,12 +104,20 @@ static void cleanup_pouch_root(const char *root) {
   unlink(path);
   snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
   unlink(path);
+  query_index_temp_path(root, path, sizeof(path));
+  unlink(path);
   snprintf(path, sizeof(path), "%s/store.log", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/writer.lock", root);
   unlink(path);
   snprintf(path, sizeof(path), "%s/query.index", root);
   unlink(path);
+  query_index_path(root, path, sizeof(path));
+  unlink(path);
+  snprintf(path, sizeof(path), "%s/%%2elockd/logstore", root);
+  rmdir(path);
+  snprintf(path, sizeof(path), "%s/%%2elockd", root);
+  rmdir(path);
   rmdir(root);
 }
 
@@ -108,7 +126,7 @@ static void corrupt_query_index_sidecar(const char *root) {
   FILE *file;
   const char *junk;
 
-  snprintf(path, sizeof(path), "%s/query.index", root);
+  query_index_path(root, path, sizeof(path));
   file = fopen(path, "wb");
   assert_non_null(file);
   junk = "not-a-pouch-query-index";
@@ -119,7 +137,7 @@ static void corrupt_query_index_sidecar(const char *root) {
 static void remove_query_index_sidecar(const char *root) {
   char path[512];
 
-  snprintf(path, sizeof(path), "%s/query.index", root);
+  query_index_path(root, path, sizeof(path));
   unlink(path);
 }
 
@@ -155,7 +173,7 @@ static void set_first_query_index_match_record_version(const char *root,
   int fd;
   int found;
 
-  snprintf(path, sizeof(path), "%s/query.index", root);
+  query_index_path(root, path, sizeof(path));
   fd = open(path, O_RDWR);
   assert_true(fd >= 0);
   assert_int_equal(lseek(fd, 0, SEEK_SET), 0);

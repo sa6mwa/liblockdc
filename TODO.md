@@ -392,6 +392,9 @@ Latest release targets confirmed on 2026-07-23:
         namespace segment/snapshot body refs when the root sidecar is missing,
         including closed-store missing-sidecar recovery with no usable
         `store.log`.
+      - [x] Move the durable query sidecar and compaction temp into the
+        internal `.lockd` namespace logstore instead of the pouch root, while
+        preserving stale cleanup for earlier root-level compaction temps.
     - [ ] Add focused recovery tests for fresh segmented stores, reopen,
       corrupt tails, manifest repair, snapshot install, obsolete cleanup,
       state-link protection, and query/index rebuild from authoritative
