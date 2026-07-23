@@ -316,9 +316,47 @@ case "$pslog_asset_name" in
     ;;
 esac
 
-compiler=${CC:-cc}
-compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
-compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
+dependency_target_id=${preset#deps-}
+
+toolchain_value() {
+  local key=$1
+  printf '%s\n' "$toolchain_description" | sed -n "s/^${key}=//p" | head -n1
+}
+
+case "$dependency_target_id" in
+  *-linux-*)
+    "$repo_root/scripts/cpkt-toolchains.sh" ensure "$dependency_target_id" >/dev/null
+    toolchain_description=$("$repo_root/scripts/cpkt-toolchains.sh" discover "$dependency_target_id")
+    if ! printf '%s\n' "$toolchain_description" | grep -q '^status=ready$'; then
+      printf 'Bootlin toolchain is not ready for %s\n%s\n' "$dependency_target_id" "$toolchain_description" >&2
+      exit 1
+    fi
+    toolchain_source=$(toolchain_value source)
+    toolchain_archive=$(toolchain_value archive)
+    toolchain_root=$(toolchain_value root)
+    toolchain_prefix=$(toolchain_value prefix)
+    toolchain_sysroot=$(toolchain_value sysroot)
+    toolchain_target_triple=$(toolchain_value target_triple)
+    compiler=$(toolchain_value cc)
+    compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
+    compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
+    ;;
+  *)
+    toolchain_description=$("$repo_root/scripts/cpkt-toolchains.sh" discover "$dependency_target_id")
+    toolchain_source=$(toolchain_value source)
+    toolchain_archive=$(toolchain_value archive)
+    toolchain_root=$(toolchain_value root)
+    toolchain_prefix=$(toolchain_value prefix)
+    toolchain_sysroot=$(toolchain_value sysroot)
+    toolchain_target_triple=$(toolchain_value target_triple)
+    compiler=$(toolchain_value cc)
+    if [ -z "$compiler" ]; then
+      compiler=${CC:-cc}
+    fi
+    compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
+    compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
+    ;;
+esac
 
 fingerprint=$(
   {
@@ -341,6 +379,13 @@ machine=$compiler_machine
 version=$compiler_version
 fingerprint=$fingerprint
 preset=$preset
+toolchain_target_id=$dependency_target_id
+toolchain_source=$toolchain_source
+toolchain_archive=$toolchain_archive
+toolchain_root=$toolchain_root
+toolchain_prefix=$toolchain_prefix
+toolchain_sysroot=$toolchain_sysroot
+toolchain_target_triple=$toolchain_target_triple
 cpkt_version=$cpkt_version
 cpkt_asset_name=$cpkt_asset_name
 cpkt_asset_hash=$cpkt_asset_hash

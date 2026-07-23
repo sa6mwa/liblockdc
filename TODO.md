@@ -170,7 +170,7 @@ Latest release targets confirmed on 2026-07-22:
   paths.
 - [x] Add concurrent acquisition stress coverage for the shared dependency
   archive cache lock path.
-- [ ] Align Linux compiler resolution with the updated Bootlin toolchain policy:
+- [x] Align Linux compiler resolution with the updated Bootlin toolchain policy:
   no host compiler/binutils fallback for Linux builds, complete pinned Bootlin
   collections per target, toolchain identity in dependency stamps, and target
   tool discovery from configured build state.
@@ -180,6 +180,9 @@ Latest release targets confirmed on 2026-07-22:
   - [x] Route all remaining Linux release toolchain files through the vendored
     lifecycle Bootlin resolver, require explicit Linux `toolchainFile` presets,
     and verify fresh configure plus build across the six-target Linux matrix.
+  - [x] Record the resolved Bootlin target ID, source, archive, root, sysroot,
+    and target triple in dependency manifests so stale dependency roots are keyed
+    by lifecycle toolchain identity instead of host compiler identity.
 - [x] Add preset-contract tests for lifecycle-required preset presence, build
   and test preset mirrors, required cache variables, release `LOCKDC_DIST_DIR`
   defaults, `debug-lua`, `valgrind`, and fuzz compatibility visibility.
