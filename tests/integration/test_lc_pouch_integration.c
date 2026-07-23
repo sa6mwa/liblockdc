@@ -63,6 +63,15 @@ static void assert_lc_server_error(int rc, lc_error *error, long http_status) {
   }
 }
 
+static void assert_invalid_query_limit_error(int rc, lc_error *error,
+                                             const char *expected_message) {
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(error);
+  assert_int_equal(error->code, LC_ERR_INVALID);
+  assert_non_null(error->message);
+  assert_string_equal(error->message, expected_message);
+}
+
 static void pouch_root_path(char *root, size_t root_size, const char *suffix) {
   snprintf(root, root_size, "/tmp/liblockdc-pouch-integration-%ld-%s",
            (long)getpid(), suffix);
@@ -1777,6 +1786,89 @@ static void test_pouch_public_rejects_reserved_namespaces(void **state) {
   lc_error_cleanup(&error);
 
   cleanup_pouch_root(root);
+}
+
+static void test_pouch_public_query_rejects_signed_oversized_limits(
+    void **state) {
+  char scan_root[256];
+  char scan_endpoint[320];
+  char index_root[256];
+  char index_endpoint[320];
+  lc_client *scan_client;
+  lc_client *index_client;
+  lc_sink *sink;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  pouch_root_path(scan_root, sizeof(scan_root), "query-limit-scan");
+  pouch_root_path(index_root, sizeof(index_root), "query-limit-index");
+  pouch_endpoint(scan_endpoint, sizeof(scan_endpoint), scan_root);
+  pouch_endpoint(index_endpoint, sizeof(index_endpoint), index_root);
+  cleanup_pouch_root(scan_root);
+  cleanup_pouch_root(index_root);
+  lc_error_init(&error);
+  scan_client = NULL;
+  index_client = NULL;
+  sink = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+
+  open_pouch_scan_client(scan_endpoint, &scan_client, &error);
+  open_pouch_client(index_endpoint, &index_client, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = LONG_MIN;
+  rc = scan_client->query(scan_client, &query_req, sink, &query_res, &error);
+  assert_invalid_query_limit_error(
+      rc, &error, "pouch query limit must be non-negative");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = LONG_MIN;
+  rc = index_client->query(index_client, &query_req, sink, &query_res, &error);
+  assert_invalid_query_limit_error(
+      rc, &error, "pouch query limit must be non-negative");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = LONG_MIN;
+  rc = scan_client->query_keys(scan_client, &query_req, &handler, &capture,
+                               &query_res, &error);
+  assert_invalid_query_limit_error(
+      rc, &error, "pouch query_keys limit must be non-negative");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_query_req_init(&query_req);
+  query_req.selector_json = "{}";
+  query_req.limit = LONG_MIN;
+  rc = index_client->query_keys(index_client, &query_req, &handler, &capture,
+                                &query_res, &error);
+  assert_invalid_query_limit_error(
+      rc, &error, "pouch query_keys limit must be non-negative");
+
+  lc_sink_close(sink);
+  scan_client->close(scan_client);
+  index_client->close(index_client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(scan_root);
+  cleanup_pouch_root(index_root);
 }
 
 static void test_pouch_public_endpoint_query_engine_selects_index(
@@ -12708,6 +12800,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_namespace_config_reports_query_mode),
       cmocka_unit_test(test_pouch_public_rejects_reserved_namespaces),
+      cmocka_unit_test(
+          test_pouch_public_query_rejects_signed_oversized_limits),
       cmocka_unit_test(
           test_pouch_public_endpoint_query_engine_selects_index),
       cmocka_unit_test(
