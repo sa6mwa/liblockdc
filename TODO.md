@@ -412,6 +412,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add local segmented pouch scan-vs-index benchmark cases for
         low-match strict JSON Pointer LQL field selectors over document and
         key-only query paths.
+      - [x] Add opt-in live Go lockd disk benchmark cases for the same
+        low-match strict JSON Pointer LQL field selector document and key-only
+        query paths, keeping them out of default local `all` runs unless
+        `LOCKDC_BENCH_LIVE=1` is set.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
 - [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
   introduced.

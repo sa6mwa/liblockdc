@@ -1726,6 +1726,15 @@ retention sweep throughput over metadata/state rows. The
 native harness also includes a hot-key contention case that repeatedly contends
 two store handles on one key and verifies that lock-contention diagnostics
 advance under that workload.
+The same executable exposes opt-in live Go lockd disk comparison cases for
+low-match strict JSON Pointer field selectors:
+`lockd-disk-query-field-low-match` and
+`lockd-disk-query-keys-field-low-match`. They use
+`LOCKDC_BENCH_DISK_ENDPOINT` / `LOCKDC_BENCH_DISK_BUNDLE`, falling back to the
+disk e2e endpoint and bundle defaults, and are excluded from `all` unless
+`LOCKDC_BENCH_LIVE=1` is set. This keeps default benchmark runs local while
+making pouch-versus-Go disk query comparisons reproducible against the same
+public client surface.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local
 benchmarks rather than performance gates; the larger matrix above remains the

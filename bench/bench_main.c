@@ -15,6 +15,7 @@
 typedef struct bench_case {
   const char *name;
   long default_iterations;
+  int live;
   int (*run)(long iterations);
 } bench_case;
 
@@ -391,6 +392,59 @@ static lc_source *bench_source_from_bytes(const void *bytes, size_t length,
     return NULL;
   }
   return source;
+}
+
+static const char *bench_env_or_default(const char *name,
+                                        const char *default_value) {
+  const char *value;
+
+  value = getenv(name);
+  return value != NULL && value[0] != '\0' ? value : default_value;
+}
+
+static const char *bench_lockd_disk_endpoint(void) {
+  return bench_env_or_default(
+      "LOCKDC_BENCH_DISK_ENDPOINT",
+      bench_env_or_default("LOCKDC_E2E_DISK_ENDPOINT",
+                           "https://localhost:19441"));
+}
+
+static const char *bench_lockd_disk_bundle(void) {
+  return bench_env_or_default(
+      "LOCKDC_BENCH_DISK_BUNDLE",
+      bench_env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                           "./devenv/volumes/lockd-disk-a-config/client.pem"));
+}
+
+static int bench_open_lockd_disk_client(lc_client **out, lc_error *error) {
+  lc_client_config config;
+  lc_source *bundle_source;
+  const char *endpoints[1];
+  int rc;
+
+  lc_client_config_init(&config);
+  bundle_source = NULL;
+  rc = lc_source_from_file(bench_lockd_disk_bundle(), &bundle_source, error);
+  if (rc != LC_OK) {
+    fprintf(stderr,
+            "lockd disk benchmark requires LOCKDC_BENCH_DISK_BUNDLE or "
+            "LOCKDC_E2E_DISK_BUNDLE\n");
+    return rc;
+  }
+  endpoints[0] = bench_lockd_disk_endpoint();
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  config.client_bundle_source = bundle_source;
+  rc = lc_client_open(&config, out, error);
+  lc_source_close(bundle_source);
+  if (rc != LC_OK) {
+    fprintf(stderr,
+            "lockd disk benchmark failed to open endpoint %s; set "
+            "LOCKDC_BENCH_DISK_ENDPOINT if needed\n",
+            endpoints[0]);
+  }
+  return rc;
 }
 
 static int bench_pouch_read_and_check(lc_source *source, const char *expected,
@@ -2983,6 +3037,172 @@ static int bench_pouch_index_query_keys_field_low_match(long iterations) {
   return bench_pouch_query_field_low_match(iterations, 0, 1);
 }
 
+static int bench_lockd_disk_seed_query_rows_by_field(lc_client *client,
+                                                     long rows,
+                                                     const char *run_id,
+                                                     lc_error *error) {
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_lease *lease;
+  lc_source *source;
+  char key[128];
+  char owner[128];
+  char json[192];
+  long target;
+  long i;
+  int rc;
+
+  target = rows > 1L ? rows / 2L : 0L;
+  lc_acquire_req_init(&acquire);
+  lc_update_opts_init(&update_opts);
+  acquire.ttl_seconds = 3600L;
+  update_opts.content_type = "application/json";
+  lease = NULL;
+  source = NULL;
+  for (i = 0; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/live/%s/%08ld", run_id, i);
+    snprintf(owner, sizeof(owner), "bench-live-%s", run_id);
+    snprintf(json, sizeof(json),
+             "{\"bucket\":\"%s-%s\",\"value\":%ld}",
+             i == target ? "needle" : "haystack", run_id, i);
+    acquire.key = key;
+    acquire.owner = owner;
+    rc = client->acquire(client, &acquire, &lease, error);
+    if (rc == LC_OK) {
+      source = bench_source_from_text(json, error);
+      if (source == NULL) {
+        rc = LC_ERR_NOMEM;
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lease->update(lease, source, &update_opts, error);
+    }
+    if (source != NULL) {
+      lc_source_close(source);
+      source = NULL;
+    }
+    if (lease != NULL) {
+      lease->close(lease);
+      lease = NULL;
+    }
+    if (rc != LC_OK) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int bench_lockd_disk_remove_query_rows(lc_client *client, long rows,
+                                              const char *run_id,
+                                              lc_error *error) {
+  lc_acquire_req acquire;
+  lc_remove_req remove_req;
+  lc_lease *lease;
+  char key[128];
+  char owner[128];
+  long i;
+  int rc;
+
+  lc_acquire_req_init(&acquire);
+  lc_remove_req_init(&remove_req);
+  acquire.ttl_seconds = 60L;
+  lease = NULL;
+  for (i = 0; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/live/%s/%08ld", run_id, i);
+    snprintf(owner, sizeof(owner), "bench-live-cleanup-%s", run_id);
+    acquire.key = key;
+    acquire.owner = owner;
+    rc = client->acquire(client, &acquire, &lease, error);
+    if (rc != LC_OK) {
+      return 1;
+    }
+    remove_req.if_state_etag = lease->state_etag;
+    rc = lease->remove(lease, &remove_req, error);
+    lease->close(lease);
+    lease = NULL;
+    if (rc != LC_OK) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int bench_lockd_disk_query_field_low_match(long iterations,
+                                                  int keys_only) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  bench_query_key_count count;
+  lc_error error;
+  char run_id[64];
+  char selector[160];
+  int rc;
+
+  lc_error_init(&error);
+  client = NULL;
+  sink = NULL;
+  snprintf(run_id, sizeof(run_id), "%ld-%ld", (long)getpid(),
+           (long)time(NULL));
+  rc = bench_open_lockd_disk_client(&client, &error);
+  if (rc == LC_OK &&
+      bench_lockd_disk_seed_query_rows_by_field(client, iterations, run_id,
+                                                &error) != 0) {
+    rc = error.code != LC_OK ? error.code : LC_ERR_PROTOCOL;
+  }
+
+  snprintf(selector, sizeof(selector),
+           "{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle-%s\"}}",
+           run_id);
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.selector_json = selector;
+  req.limit = iterations;
+  if (rc == LC_OK && keys_only) {
+    memset(&handler, 0, sizeof(handler));
+    memset(&count, 0, sizeof(count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &count, &res, &error);
+    if (rc == LC_OK && count.rows != 1L) {
+      fprintf(stderr,
+              "lockd disk field low-match selector streamed %ld keys, "
+              "expected 1\n",
+              count.rows);
+      rc = LC_ERR_PROTOCOL;
+    }
+  } else if (rc == LC_OK) {
+    rc = lc_sink_to_file("/dev/null", &sink, &error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, &error);
+      lc_sink_close(sink);
+      sink = NULL;
+    }
+  }
+  lc_query_res_cleanup(&res);
+  if (client != NULL &&
+      bench_lockd_disk_remove_query_rows(client, iterations, run_id, &error) !=
+          0 &&
+      rc == LC_OK) {
+    rc = error.code != LC_OK ? error.code : LC_ERR_PROTOCOL;
+  }
+  if (client != NULL) {
+    client->close(client);
+  }
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_lockd_disk_query_field_low_match_docs(long iterations) {
+  return bench_lockd_disk_query_field_low_match(iterations, 0);
+}
+
+static int bench_lockd_disk_query_keys_field_low_match(long iterations) {
+  return bench_lockd_disk_query_field_low_match(iterations, 1);
+}
+
 static int bench_pouch_index_query(long iterations) {
   char root[256];
   char endpoint[320];
@@ -3378,87 +3598,97 @@ static void print_usage(const char *argv0) {
   fprintf(stderr, "pouch-index-query-field-low-match|");
   fprintf(stderr, "pouch-scan-query-keys-field-low-match|");
   fprintf(stderr, "pouch-index-query-keys-field-low-match|");
+  fprintf(stderr, "lockd-disk-query-field-low-match|");
+  fprintf(stderr, "lockd-disk-query-keys-field-low-match|");
   fprintf(stderr, "pouch-key-lock-contention]\n");
+  fprintf(stderr,
+          "live lockd disk cases run only when selected directly or when "
+          "LOCKDC_BENCH_LIVE=1 is set for all\n");
 }
 
 int main(int argc, char **argv) {
   static const bench_case bench_cases[] = {
-      {"streams", 200000L, bench_stream_copy},
-      {"json", 200000L, bench_json_stream},
-      {"mutate-parse", 200000L, bench_mutate_parse},
-      {"mutate-apply", 200000L, bench_mutate_apply},
-      {"pouch-state", 1000L, bench_pouch_state_roundtrip},
-      {"pouch-state-write-1k", 1000L, bench_pouch_state_write_1k},
-      {"pouch-state-write-64k", 300L, bench_pouch_state_write_64k},
-      {"pouch-state-write-1m", 30L, bench_pouch_state_write_1m},
-      {"pouch-state-write-16m", 2L, bench_pouch_state_write_16m},
-      {"pouch-state-read-1k", 1000L, bench_pouch_state_read_1k},
-      {"pouch-state-read-64k", 300L, bench_pouch_state_read_64k},
-      {"pouch-state-read-1m", 30L, bench_pouch_state_read_1m},
-      {"pouch-state-read-16m", 2L, bench_pouch_state_read_16m},
-      {"pouch-staged", 1000L, bench_pouch_staged_promote},
-      {"pouch-public-mutate", 1000L, bench_pouch_public_mutate},
-      {"pouch-object", 1000L, bench_pouch_object_roundtrip},
-      {"pouch-queue", 1000L, bench_pouch_queue_roundtrip},
-      {"pouch-queue-txn-rollback", 1000L, bench_pouch_queue_txn_rollback},
-      {"pouch-queue-txn-commit", 1000L, bench_pouch_queue_txn_commit},
-      {"pouch-compaction", 120L, bench_pouch_compaction},
-      {"pouch-retention", 1000L, bench_pouch_retention_sweep},
-      {"pouch-scan-meta", 1000L, bench_pouch_scan_meta},
-      {"pouch-open-rebuild", 1000L, bench_pouch_open_rebuild},
-      {"pouch-index-scan", 1000L, bench_pouch_index_scan},
-      {"pouch-index-keys", 1000L, bench_pouch_index_keys},
-      {"pouch-index-scan-key", 1000L, bench_pouch_index_scan_key},
-      {"pouch-index-keys-key", 1000L, bench_pouch_index_keys_key},
-      {"pouch-index-scan-owner", 1000L, bench_pouch_index_scan_owner},
-      {"pouch-index-keys-owner", 1000L, bench_pouch_index_keys_owner},
-      {"pouch-index-scan-key-owner", 1000L,
+      {"streams", 200000L, 0, bench_stream_copy},
+      {"json", 200000L, 0, bench_json_stream},
+      {"mutate-parse", 200000L, 0, bench_mutate_parse},
+      {"mutate-apply", 200000L, 0, bench_mutate_apply},
+      {"pouch-state", 1000L, 0, bench_pouch_state_roundtrip},
+      {"pouch-state-write-1k", 1000L, 0, bench_pouch_state_write_1k},
+      {"pouch-state-write-64k", 300L, 0, bench_pouch_state_write_64k},
+      {"pouch-state-write-1m", 30L, 0, bench_pouch_state_write_1m},
+      {"pouch-state-write-16m", 2L, 0, bench_pouch_state_write_16m},
+      {"pouch-state-read-1k", 1000L, 0, bench_pouch_state_read_1k},
+      {"pouch-state-read-64k", 300L, 0, bench_pouch_state_read_64k},
+      {"pouch-state-read-1m", 30L, 0, bench_pouch_state_read_1m},
+      {"pouch-state-read-16m", 2L, 0, bench_pouch_state_read_16m},
+      {"pouch-staged", 1000L, 0, bench_pouch_staged_promote},
+      {"pouch-public-mutate", 1000L, 0, bench_pouch_public_mutate},
+      {"pouch-object", 1000L, 0, bench_pouch_object_roundtrip},
+      {"pouch-queue", 1000L, 0, bench_pouch_queue_roundtrip},
+      {"pouch-queue-txn-rollback", 1000L, 0, bench_pouch_queue_txn_rollback},
+      {"pouch-queue-txn-commit", 1000L, 0, bench_pouch_queue_txn_commit},
+      {"pouch-compaction", 120L, 0, bench_pouch_compaction},
+      {"pouch-retention", 1000L, 0, bench_pouch_retention_sweep},
+      {"pouch-scan-meta", 1000L, 0, bench_pouch_scan_meta},
+      {"pouch-open-rebuild", 1000L, 0, bench_pouch_open_rebuild},
+      {"pouch-index-scan", 1000L, 0, bench_pouch_index_scan},
+      {"pouch-index-keys", 1000L, 0, bench_pouch_index_keys},
+      {"pouch-index-scan-key", 1000L, 0, bench_pouch_index_scan_key},
+      {"pouch-index-keys-key", 1000L, 0, bench_pouch_index_keys_key},
+      {"pouch-index-scan-owner", 1000L, 0, bench_pouch_index_scan_owner},
+      {"pouch-index-keys-owner", 1000L, 0, bench_pouch_index_keys_owner},
+      {"pouch-index-scan-key-owner", 1000L, 0,
        bench_pouch_index_scan_key_owner},
-      {"pouch-index-keys-key-owner", 1000L,
+      {"pouch-index-keys-key-owner", 1000L, 0,
        bench_pouch_index_keys_key_owner},
-      {"pouch-scan-query", 1000L, bench_pouch_scan_query},
-      {"pouch-index-query", 1000L, bench_pouch_index_query},
-      {"pouch-scan-query-key", 1000L, bench_pouch_scan_query_key},
-      {"pouch-index-query-key", 1000L, bench_pouch_index_query_key},
-      {"pouch-scan-query-owner", 1000L, bench_pouch_scan_query_owner},
-      {"pouch-index-query-owner", 1000L, bench_pouch_index_query_owner},
-      {"pouch-scan-query-key-owner", 1000L,
+      {"pouch-scan-query", 1000L, 0, bench_pouch_scan_query},
+      {"pouch-index-query", 1000L, 0, bench_pouch_index_query},
+      {"pouch-scan-query-key", 1000L, 0, bench_pouch_scan_query_key},
+      {"pouch-index-query-key", 1000L, 0, bench_pouch_index_query_key},
+      {"pouch-scan-query-owner", 1000L, 0, bench_pouch_scan_query_owner},
+      {"pouch-index-query-owner", 1000L, 0, bench_pouch_index_query_owner},
+      {"pouch-scan-query-key-owner", 1000L, 0,
        bench_pouch_scan_query_key_owner},
-      {"pouch-index-query-key-owner", 1000L,
+      {"pouch-index-query-key-owner", 1000L, 0,
        bench_pouch_index_query_key_owner},
-      {"pouch-scan-query-keys", 1000L, bench_pouch_scan_query_keys},
-      {"pouch-index-query-keys", 1000L, bench_pouch_index_query_keys},
-      {"pouch-scan-query-keys-key", 1000L,
+      {"pouch-scan-query-keys", 1000L, 0, bench_pouch_scan_query_keys},
+      {"pouch-index-query-keys", 1000L, 0, bench_pouch_index_query_keys},
+      {"pouch-scan-query-keys-key", 1000L, 0,
        bench_pouch_scan_query_keys_key},
-      {"pouch-index-query-keys-key", 1000L,
+      {"pouch-index-query-keys-key", 1000L, 0,
        bench_pouch_index_query_keys_key},
-      {"pouch-scan-query-keys-owner", 1000L,
+      {"pouch-scan-query-keys-owner", 1000L, 0,
        bench_pouch_scan_query_keys_owner},
-      {"pouch-index-query-keys-owner", 1000L,
+      {"pouch-index-query-keys-owner", 1000L, 0,
        bench_pouch_index_query_keys_owner},
-      {"pouch-scan-query-owner-removed", 1000L,
+      {"pouch-scan-query-owner-removed", 1000L, 0,
        bench_pouch_scan_query_owner_removed},
-      {"pouch-index-query-owner-removed", 1000L,
+      {"pouch-index-query-owner-removed", 1000L, 0,
        bench_pouch_index_query_owner_removed},
-      {"pouch-scan-query-keys-owner-removed", 1000L,
+      {"pouch-scan-query-keys-owner-removed", 1000L, 0,
        bench_pouch_scan_query_keys_owner_removed},
-      {"pouch-index-query-keys-owner-removed", 1000L,
+      {"pouch-index-query-keys-owner-removed", 1000L, 0,
        bench_pouch_index_query_keys_owner_removed},
-      {"pouch-scan-query-keys-key-owner", 1000L,
+      {"pouch-scan-query-keys-key-owner", 1000L, 0,
        bench_pouch_scan_query_keys_key_owner},
-      {"pouch-index-query-keys-key-owner", 1000L,
+      {"pouch-index-query-keys-key-owner", 1000L, 0,
        bench_pouch_index_query_keys_key_owner},
-      {"pouch-scan-query-field-low-match", 1000L,
+      {"pouch-scan-query-field-low-match", 1000L, 0,
        bench_pouch_scan_query_field_low_match},
-      {"pouch-index-query-field-low-match", 1000L,
+      {"pouch-index-query-field-low-match", 1000L, 0,
        bench_pouch_index_query_field_low_match},
-      {"pouch-scan-query-keys-field-low-match", 1000L,
+      {"pouch-scan-query-keys-field-low-match", 1000L, 0,
        bench_pouch_scan_query_keys_field_low_match},
-      {"pouch-index-query-keys-field-low-match", 1000L,
+      {"pouch-index-query-keys-field-low-match", 1000L, 0,
        bench_pouch_index_query_keys_field_low_match},
-      {"pouch-key-lock-contention", 1000L,
+      {"lockd-disk-query-field-low-match", 1000L, 1,
+       bench_lockd_disk_query_field_low_match_docs},
+      {"lockd-disk-query-keys-field-low-match", 1000L, 1,
+       bench_lockd_disk_query_keys_field_low_match},
+      {"pouch-key-lock-contention", 1000L, 0,
        bench_pouch_key_lock_contention}};
   const char *scenario;
+  int include_live;
   long iterations;
   size_t i;
   int ran;
@@ -3475,6 +3705,8 @@ int main(int argc, char **argv) {
     print_usage(argv[0]);
     return 2;
   }
+  include_live =
+      strcmp(bench_env_or_default("LOCKDC_BENCH_LIVE", "0"), "1") == 0;
 
   printf("%-18s %12s %14s %14s %12s %12s %12s\n", "benchmark",
          "iterations", "ops/sec", "ns/op", "allocs", "frees",
@@ -3484,6 +3716,10 @@ int main(int argc, char **argv) {
   for (i = 0U; i < sizeof(bench_cases) / sizeof(bench_cases[0]); ++i) {
     if (strcmp(scenario, "all") != 0 &&
         strcmp(scenario, bench_cases[i].name) != 0) {
+      continue;
+    }
+    if (strcmp(scenario, "all") == 0 && bench_cases[i].live &&
+        !include_live) {
       continue;
     }
     ran = 1;
