@@ -5682,6 +5682,16 @@ static int lc_pouch_lql_eq_hint_path_is_eq_member(
          lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index);
 }
 
+static int lc_pouch_lql_eq_hint_path_is_ignored_and_child(
+    const lonejson_value_path *path) {
+  size_t term_index;
+
+  return path != NULL && path->segment_count >= 3U &&
+         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
+         lc_pouch_lql_eq_hint_parse_index(path, 1U, &term_index) &&
+         !lc_pouch_lql_eq_hint_segment_is(path, 2U, "eq");
+}
+
 static int lc_pouch_lql_eq_hint_ensure_term(
     lc_pouch_lql_eq_hint_visit *visit, size_t term_index) {
   lc_pouch_lql_eq_hint_term *grown;
@@ -5735,6 +5745,9 @@ lc_pouch_lql_eq_hint_root_object_begin(void *user,
     if (!lc_pouch_lql_eq_hint_ensure_term(visit, term_index)) {
       return LONEJSON_STATUS_ALLOCATION_FAILED;
     }
+  } else if (visit != NULL &&
+             lc_pouch_lql_eq_hint_path_is_ignored_and_child(path)) {
+    return LONEJSON_STATUS_OK;
   } else if (visit != NULL &&
              !lc_pouch_lql_eq_hint_path_is_and_child(path, &term_index)) {
     visit->valid = 0;
@@ -5824,14 +5837,14 @@ lc_pouch_lql_eq_hint_key_end(void *user, const lonejson_value_path *path,
   } else if (path != NULL &&
              lc_pouch_lql_eq_hint_path_is_and_child(path,
                                                     &visit->active_term_index)) {
+    if (strcmp(visit->key, "eq") != 0) {
+      return LONEJSON_STATUS_OK;
+    }
     if (!lc_pouch_lql_eq_hint_ensure_term(visit,
                                           visit->active_term_index)) {
       return LONEJSON_STATUS_ALLOCATION_FAILED;
     }
     visit->terms[visit->active_term_index].wrapper_key_count++;
-    if (strcmp(visit->key, "eq") != 0) {
-      visit->valid = 0;
-    }
   } else if (path != NULL &&
              lc_pouch_lql_eq_hint_path_is_eq_object(
                  path, &visit->active_term_index)) {
@@ -5890,6 +5903,8 @@ lc_pouch_lql_eq_hint_string_begin(void *user, const lonejson_value_path *path,
                                      &term->value_capacity, "s:", 2U)) {
       return LONEJSON_STATUS_ALLOCATION_FAILED;
     }
+  } else if (lc_pouch_lql_eq_hint_path_is_ignored_and_child(path)) {
+    return LONEJSON_STATUS_OK;
   } else {
     visit->valid = 0;
   }
@@ -5910,6 +5925,9 @@ lc_pouch_lql_eq_hint_string_chunk(void *user, const lonejson_value_path *path,
   }
   if (!visit->active_term_valid ||
       visit->active_term_index >= visit->term_count) {
+    if (lc_pouch_lql_eq_hint_path_is_ignored_and_child(path)) {
+      return LONEJSON_STATUS_OK;
+    }
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
   if (visit->string_field_active) {
@@ -5982,6 +6000,9 @@ lc_pouch_lql_eq_hint_bool_value(void *user, const lonejson_value_path *path,
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
   if (!lc_pouch_lql_eq_hint_path_is_eq_member(path, "value", &term_index)) {
+    if (lc_pouch_lql_eq_hint_path_is_ignored_and_child(path)) {
+      return LONEJSON_STATUS_OK;
+    }
     visit->valid = 0;
     return LONEJSON_STATUS_OK;
   }
@@ -6017,6 +6038,9 @@ lc_pouch_lql_eq_hint_null_value(void *user, const lonejson_value_path *path,
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
   if (!lc_pouch_lql_eq_hint_path_is_eq_member(path, "value", &term_index)) {
+    if (lc_pouch_lql_eq_hint_path_is_ignored_and_child(path)) {
+      return LONEJSON_STATUS_OK;
+    }
     visit->valid = 0;
     return LONEJSON_STATUS_OK;
   }
@@ -6050,6 +6074,9 @@ lc_pouch_lql_eq_hint_number_begin(void *user, const lonejson_value_path *path,
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
   if (!lc_pouch_lql_eq_hint_path_is_eq_member(path, "value", &term_index)) {
+    if (lc_pouch_lql_eq_hint_path_is_ignored_and_child(path)) {
+      return LONEJSON_STATUS_OK;
+    }
     visit->valid = 0;
     return LONEJSON_STATUS_OK;
   }
@@ -6106,6 +6133,9 @@ lc_pouch_lql_eq_hint_number_end(void *user, const lonejson_value_path *path,
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
   if (!lc_pouch_lql_eq_hint_path_is_eq_member(path, "value", &term_index)) {
+    if (lc_pouch_lql_eq_hint_path_is_ignored_and_child(path)) {
+      return LONEJSON_STATUS_OK;
+    }
     visit->valid = 0;
     return LONEJSON_STATUS_OK;
   }
