@@ -89,11 +89,14 @@ foreach(required_snippet
 endforeach()
 
 foreach(stale_snippet
+    "lonejson == 0.41.0-1"
+    "https://github.com/sa6mwa/lonejson/releases/download/v0.41.0/lonejson-0.41.0-1.src.rock"
     "https://github.com/sa6mwa/lonejson/releases/download/v0.16.0/lonejson-0.16.0-1.src.rock"
 )
-    string(FIND "${validate_luarocks_script}" "${stale_snippet}" snippet_index)
-    if(NOT snippet_index EQUAL -1)
+    string(FIND "${rockspec_text}" "${stale_snippet}" rockspec_stale_index)
+    string(FIND "${validate_luarocks_script}" "${stale_snippet}" script_stale_index)
+    if(NOT rockspec_stale_index EQUAL -1 OR NOT script_stale_index EQUAL -1)
         message(FATAL_ERROR
-            "LuaRocks validation script contains stale snippet '${stale_snippet}'")
+            "Lua rock dependency boundary contains stale snippet '${stale_snippet}'")
     endif()
 endforeach()

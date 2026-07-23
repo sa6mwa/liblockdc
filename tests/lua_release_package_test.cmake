@@ -151,6 +151,12 @@ if(inner_source_index EQUAL -1)
         "Lua source rock embedded rockspec should reference the embedded source archive by relative name\n"
         "rockspec:\n${lockdc_lua_inner_rockspec_text}")
 endif()
+string(FIND "${lockdc_lua_inner_rockspec_text}" "\"lonejson == 0.42.0-1\"" inner_lonejson_index)
+if(inner_lonejson_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua source rock embedded rockspec is missing the pinned lonejson dependency\n"
+        "rockspec:\n${lockdc_lua_inner_rockspec_text}")
+endif()
 
 file(READ "${lockdc_lua_rockspec_path}" lockdc_lua_rockspec_text)
 foreach(required_snippet
@@ -158,6 +164,7 @@ foreach(required_snippet
     "version = \"${LOCKDC_VERSION}-1\""
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v${LOCKDC_VERSION}\""
+    "\"lonejson == 0.42.0-1\""
     "scripts/build_lockdc_lua_rock.sh"
 )
     string(FIND "${lockdc_lua_rockspec_text}" "${required_snippet}" snippet_index)
@@ -165,6 +172,18 @@ foreach(required_snippet
         message(FATAL_ERROR
             "standalone Lua rockspec is missing expected snippet '${required_snippet}'\n"
             "rockspec:\n${lockdc_lua_rockspec_text}")
+    endif()
+endforeach()
+
+foreach(stale_snippet
+    "lonejson == 0.41.0-1"
+    "https://github.com/sa6mwa/lonejson/releases/download/v0.41.0/lonejson-0.41.0-1.src.rock"
+)
+    string(FIND "${lockdc_lua_rockspec_text}" "${stale_snippet}" standalone_stale_index)
+    string(FIND "${lockdc_lua_inner_rockspec_text}" "${stale_snippet}" inner_stale_index)
+    if(NOT standalone_stale_index EQUAL -1 OR NOT inner_stale_index EQUAL -1)
+        message(FATAL_ERROR
+            "Lua release rockspec dependency boundary contains stale snippet '${stale_snippet}'")
     endif()
 endforeach()
 
