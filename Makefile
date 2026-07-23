@@ -31,18 +31,20 @@ FUZZ_TIME ?= 30
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__format \
-	__asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate \
+	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __clean-dist \
 	__lua-rock __lua-test __lua-env \
-	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test __release __release-matrix __release-package-only __clean \
+	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test \
+	__prerelease __prerelease-live __prerelease-hardening __release __release-matrix __release-package-only __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
-	asan coverage fuzz fuzz-smoke benchmarks bench-gate \
+	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives clean-dist \
 	lua-rock lua-test lua-env \
-	dev-up dev-down dev-reset cross-build cross-preset-test cross-test release release-matrix clean
+	dev-up dev-down dev-reset cross-build cross-preset-test cross-test \
+	prerelease prerelease-live prerelease-hardening release release-matrix clean
 
 help:
 	@printf '%s\n' \
@@ -68,6 +70,8 @@ help:
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
 		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
 		'make format             Run clang-format over repo .c and .h files.' \
+		'make finalize-slice     Run formatting plus the host release test gate for an ordinary implementation slice.' \
+		'make valgrind           Native Valgrind lifecycle gate; currently fails with an actionable migration diagnostic until the Bootlin Valgrind preset lands.' \
 		'make asan               Compatibility alias for test-debug.' \
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
@@ -87,6 +91,9 @@ help:
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
+		'make prerelease         Run deterministic local prerelease confidence: finalize-slice, test-all, package-verify, and lua-test.' \
+		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
+		'make prerelease-hardening  Run prerelease plus fuzz smoke, benchmark gate, and release matrix.' \
 		'make release            Run the clean-slate final release workflow: tests, e2e, benchmarks, package generation, and final release verification; fuzz is included when Clang/libFuzzer is available.' \
 		'make release-matrix     Rebuild, test, package, and verify the release matrix while reusing existing build and dependency caches.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
@@ -215,6 +222,27 @@ format:
 
 __format:
 	rg --files -g '*.c' -g '*.h' | xargs $(CLANG_FORMAT) -i
+
+finalize-slice:
+	$(TIMED) finalize-slice $(MAKE) __finalize-slice
+
+__finalize-slice: __format __test-host
+
+valgrind:
+	$(TIMED) valgrind $(MAKE) __valgrind
+
+__valgrind:
+	@printf '%s\n' \
+		'PKT_DIAGNOSTIC_BEGIN' \
+		'surface=make valgrind' \
+		'phase=lifecycle-migration' \
+		'status=failed' \
+		'class=external-tool-unavailable' \
+		'reason=valgrind-preset-not-implemented' \
+		'artifact=CMakePresets.json' \
+		'next=add the lifecycle valgrind preset backed by the pinned native x86_64 Bootlin toolchain, then run host Valgrind Memcheck' \
+		'PKT_DIAGNOSTIC_END' >&2
+	@exit 2
 
 test-asan:
 	$(TIMED) test-asan $(MAKE) __test-asan
@@ -347,6 +375,35 @@ __cross-test: __cross-build
 
 release:
 	$(TIMED) release $(MAKE) __release
+
+prerelease:
+	$(TIMED) prerelease $(MAKE) __prerelease
+
+__prerelease: __finalize-slice __test-all __package-verify __lua-test
+
+prerelease-live:
+	$(TIMED) prerelease-live $(MAKE) __prerelease-live
+
+__prerelease-live:
+	@if [ "$${LOCKDC_PRERELEASE_LIVE:-}" != "1" ]; then \
+		printf '%s\n' \
+			'PKT_DIAGNOSTIC_BEGIN' \
+			'surface=make prerelease-live' \
+			'phase=opt-in' \
+			'status=failed' \
+			'class=external-tool-unavailable' \
+			'reason=live-prerelease-not-enabled' \
+			'artifact=LOCKDC_PRERELEASE_LIVE' \
+			'next=set LOCKDC_PRERELEASE_LIVE=1 only when live provider checks are defined and credentials are available' \
+			'PKT_DIAGNOSTIC_END' >&2; \
+		exit 2; \
+	fi
+	@printf '%s\n' '[prerelease-live] no live-provider checks are currently defined'
+
+prerelease-hardening:
+	$(TIMED) prerelease-hardening $(MAKE) __prerelease-hardening
+
+__prerelease-hardening: __prerelease __fuzz-smoke __bench-gate __release-matrix
 
 __release:
 	bash ./scripts/release.sh

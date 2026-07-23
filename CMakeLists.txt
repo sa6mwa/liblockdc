@@ -934,6 +934,16 @@ if(LOCKDC_BUILD_TESTS)
         RUN_SERIAL TRUE
         TIMEOUT 20)
 
+    add_test(NAME lifecycle_command_surface_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_command_surface_test.cmake
+    )
+    set_tests_properties(lifecycle_command_surface_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
     add_test(NAME discover_target_tools_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}

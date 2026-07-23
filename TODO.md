@@ -164,11 +164,11 @@ Latest release targets confirmed on 2026-07-22:
 - [ ] Align fuzzing with the updated pinned AFL++ GCC-plugin lifecycle for
   native x86_64 Linux only; ensure fuzz targets never rely on host Clang/GCC as
   the project compiler.
-- [ ] Update Make command surfaces so `make help` is authoritative and includes
+- [x] Update Make command surfaces so `make help` is authoritative and includes
   the updated lifecycle targets: `finalize-slice`, `prerelease`,
   `prerelease-live`, `prerelease-hardening`, `release-matrix`, `valgrind`, and
   any compatibility aliases retained for existing documented commands.
-- [ ] Add or update lifecycle migration documentation while the repo is in
+- [x] Add or update lifecycle migration documentation while the repo is in
   transition, recording old command behavior, new lifecycle command, preserved
   behavior, verification added, removed/deprecated behavior, and decisions still
   needed.
