@@ -300,6 +300,9 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Move writes from the root-level `store.log` to active namespace
       segments, including active segment creation, sealing thresholds, fsync
       boundaries, and writer marker refresh.
+      - [x] Add explicit payload file identity to live state, object, and queue
+        refs so read sources are no longer hard-wired to `store.log` and can
+        follow namespace segment paths during the write cutover.
     - [ ] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
       set changes, and preserve corrupt-tail truncation semantics per segment.
