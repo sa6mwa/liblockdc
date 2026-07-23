@@ -311,6 +311,9 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
       set changes, and preserve corrupt-tail truncation semantics per segment.
+      - [x] Decouple record replay from `store->log_fd` / `store->log_path`
+        by routing root replay through an explicit fd/path replay input; the
+        next slice can reuse this for namespace segment histories.
     - [ ] Implement snapshot compaction and cleanup: capture live refs,
       validate drift before install, protect live state-link targets, mark old
       segments/snapshots obsolete, and retry obsolete-file cleanup.

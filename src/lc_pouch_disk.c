@@ -248,6 +248,12 @@ typedef struct lc_pouch_disk_store {
   int defer_record_fsync;
 } lc_pouch_disk_store;
 
+typedef struct lc_pouch_disk_replay_input {
+  lc_pouch_disk_store *store;
+  int fd;
+  const char *path;
+} lc_pouch_disk_replay_input;
+
 struct lc_pouch_key_lock {
   lc_pouch_allocator allocator;
   char *path;
@@ -8344,20 +8350,22 @@ static int lc_pouch_disk_replay_skip_crc_sha256(
   return LC_OK;
 }
 
-static char *lc_pouch_disk_replay_read_string(lc_pouch_disk_store *store,
+static char *lc_pouch_disk_replay_read_string(lc_pouch_disk_replay_input *input,
                                               unsigned long length,
                                               unsigned long *crc,
                                               int *short_read,
                                               lc_error *error) {
+  lc_pouch_disk_store *store;
   char *copy;
   int rc;
 
+  store = input->store;
   copy = (char *)lc_pouch_alloc(&store->allocator, (size_t)length + 1U);
   if (copy == NULL) {
     (void)lc_pouch_set_nomem(error, "failed to allocate replay field");
     return NULL;
   }
-  rc = lc_pouch_disk_replay_read_crc(store->log_fd, copy, (size_t)length, crc,
+  rc = lc_pouch_disk_replay_read_crc(input->fd, copy, (size_t)length, crc,
                                      short_read, error);
   if (rc != LC_OK || *short_read) {
     lc_pouch_free(&store->allocator, copy);
@@ -8729,10 +8737,11 @@ static void lc_pouch_disk_replay_free_fields(lc_pouch_disk_store *store,
 }
 
 static int lc_pouch_disk_replay_stream_index_record(
-    lc_pouch_disk_store *store, unsigned long type, unsigned long ns_len,
+    lc_pouch_disk_replay_input *input, unsigned long type, unsigned long ns_len,
     unsigned long key_len, unsigned long ct_len, unsigned long etag_len,
     unsigned long body_len, unsigned long version, unsigned long expected_crc,
     unsigned long offset, int *stop, lc_error *error) {
+  lc_pouch_disk_store *store;
   unsigned char link_body[16];
   unsigned char object_meta[LC_POUCH_OBJECT_META_SIZE];
   unsigned char queue_meta[LC_POUCH_QUEUE_META_SIZE];
@@ -8772,6 +8781,7 @@ static int lc_pouch_disk_replay_stream_index_record(
   int short_read;
   int rc;
 
+  store = input->store;
   *stop = 0;
   ns_copy = NULL;
   key_copy = NULL;
@@ -8784,7 +8794,7 @@ static int lc_pouch_disk_replay_stream_index_record(
   crc = 0xffffffffUL;
   short_read = 0;
 
-  ns_copy = lc_pouch_disk_replay_read_string(store, ns_len, &crc, &short_read,
+  ns_copy = lc_pouch_disk_replay_read_string(input, ns_len, &crc, &short_read,
                                              error);
   if (ns_copy == NULL) {
     *stop = short_read;
@@ -8792,7 +8802,7 @@ static int lc_pouch_disk_replay_stream_index_record(
                       : (error != NULL && error->code != LC_OK ? error->code
                                                                : LC_ERR_NOMEM);
   }
-  key_copy = lc_pouch_disk_replay_read_string(store, key_len, &crc,
+  key_copy = lc_pouch_disk_replay_read_string(input, key_len, &crc,
                                               &short_read, error);
   if (key_copy == NULL) {
     lc_pouch_disk_replay_free_fields(store, ns_copy, NULL, NULL, NULL);
@@ -8802,7 +8812,7 @@ static int lc_pouch_disk_replay_stream_index_record(
                                                                : LC_ERR_NOMEM);
   }
   if (ct_len > 0UL) {
-    ct_copy = lc_pouch_disk_replay_read_string(store, ct_len, &crc,
+    ct_copy = lc_pouch_disk_replay_read_string(input, ct_len, &crc,
                                                &short_read, error);
     if (ct_copy == NULL) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, NULL, NULL);
@@ -8814,7 +8824,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     }
   }
   if (etag_len > 0UL) {
-    etag_copy = lc_pouch_disk_replay_read_string(store, etag_len, &crc,
+    etag_copy = lc_pouch_disk_replay_read_string(input, etag_len, &crc,
                                                  &short_read, error);
     if (etag_copy == NULL) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy, NULL);
@@ -8831,7 +8841,7 @@ static int lc_pouch_disk_replay_stream_index_record(
   indexed_body_len = body_len;
   if (type == LC_POUCH_RECORD_STATE_PUT ||
       type == LC_POUCH_RECORD_STATE_REMOVE) {
-    rc = lc_pouch_disk_replay_skip_crc(store->log_fd, body_len, &crc,
+    rc = lc_pouch_disk_replay_skip_crc(input->fd, body_len, &crc,
                                        &short_read, error);
     if (rc != LC_OK || short_read) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
@@ -8847,7 +8857,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     }
     if (!lc_pouch_disk_upsert_entry(
             store, ns_copy, key_copy, ct_copy, etag_copy, (long)version,
-            store->log_path, indexed_body_offset, indexed_body_len,
+            input->path, indexed_body_offset, indexed_body_len,
             type == LC_POUCH_RECORD_STATE_REMOVE)) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -8860,7 +8870,7 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
-    rc = lc_pouch_disk_replay_read_crc(store->log_fd, link_body,
+    rc = lc_pouch_disk_replay_read_crc(input->fd, link_body,
                                        sizeof(link_body), &crc, &short_read,
                                        error);
     if (rc != LC_OK || short_read) {
@@ -8886,7 +8896,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     }
     if (!lc_pouch_disk_upsert_entry(store, ns_copy, key_copy, ct_copy,
                                     etag_copy, (long)version,
-                                    store->log_path, indexed_body_offset,
+                                    input->path, indexed_body_offset,
                                     indexed_body_len, 0)) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -8900,7 +8910,7 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
-    rc = lc_pouch_disk_replay_read_crc(store->log_fd, object_meta,
+    rc = lc_pouch_disk_replay_read_crc(input->fd, object_meta,
                                        sizeof(object_meta), &crc, &short_read,
                                        error);
     if (rc != LC_OK || short_read) {
@@ -8922,7 +8932,7 @@ static int lc_pouch_disk_replay_stream_index_record(
       return LC_OK;
     }
     object_ct_copy = lc_pouch_disk_replay_read_string(
-        store, object_ct_len, &crc, &short_read, error);
+        input, object_ct_len, &crc, &short_read, error);
     if (object_ct_copy == NULL) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -8934,7 +8944,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     }
     lc_pouch_sha256_init(&object_sha256);
     rc = lc_pouch_disk_replay_skip_crc_sha256(
-        store->log_fd, object_body_len, &crc, &object_sha256, &short_read,
+        input->fd, object_body_len, &crc, &object_sha256, &short_read,
         error);
     if (rc != LC_OK || short_read) {
       lc_pouch_free(&store->allocator, object_ct_copy);
@@ -8954,7 +8964,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     if (!lc_pouch_disk_upsert_object_entry(
             store, ns_copy, key_copy, etag_copy, ct_copy, object_sha256_hex,
             object_ct_copy, (long)object_body_len, (long)created_at,
-            (long)updated_at, store->log_path,
+            (long)updated_at, input->path,
             offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
                 etag_len + LC_POUCH_OBJECT_META_SIZE + object_ct_len,
             object_body_len, 0)) {
@@ -8965,7 +8975,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     }
     lc_pouch_free(&store->allocator, object_ct_copy);
   } else if (type == LC_POUCH_RECORD_OBJECT_REMOVE) {
-    rc = lc_pouch_disk_replay_skip_crc(store->log_fd, body_len, &crc,
+    rc = lc_pouch_disk_replay_skip_crc(input->fd, body_len, &crc,
                                        &short_read, error);
     if (rc != LC_OK || short_read) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
@@ -9004,7 +9014,7 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
-    rc = lc_pouch_disk_replay_read_crc(store->log_fd, queue_meta,
+    rc = lc_pouch_disk_replay_read_crc(input->fd, queue_meta,
                                        sizeof(queue_meta), &crc, &short_read,
                                        error);
     if (rc != LC_OK || short_read) {
@@ -9042,7 +9052,7 @@ static int lc_pouch_disk_replay_stream_index_record(
       return LC_OK;
     }
     queue_content_type = lc_pouch_disk_replay_read_string(
-        store, queue_content_type_len, &crc, &short_read, error);
+        input, queue_content_type_len, &crc, &short_read, error);
     if (queue_content_type == NULL) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -9054,7 +9064,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     }
     if (queue_lease_id_len > 0UL) {
       queue_lease_id = lc_pouch_disk_replay_read_string(
-          store, queue_lease_id_len, &crc, &short_read, error);
+          input, queue_lease_id_len, &crc, &short_read, error);
       if (queue_lease_id == NULL) {
         lc_pouch_free(&store->allocator, queue_content_type);
         lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
@@ -9068,7 +9078,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     }
     if (queue_txn_id_len > 0UL) {
       queue_txn_id = lc_pouch_disk_replay_read_string(
-          store, queue_txn_id_len, &crc, &short_read, error);
+          input, queue_txn_id_len, &crc, &short_read, error);
       if (queue_txn_id == NULL) {
         lc_pouch_free(&store->allocator, queue_content_type);
         lc_pouch_free(&store->allocator, queue_lease_id);
@@ -9084,7 +9094,7 @@ static int lc_pouch_disk_replay_stream_index_record(
     queue_payload_offset =
         LC_POUCH_QUEUE_META_SIZE + queue_content_type_len +
         queue_lease_id_len + queue_txn_id_len;
-    rc = lc_pouch_disk_replay_skip_crc(store->log_fd, queue_payload_len, &crc,
+    rc = lc_pouch_disk_replay_skip_crc(input->fd, queue_payload_len, &crc,
                                        &short_read, error);
     if (rc != LC_OK || short_read) {
       lc_pouch_free(&store->allocator, queue_content_type);
@@ -9113,7 +9123,7 @@ static int lc_pouch_disk_replay_stream_index_record(
             queue_max_attempts, queue_failure_attempts, queue_enqueued_at,
             queue_not_visible_until, queue_visibility_timeout,
             queue_expires_at, queue_lease_expires_at, (long)version,
-            store->log_path,
+            input->path,
             offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
                 etag_len + queue_payload_offset,
             queue_payload_len, type == LC_POUCH_RECORD_QUEUE_PUT,
@@ -9140,7 +9150,9 @@ static int lc_pouch_disk_replay_stream_index_record(
   return LC_OK;
 }
 
-static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
+static int lc_pouch_disk_replay_input_records(
+    lc_pouch_disk_replay_input *input, lc_error *error) {
+  lc_pouch_disk_store *store;
   unsigned char header[LC_POUCH_HEADER_SIZE];
   unsigned char *payload;
   unsigned long type;
@@ -9158,16 +9170,17 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
   unsigned long offset;
   int short_read;
 
+  store = input->store;
   offset = 0UL;
   lc_pouch_disk_reset_indexes(store);
   store->replayed_query_index_size = (unsigned long)-1;
   store->replayed_query_index_record_count = 0UL;
   store->replayed_record_count = 0UL;
-  if (lseek(store->log_fd, 0, SEEK_SET) < 0) {
+  if (lseek(input->fd, 0, SEEK_SET) < 0) {
     return lc_pouch_set_errno(error, "failed to rewind pouch log");
   }
   while (1) {
-    if (!lc_pouch_read_all(store->log_fd, header, sizeof(header),
+    if (!lc_pouch_read_all(input->fd, header, sizeof(header),
                            &short_read)) {
       return lc_pouch_set_errno(error, "failed to read pouch log header");
     }
@@ -9232,7 +9245,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
 
       stop = 0;
       rc = lc_pouch_disk_replay_stream_index_record(
-          store, type, ns_len, key_len, ct_len, etag_len, body_len, version,
+          input, type, ns_len, key_len, ct_len, etag_len, body_len, version,
           expected_crc, offset, &stop, error);
       if (rc != LC_OK) {
         return rc;
@@ -9252,7 +9265,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
     if (payload == NULL) {
       return lc_pouch_set_nomem(error, "failed to allocate replay payload");
     }
-    if (!lc_pouch_read_all(store->log_fd, payload, (size_t)payload_len,
+    if (!lc_pouch_read_all(input->fd, payload, (size_t)payload_len,
                            &short_read)) {
       lc_pouch_free(&store->allocator, payload);
       return lc_pouch_set_errno(error, "failed to read pouch log payload");
@@ -9334,7 +9347,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
         }
         if (!lc_pouch_disk_upsert_entry(
                 store, ns_copy, key_copy, ct_copy, etag_copy, (long)version,
-                store->log_path, indexed_body_offset, indexed_body_len,
+                input->path, indexed_body_offset, indexed_body_len,
                 type == LC_POUCH_RECORD_STATE_REMOVE)) {
           lc_pouch_free(&store->allocator, ns_copy);
           lc_pouch_free(&store->allocator, key_copy);
@@ -9437,7 +9450,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
           if (!lc_pouch_disk_upsert_object_entry(
                   store, ns_copy, key_copy, etag_copy, ct_copy,
                   object_sha256_hex, object_ct_copy, (long)object_body_len,
-                  (long)created_at, (long)updated_at, store->log_path,
+                  (long)created_at, (long)updated_at, input->path,
                   offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
                       etag_len + LC_POUCH_OBJECT_META_SIZE + object_ct_len,
                   object_body_len, 0)) {
@@ -9524,7 +9537,7 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
                 queue_max_attempts, queue_failure_attempts, queue_enqueued_at,
                 queue_not_visible_until, queue_visibility_timeout,
                 queue_expires_at, queue_lease_expires_at, (long)version,
-                store->log_path,
+                input->path,
                 offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
                     etag_len + queue_payload_offset,
                 queue_payload_len, type == LC_POUCH_RECORD_QUEUE_PUT,
@@ -9563,12 +9576,21 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
     store->replayed_record_count++;
     lc_pouch_free(&store->allocator, payload);
   }
-  if (lseek(store->log_fd, (off_t)offset, SEEK_SET) < 0 ||
-      ftruncate(store->log_fd, (off_t)offset) != 0) {
+  if (lseek(input->fd, (off_t)offset, SEEK_SET) < 0 ||
+      ftruncate(input->fd, (off_t)offset) != 0) {
     return lc_pouch_set_errno(error, "failed to truncate pouch log tail");
   }
   store->replayed_log_size = offset;
   return LC_OK;
+}
+
+static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
+  lc_pouch_disk_replay_input input;
+
+  input.store = store;
+  input.fd = store->log_fd;
+  input.path = store->log_path;
+  return lc_pouch_disk_replay_input_records(&input, error);
 }
 
 static size_t lc_pouch_file_source_read(lc_source *self, void *buffer,
