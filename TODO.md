@@ -308,7 +308,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Preserve segmented snapshot sets during manifest replay; `snapshot`
         records add snapshot files, while `obsolete` records retire superseded
         snapshot or segment files.
-    - [ ] Implement manifest repair for missing manifests, manifestless
+    - [x] Implement manifest repair for missing manifests, manifestless
       segments, crash-incomplete manifests, and legacy open-only manifests
       produced during the new segmented development path.
       - [x] Repair missing or empty namespace manifests from active segment
@@ -319,7 +319,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Repair crash-incomplete manifest tails by separating unterminated
         partial records from appended repair records, then replaying the
         recovered unmentioned segment.
-    - [ ] Move writes from the root-level `store.log` to active namespace
+    - [x] Move writes from the root-level `store.log` to active namespace
       segments, including active segment creation, sealing thresholds, fsync
       boundaries, and writer marker refresh.
       - [x] Add explicit payload file identity to live state, object, and queue
@@ -348,7 +348,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Stop appending fd-backed state/object/queue payload records to
         root `store.log`; namespace segments are now the only record
         destination for those append paths.
-    - [ ] Replay installed snapshots plus non-obsolete segment tails in
+    - [x] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
       set changes, and preserve corrupt-tail truncation semantics per segment.
       - [x] Decouple record replay from `store->log_fd` / `store->log_path`
@@ -367,7 +367,7 @@ Latest release targets confirmed on 2026-07-23:
         detection.
       - [x] Replay multi-file compacted snapshots deterministically so large
         compacted live sets split across snapshot files remain authoritative.
-    - [ ] Implement snapshot compaction and cleanup: capture live refs,
+    - [x] Implement snapshot compaction and cleanup: capture live refs,
       validate drift before install, protect live state-link targets, mark old
       segments/snapshots obsolete, and retry obsolete-file cleanup.
       - [x] Make current compaction segment-aware by backing up active segments,
@@ -385,7 +385,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Stop installing compacted root `store.log` replacements; compaction
         now preserves high-water state in internal namespace snapshots and
         refreshes readers from identity-based segmented log generations.
-    - [ ] Move durable query summary/posting sidecars into the segmented
+      - [x] Materialize live state-link payloads into compacted snapshots under
+        the writer lock so old segment/snapshot bodies can be obsoleted without
+        dangling linked payload references.
+    - [x] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.
       - [x] Rebuild query summary and field-posting sidecars from live
@@ -395,7 +398,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Move the durable query sidecar and compaction temp into the
         internal `.lockd` namespace logstore instead of the pouch root, while
         preserving stale cleanup for earlier root-level compaction temps.
-    - [ ] Add focused recovery tests for fresh segmented stores, reopen,
+    - [x] Add focused recovery tests for fresh segmented stores, reopen,
       corrupt tails, manifest repair, snapshot install, obsolete cleanup,
       state-link protection, and query/index rebuild from authoritative
       namespace history.
@@ -406,6 +409,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Cover query sidecar field-posting rebuild from authoritative
         namespace segment bodies after removing `query.index` and truncating
         the legacy root log.
+      - [x] Cover fresh segmented state replay with the root `store.log`
+        removed, independent-handle generation refresh, manifest repair,
+        corrupt segment tail truncation, snapshot install/tail override,
+        obsolete snapshot cleanup, and state-link compaction materialization.
     - [ ] Add performance benchmarks that compare segmented pouch against the
       Go lockd disk backend on large data and indexed low-match LQL workloads
       after segmented correctness tests are stable.
