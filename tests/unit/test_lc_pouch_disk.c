@@ -9019,6 +9019,7 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   char manifest_path[512];
   char manifest_text[1024];
   char snapshot_path[512];
+  char snapshot2_path[512];
   char backend_snapshot_path[512];
   char payload[4096];
   lc_pouch_allocator allocator;
@@ -9031,6 +9032,7 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   lc_pouch_state_info state_info;
   lc_pouch_compaction_res compacted;
   lc_error error;
+  char *text;
   off_t before_log_size;
   off_t before_query_size;
   long last_version;
@@ -9128,6 +9130,61 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   read_length = read_source_count_x(body);
   assert_int_equal(read_length, sizeof(payload));
   lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  state_opts.content_type = "text/plain";
+  source = source_from_text("second-generation");
+  rc = store->write_state(store, "default", "hot-key", source, &state_opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  last_version = put_res.new_version;
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  memset(&compacted, 0, sizeof(compacted));
+  rc = store->compact(store, "force", &compacted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(compacted.compacted, 1);
+  lc_pouch_compaction_res_cleanup(&allocator, &compacted);
+  test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
+  assert_non_null(strstr(manifest_text, "snapshot snap-0000000000000002.log\n"));
+  assert_non_null(strstr(manifest_text, "obsolete snap-0000000000000001.log\n"));
+  test_snapshot_path(root, "default", 2UL, snapshot2_path,
+                     sizeof(snapshot2_path));
+  assert_int_equal(access(snapshot_path, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
+  assert_true(access(snapshot2_path, R_OK) == 0);
+
+  rc = store->read_state(store, "default", "hot-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(state_info.version, last_version);
+  text = read_source_text(body);
+  assert_string_equal(text, "second-generation");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "hot-key", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_int_equal(state_info.version, last_version);
+  text = read_source_text(body);
+  assert_string_equal(text, "second-generation");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
   lc_pouch_state_info_cleanup(&allocator, &state_info);
 
   rc = store->close(store, &error);

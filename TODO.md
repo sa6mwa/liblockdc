@@ -395,6 +395,8 @@ Latest release targets confirmed on 2026-07-23:
       namespace history.
       - [x] Cover manifest-obsolete snapshot cleanup on reopen without losing
         the active installed snapshot body.
+      - [x] Cover second-generation snapshot compaction obsoleting and cleaning
+        the prior snapshot, then reopening from the new snapshot.
       - [x] Cover query sidecar field-posting rebuild from authoritative
         namespace segment bodies after removing `query.index` and truncating
         the legacy root log.
