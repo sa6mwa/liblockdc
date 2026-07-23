@@ -298,11 +298,16 @@ Latest release targets confirmed on 2026-07-23:
         open, compaction rewrite, and obsolete compaction-backup events.
       - [x] Append manifest `seal` and next-segment `open` records when an
         active namespace segment crosses the current seal threshold.
+      - [x] Replay manifest `open`, `compact`, `seal`, and `obsolete` segment
+        lifecycle records when choosing authoritative namespace segment tails.
     - [ ] Implement manifest repair for missing manifests, manifestless
       segments, crash-incomplete manifests, and legacy open-only manifests
       produced during the new segmented development path.
       - [x] Repair missing or empty namespace manifests from active segment
         directory scans during replay/open.
+      - [x] Repair non-empty manifests by appending `open` for existing segment
+        files that no manifest lifecycle record has mentioned yet, without
+        resurrecting manifest-obsoleted files.
     - [ ] Move writes from the root-level `store.log` to active namespace
       segments, including active segment creation, sealing thresholds, fsync
       boundaries, and writer marker refresh.

@@ -10155,6 +10155,124 @@ static int lc_pouch_disk_segment_replay_paths_add(
   return 1;
 }
 
+static int lc_pouch_disk_segment_replay_paths_contains(
+    const lc_pouch_disk_segment_replay_paths *paths, const char *path) {
+  size_t index;
+
+  for (index = 0U; index < paths->count; ++index) {
+    if (strcmp(paths->items[index], path) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_disk_segment_replay_paths_add_copy(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
+    const char *path, lc_error *error) {
+  char *copy;
+
+  if (lc_pouch_disk_segment_replay_paths_contains(paths, path)) {
+    return LC_OK;
+  }
+  copy = lc_pouch_strdup(&store->allocator, path);
+  if (copy == NULL) {
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch segment replay path");
+  }
+  if (!lc_pouch_disk_segment_replay_paths_add(store, paths, copy)) {
+    lc_pouch_free(&store->allocator, copy);
+    return lc_pouch_set_nomem(error,
+                              "failed to collect pouch segment replay path");
+  }
+  return LC_OK;
+}
+
+static void lc_pouch_disk_segment_replay_paths_remove(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
+    const char *path) {
+  size_t index;
+
+  for (index = 0U; index < paths->count; ++index) {
+    if (strcmp(paths->items[index], path) == 0) {
+      lc_pouch_free(&store->allocator, paths->items[index]);
+      if (index + 1U < paths->count) {
+        memmove(paths->items + index, paths->items + index + 1U,
+                (paths->count - index - 1U) * sizeof(paths->items[0]));
+      }
+      paths->count--;
+      return;
+    }
+  }
+}
+
+static int lc_pouch_disk_read_namespace_manifest_segments(
+    lc_pouch_disk_store *store, const char *manifest_log_path,
+    const char *segments_path, lc_pouch_disk_segment_replay_paths *paths,
+    lc_pouch_disk_segment_replay_paths *mentioned_paths, lc_error *error) {
+  char line[512];
+  FILE *manifest;
+  int rc;
+
+  manifest = fopen(manifest_log_path, "r");
+  if (manifest == NULL) {
+    if (errno == ENOENT || errno == ENOTDIR) {
+      return LC_OK;
+    }
+    return lc_pouch_set_errno(error, "failed to open pouch manifest");
+  }
+  rc = LC_OK;
+  while (fgets(line, sizeof(line), manifest) != NULL) {
+    char *event;
+    char *file_name;
+    char *newline;
+    char *segment_path;
+    unsigned long ignored_number;
+
+    event = line;
+    file_name = strchr(line, ' ');
+    if (file_name == NULL) {
+      continue;
+    }
+    *file_name++ = '\0';
+    newline = strchr(file_name, '\n');
+    if (newline != NULL) {
+      *newline = '\0';
+    }
+    if (!lc_pouch_disk_segment_name_parse(file_name, &ignored_number)) {
+      continue;
+    }
+    segment_path =
+        lc_pouch_join_path(&store->allocator, segments_path, file_name);
+    if (segment_path == NULL) {
+      rc = lc_pouch_set_nomem(error,
+                              "failed to allocate pouch segment path");
+      break;
+    }
+    rc = lc_pouch_disk_segment_replay_paths_add_copy(
+        store, mentioned_paths, segment_path, error);
+    if (rc == LC_OK &&
+        (strcmp(event, "open") == 0 || strcmp(event, "compact") == 0)) {
+      rc =
+          lc_pouch_disk_segment_replay_paths_add_copy(store, paths,
+                                                      segment_path, error);
+    } else if (rc == LC_OK && strcmp(event, "obsolete") == 0) {
+      lc_pouch_disk_segment_replay_paths_remove(store, paths, segment_path);
+    }
+    lc_pouch_free(&store->allocator, segment_path);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  if (ferror(manifest) && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to read pouch manifest");
+  }
+  if (fclose(manifest) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch manifest");
+  }
+  return rc;
+}
+
 static int lc_pouch_disk_collect_active_segment_paths(
     lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
     lc_error *error) {
@@ -10174,13 +10292,21 @@ static int lc_pouch_disk_collect_active_segment_paths(
     char *namespace_path;
     char *logstore_path;
     char *segments_path;
+    char *manifest_path;
+    char *manifest_log_path;
+    lc_pouch_disk_segment_replay_paths manifest_active_paths;
+    lc_pouch_disk_segment_replay_paths mentioned_paths;
 
+    memset(&manifest_active_paths, 0, sizeof(manifest_active_paths));
+    memset(&mentioned_paths, 0, sizeof(mentioned_paths));
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
     namespace_path = NULL;
     logstore_path = NULL;
     segments_path = NULL;
+    manifest_path = NULL;
+    manifest_log_path = NULL;
     namespace_path =
         lc_pouch_join_path(&store->allocator, store->root_path, entry->d_name);
     logstore_path =
@@ -10191,12 +10317,38 @@ static int lc_pouch_disk_collect_active_segment_paths(
         logstore_path != NULL
             ? lc_pouch_join_path(&store->allocator, logstore_path, "segments")
             : NULL;
+    manifest_path =
+        logstore_path != NULL
+            ? lc_pouch_join_path(&store->allocator, logstore_path, "manifest")
+            : NULL;
+    manifest_log_path =
+        manifest_path != NULL
+            ? lc_pouch_join_path(&store->allocator, manifest_path,
+                                 "manifest.log")
+            : NULL;
     if (namespace_path == NULL || logstore_path == NULL ||
-        segments_path == NULL) {
+        segments_path == NULL || manifest_path == NULL ||
+        manifest_log_path == NULL) {
       lc_pouch_free(&store->allocator, namespace_path);
       lc_pouch_free(&store->allocator, logstore_path);
       lc_pouch_free(&store->allocator, segments_path);
+      lc_pouch_free(&store->allocator, manifest_path);
+      lc_pouch_free(&store->allocator, manifest_log_path);
       rc = lc_pouch_set_nomem(error, "failed to allocate pouch segment path");
+      break;
+    }
+    rc = lc_pouch_disk_read_namespace_manifest_segments(
+        store, manifest_log_path, segments_path, &manifest_active_paths,
+        &mentioned_paths, error);
+    if (rc != LC_OK) {
+      lc_pouch_disk_segment_replay_paths_cleanup(store,
+                                                 &manifest_active_paths);
+      lc_pouch_disk_segment_replay_paths_cleanup(store, &mentioned_paths);
+      lc_pouch_free(&store->allocator, namespace_path);
+      lc_pouch_free(&store->allocator, logstore_path);
+      lc_pouch_free(&store->allocator, segments_path);
+      lc_pouch_free(&store->allocator, manifest_path);
+      lc_pouch_free(&store->allocator, manifest_log_path);
       break;
     }
     segments_dir = opendir(segments_path);
@@ -10220,20 +10372,29 @@ static int lc_pouch_disk_collect_active_segment_paths(
         errno = 0;
         if (stat(segment_path, &st) == 0 && S_ISREG(st.st_mode) &&
             st.st_size > 0) {
-          rc = lc_pouch_disk_repair_manifest_for_segment_path(
-              store, segment_path, error);
-          if (rc != LC_OK) {
-            lc_pouch_free(&store->allocator, segment_path);
-            break;
+          if (lc_pouch_disk_segment_replay_paths_contains(
+                  &manifest_active_paths, segment_path)) {
+            rc = lc_pouch_disk_segment_replay_paths_add_copy(
+                store, paths, segment_path, error);
+            if (rc != LC_OK) {
+              lc_pouch_free(&store->allocator, segment_path);
+              break;
+            }
+          } else if (!lc_pouch_disk_segment_replay_paths_contains(
+                         &mentioned_paths, segment_path)) {
+            rc = lc_pouch_disk_repair_manifest_for_segment_path(
+                store, segment_path, error);
+            if (rc != LC_OK) {
+              lc_pouch_free(&store->allocator, segment_path);
+              break;
+            }
+            rc = lc_pouch_disk_segment_replay_paths_add_copy(
+                store, paths, segment_path, error);
+            if (rc != LC_OK) {
+              lc_pouch_free(&store->allocator, segment_path);
+              break;
+            }
           }
-          if (!lc_pouch_disk_segment_replay_paths_add(store, paths,
-                                                      segment_path)) {
-            lc_pouch_free(&store->allocator, segment_path);
-            rc = lc_pouch_set_nomem(
-                error, "failed to collect pouch segment replay path");
-            break;
-          }
-          segment_path = NULL;
         } else if (errno != ENOENT && errno != ENOTDIR && errno != 0) {
           lc_pouch_free(&store->allocator, segment_path);
           rc = lc_pouch_set_errno(error, "failed to stat pouch segment");
@@ -10248,9 +10409,13 @@ static int lc_pouch_disk_collect_active_segment_paths(
     } else if (errno != ENOENT && errno != ENOTDIR) {
       rc = lc_pouch_set_errno(error, "failed to open pouch segments directory");
     }
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &manifest_active_paths);
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &mentioned_paths);
     lc_pouch_free(&store->allocator, namespace_path);
     lc_pouch_free(&store->allocator, logstore_path);
     lc_pouch_free(&store->allocator, segments_path);
+    lc_pouch_free(&store->allocator, manifest_path);
+    lc_pouch_free(&store->allocator, manifest_log_path);
     if (rc != LC_OK) {
       break;
     }
