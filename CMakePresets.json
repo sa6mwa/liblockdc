@@ -64,6 +64,7 @@
     {
       "name": "x86_64-linux-gnu-release",
       "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-gnu.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "LOCKDC_DIST_DIR": "${sourceDir}/dist",

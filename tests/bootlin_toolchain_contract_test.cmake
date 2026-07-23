@@ -20,23 +20,12 @@ endif()
 
 set(test_root "${LOCKDC_BINARY_DIR}/bootlin-toolchain-contract")
 set(cache_root "${test_root}/cache")
-set(toolchain_root "${cache_root}/roots/x86-64--glibc--stable-2025.08-1")
-set(sysroot "${toolchain_root}/x86_64-buildroot-linux-gnu/sysroot")
-set(bin_dir "${toolchain_root}/bin")
 file(REMOVE_RECURSE "${test_root}")
-file(MAKE_DIRECTORY "${bin_dir}" "${sysroot}/usr/include" "${sysroot}/usr/lib" "${toolchain_root}/lib/gcc")
-file(WRITE "${sysroot}/usr/include/stdio.h" "")
-file(WRITE "${sysroot}/usr/lib/libc.so" "")
-file(WRITE "${toolchain_root}/lib/gcc/libstdc++.a" "")
-file(WRITE "${toolchain_root}/lib/gcc/libgcc.a" "")
 
-function(write_fake_tool name)
-    set(path "${bin_dir}/${name}")
-    if(name STREQUAL "x86_64-linux-g++")
-        file(WRITE "${path}" "#!/usr/bin/env bash\ncase \"$1\" in\n  -print-file-name=libstdc++.a) printf '%s\\n' '${toolchain_root}/lib/gcc/libstdc++.a' ;;\n  -print-file-name=libgcc.a) printf '%s\\n' '${toolchain_root}/lib/gcc/libgcc.a' ;;\n  *) exit 0 ;;\nesac\n")
-    else()
-        file(WRITE "${path}" "#!/usr/bin/env bash\nexit 0\n")
-    endif()
+function(write_fake_tool path body)
+    get_filename_component(parent "${path}" DIRECTORY)
+    file(MAKE_DIRECTORY "${parent}")
+    file(WRITE "${path}" "${body}")
     file(CHMOD "${path}"
         PERMISSIONS
             OWNER_READ OWNER_WRITE OWNER_EXECUTE
@@ -44,49 +33,136 @@ function(write_fake_tool name)
             WORLD_READ WORLD_EXECUTE)
 endfunction()
 
-foreach(tool
-        gcc
-        g++
-        ld
-        ar
-        ranlib
-        strip
-        nm
-        objcopy
-        objdump
-        addr2line
-        gdb
-        readelf)
-    write_fake_tool("x86_64-linux-${tool}")
-endforeach()
+function(create_fake_bootlin_root target_id root_name prefix sysroot_rel)
+    set(toolchain_root "${cache_root}/roots/${root_name}")
+    set(sysroot "${toolchain_root}/${sysroot_rel}")
+    set(bin_dir "${toolchain_root}/bin")
+    set(runtime_dir "${toolchain_root}/lib/gcc/${target_id}")
+    file(MAKE_DIRECTORY
+        "${bin_dir}"
+        "${sysroot}/usr/include"
+        "${sysroot}/usr/lib"
+        "${runtime_dir}")
+    file(WRITE "${sysroot}/usr/include/stdio.h" "")
+    file(WRITE "${sysroot}/usr/lib/libc.so" "")
+    file(WRITE "${runtime_dir}/libstdc++.a" "")
+    file(WRITE "${runtime_dir}/libgcc.a" "")
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E env
-        "CPKT_TOOLCHAIN_CACHE=${cache_root}"
-        "${resolver}" discover x86_64-linux-gnu
-    RESULT_VARIABLE discover_result
-    OUTPUT_VARIABLE discover_output
-    ERROR_VARIABLE discover_error)
-if(NOT discover_result EQUAL 0)
-    message(FATAL_ERROR "Bootlin resolver discover failed\n${discover_error}")
-endif()
-if(NOT discover_output MATCHES "(^|\n)status=ready(\n|$)")
-    message(FATAL_ERROR "fake Bootlin cache was not reported ready\n${discover_output}")
-endif()
+    foreach(tool
+            gcc
+            ld
+            ar
+            ranlib
+            strip
+            nm
+            objcopy
+            objdump
+            addr2line
+            gdb
+            readelf)
+        write_fake_tool("${bin_dir}/${prefix}-${tool}" "#!/usr/bin/env bash\nexit 0\n")
+    endforeach()
+    write_fake_tool("${bin_dir}/${prefix}-g++"
+        "#!/usr/bin/env bash\ncase \"$1\" in\n  -print-file-name=libstdc++.a) printf '%s\\n' '${runtime_dir}/libstdc++.a' ;;\n  -print-file-name=libgcc.a) printf '%s\\n' '${runtime_dir}/libgcc.a' ;;\n  *) exit 0 ;;\nesac\n")
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E env
-        "CPKT_TOOLCHAIN_CACHE=${cache_root}"
-        "${CMAKE_COMMAND}"
-            -DLOCKDC_TOOLCHAIN_FILE=${LOCKDC_ROOT}/cmake/toolchains/x86_64-linux-gnu.cmake
-            -DLOCKDC_EXPECTED_CC=${bin_dir}/x86_64-linux-gcc
-            -DLOCKDC_EXPECTED_AR=${bin_dir}/x86_64-linux-ar
-            -DLOCKDC_EXPECTED_SYSROOT=${sysroot}
-            -P "${LOCKDC_ROOT}/tests/bootlin_toolchain_import_assert.cmake"
-    RESULT_VARIABLE import_result
-    OUTPUT_VARIABLE import_output
-    ERROR_VARIABLE import_error)
-if(NOT import_result EQUAL 0)
-    message(FATAL_ERROR
-        "Bootlin toolchain import failed\nstdout:\n${import_output}\nstderr:\n${import_error}")
-endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "CPKT_TOOLCHAIN_CACHE=${cache_root}"
+            "${resolver}" discover "${target_id}"
+        RESULT_VARIABLE discover_result
+        OUTPUT_VARIABLE discover_output
+        ERROR_VARIABLE discover_error)
+    if(NOT discover_result EQUAL 0)
+        message(FATAL_ERROR "Bootlin resolver discover failed for ${target_id}\n${discover_error}")
+    endif()
+    if(NOT discover_output MATCHES "(^|\n)status=ready(\n|$)")
+        message(FATAL_ERROR "fake Bootlin cache was not reported ready for ${target_id}\n${discover_output}")
+    endif()
+endfunction()
+
+function(assert_bootlin_toolchain_import target_id prefix sysroot_rel)
+    set(toolchain_file "${LOCKDC_ROOT}/cmake/toolchains/${target_id}.cmake")
+    set(toolchain_root "${cache_root}/roots/${ARGN}")
+    set(sysroot "${toolchain_root}/${sysroot_rel}")
+    set(bin_dir "${toolchain_root}/bin")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "CPKT_TOOLCHAIN_CACHE=${cache_root}"
+            "${CMAKE_COMMAND}"
+                -DLOCKDC_TOOLCHAIN_FILE=${toolchain_file}
+                -DLOCKDC_EXPECTED_CC=${bin_dir}/${prefix}-gcc
+                -DLOCKDC_EXPECTED_LINKER=${bin_dir}/${prefix}-ld
+                -DLOCKDC_EXPECTED_AR=${bin_dir}/${prefix}-ar
+                -DLOCKDC_EXPECTED_RANLIB=${bin_dir}/${prefix}-ranlib
+                -DLOCKDC_EXPECTED_SYSROOT=${sysroot}
+                -P "${LOCKDC_ROOT}/tests/bootlin_toolchain_import_assert.cmake"
+        RESULT_VARIABLE import_result
+        OUTPUT_VARIABLE import_output
+        ERROR_VARIABLE import_error)
+    if(NOT import_result EQUAL 0)
+        message(FATAL_ERROR
+            "Bootlin toolchain import failed for ${target_id}\nstdout:\n${import_output}\nstderr:\n${import_error}")
+    endif()
+endfunction()
+
+create_fake_bootlin_root(
+    x86_64-linux-gnu
+    x86-64--glibc--stable-2025.08-1
+    x86_64-linux
+    x86_64-buildroot-linux-gnu/sysroot)
+create_fake_bootlin_root(
+    x86_64-linux-musl
+    x86-64--musl--stable-2025.08-1
+    x86_64-linux
+    x86_64-buildroot-linux-musl/sysroot)
+create_fake_bootlin_root(
+    aarch64-linux-gnu
+    aarch64--glibc--stable-2025.08-1
+    aarch64-linux
+    aarch64-buildroot-linux-gnu/sysroot)
+create_fake_bootlin_root(
+    aarch64-linux-musl
+    aarch64--musl--stable-2025.08-1
+    aarch64-linux
+    aarch64-buildroot-linux-musl/sysroot)
+create_fake_bootlin_root(
+    armhf-linux-gnu
+    armv7-eabihf--glibc--stable-2025.08-1
+    arm-linux
+    arm-buildroot-linux-gnueabihf/sysroot)
+create_fake_bootlin_root(
+    armhf-linux-musl
+    armv7-eabihf--musl--stable-2025.08-1
+    arm-linux
+    arm-buildroot-linux-musleabihf/sysroot)
+
+assert_bootlin_toolchain_import(
+    x86_64-linux-gnu
+    x86_64-linux
+    x86_64-buildroot-linux-gnu/sysroot
+    x86-64--glibc--stable-2025.08-1)
+assert_bootlin_toolchain_import(
+    x86_64-linux-musl
+    x86_64-linux
+    x86_64-buildroot-linux-musl/sysroot
+    x86-64--musl--stable-2025.08-1)
+assert_bootlin_toolchain_import(
+    aarch64-linux-gnu
+    aarch64-linux
+    aarch64-buildroot-linux-gnu/sysroot
+    aarch64--glibc--stable-2025.08-1)
+assert_bootlin_toolchain_import(
+    aarch64-linux-musl
+    aarch64-linux
+    aarch64-buildroot-linux-musl/sysroot
+    aarch64--musl--stable-2025.08-1)
+assert_bootlin_toolchain_import(
+    armhf-linux-gnu
+    arm-linux
+    arm-buildroot-linux-gnueabihf/sysroot
+    armv7-eabihf--glibc--stable-2025.08-1)
+assert_bootlin_toolchain_import(
+    armhf-linux-musl
+    arm-linux
+    arm-buildroot-linux-musleabihf/sysroot
+    armv7-eabihf--musl--stable-2025.08-1)

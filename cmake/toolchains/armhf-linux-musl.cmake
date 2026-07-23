@@ -2,17 +2,8 @@ set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR arm)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-set(LOCKDC_MUSL_PREFIX $ENV{HOME}/.local/cross/arm-linux-musleabihf)
-set(CMAKE_C_COMPILER ${LOCKDC_MUSL_PREFIX}/bin/arm-linux-musleabihf-gcc CACHE FILEPATH "")
-set(CMAKE_AR ${LOCKDC_MUSL_PREFIX}/bin/arm-linux-musleabihf-ar CACHE FILEPATH "")
-set(CMAKE_RANLIB ${LOCKDC_MUSL_PREFIX}/bin/arm-linux-musleabihf-ranlib CACHE FILEPATH "")
-set(CMAKE_SYSROOT ${LOCKDC_MUSL_PREFIX}/arm-linux-musleabihf CACHE PATH "")
-
-set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+include("${CMAKE_CURRENT_LIST_DIR}/../CpktBootlinToolchain.cmake")
+cpkt_configure_bootlin_toolchain(armhf-linux-musl)
 
 set(CMAKE_CROSSCOMPILING_EMULATOR /usr/bin/qemu-arm;-L;${CMAKE_SYSROOT} CACHE STRING "")
 

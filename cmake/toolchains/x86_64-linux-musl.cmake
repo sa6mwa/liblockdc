@@ -2,9 +2,8 @@ set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-set(CMAKE_C_COMPILER /usr/bin/musl-gcc CACHE FILEPATH "")
-set(CMAKE_AR /usr/bin/ar CACHE FILEPATH "")
-set(CMAKE_RANLIB /usr/bin/ranlib CACHE FILEPATH "")
+include("${CMAKE_CURRENT_LIST_DIR}/../CpktBootlinToolchain.cmake")
+cpkt_configure_bootlin_toolchain(x86_64-linux-musl)
 
 set(LOCKDC_TARGET_ARCH x86_64 CACHE STRING "" FORCE)
 set(LOCKDC_TARGET_OS linux CACHE STRING "" FORCE)

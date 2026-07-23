@@ -1,7 +1,9 @@
 foreach(required
         LOCKDC_TOOLCHAIN_FILE
         LOCKDC_EXPECTED_CC
+        LOCKDC_EXPECTED_LINKER
         LOCKDC_EXPECTED_AR
+        LOCKDC_EXPECTED_RANLIB
         LOCKDC_EXPECTED_SYSROOT)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
         message(FATAL_ERROR "${required} is required")
@@ -18,10 +20,25 @@ if(NOT CMAKE_AR STREQUAL LOCKDC_EXPECTED_AR)
     message(FATAL_ERROR
         "expected CMAKE_AR=${LOCKDC_EXPECTED_AR}, got ${CMAKE_AR}")
 endif()
+if(NOT CMAKE_LINKER STREQUAL LOCKDC_EXPECTED_LINKER)
+    message(FATAL_ERROR
+        "expected CMAKE_LINKER=${LOCKDC_EXPECTED_LINKER}, got ${CMAKE_LINKER}")
+endif()
+if(NOT CMAKE_RANLIB STREQUAL LOCKDC_EXPECTED_RANLIB)
+    message(FATAL_ERROR
+        "expected CMAKE_RANLIB=${LOCKDC_EXPECTED_RANLIB}, got ${CMAKE_RANLIB}")
+endif()
 if(NOT CMAKE_SYSROOT STREQUAL LOCKDC_EXPECTED_SYSROOT)
     message(FATAL_ERROR
         "expected CMAKE_SYSROOT=${LOCKDC_EXPECTED_SYSROOT}, got ${CMAKE_SYSROOT}")
 endif()
-if(CMAKE_C_COMPILER MATCHES "^/usr/bin/" OR CMAKE_AR MATCHES "^/usr/bin/")
+if(CMAKE_C_COMPILER MATCHES "^/usr/bin/"
+        OR CMAKE_LINKER MATCHES "^/usr/bin/"
+        OR CMAKE_AR MATCHES "^/usr/bin/"
+        OR CMAKE_RANLIB MATCHES "^/usr/bin/"
+        OR CMAKE_C_COMPILER MATCHES "/\\.local/cross/"
+        OR CMAKE_LINKER MATCHES "/\\.local/cross/"
+        OR CMAKE_AR MATCHES "/\\.local/cross/"
+        OR CMAKE_RANLIB MATCHES "/\\.local/cross/")
     message(FATAL_ERROR "Bootlin toolchain imported a host /usr/bin tool")
 endif()
