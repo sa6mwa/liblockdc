@@ -34,7 +34,7 @@ behavior is not silently lost.
 
 | Old command or behavior | New lifecycle surface | Behavior preserved | Verification added | Status |
 | --- | --- | --- | --- | --- |
-| Placeholder pouch indexed-query parser boundary | `liblql`-backed LQL parsing and evaluation behind the pouch store boundary | Pouch storage owns index layout and scan/index fallback behavior. | Pending owner/key selector, pagination, hidden metadata, removed-candidate, malformed query, oversized query, and parity tests. | Pending implementation |
+| Placeholder pouch indexed-query parser boundary | `liblql`-backed public LQL document predicates plus typed pouch metadata selectors behind the pouch store boundary | Pouch storage owns index layout, metadata filtering, and scan/index fallback behavior. | `liblql_dependency_interface` plus pouch scan/index document and `query_keys` coverage for strict JSON Pointer LQL selectors, metadata selectors, pagination, malformed query, and parity cases. | Active |
 
 ## Removed Or Deprecated Behavior
 

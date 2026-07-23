@@ -95,7 +95,7 @@ Latest release targets confirmed on 2026-07-23:
 - `lonejson v0.42.0`
 - `libpslog v0.9.0`
 - `c.pkt.systems v0.9.0`
-- `liblql v0.1.0`
+- `liblql v0.2.0`
 
 ### Dependency upgrade and provenance
 
@@ -109,7 +109,7 @@ Latest release targets confirmed on 2026-07-23:
 - [x] Upgrade `c.pkt.systems` dependency bundles from `0.7.0` to `0.9.0`,
   including every supported target asset hash, dependency root identity, package
   verification expectations, and downstream SDK metadata.
-- [x] Add `liblql v0.1.0` as a first-class lifecycle dependency from
+- [x] Add `liblql v0.2.0` as a first-class lifecycle dependency from
   `https://github.com/sa6mwa/liblql/releases`, pinned by target ID, exact
   release asset URL, SHA-256, ABI/SOVERSION, license, CMake metadata, and
   pkg-config metadata.
@@ -125,32 +125,32 @@ Latest release targets confirmed on 2026-07-23:
 
 ### Pouch `liblql` integration
 
-- [x] Route pouch query selector classification through `liblql` parse/build
-  and AST inspection instead of project-local selector token parsing, while
-  preserving the existing legacy JSON selector compatibility surface.
-- [ ] Replace the current pouch indexed-query placeholder/parser boundary with
+- [x] Route public LQL operator selectors through `liblql` parsing and
+  spooled document evaluation, while preserving the typed pouch metadata
+  selector surface for storage-owned key/owner filtering.
+- [x] Replace the current pouch indexed-query placeholder/parser boundary with
   `liblql` for LQL parsing/evaluation; do not add project-local query parser or
   expression evaluator code.
-  - [ ] Resolve the `liblql v0.1.0` evaluator gap before enabling general
-    pouch field predicates: both `stream_apply_spooled` and
-    `filter_file_spooled` return `LQL_STATUS_UNSUPPORTED` with
-    `direct stream selector is not implemented by scanner` for a parsed JSON
-    AST selector such as `{"eq":{"field":"value","value":"alpha"}}`.
+  - [x] Resolve the `liblql v0.1.0` evaluator gap by upgrading to
+    `liblql v0.2.0` and enabling general pouch document predicates through
+    `stream_apply_spooled` with strict JSON Pointer fields such as
+    `{"eq":{"field":"/value","value":"alpha"}}`.
   - [x] Add a native-only `liblql_dependency_interface` probe that exercises
-    the `v0.1.0` spooled evaluator gap directly; if a later `liblql` release
-    starts evaluating that selector, the probe fails and forces the pouch
-    backend to replace the unsupported boundary with real liblql evaluation.
-  - [x] Reconfirm on 2026-07-23 that `liblql v0.1.0` is still the latest
-    upstream release, so the general evaluator path remains an upstream
-    dependency blocker rather than repo-local incomplete integration.
+    the `v0.2.0` spooled evaluator directly with full-form strict JSON Pointer
+    selectors, decision callbacks, and matched/seen record counts.
+  - [x] Reconfirm on 2026-07-23 that `liblql v0.2.0` is the latest upstream
+    release used by this repo for LQL document predicate evaluation.
 - [x] Keep pouch storage-owned indexes behind the pouch store boundary; use
   `liblql` only for query language semantics and predicate/evaluator behavior.
-- [x] Add observable pouch tests for `liblql`-backed owner/key selectors,
-  pagination, hidden metadata filtering, removed-candidate skipping, malformed
-  LQL diagnostics, oversized query limits, and scan/index fallback parity.
-  - [x] Cover `liblql` compound key+owner selectors for scan and index
-    document queries plus `query_keys`.
-  - [x] Cover malformed `liblql` key/owner selector diagnostics for scan and
+- [x] Add observable pouch tests for typed key/owner metadata selectors,
+  full-form `liblql` document selectors, pagination, hidden metadata filtering,
+  removed-candidate skipping, malformed LQL diagnostics, oversized query
+  limits, and scan/index fallback parity.
+  - [x] Cover typed compound key+owner selectors for scan and index document
+    queries plus `query_keys`.
+  - [x] Cover malformed strict-field LQL selector diagnostics for scan and
+    index document queries plus `query_keys`.
+  - [x] Cover full-form strict JSON Pointer LQL document selectors for scan and
     index document queries plus `query_keys`.
   - [x] Cover removed-candidate skipping for index document queries plus
     `query_keys`.

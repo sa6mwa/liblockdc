@@ -119,9 +119,9 @@ if(NOT DEFINED LOCKDC_C_COMPILER OR LOCKDC_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "LOCKDC_C_COMPILER is required for native liblql evaluator probe")
 endif()
 
-set(liblql_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/liblql-evaluator-gap-probe")
-set(liblql_probe_source "${liblql_probe_dir}/liblql_evaluator_gap_probe.c")
-set(liblql_probe_binary "${liblql_probe_dir}/liblql_evaluator_gap_probe")
+set(liblql_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/liblql-spooled-evaluator-probe")
+set(liblql_probe_source "${liblql_probe_dir}/liblql_spooled_evaluator_probe.c")
+set(liblql_probe_binary "${liblql_probe_dir}/liblql_spooled_evaluator_probe")
 file(MAKE_DIRECTORY "${liblql_probe_dir}")
 file(WRITE "${liblql_probe_source}" [=[
 #include <lql/lql.h>
@@ -155,12 +155,35 @@ static lql_status probe_read(void *user, unsigned char *buffer, size_t capacity,
   return LQL_STATUS_OK;
 }
 
+typedef struct probe_decision_state {
+  size_t calls;
+  size_t matches;
+} probe_decision_state;
+
+static lql_stream_callback_result
+probe_decision(void *user, const lql_stream_decision *decision,
+               lql_error *error) {
+  probe_decision_state *state;
+
+  (void)error;
+  state = (probe_decision_state *)user;
+  if (state == 0 || decision == 0) {
+    return LQL_STREAM_CALLBACK_ERROR;
+  }
+  state->calls += 1U;
+  if (decision->matched) {
+    state->matches += 1U;
+  }
+  return LQL_STREAM_CALLBACK_CONTINUE;
+}
+
 int main(void) {
   static const char selector_json[] =
-      "{\"eq\":{\"field\":\"value\",\"value\":\"alpha\"}}";
+      "{\"eq\":{\"field\":\"/value\",\"value\":\"alpha\"}}";
   static const unsigned char ndjson[] =
       "{\"value\":\"alpha\"}\n{\"value\":\"beta\"}\n";
   probe_reader_state reader;
+  probe_decision_state decisions;
   lql *runtime;
   lql_selector *selector;
   lql_stream_request request;
@@ -190,18 +213,23 @@ int main(void) {
   request.reader = probe_read;
   request.reader_user = &reader;
   request.selector = selector;
+  request.on_decision = probe_decision;
+  request.decision_user = &decisions;
+  memset(&decisions, 0, sizeof(decisions));
   memset(&result, 0, sizeof(result));
   lql_error_init(&error);
   status = runtime->stream_apply_spooled(runtime, &request, &result, &error);
   runtime->selector_destroy(runtime, selector);
   runtime->destroy(runtime);
 
-  if (status != LQL_STATUS_UNSUPPORTED) {
+  if (status != LQL_STATUS_OK) {
     return 12;
   }
-  if (strstr(error.message,
-             "direct stream selector is not implemented by scanner") == 0) {
+  if (result.records_seen != 2U || result.records_matched != 1U) {
     return 13;
+  }
+  if (decisions.calls != 2U || decisions.matches != 1U) {
+    return 14;
   }
   return 0;
 }
@@ -225,7 +253,7 @@ execute_process(
 )
 if(NOT liblql_probe_build_result EQUAL 0)
     message(FATAL_ERROR
-        "failed to build native liblql evaluator-gap probe\n"
+        "failed to build native liblql spooled-evaluator probe\n"
         "stdout:\n${liblql_probe_build_stdout}\n"
         "stderr:\n${liblql_probe_build_stderr}")
 endif()
@@ -238,9 +266,7 @@ execute_process(
 )
 if(NOT liblql_probe_result EQUAL 0)
     message(FATAL_ERROR
-        "liblql evaluator-gap probe no longer matches v0.1.0 expectations; "
-        "enable pouch general selector evaluation instead of preserving the "
-        "unsupported boundary\n"
+        "liblql spooled evaluator did not match full-form JSON Pointer selector expectations\n"
         "exit code: ${liblql_probe_result}\n"
         "stdout:\n${liblql_probe_stdout}\n"
         "stderr:\n${liblql_probe_stderr}")

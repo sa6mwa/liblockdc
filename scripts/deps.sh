@@ -259,26 +259,26 @@ liblql_version=$(resolve_cmake_cache_string LOCKDC_LIBLQL_VERSION "${LOCKDC_LIBL
 liblql_asset_name="liblql-$liblql_version-${preset#deps-}.tar.gz"
 liblql_download_url="https://github.com/sa6mwa/liblql/releases/download/v$liblql_version/$liblql_asset_name"
 case "$liblql_asset_name" in
-  liblql-0.1.0-x86_64-linux-gnu.tar.gz)
-    liblql_asset_hash=4296c0072f76c7a53b53c2ae9f0cbd0c5b20c2955790eae84a75a76b75786146
+  liblql-0.2.0-x86_64-linux-gnu.tar.gz)
+    liblql_asset_hash=a32b3ecc33b0634df23c630843b1c2c16a8a2caa947109a33bad20965e47a399
     ;;
-  liblql-0.1.0-x86_64-linux-musl.tar.gz)
-    liblql_asset_hash=88b8606fee305755e194a6a0d6ef5ecffe3e0a9890451683da20cce0ebe3b1f1
+  liblql-0.2.0-x86_64-linux-musl.tar.gz)
+    liblql_asset_hash=6a90dd82d5d12281a2afd05025a8eba179bc775cf015da9ee3359ab50f6adcfa
     ;;
-  liblql-0.1.0-aarch64-linux-gnu.tar.gz)
-    liblql_asset_hash=79fbfebeed6968a88ce58cda37b17ed3a39f2543a177c7d0bbbc3024dcb6ea5a
+  liblql-0.2.0-aarch64-linux-gnu.tar.gz)
+    liblql_asset_hash=d796c3b0574cb4137c22d4fce2ef04f24ded83199e6848ae0829dc10b276cc2f
     ;;
-  liblql-0.1.0-aarch64-linux-musl.tar.gz)
-    liblql_asset_hash=407b3a0157d9646eb515a14ea25e45ef1fe1311d4319f34a47e98baf852705db
+  liblql-0.2.0-aarch64-linux-musl.tar.gz)
+    liblql_asset_hash=b128e35e19267e6406c13831650be2cb5a20579cf142ac9beb9903705dc4ae5a
     ;;
-  liblql-0.1.0-armhf-linux-gnu.tar.gz)
-    liblql_asset_hash=2d991728cd46b33013300fcd5675047d15ea0b3bb9bcde8ace6dae720fa64c33
+  liblql-0.2.0-armhf-linux-gnu.tar.gz)
+    liblql_asset_hash=fef9050c63f98f8a20d6afe9a428a172cb98a933b64221425e7eb759fb2284e6
     ;;
-  liblql-0.1.0-armhf-linux-musl.tar.gz)
-    liblql_asset_hash=49fd62676f58c37d8d54e5a050280882326b94bf80642a59bc3c88f4d990c4e6
+  liblql-0.2.0-armhf-linux-musl.tar.gz)
+    liblql_asset_hash=af2b00cb119834bfeb5f80c410e02338e6a51bee058b80e2b70d7ede39c42ba0
     ;;
-  liblql-0.1.0-arm64-apple-darwin.tar.gz)
-    liblql_asset_hash=75630a993625902481dc5422d68994bf1fe5ba07cac160a4b2fa3e64f89d75dc
+  liblql-0.2.0-arm64-apple-darwin.tar.gz)
+    liblql_asset_hash=2e01c19a9ee0a12bc8e6a1411d8f048a9e2f57fe336b28332ec0fc6307665725
     ;;
   *)
     printf 'unsupported liblql release asset: %s\n' "$liblql_asset_name" >&2
