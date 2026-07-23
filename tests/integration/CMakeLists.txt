@@ -23,8 +23,11 @@ function(lc_add_integration_test target_name)
   set_tests_properties(${target_name} PROPERTIES
     LABELS "integration;offline"
     RUN_SERIAL TRUE
-    TIMEOUT 120
-  )
+    TIMEOUT 120)
+  if(LOCKDC_C_TEST_ENVIRONMENT)
+    set_tests_properties(${target_name} PROPERTIES
+      ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+  endif()
 endfunction()
 
 lc_add_integration_test(lc_integration_pouch test_lc_pouch_integration.c)

@@ -21,6 +21,10 @@ function(lc_add_unit_test target_name)
   endif()
   add_test(NAME ${target_name} COMMAND ${target_name})
   set_tests_properties(${target_name} PROPERTIES TIMEOUT 60)
+  if(LOCKDC_C_TEST_ENVIRONMENT)
+    set_tests_properties(${target_name} PROPERTIES
+      ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+  endif()
 endfunction()
 
 function(lc_add_https_unit_test_case target_name case_macro)
@@ -52,6 +56,10 @@ function(lc_add_https_unit_test_case target_name case_macro)
   endif()
   add_test(NAME ${target_name} COMMAND ${target_name})
   set_tests_properties(${target_name} PROPERTIES TIMEOUT 60)
+  if(LOCKDC_C_TEST_ENVIRONMENT)
+    set_tests_properties(${target_name} PROPERTIES
+      ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+  endif()
 endfunction()
 
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)

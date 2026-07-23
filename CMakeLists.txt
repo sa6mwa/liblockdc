@@ -172,6 +172,37 @@ if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT)
     set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/${LOCKDC_TARGET_ID}" CACHE PATH "Stable build root for downloaded third-party dependencies.")
 endif()
 
+set(LOCKDC_C_TEST_ENVIRONMENT "")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT AND LOCKDC_TARGET_LIBC STREQUAL "musl")
+    set(lockdc_c_test_runtime_dirs)
+    foreach(lockdc_runtime_dir
+            "${CMAKE_SYSROOT}/lib"
+            "${CMAKE_SYSROOT}/usr/lib"
+            "${CMAKE_SYSROOT}/lib64"
+            "${CMAKE_SYSROOT}/usr/lib64")
+        if(IS_DIRECTORY "${lockdc_runtime_dir}")
+            list(APPEND lockdc_c_test_runtime_dirs "${lockdc_runtime_dir}")
+        endif()
+    endforeach()
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libatomic.so.1
+        OUTPUT_VARIABLE lockdc_libatomic_path
+        RESULT_VARIABLE lockdc_libatomic_result
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(lockdc_libatomic_result EQUAL 0
+       AND NOT lockdc_libatomic_path STREQUAL "libatomic.so.1"
+       AND EXISTS "${lockdc_libatomic_path}")
+        get_filename_component(lockdc_libatomic_dir "${lockdc_libatomic_path}" DIRECTORY)
+        list(APPEND lockdc_c_test_runtime_dirs "${lockdc_libatomic_dir}")
+    endif()
+    list(REMOVE_DUPLICATES lockdc_c_test_runtime_dirs)
+    if(lockdc_c_test_runtime_dirs)
+        string(JOIN ":" lockdc_c_test_runtime_path ${lockdc_c_test_runtime_dirs})
+        set(LOCKDC_C_TEST_ENVIRONMENT "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}")
+    endif()
+endif()
+
 function(lc_configure_c_target target)
     if(UNIX OR APPLE OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
         target_compile_definitions(${target} PRIVATE _POSIX_C_SOURCE=200809L)

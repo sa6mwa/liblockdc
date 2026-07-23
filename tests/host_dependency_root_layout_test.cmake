@@ -61,6 +61,8 @@ assert_contains(host_test_script "resolve_host_arch()" "host-native host test re
 assert_contains(host_test_script "LOCKDC_HOST_TEST_DRY_RUN" "host test dry-run support")
 assert_contains(host_test_script "deps-host-debug" "host test provisions native gnu dependencies")
 assert_contains(host_test_script "have_native_musl_toolchain()" "host test resolves optional native musl toolchains")
+assert_contains(root_cmake [=[set(LOCKDC_C_TEST_ENVIRONMENT "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}")]=] "C test Bootlin runtime environment")
+assert_contains(root_cmake "-print-file-name=libatomic.so.1" "C test libatomic runtime discovery")
 
 file(REMOVE_RECURSE "${fake_compiler_dir}")
 file(MAKE_DIRECTORY "${fake_compiler_dir}")

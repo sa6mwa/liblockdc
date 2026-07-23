@@ -337,9 +337,10 @@ case "$dependency_target_id" in
     toolchain_prefix=$(toolchain_value prefix)
     toolchain_sysroot=$(toolchain_value sysroot)
     toolchain_target_triple=$(toolchain_value target_triple)
-    compiler=$(toolchain_value cc)
-    compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
-    compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
+    compiler_path=$(toolchain_value cc)
+    compiler_machine=$("$compiler_path" -dumpmachine 2>/dev/null || echo unknown)
+    compiler_version=$("$compiler_path" --version 2>/dev/null | head -n1 || echo unknown)
+    compiler=$(basename -- "$compiler_path")
     ;;
   *)
     toolchain_description=$("$repo_root/scripts/cpkt-toolchains.sh" discover "$dependency_target_id")
@@ -349,12 +350,20 @@ case "$dependency_target_id" in
     toolchain_prefix=$(toolchain_value prefix)
     toolchain_sysroot=$(toolchain_value sysroot)
     toolchain_target_triple=$(toolchain_value target_triple)
-    compiler=$(toolchain_value cc)
-    if [ -z "$compiler" ]; then
-      compiler=${CC:-cc}
+    compiler_path=$(toolchain_value cc)
+    if [ -z "$compiler_path" ]; then
+      compiler_path=${CC:-cc}
     fi
-    compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
-    compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
+    compiler_machine=$("$compiler_path" -dumpmachine 2>/dev/null || echo unknown)
+    compiler_version=$("$compiler_path" --version 2>/dev/null | head -n1 || echo unknown)
+    compiler=$(basename -- "$compiler_path")
+    ;;
+esac
+toolchain_root_identity=$(basename -- "$toolchain_root")
+toolchain_sysroot_identity=$toolchain_sysroot
+case "$toolchain_sysroot_identity" in
+  "$toolchain_root"/*)
+    toolchain_sysroot_identity=${toolchain_sysroot_identity#"$toolchain_root"/}
     ;;
 esac
 
@@ -382,9 +391,9 @@ preset=$preset
 toolchain_target_id=$dependency_target_id
 toolchain_source=$toolchain_source
 toolchain_archive=$toolchain_archive
-toolchain_root=$toolchain_root
+toolchain_root=$toolchain_root_identity
 toolchain_prefix=$toolchain_prefix
-toolchain_sysroot=$toolchain_sysroot
+toolchain_sysroot=$toolchain_sysroot_identity
 toolchain_target_triple=$toolchain_target_triple
 cpkt_version=$cpkt_version
 cpkt_asset_name=$cpkt_asset_name
@@ -739,8 +748,8 @@ if [ "$deps_ready" -eq 1 ] && [ -f "$manifest_path" ]; then
       && [ "$(manifest_value preset "$manifest_path")" = "$preset" ] \
       && [ "$(manifest_value zlib_version "$manifest_path")" = "$zlib_version" ]; then
       prune_dependency_install_trees
-      assert_dependency_install_tree_privacy
       printf '%s\n' "$manifest" > "$manifest_path"
+      assert_dependency_install_tree_privacy
       exit 0
     fi
   fi
@@ -764,5 +773,5 @@ stage_dependency_license "pslog" "libpslog" "$deps_root/pslog/install/share/doc/
 stage_dependency_license "lonejson" "lonejson" "$deps_root/lonejson/install/share/doc/liblonejson/LICENSE"
 stage_dependency_license "liblql" "liblql" "$deps_root/liblql/install/share/doc/liblql/LICENSE"
 prune_dependency_install_trees
-assert_dependency_install_tree_privacy
 printf '%s\n' "$manifest" > "$manifest_path"
+assert_dependency_install_tree_privacy

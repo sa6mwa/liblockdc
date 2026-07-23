@@ -221,7 +221,7 @@ Latest release targets confirmed on 2026-07-22:
 - [x] Run narrow dependency gates after each pin change: shell syntax, dry-run
   target mapping, upstream checksum manifest comparison, dependency interface
   CTest, and install-tree consumer checks.
-- [ ] Run lifecycle-alignment gates after command/toolchain/cache changes:
+- [x] Run lifecycle-alignment gates after command/toolchain/cache changes:
   preset contract tests, target-tool discovery tests, cache contract tests,
   `make build`, `make test`, and `make valgrind`.
 - [ ] Run broader gates before declaring the dependency/lifecycle migration
