@@ -174,12 +174,17 @@ Latest release targets confirmed on 2026-07-22:
   no host compiler/binutils fallback for Linux builds, complete pinned Bootlin
   collections per target, toolchain identity in dependency stamps, and target
   tool discovery from configured build state.
+  - [x] Route the native `x86_64-linux-gnu` toolchain file through the vendored
+    lifecycle Bootlin resolver instead of `/usr/bin` compiler/binutils paths,
+    with a fake-cache contract test and full native release CTest coverage.
 - [x] Add preset-contract tests for lifecycle-required preset presence, build
   and test preset mirrors, required cache variables, release `LOCKDC_DIST_DIR`
   defaults, `debug-lua`, `valgrind`, and fuzz compatibility visibility.
 - [ ] Update CMake presets and toolchain files for the lifecycle-required
   Bootlin-backed `valgrind`, pinned AFL++ `fuzz`, release target matrix, and
   optional Darwin/osxcross behavior.
+  - [x] Vendor the lifecycle `scripts/cpkt-toolchains.sh` resolver and add the
+    shared CMake Bootlin import helper used by the native GNU preset.
 - [x] Replace sanitizer-as-primary hardening assumptions with the updated native
   Valgrind gate while preserving any existing useful ASan/UBSan coverage as
   compatibility or optional hardening.

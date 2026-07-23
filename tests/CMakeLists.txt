@@ -119,6 +119,17 @@ set_tests_properties(darwin_macho_lifecycle_contract_test PROPERTIES
   TIMEOUT 10
 )
 
+add_test(NAME bootlin_toolchain_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/bootlin_toolchain_contract_test.cmake"
+)
+set_tests_properties(bootlin_toolchain_contract_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
+)
+
 add_test(NAME pouch_storage_allocator_contract_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
