@@ -296,6 +296,8 @@ Latest release targets confirmed on 2026-07-23:
       snapshot install, obsolete segment, and obsolete snapshot records.
       - [x] Append text manifest lifecycle records for current active-segment
         open, compaction rewrite, and obsolete compaction-backup events.
+      - [x] Append manifest `seal` and next-segment `open` records when an
+        active namespace segment crosses the current seal threshold.
     - [ ] Implement manifest repair for missing manifests, manifestless
       segments, crash-incomplete manifests, and legacy open-only manifests
       produced during the new segmented development path.
@@ -315,6 +317,8 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Prefer active namespace segment replay over the legacy root log
         when segments exist; keep `store.log` only as a transitional refresh
         signal until the write cutover removes it.
+      - [x] Rotate active namespace segments by size threshold and route all
+        segment-shadow append paths through the shared active-segment opener.
     - [ ] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
       set changes, and preserve corrupt-tail truncation semantics per segment.
@@ -323,6 +327,9 @@ Latest release targets confirmed on 2026-07-23:
         namespace segment replay path now reuses this input wrapper.
       - [x] Replay active namespace segments in deterministic path order and
         keep root replay as a no-segment fallback only.
+      - [x] Discover and replay every numbered `seg-*.log` file in each
+        namespace, so sealed historical segments and the active tail are both
+        authoritative.
     - [ ] Implement snapshot compaction and cleanup: capture live refs,
       validate drift before install, protect live state-link targets, mark old
       segments/snapshots obsolete, and retry obsolete-file cleanup.

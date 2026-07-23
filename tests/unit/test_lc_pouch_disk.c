@@ -691,24 +691,65 @@ static off_t test_log_size(const char *root) {
   return st.st_size;
 }
 
-static off_t test_active_segment_size(const char *root,
-                                      const char *escaped_namespace) {
-  char segment_path[512];
-  struct stat st;
-
-  snprintf(segment_path, sizeof(segment_path),
-           "%s/%s/logstore/segments/seg-0000000000000001.log", root,
-           escaped_namespace);
-  assert_int_equal(stat(segment_path, &st), 0);
-  return st.st_size;
+static void test_segment_path(const char *root, const char *escaped_namespace,
+                              unsigned long segment_number, char *path,
+                              size_t path_size) {
+  snprintf(path, path_size,
+           "%s/%s/logstore/segments/seg-%016lu.log", root, escaped_namespace,
+           segment_number);
 }
 
 static void test_active_segment_path(const char *root,
                                      const char *escaped_namespace, char *path,
                                      size_t path_size) {
-  snprintf(path, path_size,
-           "%s/%s/logstore/segments/seg-0000000000000001.log", root,
-           escaped_namespace);
+  test_segment_path(root, escaped_namespace, 1UL, path, path_size);
+}
+
+static off_t test_segment_size(const char *root,
+                               const char *escaped_namespace,
+                               unsigned long segment_number) {
+  char segment_path[512];
+  struct stat st;
+
+  test_segment_path(root, escaped_namespace, segment_number, segment_path,
+                    sizeof(segment_path));
+  assert_int_equal(stat(segment_path, &st), 0);
+  return st.st_size;
+}
+
+static off_t test_namespace_segments_size(const char *root,
+                                          const char *escaped_namespace) {
+  char segments_path[2048];
+  char segment_path[2048];
+  DIR *dir;
+  struct dirent *entry;
+  struct stat st;
+  off_t total;
+
+  snprintf(segments_path, sizeof(segments_path), "%s/%s/logstore/segments",
+           root, escaped_namespace);
+  dir = opendir(segments_path);
+  assert_non_null(dir);
+  total = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strncmp(entry->d_name, "seg-", 4U) != 0 ||
+        strstr(entry->d_name, ".compact.bak") != NULL) {
+      continue;
+    }
+    assert_true(test_join_path_buf(segment_path, sizeof(segment_path),
+                                   segments_path, entry->d_name));
+    assert_int_equal(stat(segment_path, &st), 0);
+    if (S_ISREG(st.st_mode)) {
+      total += st.st_size;
+    }
+  }
+  assert_int_equal(closedir(dir), 0);
+  return total;
+}
+
+static off_t test_active_segment_size(const char *root,
+                                      const char *escaped_namespace) {
+  return test_segment_size(root, escaped_namespace, 1UL);
 }
 
 static void test_manifest_path(const char *root, const char *escaped_namespace,
@@ -1542,6 +1583,101 @@ static void test_replay_repairs_missing_namespace_manifest(void **state) {
   assert_false(info.no_content);
   text = read_source_text(read_body);
   assert_string_equal(text, "manifest-repair-body");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_segment_rotation_replays_multiple_segments(void **state) {
+  char root[256];
+  char log_path[512];
+  char manifest_path[512];
+  char manifest_text[512];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  counting_source large_source;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  size_t read_length;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "segment-rotation");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&info, 0, sizeof(info));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  counting_source_init(&large_source, 40000U);
+  rc = store->write_state(store, "default", "large-a", &large_source.pub, NULL,
+                          &put_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  counting_source_init(&large_source, 40000U);
+  rc = store->write_state(store, "default", "large-b", &large_source.pub, NULL,
+                          &put_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+  assert_true(test_segment_size(root, "default", 1UL) >
+              (off_t)(64U * 1024U));
+
+  source = source_from_text("rotated-tail");
+  rc = store->write_state(store, "default", "tail", source, NULL, &put_res,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_true(test_segment_size(root, "default", 2UL) >
+              (off_t)TEST_POUCH_HEADER_SIZE);
+
+  test_manifest_path(root, "default", manifest_path, sizeof(manifest_path));
+  test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
+  assert_non_null(strstr(manifest_text, "open seg-0000000000000001.log\n"));
+  assert_non_null(strstr(manifest_text, "seal seg-0000000000000001.log\n"));
+  assert_non_null(strstr(manifest_text, "open seg-0000000000000002.log\n"));
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  assert_int_equal(unlink(log_path), 0);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "large-a", &read_body, &info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  read_length = read_source_count_x(read_body);
+  assert_int_equal(read_length, 40000U);
+  lc_source_close(read_body);
+  read_body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->read_state(store, "default", "tail", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "rotated-tail");
   free(text);
   lc_source_close(read_body);
   lc_pouch_state_info_cleanup(&allocator, &info);
@@ -6872,7 +7008,7 @@ static void test_object_copy_streams_existing_payload_without_large_alloc(
                          &original, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(original.size, (long)payload_length);
-  segment_before_copy = test_active_segment_size(root, "default");
+  segment_before_copy = test_namespace_segments_size(root, "default");
 
   tracked.max_malloc_size = 0U;
   tracked.max_realloc_size = 0U;
@@ -6883,7 +7019,7 @@ static void test_object_copy_streams_existing_payload_without_large_alloc(
   assert_int_equal(rc, LC_OK);
   assert_string_equal(copied.id, original.id);
   assert_int_equal(copied.size, (long)payload_length);
-  segment_after_copy = test_active_segment_size(root, "default");
+  segment_after_copy = test_namespace_segments_size(root, "default");
   assert_true(segment_after_copy > segment_before_copy);
   assert_true(tracked.max_malloc_size < payload_length);
   assert_true(tracked.max_realloc_size < payload_length);
@@ -13449,6 +13585,7 @@ int main(void) {
       cmocka_unit_test(test_state_write_creates_segmented_namespace_logstore),
       cmocka_unit_test(test_replay_recovers_state_from_namespace_segment),
       cmocka_unit_test(test_replay_repairs_missing_namespace_manifest),
+      cmocka_unit_test(test_segment_rotation_replays_multiple_segments),
       cmocka_unit_test(
           test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
