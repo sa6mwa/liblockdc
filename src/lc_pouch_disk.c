@@ -437,6 +437,11 @@ static int lc_pouch_disk_append_segment_fd_shadow(
 static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
                                                   long version,
                                                   lc_error *error);
+static int lc_pouch_disk_append_manifest_record(lc_pouch_disk_store *store,
+                                                const char *manifest_log_path,
+                                                const char *event,
+                                                const char *file_name,
+                                                lc_error *error);
 static int lc_pouch_disk_append_query_index_record(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *etag, long version, const lc_pouch_meta *meta, int deleted,
@@ -1071,11 +1076,9 @@ static char *lc_pouch_disk_make_namespace_active_segment_path(
 static int lc_pouch_disk_ensure_namespace_segment_manifest(
     lc_pouch_disk_store *store, const char *manifest_log_path,
     const char *segment_path, lc_error *error) {
-  static const char manifest_line[] = "open seg-0000000000000001.log\n";
   struct stat st;
   int fd;
   int should_append;
-  int rc;
 
   should_append = 1;
   if (stat(manifest_log_path, &st) == 0 && st.st_size > 0) {
@@ -1093,12 +1096,41 @@ static int lc_pouch_disk_ensure_namespace_segment_manifest(
   if (!should_append) {
     return LC_OK;
   }
+  return lc_pouch_disk_append_manifest_record(
+      store, manifest_log_path, "open", "seg-0000000000000001.log", error);
+}
+
+static int lc_pouch_disk_append_manifest_record(lc_pouch_disk_store *store,
+                                                const char *manifest_log_path,
+                                                const char *event,
+                                                const char *file_name,
+                                                lc_error *error) {
+  size_t event_len;
+  size_t file_len;
+  size_t line_len;
+  char *line;
+  int fd;
+  int rc;
+
+  event_len = strlen(event);
+  file_len = strlen(file_name);
+  line_len = event_len + 1U + file_len + 1U;
+  line = (char *)lc_pouch_alloc(&store->allocator, line_len + 1U);
+  if (line == NULL) {
+    return lc_pouch_set_nomem(error, "failed to allocate pouch manifest line");
+  }
+  memcpy(line, event, event_len);
+  line[event_len] = ' ';
+  memcpy(line + event_len + 1U, file_name, file_len);
+  line[line_len - 1U] = '\n';
+  line[line_len] = '\0';
   fd = open(manifest_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
   if (fd < 0) {
+    lc_pouch_free(&store->allocator, line);
     return lc_pouch_set_errno(error, "failed to open pouch manifest");
   }
   rc = LC_OK;
-  if (!lc_pouch_write_all(fd, manifest_line, sizeof(manifest_line) - 1U)) {
+  if (!lc_pouch_write_all(fd, line, line_len)) {
     rc = lc_pouch_set_errno(error, "failed to append pouch manifest");
   } else if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG) != 0) {
     rc = lc_pouch_set_errno(error, "failed to fsync pouch manifest");
@@ -1106,6 +1138,7 @@ static int lc_pouch_disk_ensure_namespace_segment_manifest(
   if (close(fd) != 0 && rc == LC_OK) {
     rc = lc_pouch_set_errno(error, "failed to close pouch manifest");
   }
+  lc_pouch_free(&store->allocator, line);
   return rc;
 }
 
@@ -8044,6 +8077,111 @@ static int lc_pouch_disk_open_compact_body_fd(lc_pouch_disk_store *store,
   return fd;
 }
 
+static int lc_pouch_disk_append_manifest_event_for_segment_path(
+    lc_pouch_disk_store *store, const char *segment_path, const char *event,
+    lc_error *error) {
+  const char marker[] = "/segments/";
+  const char *marker_at;
+  const char *file_name;
+  size_t logstore_len;
+  char *logstore_path;
+  char *manifest_path;
+  char *manifest_log_path;
+  int rc;
+
+  marker_at = strstr(segment_path, marker);
+  if (marker_at == NULL) {
+    return lc_pouch_set_invalid(error, "pouch segment path is not manifestable");
+  }
+  file_name = marker_at + sizeof(marker) - 1U;
+  logstore_len = (size_t)(marker_at - segment_path);
+  logstore_path =
+      lc_pouch_dup_bytes(&store->allocator, segment_path, logstore_len);
+  manifest_path =
+      logstore_path != NULL
+          ? lc_pouch_join_path(&store->allocator, logstore_path, "manifest")
+          : NULL;
+  manifest_log_path =
+      manifest_path != NULL
+          ? lc_pouch_join_path(&store->allocator, manifest_path, "manifest.log")
+          : NULL;
+  if (logstore_path == NULL || manifest_path == NULL ||
+      manifest_log_path == NULL) {
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, manifest_path);
+    lc_pouch_free(&store->allocator, manifest_log_path);
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch manifest path");
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      manifest_path, "failed to create pouch manifest directory", error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_append_manifest_record(store, manifest_log_path, event,
+                                              file_name, error);
+  }
+  lc_pouch_free(&store->allocator, logstore_path);
+  lc_pouch_free(&store->allocator, manifest_path);
+  lc_pouch_free(&store->allocator, manifest_log_path);
+  return rc;
+}
+
+static int lc_pouch_disk_repair_manifest_for_segment_path(
+    lc_pouch_disk_store *store, const char *segment_path, lc_error *error) {
+  const char marker[] = "/segments/";
+  const char *marker_at;
+  size_t logstore_len;
+  char *logstore_path;
+  char *manifest_path;
+  char *manifest_log_path;
+  struct stat st;
+  int needs_repair;
+  int rc;
+
+  marker_at = strstr(segment_path, marker);
+  if (marker_at == NULL) {
+    return lc_pouch_set_invalid(error, "pouch segment path is not manifestable");
+  }
+  logstore_len = (size_t)(marker_at - segment_path);
+  logstore_path =
+      lc_pouch_dup_bytes(&store->allocator, segment_path, logstore_len);
+  manifest_path =
+      logstore_path != NULL
+          ? lc_pouch_join_path(&store->allocator, logstore_path, "manifest")
+          : NULL;
+  manifest_log_path =
+      manifest_path != NULL
+          ? lc_pouch_join_path(&store->allocator, manifest_path, "manifest.log")
+          : NULL;
+  if (logstore_path == NULL || manifest_path == NULL ||
+      manifest_log_path == NULL) {
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, manifest_path);
+    lc_pouch_free(&store->allocator, manifest_log_path);
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch manifest path");
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      manifest_path, "failed to create pouch manifest directory", error);
+  needs_repair = 0;
+  if (rc == LC_OK) {
+    if (stat(manifest_log_path, &st) == 0) {
+      needs_repair = st.st_size == 0;
+    } else if (errno == ENOENT) {
+      needs_repair = 1;
+    } else {
+      rc = lc_pouch_set_errno(error, "failed to stat pouch manifest");
+    }
+  }
+  if (rc == LC_OK && needs_repair) {
+    rc = lc_pouch_disk_append_manifest_event_for_segment_path(
+        store, segment_path, "open", error);
+  }
+  lc_pouch_free(&store->allocator, logstore_path);
+  lc_pouch_free(&store->allocator, manifest_path);
+  lc_pouch_free(&store->allocator, manifest_log_path);
+  return rc;
+}
+
 static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
                                         lc_error *error) {
   char *temp_path;
@@ -8308,10 +8446,20 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     lc_pouch_disk_segment_replay_paths_cleanup(store, &segment_active_paths);
     return lc_pouch_set_errno(error, "failed to fsync pouch root directory");
   }
+  for (index = 0U; rc == LC_OK && index < segment_active_paths.count;
+       ++index) {
+    rc = lc_pouch_disk_append_manifest_event_for_segment_path(
+        store, segment_active_paths.items[index], "compact", error);
+  }
+  for (index = 0U; rc == LC_OK && index < segment_backup_paths.count;
+       ++index) {
+    rc = lc_pouch_disk_append_manifest_event_for_segment_path(
+        store, segment_backup_paths.items[index], "obsolete", error);
+  }
   lc_pouch_disk_compact_segment_backups_cleanup(store, &segment_backup_paths,
                                                 0);
   lc_pouch_disk_segment_replay_paths_cleanup(store, &segment_active_paths);
-  return LC_OK;
+  return rc;
 }
 
 static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
@@ -9884,6 +10032,15 @@ static int lc_pouch_disk_collect_active_segment_paths(
     errno = 0;
     if (stat(segment_path, &st) == 0 && S_ISREG(st.st_mode) &&
         st.st_size > 0) {
+      rc = lc_pouch_disk_repair_manifest_for_segment_path(store, segment_path,
+                                                          error);
+      if (rc != LC_OK) {
+        lc_pouch_free(&store->allocator, namespace_path);
+        lc_pouch_free(&store->allocator, logstore_path);
+        lc_pouch_free(&store->allocator, segments_path);
+        lc_pouch_free(&store->allocator, segment_path);
+        break;
+      }
       if (!lc_pouch_disk_segment_replay_paths_add(store, paths, segment_path)) {
         lc_pouch_free(&store->allocator, namespace_path);
         lc_pouch_free(&store->allocator, logstore_path);

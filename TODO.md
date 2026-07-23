@@ -294,9 +294,13 @@ Latest release targets confirmed on 2026-07-23:
         temporary write target until the active segment write cutover lands.
     - [ ] Implement manifest append/replay for segment open, segment seal,
       snapshot install, obsolete segment, and obsolete snapshot records.
+      - [x] Append text manifest lifecycle records for current active-segment
+        open, compaction rewrite, and obsolete compaction-backup events.
     - [ ] Implement manifest repair for missing manifests, manifestless
       segments, crash-incomplete manifests, and legacy open-only manifests
       produced during the new segmented development path.
+      - [x] Repair missing or empty namespace manifests from active segment
+        directory scans during replay/open.
     - [ ] Move writes from the root-level `store.log` to active namespace
       segments, including active segment creation, sealing thresholds, fsync
       boundaries, and writer marker refresh.
