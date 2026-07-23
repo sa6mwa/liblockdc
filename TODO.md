@@ -302,6 +302,12 @@ Latest release targets confirmed on 2026-07-23:
         lifecycle records when choosing authoritative namespace segment tails.
       - [x] Replay manifest `snapshot` records as the authoritative namespace
         base before later non-obsolete segment tails.
+      - [x] Append manifest `snapshot` records for compacted namespace output
+        and manifest `obsolete` records for superseded segment and snapshot
+        files.
+      - [x] Preserve segmented snapshot sets during manifest replay; `snapshot`
+        records add snapshot files, while `obsolete` records retire superseded
+        snapshot or segment files.
     - [ ] Implement manifest repair for missing manifests, manifestless
       segments, crash-incomplete manifests, and legacy open-only manifests
       produced during the new segmented development path.
@@ -326,6 +332,9 @@ Latest release targets confirmed on 2026-07-23:
         signal until the write cutover removes it.
       - [x] Rotate active namespace segments by size threshold and route all
         segment-shadow append paths through the shared active-segment opener.
+      - [x] Resolve active namespace append paths from manifest state after
+        snapshot compaction, opening the next segment generation when no active
+        tail remains.
       - [x] Store live state, object, and queue payload refs from namespace
         segment append locations instead of root `store.log` offsets, while
         root writes remain a temporary refresh/compatibility signal.
@@ -354,6 +363,8 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Replay installed namespace snapshots before later active segment
         tails, and include snapshot files in logstore generation refresh
         detection.
+      - [x] Replay multi-file compacted snapshots deterministically so large
+        compacted live sets split across snapshot files remain authoritative.
     - [ ] Implement snapshot compaction and cleanup: capture live refs,
       validate drift before install, protect live state-link targets, mark old
       segments/snapshots obsolete, and retry obsolete-file cleanup.
@@ -363,6 +374,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Count active namespace segment bytes in compaction thresholds and
         result stats so `if_needed` and reported log sizes follow the
         segmented write path instead of root `store.log`.
+      - [x] Install compacted live records as namespace snapshot files, replay
+        from the installed snapshots, and preserve materialized state-link and
+        queue payload bodies across compaction/reopen.
     - [ ] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.

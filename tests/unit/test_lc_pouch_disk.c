@@ -823,6 +823,39 @@ static off_t test_namespace_segments_size(const char *root,
   return total;
 }
 
+static off_t test_namespace_snapshots_size(const char *root,
+                                           const char *escaped_namespace) {
+  char snapshots_path[2048];
+  char snapshot_path[2048];
+  DIR *dir;
+  struct dirent *entry;
+  struct stat st;
+  off_t total;
+
+  snprintf(snapshots_path, sizeof(snapshots_path),
+           "%s/%s/logstore/snapshots", root, escaped_namespace);
+  dir = opendir(snapshots_path);
+  if (dir == NULL && errno == ENOENT) {
+    return 0;
+  }
+  assert_non_null(dir);
+  total = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strncmp(entry->d_name, "snap-", 5U) != 0 ||
+        strstr(entry->d_name, ".compact.bak") != NULL) {
+      continue;
+    }
+    assert_true(test_join_path_buf(snapshot_path, sizeof(snapshot_path),
+                                   snapshots_path, entry->d_name));
+    assert_int_equal(stat(snapshot_path, &st), 0);
+    if (S_ISREG(st.st_mode)) {
+      total += st.st_size;
+    }
+  }
+  assert_int_equal(closedir(dir), 0);
+  return total;
+}
+
 static off_t test_active_segment_size(const char *root,
                                       const char *escaped_namespace) {
   return test_segment_size(root, escaped_namespace, 1UL);
@@ -8678,6 +8711,7 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   char root[256];
   char manifest_path[512];
   char manifest_text[1024];
+  char snapshot_path[512];
   char payload[4096];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -8748,10 +8782,11 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   test_manifest_path(root, "default", manifest_path, sizeof(manifest_path));
   test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
   assert_non_null(strstr(manifest_text, "open seg-0000000000000001.log\n"));
-  assert_non_null(strstr(manifest_text, "compact seg-0000000000000001.log\n"));
-  assert_non_null(
-      strstr(manifest_text,
-             "obsolete seg-0000000000000001.log.compact.bak\n"));
+  assert_non_null(strstr(manifest_text, "snapshot snap-0000000000000001.log\n"));
+  assert_non_null(strstr(manifest_text, "obsolete seg-0000000000000001.log\n"));
+  test_snapshot_path(root, "default", 1UL, snapshot_path,
+                     sizeof(snapshot_path));
+  assert_true(access(snapshot_path, R_OK) == 0);
   lc_pouch_compaction_res_cleanup(&allocator, &compacted);
 
   rc = store->read_state(store, "default", "hot-key", &body, &state_info,
@@ -9115,8 +9150,7 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
   lc_error error;
   char *text;
   size_t index;
-  off_t segment_before_compaction;
-  off_t segment_after_compaction;
+  off_t snapshot_after_compaction;
   int acked;
   int rc;
 
@@ -9185,13 +9219,11 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
   assert_int_equal(rc, LC_OK);
 
   assert_true(test_log_size(root) < (off_t)(120U * 256U));
-  segment_before_compaction = test_active_segment_size(root, "default");
   rc = store->compact(store, "force", &compacted, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(compacted.compacted);
-  segment_after_compaction = test_active_segment_size(root, "default");
-  assert_true(segment_after_compaction > (off_t)TEST_POUCH_HEADER_SIZE);
-  assert_true(segment_after_compaction <= segment_before_compaction);
+  snapshot_after_compaction = test_namespace_snapshots_size(root, "default");
+  assert_true(snapshot_after_compaction > (off_t)TEST_POUCH_HEADER_SIZE);
   lc_pouch_compaction_res_cleanup(&allocator, &compacted);
 
   memset(&dequeued, 0, sizeof(dequeued));
