@@ -1092,6 +1092,38 @@ static int lc_pouch_disk_segment_name_parse(const char *name,
   return 1;
 }
 
+static int lc_pouch_disk_snapshot_name_parse(const char *name,
+                                             unsigned long *number_out) {
+  static const char prefix[] = "snap-";
+  static const char suffix[] = ".log";
+  unsigned long number;
+  size_t index;
+  size_t suffix_at;
+
+  if (strncmp(name, prefix, sizeof(prefix) - 1U) != 0) {
+    return 0;
+  }
+  suffix_at = sizeof(prefix) - 1U + 16U;
+  if (strlen(name) != suffix_at + sizeof(suffix) - 1U ||
+      strcmp(name + suffix_at, suffix) != 0) {
+    return 0;
+  }
+  number = 0UL;
+  for (index = sizeof(prefix) - 1U; index < suffix_at; ++index) {
+    if (name[index] < '0' || name[index] > '9') {
+      return 0;
+    }
+    number = number * 10UL + (unsigned long)(name[index] - '0');
+  }
+  if (number == 0UL) {
+    return 0;
+  }
+  if (number_out != NULL) {
+    *number_out = number;
+  }
+  return 1;
+}
+
 static void lc_pouch_disk_segment_name(char *buffer, size_t buffer_size,
                                        unsigned long number) {
   (void)snprintf(buffer, buffer_size, "seg-%016lu.log", number);
@@ -10223,9 +10255,42 @@ static int lc_pouch_disk_segment_path_compare(const void *left,
                                               const void *right) {
   const char *const *left_path;
   const char *const *right_path;
+  const char *left_snapshot;
+  const char *right_snapshot;
+  const char *left_segment;
+  const char *right_segment;
+  size_t left_prefix_len;
+  size_t right_prefix_len;
+  int prefix_cmp;
 
   left_path = (const char *const *)left;
   right_path = (const char *const *)right;
+  left_snapshot = strstr(*left_path, "/logstore/snapshots/");
+  right_snapshot = strstr(*right_path, "/logstore/snapshots/");
+  left_segment = strstr(*left_path, "/logstore/segments/");
+  right_segment = strstr(*right_path, "/logstore/segments/");
+  if ((left_snapshot != NULL || left_segment != NULL) &&
+      (right_snapshot != NULL || right_segment != NULL)) {
+    const char *left_marker;
+    const char *right_marker;
+
+    left_marker = left_snapshot != NULL ? left_snapshot : left_segment;
+    right_marker = right_snapshot != NULL ? right_snapshot : right_segment;
+    left_prefix_len = (size_t)(left_marker - *left_path);
+    right_prefix_len = (size_t)(right_marker - *right_path);
+    prefix_cmp = strncmp(*left_path, *right_path,
+                         left_prefix_len < right_prefix_len ? left_prefix_len
+                                                            : right_prefix_len);
+    if (prefix_cmp != 0) {
+      return prefix_cmp;
+    }
+    if (left_prefix_len != right_prefix_len) {
+      return left_prefix_len < right_prefix_len ? -1 : 1;
+    }
+    if ((left_snapshot != NULL) != (right_snapshot != NULL)) {
+      return left_snapshot != NULL ? -1 : 1;
+    }
+  }
   return strcmp(*left_path, *right_path);
 }
 
@@ -10302,7 +10367,8 @@ static void lc_pouch_disk_segment_replay_paths_remove(
 
 static int lc_pouch_disk_read_namespace_manifest_segments(
     lc_pouch_disk_store *store, const char *manifest_log_path,
-    const char *segments_path, lc_pouch_disk_segment_replay_paths *paths,
+    const char *segments_path, const char *snapshots_path,
+    lc_pouch_disk_segment_replay_paths *paths,
     lc_pouch_disk_segment_replay_paths *mentioned_paths, lc_error *error) {
   char line[512];
   FILE *manifest;
@@ -10320,7 +10386,7 @@ static int lc_pouch_disk_read_namespace_manifest_segments(
     char *event;
     char *file_name;
     char *newline;
-    char *segment_path;
+    char *record_path;
     unsigned long ignored_number;
 
     event = line;
@@ -10333,27 +10399,41 @@ static int lc_pouch_disk_read_namespace_manifest_segments(
     if (newline != NULL) {
       *newline = '\0';
     }
-    if (!lc_pouch_disk_segment_name_parse(file_name, &ignored_number)) {
+    record_path = NULL;
+    if (lc_pouch_disk_segment_name_parse(file_name, &ignored_number)) {
+      record_path =
+          lc_pouch_join_path(&store->allocator, segments_path, file_name);
+    } else if (lc_pouch_disk_snapshot_name_parse(file_name,
+                                                 &ignored_number)) {
+      record_path =
+          lc_pouch_join_path(&store->allocator, snapshots_path, file_name);
+    } else {
       continue;
     }
-    segment_path =
-        lc_pouch_join_path(&store->allocator, segments_path, file_name);
-    if (segment_path == NULL) {
+    if (record_path == NULL) {
       rc = lc_pouch_set_nomem(error,
-                              "failed to allocate pouch segment path");
+                              "failed to allocate pouch manifest record path");
       break;
     }
-    rc = lc_pouch_disk_segment_replay_paths_add_copy(
-        store, mentioned_paths, segment_path, error);
-    if (rc == LC_OK &&
-        (strcmp(event, "open") == 0 || strcmp(event, "compact") == 0)) {
-      rc =
-          lc_pouch_disk_segment_replay_paths_add_copy(store, paths,
-                                                      segment_path, error);
-    } else if (rc == LC_OK && strcmp(event, "obsolete") == 0) {
-      lc_pouch_disk_segment_replay_paths_remove(store, paths, segment_path);
+    if (lc_pouch_disk_segment_name_parse(file_name, &ignored_number)) {
+      rc = lc_pouch_disk_segment_replay_paths_add_copy(
+          store, mentioned_paths, record_path, error);
     }
-    lc_pouch_free(&store->allocator, segment_path);
+    if (rc == LC_OK && strcmp(event, "snapshot") == 0 &&
+        lc_pouch_disk_snapshot_name_parse(file_name, &ignored_number)) {
+      lc_pouch_disk_segment_replay_paths_cleanup(store, paths);
+      rc = lc_pouch_disk_segment_replay_paths_add_copy(store, paths,
+                                                       record_path, error);
+    } else if (rc == LC_OK &&
+               lc_pouch_disk_segment_name_parse(file_name, &ignored_number) &&
+               (strcmp(event, "open") == 0 ||
+                strcmp(event, "compact") == 0)) {
+      rc = lc_pouch_disk_segment_replay_paths_add_copy(store, paths,
+                                                       record_path, error);
+    } else if (rc == LC_OK && strcmp(event, "obsolete") == 0) {
+      lc_pouch_disk_segment_replay_paths_remove(store, paths, record_path);
+    }
+    lc_pouch_free(&store->allocator, record_path);
     if (rc != LC_OK) {
       break;
     }
@@ -10386,6 +10466,7 @@ static int lc_pouch_disk_collect_active_segment_paths(
     char *namespace_path;
     char *logstore_path;
     char *segments_path;
+    char *snapshots_path;
     char *manifest_path;
     char *manifest_log_path;
     lc_pouch_disk_segment_replay_paths manifest_active_paths;
@@ -10399,6 +10480,7 @@ static int lc_pouch_disk_collect_active_segment_paths(
     namespace_path = NULL;
     logstore_path = NULL;
     segments_path = NULL;
+    snapshots_path = NULL;
     manifest_path = NULL;
     manifest_log_path = NULL;
     namespace_path =
@@ -10411,6 +10493,10 @@ static int lc_pouch_disk_collect_active_segment_paths(
         logstore_path != NULL
             ? lc_pouch_join_path(&store->allocator, logstore_path, "segments")
             : NULL;
+    snapshots_path =
+        logstore_path != NULL
+            ? lc_pouch_join_path(&store->allocator, logstore_path, "snapshots")
+            : NULL;
     manifest_path =
         logstore_path != NULL
             ? lc_pouch_join_path(&store->allocator, logstore_path, "manifest")
@@ -10421,19 +10507,46 @@ static int lc_pouch_disk_collect_active_segment_paths(
                                  "manifest.log")
             : NULL;
     if (namespace_path == NULL || logstore_path == NULL ||
-        segments_path == NULL || manifest_path == NULL ||
+        segments_path == NULL || snapshots_path == NULL ||
+        manifest_path == NULL ||
         manifest_log_path == NULL) {
       lc_pouch_free(&store->allocator, namespace_path);
       lc_pouch_free(&store->allocator, logstore_path);
       lc_pouch_free(&store->allocator, segments_path);
+      lc_pouch_free(&store->allocator, snapshots_path);
       lc_pouch_free(&store->allocator, manifest_path);
       lc_pouch_free(&store->allocator, manifest_log_path);
       rc = lc_pouch_set_nomem(error, "failed to allocate pouch segment path");
       break;
     }
     rc = lc_pouch_disk_read_namespace_manifest_segments(
-        store, manifest_log_path, segments_path, &manifest_active_paths,
-        &mentioned_paths, error);
+        store, manifest_log_path, segments_path, snapshots_path,
+        &manifest_active_paths, &mentioned_paths, error);
+    if (rc == LC_OK) {
+      size_t path_index;
+
+      for (path_index = 0U; path_index < manifest_active_paths.count;
+           ++path_index) {
+        struct stat st;
+
+        if (strstr(manifest_active_paths.items[path_index],
+                   "/logstore/snapshots/") == NULL) {
+          continue;
+        }
+        errno = 0;
+        if (stat(manifest_active_paths.items[path_index], &st) == 0 &&
+            S_ISREG(st.st_mode) && st.st_size > 0) {
+          rc = lc_pouch_disk_segment_replay_paths_add_copy(
+              store, paths, manifest_active_paths.items[path_index], error);
+          if (rc != LC_OK) {
+            break;
+          }
+        } else if (errno != ENOENT && errno != ENOTDIR && errno != 0) {
+          rc = lc_pouch_set_errno(error, "failed to stat pouch snapshot");
+          break;
+        }
+      }
+    }
     if (rc != LC_OK) {
       lc_pouch_disk_segment_replay_paths_cleanup(store,
                                                  &manifest_active_paths);
@@ -10441,6 +10554,7 @@ static int lc_pouch_disk_collect_active_segment_paths(
       lc_pouch_free(&store->allocator, namespace_path);
       lc_pouch_free(&store->allocator, logstore_path);
       lc_pouch_free(&store->allocator, segments_path);
+      lc_pouch_free(&store->allocator, snapshots_path);
       lc_pouch_free(&store->allocator, manifest_path);
       lc_pouch_free(&store->allocator, manifest_log_path);
       break;
@@ -10508,6 +10622,7 @@ static int lc_pouch_disk_collect_active_segment_paths(
     lc_pouch_free(&store->allocator, namespace_path);
     lc_pouch_free(&store->allocator, logstore_path);
     lc_pouch_free(&store->allocator, segments_path);
+    lc_pouch_free(&store->allocator, snapshots_path);
     lc_pouch_free(&store->allocator, manifest_path);
     lc_pouch_free(&store->allocator, manifest_log_path);
     if (rc != LC_OK) {
@@ -10532,9 +10647,9 @@ static int lc_pouch_disk_active_segment_generation(lc_pouch_disk_store *store,
                                                    int *found,
                                                    unsigned long *generation,
                                                    lc_error *error) {
-  DIR *root_dir;
-  struct dirent *entry;
+  lc_pouch_disk_segment_replay_paths paths;
   unsigned long total;
+  size_t index;
   int rc;
 
   if (found != NULL) {
@@ -10543,78 +10658,26 @@ static int lc_pouch_disk_active_segment_generation(lc_pouch_disk_store *store,
   if (generation != NULL) {
     *generation = 0UL;
   }
-  root_dir = opendir(store->root_path);
-  if (root_dir == NULL) {
-    return lc_pouch_set_errno(error, "failed to open pouch root directory");
-  }
+  memset(&paths, 0, sizeof(paths));
   total = 0UL;
-  rc = LC_OK;
-  while ((entry = readdir(root_dir)) != NULL) {
-    DIR *segments_dir;
-    struct dirent *segment_entry;
-    char segments_path[4096];
-    int wrote;
+  rc = lc_pouch_disk_collect_active_segment_paths(store, &paths, error);
+  for (index = 0U; rc == LC_OK && index < paths.count; ++index) {
+    struct stat st;
 
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+    if (stat(paths.items[index], &st) != 0) {
+      rc = lc_pouch_set_errno(error, "failed to stat pouch logstore record");
+      break;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size <= 0) {
       continue;
     }
-    wrote = snprintf(segments_path, sizeof(segments_path),
-                     "%s/%s/logstore/segments", store->root_path,
-                     entry->d_name);
-    if (wrote < 0 || (size_t)wrote >= sizeof(segments_path)) {
-      rc = lc_pouch_set_invalid(error, "pouch segment path is too long");
+    if ((unsigned long)st.st_size > (unsigned long)-1 - total) {
+      rc = lc_pouch_set_invalid(error, "pouch logstore generation overflow");
       break;
     }
-    segments_dir = opendir(segments_path);
-    if (segments_dir == NULL) {
-      if (errno == ENOENT || errno == ENOTDIR) {
-        continue;
-      }
-      rc = lc_pouch_set_errno(error, "failed to open pouch segments directory");
-      break;
-    }
-    while ((segment_entry = readdir(segments_dir)) != NULL) {
-      char segment_path[4096];
-      struct stat st;
-      unsigned long ignored_number;
-
-      if (!lc_pouch_disk_segment_name_parse(segment_entry->d_name,
-                                            &ignored_number)) {
-        continue;
-      }
-      wrote = snprintf(segment_path, sizeof(segment_path), "%s/%s",
-                       segments_path, segment_entry->d_name);
-      if (wrote < 0 || (size_t)wrote >= sizeof(segment_path)) {
-        rc = lc_pouch_set_invalid(error, "pouch segment path is too long");
-        break;
-      }
-      if (stat(segment_path, &st) != 0) {
-        if (errno == ENOENT || errno == ENOTDIR) {
-          continue;
-        }
-        rc = lc_pouch_set_errno(error, "failed to stat pouch segment");
-        break;
-      }
-      if (!S_ISREG(st.st_mode) || st.st_size <= 0) {
-        continue;
-      }
-      if ((unsigned long)st.st_size > (unsigned long)-1 - total) {
-        rc = lc_pouch_set_invalid(error, "pouch segment generation overflow");
-        break;
-      }
-      total += (unsigned long)st.st_size;
-    }
-    if (closedir(segments_dir) != 0 && rc == LC_OK) {
-      rc = lc_pouch_set_errno(error,
-                              "failed to close pouch segments directory");
-    }
-    if (rc != LC_OK) {
-      break;
-    }
+    total += (unsigned long)st.st_size;
   }
-  if (closedir(root_dir) != 0 && rc == LC_OK) {
-    rc = lc_pouch_set_errno(error, "failed to close pouch root directory");
-  }
+  lc_pouch_disk_segment_replay_paths_cleanup(store, &paths);
   if (rc == LC_OK) {
     if (total > 0UL && found != NULL) {
       *found = 1;

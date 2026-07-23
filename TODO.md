@@ -300,6 +300,8 @@ Latest release targets confirmed on 2026-07-23:
         active namespace segment crosses the current seal threshold.
       - [x] Replay manifest `open`, `compact`, `seal`, and `obsolete` segment
         lifecycle records when choosing authoritative namespace segment tails.
+      - [x] Replay manifest `snapshot` records as the authoritative namespace
+        base before later non-obsolete segment tails.
     - [ ] Implement manifest repair for missing manifests, manifestless
       segments, crash-incomplete manifests, and legacy open-only manifests
       produced during the new segmented development path.
@@ -349,6 +351,9 @@ Latest release targets confirmed on 2026-07-23:
         authoritative.
       - [x] Truncate invalid/trailing bytes from namespace segment files during
         authoritative segment replay, matching root-log corrupt-tail semantics.
+      - [x] Replay installed namespace snapshots before later active segment
+        tails, and include snapshot files in logstore generation refresh
+        detection.
     - [ ] Implement snapshot compaction and cleanup: capture live refs,
       validate drift before install, protect live state-link targets, mark old
       segments/snapshots obsolete, and retry obsolete-file cleanup.

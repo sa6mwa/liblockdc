@@ -764,6 +764,14 @@ static void test_segment_path(const char *root, const char *escaped_namespace,
            segment_number);
 }
 
+static void test_snapshot_path(const char *root, const char *escaped_namespace,
+                               unsigned long snapshot_number, char *path,
+                               size_t path_size) {
+  snprintf(path, path_size,
+           "%s/%s/logstore/snapshots/snap-%016lu.log", root,
+           escaped_namespace, snapshot_number);
+}
+
 static void test_active_segment_path(const char *root,
                                      const char *escaped_namespace, char *path,
                                      size_t path_size) {
@@ -2230,6 +2238,108 @@ static void test_segment_replay_honors_manifest_obsolete(void **state) {
   lc_source_close(read_body);
   lc_pouch_state_info_cleanup(&allocator, &info);
 
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_replay_installed_snapshot_without_segment_tail(void **state) {
+  char root[256];
+  char segment_path[512];
+  char snapshot_path[512];
+  char manifest_path[512];
+  const char snapshot_line[] = "snapshot snap-0000000000000001.log\n";
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_put_state_res tail_res;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int fd;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "snapshot-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&tail_res, 0, sizeof(tail_res));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  opts.content_type = "text/plain";
+  source = source_from_text("snapshot-body");
+  rc = store->write_state(store, "default", "snap-key", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  test_segment_path(root, "default", 1UL, segment_path, sizeof(segment_path));
+  test_snapshot_path(root, "default", 1UL, snapshot_path,
+                     sizeof(snapshot_path));
+  assert_int_equal(rename(segment_path, snapshot_path), 0);
+  test_manifest_path(root, "default", manifest_path, sizeof(manifest_path));
+  fd = open(manifest_path, O_WRONLY | O_TRUNC);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, snapshot_line, sizeof(snapshot_line) - 1U),
+                   (ssize_t)(sizeof(snapshot_line) - 1U));
+  assert_int_equal(close(fd), 0);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "snap-key", &body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, put_res.new_state_etag);
+  assert_int_equal(info.version, put_res.new_version);
+  text = read_source_text(body);
+  assert_string_equal(text, "snapshot-body");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  source = source_from_text("tail-body");
+  opts.if_state_etag = put_res.new_state_etag;
+  rc = store->write_state(store, "default", "snap-key", source, &opts,
+                          &tail_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_true(tail_res.new_version > put_res.new_version);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "snap-key", &body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, tail_res.new_state_etag);
+  assert_int_equal(info.version, tail_res.new_version);
+  text = read_source_text(body);
+  assert_string_equal(text, "tail-body");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &tail_res);
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
@@ -6099,7 +6209,7 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
                                  "e3b0c44298fc1c149afbf4c8996fb92427ae41e"
                                  "4649b934ca495991b7852b855") +
                              1U;
-  tracked.fail_malloc_after_calls = tracked.malloc_calls + 61U;
+  tracked.fail_malloc_after_calls = tracked.malloc_calls + 107U;
   rc = store->retention_sweep(store, &req, &sweep, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(sweep.scanned_metadata, 1UL);
@@ -14169,6 +14279,7 @@ int main(void) {
       cmocka_unit_test(test_segment_rotation_replays_multiple_segments),
       cmocka_unit_test(test_segment_replay_truncates_rotated_tail),
       cmocka_unit_test(test_segment_replay_honors_manifest_obsolete),
+      cmocka_unit_test(test_replay_installed_snapshot_without_segment_tail),
       cmocka_unit_test(
           test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
