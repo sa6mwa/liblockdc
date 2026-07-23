@@ -206,7 +206,7 @@ Latest release targets confirmed on 2026-07-22:
 
 ## Current release-readiness focus
 
-- [ ] Keep API examples aligned with the receiver-function public surface.
+- [x] Keep API examples aligned with the receiver-function public surface.
 - [ ] Keep the Lua rock dependency boundary aligned with the pinned
   `lonejson` release.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
