@@ -377,6 +377,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Install compacted live records as namespace snapshot files, replay
         from the installed snapshots, and preserve materialized state-link and
         queue payload bodies across compaction/reopen.
+      - [x] Retry cleanup for manifest-obsolete segment and snapshot files
+        during logstore collection/replay, while preserving active snapshot
+        sets and tolerating already-missing obsolete files.
     - [ ] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.
@@ -384,6 +387,8 @@ Latest release targets confirmed on 2026-07-23:
       corrupt tails, manifest repair, snapshot install, obsolete cleanup,
       state-link protection, and query/index rebuild from authoritative
       namespace history.
+      - [x] Cover manifest-obsolete snapshot cleanup on reopen without losing
+        the active installed snapshot body.
     - [ ] Add performance benchmarks that compare segmented pouch against the
       Go lockd disk backend on large data and indexed low-match LQL workloads
       after segmented correctness tests are stable.

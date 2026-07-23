@@ -10644,7 +10644,8 @@ static int lc_pouch_disk_read_namespace_manifest_segments(
     lc_pouch_disk_store *store, const char *manifest_log_path,
     const char *segments_path, const char *snapshots_path,
     lc_pouch_disk_segment_replay_paths *paths,
-    lc_pouch_disk_segment_replay_paths *mentioned_paths, lc_error *error) {
+    lc_pouch_disk_segment_replay_paths *mentioned_paths,
+    lc_pouch_disk_segment_replay_paths *obsolete_paths, lc_error *error) {
   char line[512];
   FILE *manifest;
   int rc;
@@ -10694,6 +10695,10 @@ static int lc_pouch_disk_read_namespace_manifest_segments(
       rc = lc_pouch_disk_segment_replay_paths_add_copy(
           store, mentioned_paths, record_path, error);
     }
+    if (rc == LC_OK && strcmp(event, "obsolete") == 0) {
+      rc = lc_pouch_disk_segment_replay_paths_add_copy(
+          store, obsolete_paths, record_path, error);
+    }
     if (rc == LC_OK && strcmp(event, "snapshot") == 0 &&
         lc_pouch_disk_snapshot_name_parse(file_name, &ignored_number)) {
       rc = lc_pouch_disk_segment_replay_paths_add_copy(store, paths,
@@ -10721,6 +10726,27 @@ static int lc_pouch_disk_read_namespace_manifest_segments(
   return rc;
 }
 
+static int lc_pouch_disk_cleanup_obsolete_manifest_paths(
+    lc_pouch_disk_store *store,
+    const lc_pouch_disk_segment_replay_paths *active_paths,
+    const lc_pouch_disk_segment_replay_paths *obsolete_paths, lc_error *error) {
+  size_t index;
+
+  (void)store;
+  for (index = 0U; index < obsolete_paths->count; ++index) {
+    if (lc_pouch_disk_segment_replay_paths_contains(
+            active_paths, obsolete_paths->items[index])) {
+      continue;
+    }
+    if (unlink(obsolete_paths->items[index]) != 0 && errno != ENOENT &&
+        errno != ENOTDIR) {
+      return lc_pouch_set_errno(error,
+                                "failed to cleanup obsolete pouch logstore");
+    }
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_disk_collect_active_segment_paths(
     lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
     lc_error *error) {
@@ -10745,9 +10771,11 @@ static int lc_pouch_disk_collect_active_segment_paths(
     char *manifest_log_path;
     lc_pouch_disk_segment_replay_paths manifest_active_paths;
     lc_pouch_disk_segment_replay_paths mentioned_paths;
+    lc_pouch_disk_segment_replay_paths obsolete_paths;
 
     memset(&manifest_active_paths, 0, sizeof(manifest_active_paths));
     memset(&mentioned_paths, 0, sizeof(mentioned_paths));
+    memset(&obsolete_paths, 0, sizeof(obsolete_paths));
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
@@ -10795,7 +10823,7 @@ static int lc_pouch_disk_collect_active_segment_paths(
     }
     rc = lc_pouch_disk_read_namespace_manifest_segments(
         store, manifest_log_path, segments_path, snapshots_path,
-        &manifest_active_paths, &mentioned_paths, error);
+        &manifest_active_paths, &mentioned_paths, &obsolete_paths, error);
     if (rc == LC_OK) {
       size_t path_index;
 
@@ -10825,6 +10853,7 @@ static int lc_pouch_disk_collect_active_segment_paths(
       lc_pouch_disk_segment_replay_paths_cleanup(store,
                                                  &manifest_active_paths);
       lc_pouch_disk_segment_replay_paths_cleanup(store, &mentioned_paths);
+      lc_pouch_disk_segment_replay_paths_cleanup(store, &obsolete_paths);
       lc_pouch_free(&store->allocator, namespace_path);
       lc_pouch_free(&store->allocator, logstore_path);
       lc_pouch_free(&store->allocator, segments_path);
@@ -10891,8 +10920,13 @@ static int lc_pouch_disk_collect_active_segment_paths(
     } else if (errno != ENOENT && errno != ENOTDIR) {
       rc = lc_pouch_set_errno(error, "failed to open pouch segments directory");
     }
+    if (rc == LC_OK) {
+      rc = lc_pouch_disk_cleanup_obsolete_manifest_paths(
+          store, &manifest_active_paths, &obsolete_paths, error);
+    }
     lc_pouch_disk_segment_replay_paths_cleanup(store, &manifest_active_paths);
     lc_pouch_disk_segment_replay_paths_cleanup(store, &mentioned_paths);
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &obsolete_paths);
     lc_pouch_free(&store->allocator, namespace_path);
     lc_pouch_free(&store->allocator, logstore_path);
     lc_pouch_free(&store->allocator, segments_path);
