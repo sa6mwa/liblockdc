@@ -2,9 +2,12 @@
 #include "lc_mutate_stream.h"
 #include "lc_pouch_store.h"
 
+#include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -338,26 +341,35 @@ static void bench_pouch_root_path(char *buffer, size_t buffer_size,
            (long)getpid(), suffix);
 }
 
-static void bench_pouch_cleanup_root(const char *root) {
-  char path[512];
+static void bench_remove_tree(const char *path) {
+  DIR *dir;
+  struct dirent *entry;
 
-  snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/store.log", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/query.index", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/writer.lock", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/locks/bench/hot-key", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/locks/bench", root);
-  rmdir(path);
-  snprintf(path, sizeof(path), "%s/locks", root);
-  rmdir(path);
-  rmdir(root);
+  dir = opendir(path);
+  if (dir == NULL) {
+    (void)unlink(path);
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    char child[1024];
+    struct stat st;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+      bench_remove_tree(child);
+    } else {
+      (void)unlink(child);
+    }
+  }
+  (void)closedir(dir);
+  (void)rmdir(path);
+}
+
+static void bench_pouch_cleanup_root(const char *root) {
+  bench_remove_tree(root);
 }
 
 static lc_source *bench_source_from_text(const char *text, lc_error *error) {
@@ -680,6 +692,77 @@ static int bench_pouch_seed_public_query_rows_by_owner(const char *root,
     snprintf(key, sizeof(key), "bench/query/%08ld", i);
     snprintf(owner, sizeof(owner), "bench-owner-%02ld", i % 10L);
     snprintf(json, sizeof(json), "{\"value\":%ld}", i);
+    lease = NULL;
+    source = NULL;
+    acquire.key = key;
+    acquire.owner = owner;
+    rc = client->acquire(client, &acquire, &lease, error);
+    if (rc == LC_OK) {
+      source = bench_source_from_text(json, error);
+      if (source == NULL) {
+        rc = LC_ERR_NOMEM;
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lease->update(lease, source, &update_opts, error);
+    }
+    if (source != NULL) {
+      lc_source_close(source);
+    }
+    if (lease != NULL) {
+      lease->close(lease);
+    }
+    if (rc != LC_OK) {
+      client->close(client);
+      return 1;
+    }
+  }
+  client->close(client);
+  return 0;
+}
+
+static int bench_pouch_seed_public_query_rows_by_field(const char *root,
+                                                       long rows,
+                                                       lc_error *error) {
+  char endpoint[320];
+  char key[96];
+  char owner[32];
+  char json[128];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_lease *lease;
+  lc_source *source;
+  long target;
+  long i;
+  int rc;
+
+  target = rows > 1L ? rows / 2L : 0L;
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s?query_engine=scan", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  rc = lc_client_open(&config, &client, error);
+  if (rc != LC_OK) {
+    return 1;
+  }
+  lc_acquire_req_init(&acquire);
+  lc_update_opts_init(&update_opts);
+  acquire.ttl_seconds = 3600L;
+  update_opts.content_type = "application/json";
+  lease = NULL;
+  source = NULL;
+  for (i = 0; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/query/%08ld", i);
+    snprintf(owner, sizeof(owner), "bench-owner-%02ld", i % 10L);
+    snprintf(json, sizeof(json),
+             "{\"bucket\":\"%s\",\"value\":%ld}",
+             i == target ? "needle" : "haystack", i);
     lease = NULL;
     source = NULL;
     acquire.key = key;
@@ -2791,6 +2874,115 @@ static int bench_pouch_index_query_keys_key_owner(long iterations) {
   return bench_pouch_query_key_owner_selector(iterations, 0, 1);
 }
 
+static int bench_pouch_query_field_low_match(long iterations, int scan_mode,
+                                             int keys_only) {
+  char root[256];
+  char endpoint[320];
+  const char selector[] =
+      "{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle\"}}";
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_sink *sink;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  bench_query_key_count count;
+  lc_error error;
+  int rc;
+
+  bench_pouch_root_path(root, sizeof(root),
+                        scan_mode ? (keys_only
+                                         ? "scan-query-keys-field-low-match"
+                                         : "scan-query-field-low-match")
+                                  : (keys_only
+                                         ? "index-query-keys-field-low-match"
+                                         : "index-query-field-low-match"));
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_public_query_rows_by_field(root, iterations, &error) !=
+      0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  snprintf(endpoint, sizeof(endpoint), scan_mode
+                                       ? "pouch://%s?query_engine=scan"
+                                       : "pouch://%s",
+           root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.selector_json = selector;
+  req.limit = iterations;
+  if (keys_only) {
+    memset(&handler, 0, sizeof(handler));
+    memset(&count, 0, sizeof(count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &count, &res, &error);
+    if (rc == LC_OK && count.rows != 1L) {
+      fprintf(stderr,
+              "pouch field low-match selector streamed %ld keys, expected 1\n",
+              count.rows);
+      rc = LC_ERR_PROTOCOL;
+    }
+  } else {
+    sink = NULL;
+    rc = lc_sink_to_file("/dev/null", &sink, &error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, &error);
+      lc_sink_close(sink);
+    }
+  }
+  if (rc == LC_OK && scan_mode && res.index_seq != 0UL) {
+    fprintf(stderr,
+            "pouch scan field low-match selector reported an index sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK && !scan_mode && res.index_seq == 0UL) {
+    fprintf(stderr,
+            "pouch index field low-match selector did not report an index "
+            "sequence\n");
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_scan_query_field_low_match(long iterations) {
+  return bench_pouch_query_field_low_match(iterations, 1, 0);
+}
+
+static int bench_pouch_index_query_field_low_match(long iterations) {
+  return bench_pouch_query_field_low_match(iterations, 0, 0);
+}
+
+static int bench_pouch_scan_query_keys_field_low_match(long iterations) {
+  return bench_pouch_query_field_low_match(iterations, 1, 1);
+}
+
+static int bench_pouch_index_query_keys_field_low_match(long iterations) {
+  return bench_pouch_query_field_low_match(iterations, 0, 1);
+}
+
 static int bench_pouch_index_query(long iterations) {
   char root[256];
   char endpoint[320];
@@ -3182,6 +3374,10 @@ static void print_usage(const char *argv0) {
   fprintf(stderr, "pouch-index-query-keys-owner-removed|");
   fprintf(stderr, "pouch-scan-query-keys-key-owner|");
   fprintf(stderr, "pouch-index-query-keys-key-owner|");
+  fprintf(stderr, "pouch-scan-query-field-low-match|");
+  fprintf(stderr, "pouch-index-query-field-low-match|");
+  fprintf(stderr, "pouch-scan-query-keys-field-low-match|");
+  fprintf(stderr, "pouch-index-query-keys-field-low-match|");
   fprintf(stderr, "pouch-key-lock-contention]\n");
 }
 
@@ -3252,6 +3448,14 @@ int main(int argc, char **argv) {
        bench_pouch_scan_query_keys_key_owner},
       {"pouch-index-query-keys-key-owner", 1000L,
        bench_pouch_index_query_keys_key_owner},
+      {"pouch-scan-query-field-low-match", 1000L,
+       bench_pouch_scan_query_field_low_match},
+      {"pouch-index-query-field-low-match", 1000L,
+       bench_pouch_index_query_field_low_match},
+      {"pouch-scan-query-keys-field-low-match", 1000L,
+       bench_pouch_scan_query_keys_field_low_match},
+      {"pouch-index-query-keys-field-low-match", 1000L,
+       bench_pouch_index_query_keys_field_low_match},
       {"pouch-key-lock-contention", 1000L,
        bench_pouch_key_lock_contention}};
   const char *scenario;

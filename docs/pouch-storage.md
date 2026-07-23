@@ -1723,8 +1723,9 @@ summary/key scans, exact-key public document and key queries in both scan and
 indexed modes, exact-owner and key+owner indexed summary/key scans, exact-owner
 and key+owner public document and key queries in both scan and indexed modes,
 owner document and key queries with removed-state candidates filtered out in
-both scan and indexed modes, and retention sweep throughput over
-metadata/state rows. The
+both scan and indexed modes, low-match strict JSON Pointer LQL field selectors
+over public document and key query paths in both scan and indexed modes, and
+retention sweep throughput over metadata/state rows. The
 native harness also includes a hot-key contention case that repeatedly contends
 two store handles on one key and verifies that lock-contention diagnostics
 advance under that workload.

@@ -399,6 +399,9 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Add performance benchmarks that compare segmented pouch against the
       Go lockd disk backend on large data and indexed low-match LQL workloads
       after segmented correctness tests are stable.
+      - [x] Add local segmented pouch scan-vs-index benchmark cases for
+        low-match strict JSON Pointer LQL field selectors over document and
+        key-only query paths.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
 - [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
   introduced.
