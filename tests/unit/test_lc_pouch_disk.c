@@ -691,6 +691,18 @@ static off_t test_log_size(const char *root) {
   return st.st_size;
 }
 
+static off_t test_active_segment_size(const char *root,
+                                      const char *escaped_namespace) {
+  char segment_path[512];
+  struct stat st;
+
+  snprintf(segment_path, sizeof(segment_path),
+           "%s/%s/logstore/segments/seg-0000000000000001.log", root,
+           escaped_namespace);
+  assert_int_equal(stat(segment_path, &st), 0);
+  return st.st_size;
+}
+
 static off_t test_query_index_size(const char *root) {
   char index_path[512];
   struct stat st;
@@ -6605,6 +6617,8 @@ static void test_object_copy_streams_existing_payload_without_large_alloc(
   lc_error error;
   size_t payload_length;
   size_t copied_length;
+  off_t segment_before_copy;
+  off_t segment_after_copy;
   int rc;
 
   (void)state;
@@ -6633,6 +6647,7 @@ static void test_object_copy_streams_existing_payload_without_large_alloc(
                          &original, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(original.size, (long)payload_length);
+  segment_before_copy = test_active_segment_size(root, "default");
 
   tracked.max_malloc_size = 0U;
   tracked.max_realloc_size = 0U;
@@ -6643,6 +6658,8 @@ static void test_object_copy_streams_existing_payload_without_large_alloc(
   assert_int_equal(rc, LC_OK);
   assert_string_equal(copied.id, original.id);
   assert_int_equal(copied.size, (long)payload_length);
+  segment_after_copy = test_active_segment_size(root, "default");
+  assert_true(segment_after_copy > segment_before_copy);
   assert_true(tracked.max_malloc_size < payload_length);
   assert_true(tracked.max_realloc_size < payload_length);
 
@@ -8038,9 +8055,12 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
   lc_pouch_queue_message_info enqueued;
   lc_pouch_queue_message_info dequeued;
   lc_pouch_queue_ref ref;
+  lc_pouch_compaction_res compacted;
   lc_error error;
   char *text;
   size_t index;
+  off_t segment_before_compaction;
+  off_t segment_after_compaction;
   int acked;
   int rc;
 
@@ -8051,6 +8071,7 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
   memset(&error, 0, sizeof(error));
   memset(&enqueue_opts, 0, sizeof(enqueue_opts));
   memset(&dequeue_opts, 0, sizeof(dequeue_opts));
+  memset(&compacted, 0, sizeof(compacted));
   store = NULL;
   body = NULL;
 
@@ -8100,7 +8121,35 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
     lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
   }
 
+  memset(&enqueued, 0, sizeof(enqueued));
+  source = source_from_text("queue-payload");
+  rc = store->enqueue_message(store, "default", "jobs", source,
+                              &enqueue_opts, &enqueued, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
   assert_true(test_log_size(root) < (off_t)(120U * 256U));
+  segment_before_compaction = test_active_segment_size(root, "default");
+  rc = store->compact(store, "force", &compacted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(compacted.compacted);
+  segment_after_compaction = test_active_segment_size(root, "default");
+  assert_true(segment_after_compaction > segment_before_compaction);
+  lc_pouch_compaction_res_cleanup(&allocator, &compacted);
+
+  memset(&dequeued, 0, sizeof(dequeued));
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &body,
+                              &dequeued, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_string_equal(dequeued.message_id, enqueued.message_id);
+  text = read_source_text(body);
+  assert_string_equal(text, "queue-payload");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
+  lc_pouch_queue_message_info_cleanup(&allocator, &enqueued);
 
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);

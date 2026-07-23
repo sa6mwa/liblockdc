@@ -8146,8 +8146,16 @@ static int lc_pouch_disk_append_object_copy_record(
   unsigned long payload_len;
   unsigned long crc;
   off_t start;
+  char *segment_path;
+  int segment_fd;
   int rc;
 
+  segment_path = NULL;
+  segment_fd = -1;
+  rc = lc_pouch_disk_ensure_namespace_logstore(store, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   ns_len = (unsigned long)strlen(namespace_name);
   key_len = (unsigned long)strlen(key);
   name_len = (unsigned long)strlen(name);
@@ -8207,6 +8215,47 @@ static int lc_pouch_disk_append_object_copy_record(
   lc_pouch_put_u64(header + 44, payload_len);
   lc_pouch_put_u32(header + 52, crc ^ 0xffffffffUL);
   lc_pouch_put_u32(header + 56, LC_POUCH_RECORD_VERSION);
+
+  segment_path =
+      lc_pouch_disk_make_namespace_active_segment_path(store, namespace_name);
+  if (segment_path == NULL) {
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch segment path");
+  }
+  segment_fd = open(segment_path, O_RDWR | O_APPEND);
+  if (segment_fd < 0) {
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to open pouch segment");
+  }
+  if (!lc_pouch_write_all(segment_fd, header, sizeof(header)) ||
+      !lc_pouch_write_all(segment_fd, namespace_name, (size_t)ns_len) ||
+      !lc_pouch_write_all(segment_fd, key, (size_t)key_len) ||
+      !lc_pouch_write_all(segment_fd, name, (size_t)name_len) ||
+      !lc_pouch_write_all(segment_fd, id, (size_t)id_len) ||
+      !lc_pouch_write_all(segment_fd, object_meta, sizeof(object_meta)) ||
+      !lc_pouch_write_all(segment_fd, payload_content_type,
+                          (size_t)payload_ct_len)) {
+    close(segment_fd);
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to append pouch segment record");
+  }
+  rc = lc_pouch_disk_write_fd_span(segment_fd, read_fd, src_body_offset,
+                                   src_body_length, error);
+  if (rc != LC_OK) {
+    close(segment_fd);
+    lc_pouch_free(&store->allocator, segment_path);
+    return rc;
+  }
+  if (lc_pouch_disk_fsync(store, segment_fd, LC_POUCH_FSYNC_LOG) != 0) {
+    close(segment_fd);
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to fsync pouch segment");
+  }
+  if (close(segment_fd) != 0) {
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to close pouch segment");
+  }
+  lc_pouch_free(&store->allocator, segment_path);
 
   if (!lc_pouch_write_all(store->log_fd, header, sizeof(header)) ||
       !lc_pouch_write_all(store->log_fd, namespace_name, (size_t)ns_len) ||
@@ -11337,8 +11386,17 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
   unsigned long crc;
   unsigned long body_offset;
   off_t start;
+  char *segment_path;
+  int segment_fd;
   int rc;
 
+  segment_path = NULL;
+  segment_fd = -1;
+  rc = lc_pouch_disk_ensure_namespace_logstore(store, entry->namespace_name,
+                                               error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   content_type = entry->payload_content_type != NULL
                      ? entry->payload_content_type
                      : "application/octet-stream";
@@ -11431,6 +11489,55 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
   lc_pouch_put_u64(header + 44, payload_len);
   lc_pouch_put_u32(header + 52, crc ^ 0xffffffffUL);
   lc_pouch_put_u32(header + 56, LC_POUCH_RECORD_VERSION);
+
+  segment_path = lc_pouch_disk_make_namespace_active_segment_path(
+      store, entry->namespace_name);
+  if (segment_path == NULL) {
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch segment path");
+  }
+  segment_fd = open(segment_path, O_RDWR | O_APPEND);
+  if (segment_fd < 0) {
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to open pouch segment");
+  }
+  if (!lc_pouch_write_all(segment_fd, header, sizeof(header)) ||
+      !lc_pouch_write_all(segment_fd, entry->namespace_name,
+                          (size_t)ns_len) ||
+      !lc_pouch_write_all(segment_fd, entry->queue, (size_t)queue_len) ||
+      !lc_pouch_write_all(segment_fd, entry->message_id,
+                          (size_t)message_id_len) ||
+      (meta_etag_len > 0UL &&
+       !lc_pouch_write_all(segment_fd, entry->meta_etag,
+                           (size_t)meta_etag_len)) ||
+      !lc_pouch_write_all(segment_fd, queue_meta, sizeof(queue_meta)) ||
+      !lc_pouch_write_all(segment_fd, content_type,
+                          (size_t)content_type_len) ||
+      (lease_id_len > 0UL &&
+       !lc_pouch_write_all(segment_fd, lease_id, (size_t)lease_id_len)) ||
+      (txn_id_len > 0UL &&
+       !lc_pouch_write_all(segment_fd, txn_id, (size_t)txn_id_len))) {
+    close(segment_fd);
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to append pouch segment record");
+  }
+  rc = lc_pouch_disk_write_fd_span(segment_fd, payload_fd, payload_offset,
+                                   payload_length, error);
+  if (rc != LC_OK) {
+    close(segment_fd);
+    lc_pouch_free(&store->allocator, segment_path);
+    return rc;
+  }
+  if (lc_pouch_disk_fsync(store, segment_fd, LC_POUCH_FSYNC_LOG) != 0) {
+    close(segment_fd);
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to fsync pouch segment");
+  }
+  if (close(segment_fd) != 0) {
+    lc_pouch_free(&store->allocator, segment_path);
+    return lc_pouch_set_errno(error, "failed to close pouch segment");
+  }
+  lc_pouch_free(&store->allocator, segment_path);
 
   if (!lc_pouch_write_all(store->log_fd, header, sizeof(header)) ||
       !lc_pouch_write_all(store->log_fd, entry->namespace_name,

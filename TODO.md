@@ -306,7 +306,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Append ordinary memory and fd-backed records to the namespace
         active segment as a byte-identical shadow while root `store.log`
         remains the temporary authoritative replay source.
-      - [ ] Move custom object-copy and queue-fd append paths to the namespace
+      - [x] Move custom object-copy and queue-fd append paths to the namespace
         active segment shadow before segment replay becomes authoritative.
     - [ ] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
