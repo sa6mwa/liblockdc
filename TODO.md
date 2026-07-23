@@ -131,6 +131,11 @@ Latest release targets confirmed on 2026-07-22:
 - [ ] Replace the current pouch indexed-query placeholder/parser boundary with
   `liblql` for LQL parsing/evaluation; do not add project-local query parser or
   expression evaluator code.
+  - [ ] Resolve the `liblql v0.1.0` evaluator gap before enabling general
+    pouch field predicates: both `stream_apply_spooled` and
+    `filter_file_spooled` return `LQL_STATUS_UNSUPPORTED` with
+    `direct stream selector is not implemented by scanner` for a parsed JSON
+    AST selector such as `{"eq":{"field":"value","value":"alpha"}}`.
 - [ ] Keep pouch storage-owned indexes behind the pouch store boundary; use
   `liblql` only for query language semantics and predicate/evaluator behavior.
 - [ ] Add observable pouch tests for `liblql`-backed owner/key selectors,
