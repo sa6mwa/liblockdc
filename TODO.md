@@ -147,6 +147,8 @@ Latest release targets confirmed on 2026-07-22:
     index document queries plus `query_keys`.
   - [x] Cover removed-candidate skipping for index document queries plus
     `query_keys`.
+  - [x] Cover hidden metadata filtering for scan and index document queries
+    plus `query_keys`.
 - [x] Add package and install-tree smoke consumers proving downstream CMake and
   pkg-config users can link `liblockdc` with the transitive `liblql` contract.
 
