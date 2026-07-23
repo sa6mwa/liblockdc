@@ -8,6 +8,7 @@ preset=${1:-deps-x86_64-linux-gnu}
 unset LD_LIBRARY_PATH
 dry_run=${LOCKDC_DEPS_DRY_RUN:-0}
 download_timeout=${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT:-300}
+local_download_root=${LOCKDC_DOWNLOAD_ROOT:-$repo_root/.cache/downloads}
 lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-25}
 liblql_abi_version=${LOCKDC_LIBLQL_ABI_VERSION:-0}
 
@@ -182,6 +183,18 @@ lonejson_version=$(resolve_cmake_cache_string LOCKDC_LONEJSON_VERSION "${LOCKDC_
 cmocka_version=$(resolve_cmake_cache_string LOCKDC_CMOCKA_VERSION "${LOCKDC_CMOCKA_VERSION:-}")
 pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_VERSION:-}")
 
+cmocka_asset_name="cmocka-$cmocka_version.tar.xz"
+cmocka_download_url="https://cmocka.org/files/2.0/$cmocka_asset_name"
+case "$cmocka_asset_name" in
+  cmocka-2.0.2.tar.xz)
+    cmocka_asset_hash=39f92f366bdf3f1a02af4da75b4a5c52df6c9f7e736c7d65de13283f9f0ef416
+    ;;
+  *)
+    printf 'unsupported cmocka release asset: %s\n' "$cmocka_asset_name" >&2
+    exit 1
+    ;;
+esac
+
 cpkt_asset_name="c.pkt.systems-$cpkt_version-${preset#deps-}.tar.gz"
 cpkt_download_url="https://github.com/sa6mwa/c.pkt.systems/releases/download/v$cpkt_version/$cpkt_asset_name"
 case "$cpkt_asset_name" in
@@ -273,6 +286,36 @@ case "$liblql_asset_name" in
     ;;
 esac
 
+pslog_asset_name="libpslog-$pslog_version-${preset#deps-}.tar.gz"
+pslog_download_url="https://github.com/sa6mwa/libpslog/releases/download/v$pslog_version/$pslog_asset_name"
+case "$pslog_asset_name" in
+  libpslog-0.9.0-x86_64-linux-gnu.tar.gz)
+    pslog_asset_hash=7981ce7e60f6f1e144042e7a9192bb661472756ae34336fb0c2ed8316b31945f
+    ;;
+  libpslog-0.9.0-x86_64-linux-musl.tar.gz)
+    pslog_asset_hash=d05e59e8d88018a2e78e0941d2db211f3c08e4fd7539065ed2de79ce7e371055
+    ;;
+  libpslog-0.9.0-aarch64-linux-gnu.tar.gz)
+    pslog_asset_hash=38bb08ca6646cf186925a724b61fb534fa49ec0d5e77ca95953dd7a5b18f76e1
+    ;;
+  libpslog-0.9.0-aarch64-linux-musl.tar.gz)
+    pslog_asset_hash=fce3c4f95b317563427437313ef2eb1987dc43973b0b0bf5169763d0a2705f69
+    ;;
+  libpslog-0.9.0-armhf-linux-gnu.tar.gz)
+    pslog_asset_hash=eff69fe9223cd2ad56572ad6acd768b560ac3e863e379c65367ad6338dbfffef
+    ;;
+  libpslog-0.9.0-armhf-linux-musl.tar.gz)
+    pslog_asset_hash=19eeadacfb82b7eba4187b1fc405225bf85a8866ea81939e2eaa841a23d3785c
+    ;;
+  libpslog-0.9.0-arm64-apple-darwin.tar.gz)
+    pslog_asset_hash=ff5d2106bcbc5ea5bce8dfdbca54d21650f350e50fd214a4b52ac65b4f834073
+    ;;
+  *)
+    printf 'unsupported libpslog release asset: %s\n' "$pslog_asset_name" >&2
+    exit 1
+    ;;
+esac
+
 compiler=${CC:-cc}
 compiler_machine=$("$compiler" -dumpmachine 2>/dev/null || echo unknown)
 compiler_version=$("$compiler" --version 2>/dev/null | head -n1 || echo unknown)
@@ -313,7 +356,11 @@ liblql_version=$liblql_version
 liblql_asset_name=$liblql_asset_name
 liblql_asset_hash=$liblql_asset_hash
 cmocka_version=$cmocka_version
-pslog_version=$pslog_version"
+cmocka_asset_name=$cmocka_asset_name
+cmocka_asset_hash=$cmocka_asset_hash
+pslog_version=$pslog_version
+pslog_asset_name=$pslog_asset_name
+pslog_asset_hash=$pslog_asset_hash"
 
 manifest_value() {
   local key=$1
@@ -369,17 +416,36 @@ stage_cpkt_license() {
   cp "$source_path" "$destination_dir/LICENSE.txt"
 }
 
+acquire_verified_archive() {
+  local component=$1
+  local url=$2
+  local expected_hash=$3
+  local archive_name=$4
+  local output_path=$5
+  local cache_args=()
+
+  if [ "${CPKT_DEPENDENCY_CACHE+x}" ]; then
+    cache_args=(-DCPKT_DEPENDENCY_CACHE="$CPKT_DEPENDENCY_CACHE")
+  fi
+
+  cmake \
+    -DLOCKDC_ARCHIVE_COMPONENT="$component" \
+    -DLOCKDC_ARCHIVE_URL="$url" \
+    -DLOCKDC_ARCHIVE_SHA256="$expected_hash" \
+    -DLOCKDC_ARCHIVE_NAME="$archive_name" \
+    -DLOCKDC_ARCHIVE_OUTPUT="$output_path" \
+    -DLOCKDC_ARCHIVE_TIMEOUT="$download_timeout" \
+    "${cache_args[@]}" \
+    -P "$repo_root/cmake/acquire_verified_archive.cmake"
+}
+
 download_cpkt_bundle() {
-  local archive_path="$repo_root/.cache/downloads/$cpkt_asset_name"
+  local archive_path="$local_download_root/$cpkt_asset_name"
   local extract_root="$deps_root/c.pkt.systems/install"
   local actual_hash
 
-  mkdir -p "$repo_root/.cache/downloads" "$extract_root"
-  if [ ! -f "$archive_path" ]; then
-    curl -fL --connect-timeout "$download_timeout" \
-      --max-time "$download_timeout" \
-      -o "$archive_path" "$cpkt_download_url"
-  fi
+  mkdir -p "$local_download_root" "$extract_root"
+  acquire_verified_archive "c.pkt.systems" "$cpkt_download_url" "$cpkt_asset_hash" "$cpkt_asset_name" "$archive_path"
 
   actual_hash=$(sha256sum "$archive_path" | awk '{print $1}')
   if [ "$actual_hash" != "$cpkt_asset_hash" ]; then
@@ -394,16 +460,12 @@ download_cpkt_bundle() {
 }
 
 download_lonejson_bundle() {
-  local archive_path="$repo_root/.cache/downloads/$lonejson_asset_name"
+  local archive_path="$local_download_root/$lonejson_asset_name"
   local extract_root="$deps_root/lonejson/install"
   local actual_hash
 
-  mkdir -p "$repo_root/.cache/downloads" "$extract_root"
-  if [ ! -f "$archive_path" ]; then
-    curl -fL --connect-timeout "$download_timeout" \
-      --max-time "$download_timeout" \
-      -o "$archive_path" "$lonejson_download_url"
-  fi
+  mkdir -p "$local_download_root" "$extract_root"
+  acquire_verified_archive "lonejson" "$lonejson_download_url" "$lonejson_asset_hash" "$lonejson_asset_name" "$archive_path"
 
   actual_hash=$(sha256sum "$archive_path" | awk '{print $1}')
   if [ "$actual_hash" != "$lonejson_asset_hash" ]; then
@@ -418,16 +480,12 @@ download_lonejson_bundle() {
 }
 
 download_liblql_bundle() {
-  local archive_path="$repo_root/.cache/downloads/$liblql_asset_name"
+  local archive_path="$local_download_root/$liblql_asset_name"
   local extract_root="$deps_root/liblql/install"
   local actual_hash
 
-  mkdir -p "$repo_root/.cache/downloads" "$extract_root"
-  if [ ! -f "$archive_path" ]; then
-    curl -fL --connect-timeout "$download_timeout" \
-      --max-time "$download_timeout" \
-      -o "$archive_path" "$liblql_download_url"
-  fi
+  mkdir -p "$local_download_root" "$extract_root"
+  acquire_verified_archive "liblql" "$liblql_download_url" "$liblql_asset_hash" "$liblql_asset_name" "$archive_path"
 
   actual_hash=$(sha256sum "$archive_path" | awk '{print $1}')
   if [ "$actual_hash" != "$liblql_asset_hash" ]; then
@@ -439,6 +497,20 @@ download_liblql_bundle() {
   rm -rf "$extract_root"
   mkdir -p "$extract_root"
   tar -xzf "$archive_path" -C "$extract_root" --strip-components=1
+}
+
+download_cmocka_bundle() {
+  local archive_path="$local_download_root/$cmocka_asset_name"
+
+  mkdir -p "$local_download_root"
+  acquire_verified_archive "cmocka" "$cmocka_download_url" "$cmocka_asset_hash" "$cmocka_asset_name" "$archive_path"
+}
+
+download_pslog_bundle() {
+  local archive_path="$local_download_root/$pslog_asset_name"
+
+  mkdir -p "$local_download_root"
+  acquire_verified_archive "libpslog" "$pslog_download_url" "$pslog_asset_hash" "$pslog_asset_name" "$archive_path"
 }
 
 stage_cpkt_component_layout() {
@@ -633,6 +705,12 @@ reset_dependency_build_root
 stage_cpkt_component_layout
 download_lonejson_bundle
 download_liblql_bundle
+download_pslog_bundle
+cmake_extra_args+=("-DLOCKDC_PSLOG_ARCHIVE_PATH=$local_download_root/$pslog_asset_name")
+if [ "$preset" != "deps-arm64-apple-darwin" ]; then
+  download_cmocka_bundle
+  cmake_extra_args+=("-DLOCKDC_CMOCKA_ARCHIVE_PATH=$local_download_root/$cmocka_asset_name")
+fi
 cmake_extra_args+=("-DLOCKDC_ZLIB_VERSION=$zlib_version")
 cmake_extra_args+=("-DLOCKDC_CPKT_VERSION=$cpkt_version")
 cmake --preset "$cmake_preset" --fresh "${cmake_extra_args[@]}"

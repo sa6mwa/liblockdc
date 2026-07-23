@@ -1,9 +1,16 @@
 function(lockdc_private_trace_needles out_var)
     set(_needles "")
+    set(_cpkt_dependency_cache "")
+    if(DEFINED CPKT_DEPENDENCY_CACHE AND NOT "${CPKT_DEPENDENCY_CACHE}" STREQUAL "")
+        set(_cpkt_dependency_cache "${CPKT_DEPENDENCY_CACHE}")
+    elseif(DEFINED ENV{CPKT_DEPENDENCY_CACHE} AND NOT "$ENV{CPKT_DEPENDENCY_CACHE}" STREQUAL "")
+        set(_cpkt_dependency_cache "$ENV{CPKT_DEPENDENCY_CACHE}")
+    endif()
 
     foreach(_entry
         "LOCKDC_ROOT=${LOCKDC_ROOT}"
         "HOME=$ENV{HOME}"
+        "CPKT_DEPENDENCY_CACHE=${_cpkt_dependency_cache}"
     )
         if(NOT _entry MATCHES "^([^=]+)=(.*)$")
             continue()

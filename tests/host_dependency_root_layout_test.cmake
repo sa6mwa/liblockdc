@@ -29,7 +29,8 @@ assert_not_contains(presets_json ".cache/deps-build/host-debug" "host-debug depe
 
 assert_contains(root_cmake "set(LOCKDC_EXTERNAL_ROOT \"\${CMAKE_SOURCE_DIR}/.cache/deps/\${LOCKDC_TARGET_ID}\"" "target-aware default external root")
 assert_contains(root_cmake "set(LOCKDC_DEPENDENCY_BUILD_ROOT \"\${CMAKE_SOURCE_DIR}/.cache/deps-build/\${LOCKDC_TARGET_ID}\"" "target-aware default dependency build root")
-assert_contains(root_cmake "set(LOCKDC_DOWNLOAD_ROOT \"\${CMAKE_SOURCE_DIR}/.cache/downloads\"" "shared download root")
+assert_contains(root_cmake "set(CPKT_DEPENDENCY_CACHE \"\${LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE}\" CACHE PATH" "shared dependency archive cache variable")
+assert_contains(root_cmake "set(LOCKDC_DOWNLOAD_ROOT \"\${CMAKE_SOURCE_DIR}/.cache/downloads\"" "repo-local download staging root")
 assert_contains(root_cmake "set(LOCKDC_DEPENDENCY_BUILD_TYPE \"Release\")" "release-only dependency build type")
 assert_contains(root_makefile "__deps-debug:\n\tbash ./scripts/deps.sh deps-host-debug" "debug dependency target uses host-native alias")
 assert_contains(root_makefile "__test-host:\n\tbash ./scripts/host_test.sh" "host test target delegates to host_test.sh")
@@ -38,6 +39,8 @@ assert_contains(deps_script "deps-aarch64-linux-gnu" "aarch64 host-native depend
 assert_contains(deps_script "deps-armhf-linux-gnu" "armhf host-native dependency mapping")
 assert_contains(deps_script "deps-x86_64-linux-gnu" "x86_64 host-native dependency mapping")
 assert_contains(deps_script "LOCKDC_DEPS_DRY_RUN" "deps dry-run support")
+assert_contains(deps_script "acquire_verified_archive()" "shared verified archive acquisition wrapper")
+assert_contains(deps_script "CPKT_DEPENDENCY_CACHE" "shared dependency archive cache support")
 assert_contains(deps_script [=[lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-25}]=] "lonejson ABI readiness check knob")
 assert_contains(deps_script [=[liblql_abi_version=${LOCKDC_LIBLQL_ABI_VERSION:-0}]=] "liblql ABI readiness check knob")
 assert_contains(deps_script [=[liblonejson.${lonejson_abi_version}.${shared_ext}]=] "Darwin lonejson ABI readiness path")

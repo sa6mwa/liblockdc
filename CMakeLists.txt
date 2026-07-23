@@ -79,7 +79,19 @@ set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for u
 set(LOCKDC_PSLOG_VERSION "0.9.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
 set(LOCKDC_CPKT_VERSION "0.9.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version." FORCE)
 set(LOCKDC_ABI_VERSION "1" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
-set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
+if(DEFINED ENV{CPKT_DEPENDENCY_CACHE} AND NOT "$ENV{CPKT_DEPENDENCY_CACHE}" STREQUAL "")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{CPKT_DEPENDENCY_CACHE}")
+elseif(DEFINED ENV{XDG_CACHE_HOME} AND NOT "$ENV{XDG_CACHE_HOME}" STREQUAL "")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{XDG_CACHE_HOME}/c.pkt.systems/deps")
+elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{HOME}/.cache/c.pkt.systems/deps")
+else()
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "${CMAKE_SOURCE_DIR}/.cache/c.pkt.systems/deps")
+endif()
+set(CPKT_DEPENDENCY_CACHE "${LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE}" CACHE PATH "Shared verified c.pkt.systems dependency archive cache.")
+set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Repository-local verified dependency archive staging root.")
+set(LOCKDC_CMOCKA_ARCHIVE_PATH "" CACHE FILEPATH "Verified local cmocka release archive path.")
+set(LOCKDC_PSLOG_ARCHIVE_PATH "" CACHE FILEPATH "Verified local libpslog release archive path.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
 set(LOCKDC_VERSION_OVERRIDE "" CACHE STRING "Override the detected liblockdc package version with an explicit semantic version.")
 set(LOCKDC_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "Artifact architecture name")
@@ -910,6 +922,17 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_download_timeout_test.cmake
     )
     set_tests_properties(dependency_download_timeout_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME dependency_archive_cache_contract_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_archive_cache_contract_test.cmake
+    )
+    set_tests_properties(dependency_archive_cache_contract_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 20)
 
     add_test(NAME discover_target_tools_test
         COMMAND ${CMAKE_COMMAND}

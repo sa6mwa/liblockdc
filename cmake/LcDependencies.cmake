@@ -205,8 +205,15 @@ function(lc_add_cmocka)
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
   if(LOCKDC_BUILD_DEPENDENCIES)
+    set(cmocka_archive_url "https://cmocka.org/files/2.0/cmocka-${LOCKDC_CMOCKA_VERSION}.tar.xz")
+    if(NOT LOCKDC_CMOCKA_ARCHIVE_PATH STREQUAL "")
+      if(NOT EXISTS "${LOCKDC_CMOCKA_ARCHIVE_PATH}")
+        message(FATAL_ERROR "configured cmocka archive does not exist: ${LOCKDC_CMOCKA_ARCHIVE_PATH}")
+      endif()
+      set(cmocka_archive_url "${LOCKDC_CMOCKA_ARCHIVE_PATH}")
+    endif()
     ExternalProject_Add(${project_name}
-      URL "https://cmocka.org/files/2.0/cmocka-${LOCKDC_CMOCKA_VERSION}.tar.xz"
+      URL "${cmocka_archive_url}"
       URL_HASH "SHA256=39f92f366bdf3f1a02af4da75b4a5c52df6c9f7e736c7d65de13283f9f0ef416"
       PREFIX "${prefix_dir}"
       DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
@@ -285,8 +292,15 @@ function(lc_add_pslog)
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
   if(LOCKDC_BUILD_DEPENDENCIES)
+    set(pslog_archive_url "https://github.com/sa6mwa/libpslog/releases/download/v${LOCKDC_PSLOG_VERSION}/${asset_name}")
+    if(NOT LOCKDC_PSLOG_ARCHIVE_PATH STREQUAL "")
+      if(NOT EXISTS "${LOCKDC_PSLOG_ARCHIVE_PATH}")
+        message(FATAL_ERROR "configured libpslog archive does not exist: ${LOCKDC_PSLOG_ARCHIVE_PATH}")
+      endif()
+      set(pslog_archive_url "${LOCKDC_PSLOG_ARCHIVE_PATH}")
+    endif()
     ExternalProject_Add(${project_name}
-      URL "https://github.com/sa6mwa/libpslog/releases/download/v${LOCKDC_PSLOG_VERSION}/${asset_name}"
+      URL "${pslog_archive_url}"
       URL_HASH "SHA256=${asset_hash}"
       DOWNLOAD_NAME "${asset_name}"
       PREFIX "${prefix_dir}"

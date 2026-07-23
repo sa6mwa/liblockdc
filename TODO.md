@@ -116,7 +116,7 @@ Latest release targets confirmed on 2026-07-22:
 - [x] Add `liblql` dependency interface tests that verify headers, static and
   shared libraries, CMake package config, pkg-config metadata, exported symbols,
   forbidden private artifacts, and license/provenance metadata.
-- [ ] Add stale-cache failure behavior coverage for `liblql` once the lifecycle
+- [x] Add stale-cache failure behavior coverage for `liblql` once the lifecycle
   shared archive cache helper lands.
 - [x] Update binary SDK package manifests so `liblql`, `lonejson`, `libpslog`,
   and `c.pkt.systems` record logical dependency identity, exact upstream release
@@ -138,16 +138,18 @@ Latest release targets confirmed on 2026-07-22:
 
 ### Updated lifecycle alignment
 
-- [ ] Align dependency acquisition with the updated lifecycle shared archive
+- [x] Align dependency acquisition with the updated lifecycle shared archive
   cache:
   `${CPKT_DEPENDENCY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/deps}`.
   Cache verified immutable archives by SHA-256, publish through atomic rename,
   keep extracted/build/install state under repo-local `.cache/`, and ensure
   `make clean` never removes the shared archive cache.
-- [ ] Add a project-owned verified archive acquisition helper and tests for
+- [x] Add a project-owned verified archive acquisition helper and tests for
   initial download, offline cache hit after deleting local dependency roots,
-  corrupt cached archive rejection, concurrent acquisition, and package privacy
-  rejection of global-cache paths.
+  corrupt cached archive rejection, and package privacy rejection of global-cache
+  paths.
+- [ ] Add concurrent acquisition stress coverage for the shared dependency
+  archive cache lock path.
 - [ ] Align Linux compiler resolution with the updated Bootlin toolchain policy:
   no host compiler/binutils fallback for Linux builds, complete pinned Bootlin
   collections per target, toolchain identity in dependency stamps, and target
@@ -173,7 +175,7 @@ Latest release targets confirmed on 2026-07-22:
 
 ### Verification gates
 
-- [ ] Run narrow dependency gates after each pin change: shell syntax, dry-run
+- [x] Run narrow dependency gates after each pin change: shell syntax, dry-run
   target mapping, upstream checksum manifest comparison, dependency interface
   CTest, and install-tree consumer checks.
 - [ ] Run lifecycle-alignment gates after command/toolchain/cache changes:
