@@ -946,6 +946,65 @@ static unsigned long test_crc32_update(unsigned long crc,
   return crc;
 }
 
+static void write_root_store_log_state_put(const char *root, const char *ns,
+                                           const char *key,
+                                           const char *content_type,
+                                           const char *etag,
+                                           const char *body,
+                                           unsigned long version) {
+  char log_path[512];
+  unsigned char header[TEST_POUCH_HEADER_SIZE];
+  unsigned char *payload;
+  size_t ns_len;
+  size_t key_len;
+  size_t ct_len;
+  size_t etag_len;
+  size_t body_len;
+  size_t payload_len;
+  unsigned long crc;
+  int fd;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  ns_len = strlen(ns);
+  key_len = strlen(key);
+  ct_len = strlen(content_type);
+  etag_len = strlen(etag);
+  body_len = strlen(body);
+  payload_len = ns_len + key_len + ct_len + etag_len + body_len;
+  payload = (unsigned char *)malloc(payload_len);
+  assert_non_null(payload);
+  memcpy(payload, ns, ns_len);
+  memcpy(payload + ns_len, key, key_len);
+  memcpy(payload + ns_len + key_len, content_type, ct_len);
+  memcpy(payload + ns_len + key_len + ct_len, etag, etag_len);
+  memcpy(payload + ns_len + key_len + ct_len + etag_len, body, body_len);
+
+  crc = test_crc32_update(0xffffffffUL, payload, payload_len) ^ 0xffffffffUL;
+  memset(header, 0, sizeof(header));
+  memcpy(header, "LCP1", 4U);
+  test_put_u32(header + 4, TEST_POUCH_HEADER_SIZE);
+  test_put_u32(header + 8, TEST_POUCH_RECORD_STATE_PUT);
+  test_put_u32(header + 12, (unsigned long)ns_len);
+  test_put_u32(header + 16, (unsigned long)key_len);
+  test_put_u32(header + 20, (unsigned long)ct_len);
+  test_put_u32(header + 24, (unsigned long)etag_len);
+  test_put_u64(header + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET,
+               (unsigned long)body_len);
+  test_put_u64(header + 36, version);
+  test_put_u64(header + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET,
+               (unsigned long)payload_len);
+  test_put_u32(header + 52, crc);
+  test_put_u32(header + TEST_POUCH_HEADER_RECORD_VERSION_OFFSET, 1UL);
+
+  fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, header, sizeof(header)), sizeof(header));
+  assert_int_equal(write(fd, payload, payload_len), (ssize_t)payload_len);
+  assert_int_equal(fsync(fd), 0);
+  assert_int_equal(close(fd), 0);
+  free(payload);
+}
+
 static void rewrite_query_index_as_v1_without_owner(const char *root) {
   char index_path[512];
   char temp_path[512];
@@ -2463,6 +2522,43 @@ static void test_replay_cleans_obsolete_snapshot_files(void **state) {
   lc_pouch_state_info_cleanup(&allocator, &info);
 
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_replay_ignores_root_store_log_without_segments(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *body;
+  lc_pouch_state_info info;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "root-log-not-authoritative");
+  test_cleanup_root(root);
+  assert_int_equal(mkdir(root, 0777), 0);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  body = NULL;
+
+  write_root_store_log_state_put(root, "default", "legacy-key", "text/plain",
+                                 "root-only-etag", "root-only-body", 7UL);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->read_state(store, "default", "legacy-key", &body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(body);
+
+  lc_pouch_state_info_cleanup(&allocator, &info);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -14517,6 +14613,7 @@ int main(void) {
       cmocka_unit_test(test_segment_replay_honors_manifest_obsolete),
       cmocka_unit_test(test_replay_installed_snapshot_without_segment_tail),
       cmocka_unit_test(test_replay_cleans_obsolete_snapshot_files),
+      cmocka_unit_test(test_replay_ignores_root_store_log_without_segments),
       cmocka_unit_test(
           test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),

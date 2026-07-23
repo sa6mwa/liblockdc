@@ -2890,7 +2890,8 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
     }
     return rc;
   }
-  if ((unsigned long)st.st_size == store->replayed_log_size) {
+  if (store->replayed_segment_generation == 0UL) {
+    store->replayed_log_size = (unsigned long)st.st_size;
     return LC_OK;
   }
   store->lock_replay_refreshes++;
@@ -4899,6 +4900,13 @@ static void lc_pouch_disk_reset_indexes(lc_pouch_disk_store *store) {
   }
   store->queue_entry_count = 0U;
   store->next_version = 1L;
+}
+
+static void lc_pouch_disk_reset_replay_state(lc_pouch_disk_store *store) {
+  lc_pouch_disk_reset_indexes(store);
+  store->replayed_query_index_size = (unsigned long)-1;
+  store->replayed_query_index_record_count = 0UL;
+  store->replayed_record_count = 0UL;
 }
 
 static int
@@ -10118,10 +10126,7 @@ static int lc_pouch_disk_replay_input_records(
   store = input->store;
   offset = 0UL;
   if (reset_indexes) {
-    lc_pouch_disk_reset_indexes(store);
-    store->replayed_query_index_size = (unsigned long)-1;
-    store->replayed_query_index_record_count = 0UL;
-    store->replayed_record_count = 0UL;
+    lc_pouch_disk_reset_replay_state(store);
   }
   if (lseek(input->fd, 0, SEEK_SET) < 0) {
     return lc_pouch_set_errno(error, "failed to rewind pouch log");
@@ -11079,9 +11084,7 @@ static int lc_pouch_disk_replay_active_segments(lc_pouch_disk_store *store,
 }
 
 static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
-  lc_pouch_disk_replay_input input;
   struct stat st;
-  unsigned long offset;
   int found_segments;
   int rc;
 
@@ -11097,15 +11100,11 @@ static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
     return LC_OK;
   }
 
-  input.store = store;
-  input.fd = store->log_fd;
-  input.path = store->log_path;
-  offset = 0UL;
-  rc = lc_pouch_disk_replay_input_records(&input, 1, 1, &offset, error);
-  if (rc != LC_OK) {
-    return rc;
+  lc_pouch_disk_reset_replay_state(store);
+  if (fstat(store->log_fd, &st) != 0) {
+    return lc_pouch_set_errno(error, "failed to stat pouch log");
   }
-  store->replayed_log_size = offset;
+  store->replayed_log_size = (unsigned long)st.st_size;
   store->replayed_segment_generation = 0UL;
   return LC_OK;
 }

@@ -327,9 +327,9 @@ Latest release targets confirmed on 2026-07-23:
         remains the temporary authoritative replay source.
       - [x] Move custom object-copy and queue-fd append paths to the namespace
         active segment shadow before segment replay becomes authoritative.
-      - [x] Prefer active namespace segment replay over the legacy root log
-        when segments exist; keep `store.log` only as a transitional refresh
-        signal until the write cutover removes it.
+      - [x] Remove root `store.log` replay/import fallback; active namespace
+        segments and installed snapshots are the only authoritative record
+        sources for the unreleased segmented format.
       - [x] Rotate active namespace segments by size threshold and route all
         segment-shadow append paths through the shared active-segment opener.
       - [x] Resolve active namespace append paths from manifest state after
@@ -353,8 +353,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Decouple record replay from `store->log_fd` / `store->log_path`
         by routing root replay through an explicit fd/path replay input; the
         namespace segment replay path now reuses this input wrapper.
-      - [x] Replay active namespace segments in deterministic path order and
-        keep root replay as a no-segment fallback only.
+      - [x] Replay active namespace segments in deterministic path order; when
+        no namespace logstore segments exist, reset replay projections to an
+        empty store instead of importing root `store.log`.
       - [x] Discover and replay every numbered `seg-*.log` file in each
         namespace, so sealed historical segments and the active tail are both
         authoritative.
