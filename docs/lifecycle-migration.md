@@ -22,6 +22,14 @@ behavior is not silently lost.
 | Repository-local release asset downloads under `.cache/downloads` only | Shared verified archive cache under `CPKT_DEPENDENCY_CACHE`, with repo-local staging under `.cache/downloads` | Existing dependency roots and package manifests still use target IDs and exact release assets. | `dependency_archive_cache_contract_test`, `dependency_download_timeout_test`, and full `make test` coverage. | Active |
 | Direct lifecycle use of `lonejson`, `libpslog`, and `c.pkt.systems` pins | Latest release pins plus first-class `liblql` dependency | Downstream CMake and pkg-config consumers still link through `liblockdc`. | Dependency interface tests and install-tree smoke consumers. | Active |
 
+## Preset Surface
+
+| Old command or behavior | New lifecycle surface | Behavior preserved | Verification added | Status |
+| --- | --- | --- | --- | --- |
+| Lua checks ran through the general `debug` preset | `debug-lua` | Lua bindings still build against the debug dependency root; the preset narrows non-Lua work. | `lifecycle_preset_contract_test` asserts configure/build/test preset coverage. | Active |
+| No dedicated Valgrind configure preset | `valgrind` | Debug symbols are preserved without sanitizer instrumentation so Memcheck can inspect runtime behavior. | `lifecycle_preset_contract_test` asserts the preset disables fuzzers and sanitizer debug flags. | Pending Make runner and Bootlin toolchain |
+| Fuzz preset selected host Clang directly | Pinned AFL++ GCC-plugin lifecycle | Existing fuzz preset remains available as compatibility until the AFL++ resolver is wired. | `lifecycle_preset_contract_test` keeps this gap visible through required preset coverage. | Pending AFL++ migration |
+
 ## Pouch Storage Surface
 
 | Old command or behavior | New lifecycle surface | Behavior preserved | Verification added | Status |
@@ -39,6 +47,8 @@ behavior is not silently lost.
 - Whether Valgrind becomes part of `make prerelease` immediately when the
   Bootlin-backed `valgrind` preset lands, or first runs as a separate hardening
   gate for one migration slice.
+- Whether the existing host-Clang fuzz preset should remain as an explicit
+  compatibility alias after the pinned AFL++ lifecycle migration lands.
 - Whether live provider checks should exist for `make prerelease-live`; no live
   prerelease checks are currently defined.
 - Whether the migration ledger should be retained as project documentation after

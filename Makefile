@@ -71,7 +71,7 @@ help:
 		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
 		'make format             Run clang-format over repo .c and .h files.' \
 		'make finalize-slice     Run formatting plus the host release test gate for an ordinary implementation slice.' \
-		'make valgrind           Native Valgrind lifecycle gate; currently fails with an actionable migration diagnostic until the Bootlin Valgrind preset lands.' \
+		'make valgrind           Native Valgrind lifecycle gate; currently fails with an actionable migration diagnostic until the Valgrind runner lands.' \
 		'make asan               Compatibility alias for test-debug.' \
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
@@ -239,8 +239,8 @@ __valgrind:
 		'status=failed' \
 		'class=external-tool-unavailable' \
 		'reason=valgrind-preset-not-implemented' \
-		'artifact=CMakePresets.json' \
-		'next=add the lifecycle valgrind preset backed by the pinned native x86_64 Bootlin toolchain, then run host Valgrind Memcheck' \
+		'artifact=Makefile' \
+		'next=wire make valgrind to build the valgrind preset with the pinned native x86_64 Bootlin toolchain, then run host Valgrind Memcheck' \
 		'PKT_DIAGNOSTIC_END' >&2
 	@exit 2
 

@@ -154,10 +154,12 @@ Latest release targets confirmed on 2026-07-22:
   no host compiler/binutils fallback for Linux builds, complete pinned Bootlin
   collections per target, toolchain identity in dependency stamps, and target
   tool discovery from configured build state.
+- [x] Add preset-contract tests for lifecycle-required preset presence, build
+  and test preset mirrors, required cache variables, release `LOCKDC_DIST_DIR`
+  defaults, `debug-lua`, `valgrind`, and fuzz compatibility visibility.
 - [ ] Update CMake presets and toolchain files for the lifecycle-required
-  `debug`, `debug-lua`, `valgrind`, `fuzz`, release target matrix, and optional
-  Darwin/osxcross behavior; add preset-contract tests for required cache
-  variables and dependency-mode defaults.
+  Bootlin-backed `valgrind`, pinned AFL++ `fuzz`, release target matrix, and
+  optional Darwin/osxcross behavior.
 - [ ] Replace sanitizer-as-primary hardening assumptions with the updated native
   Valgrind gate while preserving any existing useful ASan/UBSan coverage as
   compatibility or optional hardening.
