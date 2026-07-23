@@ -308,15 +308,23 @@ Latest release targets confirmed on 2026-07-23:
         remains the temporary authoritative replay source.
       - [x] Move custom object-copy and queue-fd append paths to the namespace
         active segment shadow before segment replay becomes authoritative.
+      - [x] Prefer active namespace segment replay over the legacy root log
+        when segments exist; keep `store.log` only as a transitional refresh
+        signal until the write cutover removes it.
     - [ ] Replay installed snapshots plus non-obsolete segment tails in
       deterministic order, reset replay projections after snapshot or obsolete
       set changes, and preserve corrupt-tail truncation semantics per segment.
       - [x] Decouple record replay from `store->log_fd` / `store->log_path`
         by routing root replay through an explicit fd/path replay input; the
-        next slice can reuse this for namespace segment histories.
+        namespace segment replay path now reuses this input wrapper.
+      - [x] Replay active namespace segments in deterministic path order and
+        keep root replay as a no-segment fallback only.
     - [ ] Implement snapshot compaction and cleanup: capture live refs,
       validate drift before install, protect live state-link targets, mark old
       segments/snapshots obsolete, and retry obsolete-file cleanup.
+      - [x] Make current compaction segment-aware by backing up active segments,
+        writing compacted live records into fresh active segments, restoring on
+        failure, and reading live payloads from recorded body paths.
     - [ ] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.

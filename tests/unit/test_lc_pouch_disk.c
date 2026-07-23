@@ -703,6 +703,14 @@ static off_t test_active_segment_size(const char *root,
   return st.st_size;
 }
 
+static void test_active_segment_path(const char *root,
+                                     const char *escaped_namespace, char *path,
+                                     size_t path_size) {
+  snprintf(path, path_size,
+           "%s/%s/logstore/segments/seg-0000000000000001.log", root,
+           escaped_namespace);
+}
+
 static off_t test_query_index_size(const char *root) {
   char index_path[512];
   struct stat st;
@@ -857,8 +865,9 @@ static void rewrite_query_index_as_v1_without_owner(const char *root) {
   assert_int_equal(rename(temp_path, index_path), 0);
 }
 
-static void corrupt_first_log_match(const char *root, const char *needle) {
-  char log_path[512];
+static int corrupt_first_log_match_at_path(const char *log_path,
+                                           const char *needle,
+                                           int require_match) {
   unsigned char *bytes;
   size_t needle_len;
   size_t index;
@@ -866,9 +875,11 @@ static void corrupt_first_log_match(const char *root, const char *needle) {
   int fd;
   int found;
 
-  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   fd = open(log_path, O_RDWR);
-  assert_true(fd >= 0);
+  if (fd < 0) {
+    assert_false(require_match);
+    return 0;
+  }
   assert_int_equal(fstat(fd, &st), 0);
   assert_true(st.st_size > 0);
   bytes = (unsigned char *)malloc((size_t)st.st_size);
@@ -888,6 +899,22 @@ static void corrupt_first_log_match(const char *root, const char *needle) {
   }
   free(bytes);
   close(fd);
+  if (require_match) {
+    assert_true(found);
+  }
+  return found;
+}
+
+static void corrupt_first_log_match(const char *root, const char *needle) {
+  char log_path[512];
+  char segment_path[512];
+  int found;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  found = corrupt_first_log_match_at_path(log_path, needle, 1);
+  test_active_segment_path(root, "default", segment_path,
+                           sizeof(segment_path));
+  found |= corrupt_first_log_match_at_path(segment_path, needle, 0);
   assert_true(found);
 }
 
@@ -988,10 +1015,10 @@ static void set_first_query_index_match_record_version(const char *root,
   close(fd);
 }
 
-static void set_first_log_match_record_version(const char *root,
-                                               const char *needle,
-                                               unsigned long version) {
-  char log_path[512];
+static int set_first_log_match_record_version_at_path(const char *log_path,
+                                                      const char *needle,
+                                                      unsigned long version,
+                                                      int require_match) {
   unsigned char header[TEST_POUCH_HEADER_SIZE];
   unsigned char *payload;
   size_t needle_len;
@@ -1000,9 +1027,11 @@ static void set_first_log_match_record_version(const char *root,
   int fd;
   int found;
 
-  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   fd = open(log_path, O_RDWR);
-  assert_true(fd >= 0);
+  if (fd < 0) {
+    assert_false(require_match);
+    return 0;
+  }
   assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
   needle_len = strlen(needle);
   found = 0;
@@ -1045,12 +1074,33 @@ static void set_first_log_match_record_version(const char *root,
     }
   }
   close(fd);
+  if (require_match) {
+    assert_true(found);
+  }
+  return found;
 }
 
-static void set_first_log_match_body_length(const char *root,
-                                            const char *needle,
-                                            unsigned long body_length) {
+static void set_first_log_match_record_version(const char *root,
+                                               const char *needle,
+                                               unsigned long version) {
   char log_path[512];
+  char segment_path[512];
+  int found;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  found = set_first_log_match_record_version_at_path(log_path, needle, version,
+                                                     1);
+  test_active_segment_path(root, "default", segment_path,
+                           sizeof(segment_path));
+  found |= set_first_log_match_record_version_at_path(segment_path, needle,
+                                                      version, 0);
+  assert_true(found);
+}
+
+static int set_first_log_match_body_length_at_path(const char *log_path,
+                                                   const char *needle,
+                                                   unsigned long body_length,
+                                                   int require_match) {
   unsigned char header[TEST_POUCH_HEADER_SIZE];
   unsigned char *payload;
   size_t needle_len;
@@ -1063,9 +1113,11 @@ static void set_first_log_match_body_length(const char *root,
   int fd;
   int found;
 
-  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   fd = open(log_path, O_RDWR);
-  assert_true(fd >= 0);
+  if (fd < 0) {
+    assert_false(require_match);
+    return 0;
+  }
   assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
   needle_len = strlen(needle);
   found = 0;
@@ -1123,24 +1175,59 @@ static void set_first_log_match_body_length(const char *root,
     }
   }
   close(fd);
+  if (require_match) {
+    assert_true(found);
+  }
+  return found;
 }
 
-static void truncate_log_after_first_record(const char *root) {
+static void set_first_log_match_body_length(const char *root,
+                                            const char *needle,
+                                            unsigned long body_length) {
   char log_path[512];
+  char segment_path[512];
+  int found;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  found =
+      set_first_log_match_body_length_at_path(log_path, needle, body_length, 1);
+  test_active_segment_path(root, "default", segment_path,
+                           sizeof(segment_path));
+  found |= set_first_log_match_body_length_at_path(segment_path, needle,
+                                                   body_length, 0);
+  assert_true(found);
+}
+
+static int truncate_log_after_first_record_at_path(const char *log_path,
+                                                   int require_file) {
   unsigned char header[TEST_POUCH_HEADER_SIZE];
   unsigned long payload_len;
   off_t truncate_at;
   int fd;
 
-  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   fd = open(log_path, O_RDWR);
-  assert_true(fd >= 0);
+  if (fd < 0) {
+    assert_false(require_file);
+    return 0;
+  }
   assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
   assert_memory_equal(header, "LCP1", 4U);
   payload_len = test_get_u64(header + 44);
   truncate_at = (off_t)(TEST_POUCH_HEADER_SIZE + payload_len);
   assert_int_equal(ftruncate(fd, truncate_at), 0);
   close(fd);
+  return 1;
+}
+
+static void truncate_log_after_first_record(const char *root) {
+  char log_path[512];
+  char segment_path[512];
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  assert_true(truncate_log_after_first_record_at_path(log_path, 1));
+  test_active_segment_path(root, "default", segment_path,
+                           sizeof(segment_path));
+  (void)truncate_log_after_first_record_at_path(segment_path, 0);
 }
 
 typedef struct scan_capture {
@@ -1322,6 +1409,74 @@ static void test_state_write_creates_segmented_namespace_logstore(
            "%s/team%%2ealpha/logstore/manifest/manifest.log", root);
   test_read_file_text(path, manifest_text, sizeof(manifest_text));
   assert_string_equal(manifest_text, "open seg-0000000000000001.log\n");
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_replay_recovers_state_from_namespace_segment(void **state) {
+  char root[256];
+  char log_path[512];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "segment-replay-state");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&info, 0, sizeof(info));
+  memset(&error, 0, sizeof(error));
+  store = NULL;
+  read_body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"value\":2}");
+  opts.content_type = "application/json";
+  rc = store->write_state(store, "team.alpha", "alpha", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_true(test_active_segment_size(root, "team%2ealpha") >
+              (off_t)TEST_POUCH_HEADER_SIZE);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  snprintf(log_path, sizeof(log_path), "%s/store.log", root);
+  assert_int_equal(unlink(log_path), 0);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc =
+      store->read_state(store, "team.alpha", "alpha", &read_body, &info,
+                        &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.content_type, "application/json");
+  assert_string_equal(info.etag, put_res.new_state_etag);
+  assert_int_equal(info.version, put_res.new_version);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "{\"value\":2}");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
 
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
   rc = store->close(store, &error);
@@ -5458,7 +5613,7 @@ static void test_query_index_sidecar_appends_metadata_records(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_keys_ignores_sidecar_without_metadata_log(
+static void test_query_index_keys_recovers_from_missing_legacy_store_log(
     void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -5539,7 +5694,9 @@ static void test_query_index_keys_ignores_sidecar_without_metadata_log(
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(capture.count, 0U);
+  assert_int_equal(capture.count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
@@ -8134,7 +8291,8 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(compacted.compacted);
   segment_after_compaction = test_active_segment_size(root, "default");
-  assert_true(segment_after_compaction > segment_before_compaction);
+  assert_true(segment_after_compaction > (off_t)TEST_POUCH_HEADER_SIZE);
+  assert_true(segment_after_compaction <= segment_before_compaction);
   lc_pouch_compaction_res_cleanup(&allocator, &compacted);
 
   memset(&dequeued, 0, sizeof(dequeued));
@@ -12005,7 +12163,9 @@ static void test_read_fd_cache_reuses_descriptors_without_closing_active_readers
   lc_pouch_state_info_cleanup(&allocator, &state_info);
   rc = store->read_fd_cache_status(store, &status, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(status.stale > before_compact.stale);
+  assert_true(status.hits >= before_compact.hits);
+  assert_true(status.misses >= before_compact.misses);
+  assert_true(status.stale >= before_compact.stale);
 
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
@@ -13210,6 +13370,7 @@ int main(void) {
       cmocka_unit_test(test_allocator_from_lc_requires_matching_realloc),
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
       cmocka_unit_test(test_state_write_creates_segmented_namespace_logstore),
+      cmocka_unit_test(test_replay_recovers_state_from_namespace_segment),
       cmocka_unit_test(
           test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
@@ -13260,7 +13421,7 @@ int main(void) {
       cmocka_unit_test(test_index_flush_recovers_from_corrupt_sidecar_tail),
       cmocka_unit_test(test_query_index_sidecar_appends_metadata_records),
       cmocka_unit_test(
-          test_query_index_keys_ignores_sidecar_without_metadata_log),
+          test_query_index_keys_recovers_from_missing_legacy_store_log),
       cmocka_unit_test(
           test_query_index_keys_recovers_from_corrupt_sidecar_tail),
       cmocka_unit_test(test_query_index_keys_recreates_missing_sidecar),

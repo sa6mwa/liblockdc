@@ -254,6 +254,12 @@ typedef struct lc_pouch_disk_replay_input {
   const char *path;
 } lc_pouch_disk_replay_input;
 
+typedef struct lc_pouch_disk_segment_replay_paths {
+  char **items;
+  size_t count;
+  size_t capacity;
+} lc_pouch_disk_segment_replay_paths;
+
 struct lc_pouch_key_lock {
   lc_pouch_allocator allocator;
   char *path;
@@ -467,6 +473,14 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
 static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
                                               unsigned long log_size,
                                               lc_error *error);
+static void lc_pouch_disk_segment_replay_paths_cleanup(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths);
+static int lc_pouch_disk_collect_active_segment_paths(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
+    lc_error *error);
+static int lc_pouch_disk_segment_replay_paths_add(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
+    char *path);
 static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error);
 static size_t lc_pouch_file_source_read(lc_source *self, void *buffer,
                                         size_t count, lc_error *error);
@@ -1575,14 +1589,17 @@ static int lc_pouch_disk_take_cached_read_fd(lc_pouch_disk_store *store,
     (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
     cursor = &lc_pouch_process_read_fd_cache;
     while (*cursor != NULL) {
-      entry = *cursor;
-      if (entry->path != NULL && strcmp(entry->path, path) == 0) {
-        fd = entry->fd;
-        *cursor = entry->next;
+      lc_pouch_read_fd_cache_entry *candidate;
+
+      candidate = *cursor;
+      if (candidate->path != NULL && strcmp(candidate->path, path) == 0) {
+        entry = candidate;
+        fd = candidate->fd;
+        *cursor = candidate->next;
         lc_pouch_process_read_fd_cache_count--;
         break;
       }
-      cursor = &(*cursor)->next;
+      cursor = &candidate->next;
     }
     (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
     if (entry == NULL) {
@@ -7919,10 +7936,120 @@ static int lc_pouch_disk_fsync_root(lc_pouch_disk_store *store) {
   return rc;
 }
 
+static char *lc_pouch_disk_make_compact_backup_path(lc_pouch_disk_store *store,
+                                                    const char *path) {
+  static const char suffix[] = ".compact.bak";
+  size_t path_len;
+  size_t suffix_len;
+  char *backup_path;
+
+  path_len = strlen(path);
+  suffix_len = sizeof(suffix) - 1U;
+  backup_path =
+      (char *)lc_pouch_alloc(&store->allocator, path_len + suffix_len + 1U);
+  if (backup_path == NULL) {
+    return NULL;
+  }
+  memcpy(backup_path, path, path_len);
+  memcpy(backup_path + path_len, suffix, suffix_len + 1U);
+  return backup_path;
+}
+
+static void lc_pouch_disk_compact_segment_backups_cleanup(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *backups,
+    int restore) {
+  size_t index;
+
+  for (index = 0U; index < backups->count; ++index) {
+    if (backups->items[index] != NULL) {
+      if (restore) {
+        size_t backup_len;
+        char *active_path;
+
+        backup_len = strlen(backups->items[index]);
+        active_path = lc_pouch_dup_bytes(&store->allocator,
+                                         backups->items[index],
+                                         backup_len - strlen(".compact.bak"));
+        if (active_path != NULL) {
+          (void)unlink(active_path);
+          (void)rename(backups->items[index], active_path);
+          lc_pouch_free(&store->allocator, active_path);
+        }
+      } else {
+        (void)unlink(backups->items[index]);
+      }
+    }
+  }
+  lc_pouch_disk_segment_replay_paths_cleanup(store, backups);
+}
+
+static int lc_pouch_disk_prepare_compact_segment_backups(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *active_paths,
+    lc_pouch_disk_segment_replay_paths *backups, lc_error *error) {
+  size_t index;
+
+  memset(backups, 0, sizeof(*backups));
+  for (index = 0U; index < active_paths->count; ++index) {
+    char *backup_path;
+
+    backup_path =
+        lc_pouch_disk_make_compact_backup_path(store, active_paths->items[index]);
+    if (backup_path == NULL) {
+      lc_pouch_disk_compact_segment_backups_cleanup(store, backups, 1);
+      return lc_pouch_set_nomem(error,
+                                "failed to allocate pouch segment backup path");
+    }
+    (void)unlink(backup_path);
+    if (rename(active_paths->items[index], backup_path) != 0) {
+      lc_pouch_free(&store->allocator, backup_path);
+      lc_pouch_disk_compact_segment_backups_cleanup(store, backups, 1);
+      return lc_pouch_set_errno(error, "failed to backup pouch segment");
+    }
+    if (!lc_pouch_disk_segment_replay_paths_add(store, backups, backup_path)) {
+      (void)rename(backup_path, active_paths->items[index]);
+      lc_pouch_free(&store->allocator, backup_path);
+      lc_pouch_disk_compact_segment_backups_cleanup(store, backups, 1);
+      return lc_pouch_set_nomem(error,
+                                "failed to track pouch segment backup");
+    }
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_open_compact_body_fd(lc_pouch_disk_store *store,
+                                              const char *path,
+                                              lc_error *error) {
+  char *backup_path;
+  int fd;
+
+  backup_path = lc_pouch_disk_make_compact_backup_path(store, path);
+  if (backup_path == NULL) {
+    (void)lc_pouch_set_nomem(error,
+                             "failed to allocate pouch compact body path");
+    return -1;
+  }
+  fd = open(backup_path, O_RDONLY);
+  lc_pouch_free(&store->allocator, backup_path);
+  if (fd >= 0) {
+    return fd;
+  }
+  if (errno != ENOENT) {
+    (void)lc_pouch_set_errno(error, "failed to open pouch compact body");
+    return -1;
+  }
+  fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    (void)lc_pouch_set_errno(error, "failed to open pouch compact body");
+  }
+  return fd;
+}
+
 static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
                                         lc_error *error) {
   char *temp_path;
   char *temp_query_path;
+  lc_pouch_disk_segment_replay_paths segment_active_paths;
+  lc_pouch_disk_segment_replay_paths segment_backup_paths;
   unsigned char *meta_payload;
   size_t meta_payload_length;
   unsigned long body_offset;
@@ -7933,12 +8060,15 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
   int temp_fd;
   int temp_query_fd;
   int rc;
+  int body_fd;
   size_t index;
 
   temp_path = lc_pouch_join_path(&store->allocator, store->root_path,
                                  "store.compact.tmp");
   temp_query_path = lc_pouch_join_path(&store->allocator, store->root_path,
                                        "query.index.compact.tmp");
+  memset(&segment_active_paths, 0, sizeof(segment_active_paths));
+  memset(&segment_backup_paths, 0, sizeof(segment_backup_paths));
   if (temp_path == NULL || temp_query_path == NULL) {
     lc_pouch_free(&store->allocator, temp_path);
     lc_pouch_free(&store->allocator, temp_query_path);
@@ -7964,6 +8094,22 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
   old_query_fd = store->query_index_fd;
   old_record_count = store->replayed_record_count;
   old_replayed_size = store->replayed_log_size;
+  rc = lc_pouch_disk_collect_active_segment_paths(store, &segment_active_paths,
+                                                  error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_prepare_compact_segment_backups(
+        store, &segment_active_paths, &segment_backup_paths, error);
+  }
+  if (rc != LC_OK) {
+    close(temp_fd);
+    close(temp_query_fd);
+    unlink(temp_path);
+    unlink(temp_query_path);
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &segment_active_paths);
+    lc_pouch_free(&store->allocator, temp_path);
+    lc_pouch_free(&store->allocator, temp_query_path);
+    return rc;
+  }
   store->log_fd = temp_fd;
   store->query_index_fd = temp_query_fd;
   store->defer_record_fsync = 1;
@@ -7979,15 +8125,26 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     if (entry->deleted) {
       continue;
     }
+    body_fd = lc_pouch_disk_open_compact_body_fd(
+        store, entry->body_path != NULL ? entry->body_path : store->log_path,
+        error);
+    if (body_fd < 0) {
+      rc = error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+      break;
+    }
     rc = lc_pouch_disk_append_fd_record(
         store, LC_POUCH_RECORD_STATE_PUT, entry->namespace_name, entry->key,
-        entry->content_type, entry->etag, entry->version, old_fd,
+        entry->content_type, entry->etag, entry->version, body_fd,
         entry->body_offset, entry->body_length, &body_offset, error);
     if (rc == LC_OK) {
       rc = lc_pouch_disk_update_query_field_index_from_fd(
           store, entry->namespace_name, entry->key, entry->content_type,
-          entry->etag, entry->version, old_fd, entry->body_offset,
+          entry->etag, entry->version, body_fd, entry->body_offset,
           entry->body_length, 1, 1, error);
+    }
+    if (close(body_fd) != 0 && rc == LC_OK) {
+      rc = lc_pouch_set_errno(error, "failed to close pouch compact state body");
     }
   }
   for (index = 0U; rc == LC_OK && index < store->meta_entry_count; ++index) {
@@ -8030,11 +8187,23 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     if (entry->deleted) {
       continue;
     }
+    body_fd = lc_pouch_disk_open_compact_body_fd(
+        store, entry->body_path != NULL ? entry->body_path : store->log_path,
+        error);
+    if (body_fd < 0) {
+      rc = error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+      break;
+    }
     rc = lc_pouch_disk_append_object_copy_record(
-        store, old_fd, entry->namespace_name, entry->key, entry->name,
+        store, body_fd, entry->namespace_name, entry->key, entry->name,
         entry->id, entry->content_type, entry->body_offset, entry->body_length,
         entry->created_at_unix, entry->updated_at_unix, &payload_offset,
         error);
+    if (close(body_fd) != 0 && rc == LC_OK) {
+      rc =
+          lc_pouch_set_errno(error, "failed to close pouch compact object body");
+    }
   }
   for (index = 0U; rc == LC_OK && index < store->queue_entry_count; ++index) {
     lc_pouch_disk_queue_entry *entry;
@@ -8043,9 +8212,20 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     if (entry->deleted) {
       continue;
     }
-    rc = lc_pouch_disk_append_queue_put_fd_entry(store, entry, old_fd,
+    body_fd = lc_pouch_disk_open_compact_body_fd(
+        store, entry->body_path != NULL ? entry->body_path : store->log_path,
+        error);
+    if (body_fd < 0) {
+      rc = error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+      break;
+    }
+    rc = lc_pouch_disk_append_queue_put_fd_entry(store, entry, body_fd,
                                                  entry->body_offset,
                                                  entry->body_length, error);
+    if (close(body_fd) != 0 && rc == LC_OK) {
+      rc = lc_pouch_set_errno(error, "failed to close pouch compact queue body");
+    }
   }
   if (rc == LC_OK &&
       lc_pouch_disk_fsync(store, temp_fd, LC_POUCH_FSYNC_LOG) != 0) {
@@ -8072,6 +8252,9 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     close(temp_query_fd);
     unlink(temp_path);
     unlink(temp_query_path);
+    lc_pouch_disk_compact_segment_backups_cleanup(store, &segment_backup_paths,
+                                                  1);
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &segment_active_paths);
     lc_pouch_free(&store->allocator, temp_path);
     lc_pouch_free(&store->allocator, temp_query_path);
     return rc;
@@ -8086,6 +8269,9 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     close(temp_query_fd);
     unlink(temp_path);
     unlink(temp_query_path);
+    lc_pouch_disk_compact_segment_backups_cleanup(store, &segment_backup_paths,
+                                                  1);
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &segment_active_paths);
     lc_pouch_free(&store->allocator, temp_path);
     lc_pouch_free(&store->allocator, temp_query_path);
     return lc_pouch_set_errno(error,
@@ -8102,6 +8288,9 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     (void)lc_pouch_disk_replay(store, NULL);
     close(temp_fd);
     unlink(temp_path);
+    lc_pouch_disk_compact_segment_backups_cleanup(store, &segment_backup_paths,
+                                                  1);
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &segment_active_paths);
     lc_pouch_free(&store->allocator, temp_path);
     lc_pouch_free(&store->allocator, temp_query_path);
     return lc_pouch_set_errno(error, "failed to install pouch compact log");
@@ -8114,8 +8303,14 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
   store->replayed_query_index_size = (unsigned long)-1;
   store->replayed_query_index_record_count = 0UL;
   if (!lc_pouch_disk_fsync_root(store)) {
+    lc_pouch_disk_compact_segment_backups_cleanup(store, &segment_backup_paths,
+                                                  0);
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &segment_active_paths);
     return lc_pouch_set_errno(error, "failed to fsync pouch root directory");
   }
+  lc_pouch_disk_compact_segment_backups_cleanup(store, &segment_backup_paths,
+                                                0);
+  lc_pouch_disk_segment_replay_paths_cleanup(store, &segment_active_paths);
   return LC_OK;
 }
 
@@ -9151,7 +9346,8 @@ static int lc_pouch_disk_replay_stream_index_record(
 }
 
 static int lc_pouch_disk_replay_input_records(
-    lc_pouch_disk_replay_input *input, lc_error *error) {
+    lc_pouch_disk_replay_input *input, int reset_indexes, int truncate_tail,
+    unsigned long *offset_out, lc_error *error) {
   lc_pouch_disk_store *store;
   unsigned char header[LC_POUCH_HEADER_SIZE];
   unsigned char *payload;
@@ -9172,10 +9368,12 @@ static int lc_pouch_disk_replay_input_records(
 
   store = input->store;
   offset = 0UL;
-  lc_pouch_disk_reset_indexes(store);
-  store->replayed_query_index_size = (unsigned long)-1;
-  store->replayed_query_index_record_count = 0UL;
-  store->replayed_record_count = 0UL;
+  if (reset_indexes) {
+    lc_pouch_disk_reset_indexes(store);
+    store->replayed_query_index_size = (unsigned long)-1;
+    store->replayed_query_index_record_count = 0UL;
+    store->replayed_record_count = 0UL;
+  }
   if (lseek(input->fd, 0, SEEK_SET) < 0) {
     return lc_pouch_set_errno(error, "failed to rewind pouch log");
   }
@@ -9576,21 +9774,230 @@ static int lc_pouch_disk_replay_input_records(
     store->replayed_record_count++;
     lc_pouch_free(&store->allocator, payload);
   }
-  if (lseek(input->fd, (off_t)offset, SEEK_SET) < 0 ||
-      ftruncate(input->fd, (off_t)offset) != 0) {
-    return lc_pouch_set_errno(error, "failed to truncate pouch log tail");
+  if (truncate_tail) {
+    if (lseek(input->fd, (off_t)offset, SEEK_SET) < 0 ||
+        ftruncate(input->fd, (off_t)offset) != 0) {
+      return lc_pouch_set_errno(error, "failed to truncate pouch log tail");
+    }
   }
-  store->replayed_log_size = offset;
+  if (offset_out != NULL) {
+    *offset_out = offset;
+  }
   return LC_OK;
+}
+
+static void lc_pouch_disk_segment_replay_paths_cleanup(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths) {
+  size_t index;
+
+  if (paths == NULL) {
+    return;
+  }
+  for (index = 0U; index < paths->count; ++index) {
+    lc_pouch_free(&store->allocator, paths->items[index]);
+  }
+  lc_pouch_free(&store->allocator, paths->items);
+  memset(paths, 0, sizeof(*paths));
+}
+
+static int lc_pouch_disk_segment_path_compare(const void *left,
+                                              const void *right) {
+  const char *const *left_path;
+  const char *const *right_path;
+
+  left_path = (const char *const *)left;
+  right_path = (const char *const *)right;
+  return strcmp(*left_path, *right_path);
+}
+
+static int lc_pouch_disk_segment_replay_paths_add(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
+    char *path) {
+  char **grown;
+  size_t new_capacity;
+
+  if (paths->count >= paths->capacity) {
+    new_capacity = paths->capacity == 0U ? 8U : paths->capacity * 2U;
+    grown = (char **)lc_pouch_realloc(&store->allocator, paths->items,
+                                      new_capacity * sizeof(paths->items[0]));
+    if (grown == NULL) {
+      return 0;
+    }
+    paths->items = grown;
+    paths->capacity = new_capacity;
+  }
+  paths->items[paths->count++] = path;
+  return 1;
+}
+
+static int lc_pouch_disk_collect_active_segment_paths(
+    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
+    lc_error *error) {
+  DIR *root_dir;
+  struct dirent *entry;
+  int rc;
+
+  memset(paths, 0, sizeof(*paths));
+  root_dir = opendir(store->root_path);
+  if (root_dir == NULL) {
+    return lc_pouch_set_errno(error, "failed to open pouch root directory");
+  }
+  rc = LC_OK;
+  while ((entry = readdir(root_dir)) != NULL) {
+    struct stat st;
+    char *namespace_path;
+    char *logstore_path;
+    char *segments_path;
+    char *segment_path;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    namespace_path = NULL;
+    logstore_path = NULL;
+    segments_path = NULL;
+    segment_path = NULL;
+    namespace_path =
+        lc_pouch_join_path(&store->allocator, store->root_path, entry->d_name);
+    logstore_path =
+        namespace_path != NULL
+            ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+            : NULL;
+    segments_path =
+        logstore_path != NULL
+            ? lc_pouch_join_path(&store->allocator, logstore_path, "segments")
+            : NULL;
+    segment_path =
+        segments_path != NULL
+            ? lc_pouch_join_path(&store->allocator, segments_path,
+                                 "seg-0000000000000001.log")
+            : NULL;
+    if (namespace_path == NULL || logstore_path == NULL ||
+        segments_path == NULL || segment_path == NULL) {
+      lc_pouch_free(&store->allocator, namespace_path);
+      lc_pouch_free(&store->allocator, logstore_path);
+      lc_pouch_free(&store->allocator, segments_path);
+      lc_pouch_free(&store->allocator, segment_path);
+      rc = lc_pouch_set_nomem(error, "failed to allocate pouch segment path");
+      break;
+    }
+    errno = 0;
+    if (stat(segment_path, &st) == 0 && S_ISREG(st.st_mode) &&
+        st.st_size > 0) {
+      if (!lc_pouch_disk_segment_replay_paths_add(store, paths, segment_path)) {
+        lc_pouch_free(&store->allocator, namespace_path);
+        lc_pouch_free(&store->allocator, logstore_path);
+        lc_pouch_free(&store->allocator, segments_path);
+        lc_pouch_free(&store->allocator, segment_path);
+        rc = lc_pouch_set_nomem(error,
+                                "failed to collect pouch segment replay path");
+        break;
+      }
+      segment_path = NULL;
+    } else if (errno != ENOENT && errno != ENOTDIR && errno != 0) {
+      lc_pouch_free(&store->allocator, namespace_path);
+      lc_pouch_free(&store->allocator, logstore_path);
+      lc_pouch_free(&store->allocator, segments_path);
+      lc_pouch_free(&store->allocator, segment_path);
+      rc = lc_pouch_set_errno(error, "failed to stat pouch segment");
+      break;
+    }
+    lc_pouch_free(&store->allocator, namespace_path);
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, segments_path);
+    lc_pouch_free(&store->allocator, segment_path);
+  }
+  if (closedir(root_dir) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch root directory");
+  }
+  if (rc != LC_OK) {
+    lc_pouch_disk_segment_replay_paths_cleanup(store, paths);
+    return rc;
+  }
+  if (paths->count > 1U) {
+    qsort(paths->items, paths->count, sizeof(paths->items[0]),
+          lc_pouch_disk_segment_path_compare);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_replay_active_segments(lc_pouch_disk_store *store,
+                                                int *found,
+                                                lc_error *error) {
+  lc_pouch_disk_segment_replay_paths paths;
+  size_t index;
+  int rc;
+
+  if (found != NULL) {
+    *found = 0;
+  }
+  rc = lc_pouch_disk_collect_active_segment_paths(store, &paths, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (paths.count == 0U) {
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &paths);
+    return LC_OK;
+  }
+  if (found != NULL) {
+    *found = 1;
+  }
+  for (index = 0U; index < paths.count; ++index) {
+    lc_pouch_disk_replay_input input;
+    unsigned long ignored_offset;
+    int fd;
+
+    fd = open(paths.items[index], O_RDONLY);
+    if (fd < 0) {
+      rc = lc_pouch_set_errno(error, "failed to open pouch segment");
+      break;
+    }
+    input.store = store;
+    input.fd = fd;
+    input.path = paths.items[index];
+    ignored_offset = 0UL;
+    rc = lc_pouch_disk_replay_input_records(&input, index == 0U, 0,
+                                            &ignored_offset, error);
+    if (close(fd) != 0 && rc == LC_OK) {
+      rc = lc_pouch_set_errno(error, "failed to close pouch segment");
+    }
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  lc_pouch_disk_segment_replay_paths_cleanup(store, &paths);
+  return rc;
 }
 
 static int lc_pouch_disk_replay(lc_pouch_disk_store *store, lc_error *error) {
   lc_pouch_disk_replay_input input;
+  struct stat st;
+  unsigned long offset;
+  int found_segments;
+  int rc;
+
+  rc = lc_pouch_disk_replay_active_segments(store, &found_segments, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (found_segments) {
+    if (fstat(store->log_fd, &st) != 0) {
+      return lc_pouch_set_errno(error, "failed to stat pouch log");
+    }
+    store->replayed_log_size = (unsigned long)st.st_size;
+    return LC_OK;
+  }
 
   input.store = store;
   input.fd = store->log_fd;
   input.path = store->log_path;
-  return lc_pouch_disk_replay_input_records(&input, error);
+  offset = 0UL;
+  rc = lc_pouch_disk_replay_input_records(&input, 1, 1, &offset, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  store->replayed_log_size = offset;
+  return LC_OK;
 }
 
 static size_t lc_pouch_file_source_read(lc_source *self, void *buffer,
@@ -11001,6 +11408,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   unsigned long payload_offset;
   unsigned long src_body_offset;
   unsigned long src_body_length;
+  const char *src_body_path;
   long src_size;
   long now_unix;
   int existing;
@@ -11086,6 +11494,8 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   }
   src_body_offset = src_entry->body_offset;
   src_body_length = src_entry->body_length;
+  src_body_path = src_entry->body_path != NULL ? src_entry->body_path
+                                               : store->log_path;
   src_size = src_entry->size;
   existing = lc_pouch_disk_find_object_by_name(store, namespace_name, dst_key,
                                                name);
@@ -11098,7 +11508,7 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
                         "pouch attachment already exists", NULL,
                         "attachment_exists", NULL);
   }
-  read_fd = open(store->log_path, O_RDONLY);
+  read_fd = open(src_body_path, O_RDONLY);
   if (read_fd < 0) {
     lc_pouch_free(&store->allocator, src_plaintext_sha256);
     lc_pouch_free(&store->allocator, src_content_type);
