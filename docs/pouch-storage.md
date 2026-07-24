@@ -576,12 +576,15 @@ instance-level choice with the same operational role as the server disk store's
 query backend mode: a caller can intentionally run a pouch instance in scan
 mode even though indexed mode is the normal production route. The public client
 sets this directly on a pouch endpoint with
-`pouch:///path?query_engine=scan&query_fallback_engine=index`. The disk backend
-also exposes the same choice through `lc_pouch_disk_open_with_options`, where
+`pouch:///path?query_engine=scan&query_fallback_engine=index`. The same endpoint
+query parser accepts `single_writer=true` for deployments that can promise one
+active writer and want the marker-synced refresh fast path. The disk backend
+also exposes these choices through `lc_pouch_disk_open_with_options`, where
 `query_engine=index` is the default, `query_engine=scan` forces the log-backed
-ordered scan route, and `query_fallback_engine` is explicit rather than
-implicit. Scan mode is useful for tiny stores, diagnostics, index rebuild
-validation, and early deployments before a particular index feature exists.
+ordered scan route, `query_fallback_engine` is explicit rather than implicit,
+and `single_writer` is disabled by default. Scan mode is useful for tiny stores,
+diagnostics, index rebuild validation, and early deployments before a particular
+index feature exists.
 
 This configuration is part of pouch setup, not just a per-request hint. A pouch
 instance opened with scan as the preferred engine must route ordinary match-all
@@ -1040,15 +1043,18 @@ mtime granularity is unreliable. Marker snapshots must ignore the current
 writer's own marker and compare other writers by name, size, and modification
 time. The current C backend uses peer-marker snapshots to avoid repeated
 manifest/segment scans after an independent handle has refreshed from a peer,
-and periodically falls back to segment validation so marker hints cannot hide
-external rewrites indefinitely. A later directory-mtime fast path should reduce
-the marker scan cost itself while still forcing full marker scans on a bounded
-interval.
+uses marker-directory mtime and size as a fast path to avoid full marker
+directory scans, stats cached peer markers when directory metadata is unchanged,
+and periodically falls back to full marker scans plus segment validation so
+marker hints cannot hide external rewrites indefinitely.
 
 Refresh needs two modes:
 
 - normal refresh may skip segment scans when peer markers and marker directory
   state are unchanged;
+- single-writer refresh may skip marker and segment scans after the handle has
+  synced once, because the mode promises that no peer writer is mutating the
+  store;
 - forced refresh always scans manifest, snapshots, and segments.
 
 Forced refresh is required before concluding that a CAS target does not exist

@@ -200,7 +200,15 @@ typedef struct lc_pouch_disk_marker_snapshot_entry {
   char *path;
   unsigned long size;
   long mtime;
+  long mtime_nsec;
 } lc_pouch_disk_marker_snapshot_entry;
+
+typedef struct lc_pouch_disk_marker_dir_snapshot_entry {
+  char *path;
+  unsigned long size;
+  long mtime;
+  long mtime_nsec;
+} lc_pouch_disk_marker_dir_snapshot_entry;
 
 typedef struct lc_pouch_disk_store {
   lc_pouch_store pub;
@@ -213,6 +221,7 @@ typedef struct lc_pouch_disk_store {
   char *logstore_writer_marker_leaf;
   char *query_engine;
   char *query_fallback_engine;
+  int single_writer;
   lc_pouch_read_cache_owner *read_cache_owner;
   int log_fd;
   int lock_fd;
@@ -258,6 +267,9 @@ typedef struct lc_pouch_disk_store {
   lc_pouch_disk_marker_snapshot_entry *marker_snapshot_entries;
   size_t marker_snapshot_entry_count;
   size_t marker_snapshot_entry_capacity;
+  lc_pouch_disk_marker_dir_snapshot_entry *marker_dir_snapshot_entries;
+  size_t marker_dir_snapshot_entry_count;
+  size_t marker_dir_snapshot_entry_capacity;
   int marker_snapshot_synced;
   unsigned long marker_snapshot_clean_checks;
   lc_pouch_fsync_stats fsync_stats;
@@ -2379,6 +2391,10 @@ static int lc_pouch_disk_validate_open_opts(const lc_pouch_disk_open_opts *opts,
     return lc_pouch_set_invalid(
         error, "pouch disk query_fallback_engine must be none, index, or scan");
   }
+  if (opts->single_writer != 0 && opts->single_writer != 1) {
+    return lc_pouch_set_invalid(error,
+                                "pouch disk single_writer must be 0 or 1");
+  }
   return LC_OK;
 }
 
@@ -3038,8 +3054,30 @@ static int lc_pouch_disk_marker_snapshot_compare(const void *left,
   return strcmp(left_entry->path, right_entry->path);
 }
 
+static long lc_pouch_disk_stat_mtime_nsec(const struct stat *st) {
+#if defined(__APPLE__)
+  return (long)st->st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+  (void)st;
+  return 0L;
+#else
+  return (long)st->st_mtim.tv_nsec;
+#endif
+}
+
 static void lc_pouch_disk_marker_snapshot_entries_cleanup(
     lc_pouch_disk_store *store, lc_pouch_disk_marker_snapshot_entry *entries,
+    size_t count) {
+  size_t index;
+
+  for (index = 0U; index < count; ++index) {
+    lc_pouch_free(&store->allocator, entries[index].path);
+  }
+  lc_pouch_free(&store->allocator, entries);
+}
+
+static void lc_pouch_disk_marker_dir_snapshot_entries_cleanup(
+    lc_pouch_disk_store *store, lc_pouch_disk_marker_dir_snapshot_entry *entries,
     size_t count) {
   size_t index;
 
@@ -3056,9 +3094,15 @@ static void lc_pouch_disk_marker_snapshot_cleanup(lc_pouch_disk_store *store) {
   lc_pouch_disk_marker_snapshot_entries_cleanup(
       store, store->marker_snapshot_entries,
       store->marker_snapshot_entry_count);
+  lc_pouch_disk_marker_dir_snapshot_entries_cleanup(
+      store, store->marker_dir_snapshot_entries,
+      store->marker_dir_snapshot_entry_count);
   store->marker_snapshot_entries = NULL;
   store->marker_snapshot_entry_count = 0U;
   store->marker_snapshot_entry_capacity = 0U;
+  store->marker_dir_snapshot_entries = NULL;
+  store->marker_dir_snapshot_entry_count = 0U;
+  store->marker_dir_snapshot_entry_capacity = 0U;
   store->marker_snapshot_synced = 0;
   store->marker_snapshot_clean_checks = 0UL;
 }
@@ -3082,8 +3126,127 @@ static int lc_pouch_disk_marker_snapshot_add(
   (*entries)[*count].path = path;
   (*entries)[*count].size = (unsigned long)st->st_size;
   (*entries)[*count].mtime = (long)st->st_mtime;
+  (*entries)[*count].mtime_nsec = lc_pouch_disk_stat_mtime_nsec(st);
   (*count)++;
   return 1;
+}
+
+static int lc_pouch_disk_marker_dir_snapshot_compare(const void *left,
+                                                     const void *right) {
+  const lc_pouch_disk_marker_dir_snapshot_entry *left_entry;
+  const lc_pouch_disk_marker_dir_snapshot_entry *right_entry;
+
+  left_entry = (const lc_pouch_disk_marker_dir_snapshot_entry *)left;
+  right_entry = (const lc_pouch_disk_marker_dir_snapshot_entry *)right;
+  return strcmp(left_entry->path, right_entry->path);
+}
+
+static int lc_pouch_disk_marker_dir_snapshot_add(
+    lc_pouch_disk_store *store,
+    lc_pouch_disk_marker_dir_snapshot_entry **entries, size_t *count,
+    size_t *capacity, char *path, const struct stat *st) {
+  lc_pouch_disk_marker_dir_snapshot_entry *grown;
+  size_t new_capacity;
+
+  if (*count >= *capacity) {
+    new_capacity = *capacity == 0U ? 8U : *capacity * 2U;
+    grown = (lc_pouch_disk_marker_dir_snapshot_entry *)lc_pouch_realloc(
+        &store->allocator, *entries, new_capacity * sizeof((*entries)[0]));
+    if (grown == NULL) {
+      return 0;
+    }
+    *entries = grown;
+    *capacity = new_capacity;
+  }
+  (*entries)[*count].path = path;
+  (*entries)[*count].size = (unsigned long)st->st_size;
+  (*entries)[*count].mtime = (long)st->st_mtime;
+  (*entries)[*count].mtime_nsec = lc_pouch_disk_stat_mtime_nsec(st);
+  (*count)++;
+  return 1;
+}
+
+static int lc_pouch_disk_collect_marker_dir_snapshot(
+    lc_pouch_disk_store *store,
+    lc_pouch_disk_marker_dir_snapshot_entry **entries, size_t *count,
+    size_t *capacity, lc_error *error) {
+  DIR *root_dir;
+  struct dirent *entry;
+  int rc;
+
+  *entries = NULL;
+  *count = 0U;
+  *capacity = 0U;
+  root_dir = opendir(store->root_path);
+  if (root_dir == NULL) {
+    return lc_pouch_set_errno(error, "failed to open pouch root directory");
+  }
+  rc = LC_OK;
+  while ((entry = readdir(root_dir)) != NULL) {
+    char *namespace_path;
+    char *logstore_path;
+    char *markers_path;
+    char *copy;
+    struct stat st;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    namespace_path =
+        lc_pouch_join_path(&store->allocator, store->root_path, entry->d_name);
+    logstore_path =
+        namespace_path != NULL
+            ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+            : NULL;
+    markers_path =
+        logstore_path != NULL
+            ? lc_pouch_join_path(&store->allocator, logstore_path, "markers")
+            : NULL;
+    if (namespace_path == NULL || logstore_path == NULL ||
+        markers_path == NULL) {
+      lc_pouch_free(&store->allocator, namespace_path);
+      lc_pouch_free(&store->allocator, logstore_path);
+      lc_pouch_free(&store->allocator, markers_path);
+      rc = lc_pouch_set_nomem(error, "failed to allocate pouch marker path");
+      break;
+    }
+    errno = 0;
+    if (stat(markers_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+      copy = lc_pouch_strdup(&store->allocator, markers_path);
+      if (copy == NULL) {
+        rc = lc_pouch_set_nomem(
+            error, "failed to allocate pouch marker directory snapshot");
+      } else if (!lc_pouch_disk_marker_dir_snapshot_add(
+                     store, entries, count, capacity, copy, &st)) {
+        lc_pouch_free(&store->allocator, copy);
+        rc = lc_pouch_set_nomem(
+            error, "failed to collect pouch marker directory snapshot");
+      }
+    } else if (errno != ENOENT && errno != ENOTDIR && errno != 0) {
+      rc = lc_pouch_set_errno(error, "failed to stat pouch markers directory");
+    }
+    lc_pouch_free(&store->allocator, markers_path);
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, namespace_path);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  if (closedir(root_dir) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch root directory");
+  }
+  if (rc != LC_OK) {
+    lc_pouch_disk_marker_dir_snapshot_entries_cleanup(store, *entries, *count);
+    *entries = NULL;
+    *count = 0U;
+    *capacity = 0U;
+    return rc;
+  }
+  if (*count > 1U) {
+    qsort(*entries, *count, sizeof((*entries)[0]),
+          lc_pouch_disk_marker_dir_snapshot_compare);
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_disk_collect_marker_snapshot(
@@ -3207,19 +3370,78 @@ static int lc_pouch_disk_marker_snapshot_equal(
   for (index = 0U; index < left_count; ++index) {
     if (strcmp(left[index].path, right[index].path) != 0 ||
         left[index].size != right[index].size ||
-        left[index].mtime != right[index].mtime) {
+        left[index].mtime != right[index].mtime ||
+        left[index].mtime_nsec != right[index].mtime_nsec) {
       return 0;
     }
   }
   return 1;
 }
 
+static int lc_pouch_disk_marker_dir_snapshot_equal(
+    const lc_pouch_disk_marker_dir_snapshot_entry *left, size_t left_count,
+    const lc_pouch_disk_marker_dir_snapshot_entry *right, size_t right_count) {
+  size_t index;
+
+  if (left_count != right_count) {
+    return 0;
+  }
+  for (index = 0U; index < left_count; ++index) {
+    if (strcmp(left[index].path, right[index].path) != 0 ||
+        left[index].size != right[index].size ||
+        left[index].mtime != right[index].mtime ||
+        left[index].mtime_nsec != right[index].mtime_nsec) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_disk_cached_marker_snapshot_changed(
+    lc_pouch_disk_store *store, int *changed, lc_error *error) {
+  size_t index;
+
+  if (changed != NULL) {
+    *changed = 0;
+  }
+  for (index = 0U; index < store->marker_snapshot_entry_count; ++index) {
+    lc_pouch_disk_marker_snapshot_entry *entry;
+    struct stat st;
+
+    entry = &store->marker_snapshot_entries[index];
+    errno = 0;
+    if (stat(entry->path, &st) == 0 && S_ISREG(st.st_mode)) {
+      if ((unsigned long)st.st_size != entry->size ||
+          (long)st.st_mtime != entry->mtime ||
+          lc_pouch_disk_stat_mtime_nsec(&st) != entry->mtime_nsec) {
+        if (changed != NULL) {
+          *changed = 1;
+        }
+        return LC_OK;
+      }
+    } else if (errno == ENOENT || errno == ENOTDIR) {
+      if (changed != NULL) {
+        *changed = 1;
+      }
+      return LC_OK;
+    } else {
+      return lc_pouch_set_errno(error, "failed to stat pouch marker");
+    }
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_disk_marker_snapshot_changed(lc_pouch_disk_store *store,
+                                                 int force_marker_scan,
                                                  int *changed,
                                                  lc_error *error) {
   lc_pouch_disk_marker_snapshot_entry *entries;
+  lc_pouch_disk_marker_dir_snapshot_entry *dir_entries;
   size_t count;
   size_t capacity;
+  size_t dir_count;
+  size_t dir_capacity;
+  int dirs_equal;
   int equal;
   int rc;
 
@@ -3229,9 +3451,38 @@ static int lc_pouch_disk_marker_snapshot_changed(lc_pouch_disk_store *store,
   entries = NULL;
   count = 0U;
   capacity = 0U;
+  dir_entries = NULL;
+  dir_count = 0U;
+  dir_capacity = 0U;
+  rc = lc_pouch_disk_collect_marker_dir_snapshot(
+      store, &dir_entries, &dir_count, &dir_capacity, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  dirs_equal =
+      store->marker_snapshot_synced &&
+      lc_pouch_disk_marker_dir_snapshot_equal(
+          store->marker_dir_snapshot_entries,
+          store->marker_dir_snapshot_entry_count, dir_entries, dir_count);
+  if (dirs_equal && !force_marker_scan) {
+    if (store->marker_snapshot_entry_count == 0U) {
+      lc_pouch_disk_marker_dir_snapshot_entries_cleanup(store, dir_entries,
+                                                        dir_count);
+      if (changed != NULL) {
+        *changed = 0;
+      }
+      return LC_OK;
+    }
+    rc = lc_pouch_disk_cached_marker_snapshot_changed(store, changed, error);
+    lc_pouch_disk_marker_dir_snapshot_entries_cleanup(store, dir_entries,
+                                                      dir_count);
+    return rc;
+  }
   rc = lc_pouch_disk_collect_marker_snapshot(store, &entries, &count, &capacity,
                                              error);
   if (rc != LC_OK) {
+    lc_pouch_disk_marker_dir_snapshot_entries_cleanup(store, dir_entries,
+                                                      dir_count);
     return rc;
   }
   equal = store->marker_snapshot_synced &&
@@ -3244,6 +3495,12 @@ static int lc_pouch_disk_marker_snapshot_changed(lc_pouch_disk_store *store,
   store->marker_snapshot_entries = entries;
   store->marker_snapshot_entry_count = count;
   store->marker_snapshot_entry_capacity = capacity;
+  lc_pouch_disk_marker_dir_snapshot_entries_cleanup(
+      store, store->marker_dir_snapshot_entries,
+      store->marker_dir_snapshot_entry_count);
+  store->marker_dir_snapshot_entries = dir_entries;
+  store->marker_dir_snapshot_entry_count = dir_count;
+  store->marker_dir_snapshot_entry_capacity = dir_capacity;
   store->marker_snapshot_synced = 1;
   if (changed != NULL) {
     *changed = !equal;
@@ -3256,7 +3513,7 @@ static void lc_pouch_disk_sync_marker_snapshot(lc_pouch_disk_store *store) {
   int ignored_changed;
 
   memset(&ignored_error, 0, sizeof(ignored_error));
-  (void)lc_pouch_disk_marker_snapshot_changed(store, &ignored_changed,
+  (void)lc_pouch_disk_marker_snapshot_changed(store, 1, &ignored_changed,
                                               &ignored_error);
   lc_error_cleanup(&ignored_error);
 }
@@ -3267,6 +3524,8 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
   struct stat path_st;
   unsigned long segment_generation;
   int marker_changed;
+  int marker_checked;
+  int force_marker_scan;
   int found_segments;
   int new_fd;
   int rc;
@@ -3308,10 +3567,20 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
     }
   }
   marker_changed = 1;
+  marker_checked = 0;
+  if (store->single_writer && store->marker_snapshot_synced &&
+      store->replayed_segment_generation != (unsigned long)-1) {
+    return LC_OK;
+  }
   if (store->replayed_segment_generation != (unsigned long)-1 &&
       store->marker_snapshot_synced &&
       store->marker_snapshot_entry_count > 0U) {
-    rc = lc_pouch_disk_marker_snapshot_changed(store, &marker_changed, error);
+    force_marker_scan =
+        ((store->marker_snapshot_clean_checks + 1UL) %
+         LC_POUCH_MARKER_FORCE_SCAN_EVERY) == 0UL;
+    rc = lc_pouch_disk_marker_snapshot_changed(
+        store, force_marker_scan, &marker_changed, error);
+    marker_checked = 1;
     if (rc != LC_OK) {
       lock.l_type = F_UNLCK;
       (void)fcntl(store->lock_fd, F_SETLK, &lock);
@@ -3335,7 +3604,8 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
     return rc;
   }
   if (found_segments) {
-    if (segment_generation == store->replayed_segment_generation) {
+    if (segment_generation == store->replayed_segment_generation &&
+        (!marker_checked || !marker_changed)) {
       return LC_OK;
     }
     store->lock_replay_refreshes++;
@@ -15045,6 +15315,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->replayed_log_size = (unsigned long)-1;
   store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_query_index_size = (unsigned long)-1;
+  store->single_writer = opts != NULL ? opts->single_writer : 0;
   store->next_version = 1L;
   store->pub.impl = store;
   store->read_cache_owner =

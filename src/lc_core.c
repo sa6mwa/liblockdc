@@ -973,6 +973,7 @@ typedef struct lc_pouch_endpoint_options {
   char *root_path;
   char *query_engine;
   char *query_fallback_engine;
+  int single_writer;
 } lc_pouch_endpoint_options;
 
 static void lc_pouch_endpoint_options_cleanup(
@@ -1123,6 +1124,32 @@ static int lc_pouch_endpoint_parse_option(
     }
     lc_free_with_allocator(allocator, options->query_fallback_engine);
     options->query_fallback_engine = copy;
+    lc_free_with_allocator(allocator, decoded_key);
+    return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "single_writer") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_single_writer")) {
+    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                              "single_writer", error);
+    if (copy == NULL) {
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    if (strcmp(copy, "true") == 0 || strcmp(copy, "1") == 0) {
+      options->single_writer = 1;
+    } else if (strcmp(copy, "false") == 0 || strcmp(copy, "0") == 0) {
+      options->single_writer = 0;
+    } else {
+      lc_free_with_allocator(allocator, copy);
+      lc_free_with_allocator(allocator, decoded_key);
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          "pouch endpoint single_writer must be true or false", NULL, NULL,
+          NULL);
+    }
+    lc_free_with_allocator(allocator, copy);
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
@@ -1430,6 +1457,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     memset(&pouch_open_opts, 0, sizeof(pouch_open_opts));
     pouch_open_opts.query_engine = effective_query_engine;
     pouch_open_opts.query_fallback_engine = effective_query_fallback_engine;
+    pouch_open_opts.single_writer = pouch_endpoint_options.single_writer;
     rc = lc_pouch_disk_open_with_options(
         pouch_endpoint_options.root_path, &client->pouch_allocator,
         &pouch_open_opts, &client->pouch_store, error);

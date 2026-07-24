@@ -5449,7 +5449,8 @@ test_pouch_endpoint_query_options_configure_scan_mode(void **state) {
   test_root_path(root, sizeof(root), "query-mode-url");
   test_cleanup_root(root);
   test_endpoint_with_query(endpoint, sizeof(endpoint), root,
-                           "query_engine=scan&query_fallback_engine=index");
+                           "query_engine=scan&query_fallback_engine=index&"
+                           "single_writer=true");
   memset(&error, 0, sizeof(error));
   memset(&res, 0, sizeof(res));
   client = open_pouch_client(endpoint);
@@ -5589,6 +5590,18 @@ static void test_pouch_endpoint_rejects_invalid_query_options(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(client);
   assert_string_equal(error.message, "unsupported pouch endpoint query option");
+  lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  test_endpoint_with_query(endpoint, sizeof(endpoint), root,
+                           "single_writer=maybe");
+  endpoints[0] = endpoint;
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch endpoint single_writer must be true or false");
   lc_error_cleanup(&error);
 
   memset(&error, 0, sizeof(error));

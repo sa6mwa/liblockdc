@@ -12326,6 +12326,16 @@ static void test_query_config_rejects_invalid_options(void **state) {
       error.message,
       "pouch disk query_fallback_engine must be none, index, or scan");
   lc_error_cleanup(&error);
+
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  opts.single_writer = 2;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(store);
+  assert_string_equal(error.message,
+                      "pouch disk single_writer must be 0 or 1");
+  lc_error_cleanup(&error);
   test_cleanup_root(root);
 }
 
@@ -14919,6 +14929,176 @@ test_marker_snapshot_skips_unchanged_independent_refresh(void **state) {
 }
 
 static void
+test_marker_dir_mtime_fast_path_stats_known_markers(void **state) {
+  char root[256];
+  char markers_path[512];
+  struct stat marker_dir_stat;
+  struct utimbuf marker_dir_times;
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *writer;
+  lc_pouch_store *reader;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "marker-dir-fast-path");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  writer = NULL;
+  reader = NULL;
+  body = NULL;
+  text = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "text/plain";
+  source = source_from_text("directory fast path");
+  rc = writer->write_state(writer, "default", "dir-fast-path-key", source,
+                           &opts, &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+
+  rc = reader->read_state(reader, "default", "dir-fast-path-key", &body,
+                          &state_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  text = read_source_text(body);
+  assert_string_equal(text, "directory fast path");
+  free(text);
+  text = NULL;
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+  memset(&state_info, 0, sizeof(state_info));
+
+  snprintf(markers_path, sizeof(markers_path), "%s/default/logstore/markers",
+           root);
+  assert_int_equal(stat(markers_path, &marker_dir_stat), 0);
+  source = source_from_text("directory fast path changed");
+  rc = writer->write_state(writer, "default", "dir-fast-path-key", source,
+                           &opts, &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  marker_dir_times.actime = marker_dir_stat.st_atime;
+  marker_dir_times.modtime = marker_dir_stat.st_mtime;
+  assert_int_equal(utime(markers_path, &marker_dir_times), 0);
+
+  rc = reader->read_state(reader, "default", "dir-fast-path-key", &body,
+                          &state_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  text = read_source_text(body);
+  assert_string_equal(text, "directory fast path changed");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = reader->close(reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = writer->close(writer, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
+test_single_writer_mode_skips_peer_refresh_after_sync(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_disk_open_opts opts;
+  lc_pouch_store *writer;
+  lc_pouch_store *reader;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "single-writer-refresh");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&opts, 0, sizeof(opts));
+  memset(&error, 0, sizeof(error));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  writer = NULL;
+  reader = NULL;
+  body = NULL;
+  text = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("single-writer-v1");
+  rc = writer->write_state(writer, "default", "single-writer-key", source,
+                           NULL, &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  opts.single_writer = 1;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &reader,
+                                       &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = reader->read_state(reader, "default", "single-writer-key", &body,
+                          &state_info, &error);
+  assert_int_equal(rc, LC_OK);
+  text = read_source_text(body);
+  assert_string_equal(text, "single-writer-v1");
+  free(text);
+  text = NULL;
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+  memset(&state_info, 0, sizeof(state_info));
+
+  source = source_from_text("single-writer-v2");
+  rc = writer->write_state(writer, "default", "single-writer-key", source,
+                           NULL, &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+
+  rc = reader->read_state(reader, "default", "single-writer-key", &body,
+                          &state_info, &error);
+  assert_int_equal(rc, LC_OK);
+  text = read_source_text(body);
+  assert_string_equal(text, "single-writer-v1");
+  free(text);
+  lc_source_close(body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = reader->close(reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = writer->close(writer, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_writer_marker_touch_failure_does_not_rollback_commit(void **state) {
   char root[256];
   char marker_path[512];
@@ -15144,6 +15324,9 @@ int main(void) {
           test_logstore_writer_marker_updates_after_namespace_commit),
       cmocka_unit_test(
           test_marker_snapshot_skips_unchanged_independent_refresh),
+      cmocka_unit_test(
+          test_marker_dir_mtime_fast_path_stats_known_markers),
+      cmocka_unit_test(test_single_writer_mode_skips_peer_refresh_after_sync),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),
       cmocka_unit_test(test_list_namespaces_reports_live_projection_names),

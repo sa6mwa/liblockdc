@@ -212,6 +212,7 @@ typedef struct lc_pouch_query_config {
 typedef struct lc_pouch_disk_open_opts {
   const char *query_engine;
   const char *query_fallback_engine;
+  int single_writer;
 } lc_pouch_disk_open_opts;
 
 typedef struct lc_pouch_object_info {

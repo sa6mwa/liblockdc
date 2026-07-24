@@ -417,7 +417,7 @@ Latest release targets confirmed on 2026-07-23:
         passes.
       - [ ] Keep manual `compact(force|if_needed)` deterministic and
         foreground-safe even when background scheduling is enabled.
-    - [ ] Add Go disk-style marker lifecycle for segmented pouch logstores.
+    - [x] Add Go disk-style marker lifecycle for segmented pouch logstores.
       - [x] Clarify and implement root-level writer-presence markers for
         exclusive writer detection/fencing, separate from namespace logstore
         query/segment files.
@@ -428,10 +428,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Cache peer writer marker snapshots by name, modtime, and size and
         periodically force segment scans so marker hints cannot suppress all
         fallback validation indefinitely.
-      - [ ] Add a marker-directory mtime fast path for the peer-marker snapshot
+      - [x] Add a marker-directory mtime fast path for the peer-marker snapshot
         cache, with periodic forced full marker scans because filesystem/NFS
         mtime granularity can hide changes.
-      - [ ] In single-writer mode, allow marker-synced handles to skip refresh
+      - [x] In single-writer mode, allow marker-synced handles to skip refresh
         scans unless forced, matching Go disk's native single-writer
         optimization.
       - [x] Cover marker creation, marker payload toggling, peer marker
