@@ -775,9 +775,9 @@ branches remain deterministic fallback rather than risking false negatives.
 Exact `not exists` leaves under recursive `and` composition are also used as
 storage-owned exclusions: candidate scans reject keys with live postings for the
 excluded JSON Pointer field before final `liblql` acceptance.
-String-literal `not eq` leaves under recursive `and` composition similarly
-exclude keys with live exact text equality postings for that field/value; typed
-non-string equality exclusions remain final-acceptance-only.
+Scalar `not eq` leaves under recursive `and` composition similarly exclude keys
+with live exact string, boolean, or null equality postings for that field/value;
+selector semantics still remain final `liblql` acceptance.
 Date selectors use indexed field-presence postings for their strict JSON
 Pointer field as a candidate superset. Pouch does not duplicate liblql's
 datetime parser or comparison rules; final date acceptance remains in `liblql`.

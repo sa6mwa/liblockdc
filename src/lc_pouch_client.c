@@ -6506,6 +6506,73 @@ lc_pouch_lql_not_eq_hint_string_end(void *user, const lonejson_value_path *path,
   return LONEJSON_STATUS_OK;
 }
 
+static lonejson_status
+lc_pouch_lql_not_eq_hint_bool_value(void *user, const lonejson_value_path *path,
+                                    int value, lonejson_error *error) {
+  lc_pouch_lql_eq_hint_visit *visit;
+  lc_pouch_lql_eq_hint_term *term;
+  const char *encoded;
+  size_t term_index;
+
+  (void)error;
+  visit = (lc_pouch_lql_eq_hint_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (!lc_pouch_lql_not_eq_hint_path_is_member(path, "value", &term_index)) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (!lc_pouch_lql_eq_hint_ensure_term(visit, term_index)) {
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  term = &visit->terms[term_index];
+  encoded = value ? "b:1" : "b:0";
+  term->value_len = 0U;
+  if (term->value != NULL) {
+    term->value[0] = '\0';
+  }
+  if (!lc_pouch_lql_eq_hint_append(&term->value, &term->value_len,
+                                   &term->value_capacity, encoded,
+                                   strlen(encoded))) {
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  term->saw_value = 1;
+  term->value_supported = 1;
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_not_eq_hint_null_value(void *user, const lonejson_value_path *path,
+                                    lonejson_error *error) {
+  lc_pouch_lql_eq_hint_visit *visit;
+  lc_pouch_lql_eq_hint_term *term;
+  size_t term_index;
+
+  (void)error;
+  visit = (lc_pouch_lql_eq_hint_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (!lc_pouch_lql_not_eq_hint_path_is_member(path, "value", &term_index)) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (!lc_pouch_lql_eq_hint_ensure_term(visit, term_index)) {
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  term = &visit->terms[term_index];
+  term->value_len = 0U;
+  if (term->value != NULL) {
+    term->value[0] = '\0';
+  }
+  if (!lc_pouch_lql_eq_hint_append(&term->value, &term->value_len,
+                                   &term->value_capacity, "z:", 2U)) {
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  term->saw_value = 1;
+  term->value_supported = 1;
+  return LONEJSON_STATUS_OK;
+}
+
 static void
 lc_pouch_lql_not_eq_hint_parse(const char *selector_json,
                                lc_pouch_document_eq_term **terms_out,
@@ -6535,6 +6602,8 @@ lc_pouch_lql_not_eq_hint_parse(const char *selector_json,
   visitor.string_begin = lc_pouch_lql_not_eq_hint_string_begin;
   visitor.string_chunk = lc_pouch_lql_not_eq_hint_string_chunk;
   visitor.string_end = lc_pouch_lql_not_eq_hint_string_end;
+  visitor.boolean_value = lc_pouch_lql_not_eq_hint_bool_value;
+  visitor.null_value = lc_pouch_lql_not_eq_hint_null_value;
   lonejson_error_init(&error);
   status = runtime->visit_path_value_cstr(runtime, selector_json, &visitor,
                                           &visit, &error);

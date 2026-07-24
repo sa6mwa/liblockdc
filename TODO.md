@@ -412,10 +412,10 @@ Latest release targets confirmed on 2026-07-23:
         under recursive `and` composition; candidate scans reject keys with live
         postings for the excluded JSON Pointer field while final predicate
         acceptance remains owned by `liblql`.
-      - [x] Add storage-owned exclusion for safe string-literal `not eq` leaves
-        under recursive `and` composition; candidate scans reject keys with live
-        exact text equality postings for the excluded field/value while typed
-        non-string equality remains final-acceptance-only.
+      - [x] Add storage-owned exclusion for safe scalar `not eq` leaves under
+        recursive `and` composition; candidate scans reject keys with live
+        exact string, boolean, or null equality postings for the excluded
+        field/value while final predicate acceptance remains owned by `liblql`.
       - [x] Add storage-owned field-presence candidate planning for `date`
         selectors and date-containing OR groups; final datetime, relative-date,
         and boundary semantics remain owned by `liblql`.
