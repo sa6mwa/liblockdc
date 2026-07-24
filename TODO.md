@@ -573,9 +573,11 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add interval scheduling for explicit scheduled maintenance ticks
         with observable `interval-not-elapsed` diagnostics and no effect on
         foreground-safe manual compaction.
+      - [x] Add cleanup-only maintenance passes that retry manifest-obsolete
+        segment/snapshot file cleanup without requiring scheduled compaction to
+        be enabled.
       - [ ] Add deadline scheduling, minimum sealed/snapshot candidates,
-        minimum reclaimable bytes, delete grace, cleanup-only maintenance
-        passes, and optional I/O throttling.
+        minimum reclaimable bytes, delete grace, and optional I/O throttling.
     - [x] Add Go disk-style marker lifecycle for segmented pouch logstores.
       - [x] Clarify and implement root-level writer-presence markers for
         exclusive writer detection/fencing, separate from namespace logstore

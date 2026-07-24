@@ -12448,9 +12448,10 @@ static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
     return lc_pouch_set_invalid(error, "maintenance requires store and output");
   }
   effective_mode = mode != NULL && mode[0] != '\0' ? mode : "scheduled";
-  if (strcmp(effective_mode, "scheduled") != 0) {
-    return lc_pouch_set_invalid(error,
-                                "pouch maintenance mode must be scheduled");
+  if (strcmp(effective_mode, "scheduled") != 0 &&
+      strcmp(effective_mode, "cleanup") != 0) {
+    return lc_pouch_set_invalid(
+        error, "pouch maintenance mode must be scheduled or cleanup");
   }
 
   store = (lc_pouch_disk_store *)self->impl;
@@ -12461,6 +12462,30 @@ static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
   }
   out->accepted = 1;
   out->compaction_enabled = store->background_compaction;
+  if (strcmp(effective_mode, "cleanup") == 0) {
+    rc = lc_pouch_disk_lock(store, error);
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+    rc = lc_pouch_disk_force_replay_locked(store, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_disk_unlock(store, error);
+    } else {
+      lc_pouch_disk_unlock(store, NULL);
+    }
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+    out->reason = lc_pouch_strdup(&store->allocator, "cleanup-completed");
+    if (out->reason == NULL) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return lc_pouch_set_nomem(error,
+                                "failed to copy pouch maintenance reason");
+    }
+    return LC_OK;
+  }
   if (!store->background_compaction) {
     out->reason = lc_pouch_strdup(&store->allocator, "background-disabled");
     if (out->reason == NULL) {

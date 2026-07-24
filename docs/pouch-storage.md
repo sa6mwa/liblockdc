@@ -568,9 +568,11 @@ I/O. Scheduled maintenance can be interval-throttled through the private disk
 open options: once a scheduled tick reaches the compaction decision path,
 subsequent ticks inside the configured interval return `interval-not-elapsed`
 without entering compaction. Manual `compact(force|if_needed)` is not throttled.
-Later lifecycle work can layer deadline scheduling, cleanup-only passes,
-reclaim-byte thresholds, delete grace, and throttling on that explicit
-store-owned path.
+`maintenance("cleanup")` runs the store-owned replay/manifest cleanup path
+without entering compaction, so manifest-obsolete segment and snapshot file
+deletes can be retried even when scheduled compaction is disabled. Later
+lifecycle work can layer deadline scheduling, reclaim-byte thresholds, delete
+grace, and throttling on that explicit store-owned path.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query

@@ -2751,6 +2751,102 @@ static void test_replay_cleans_obsolete_snapshot_files(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_maintenance_cleanup_cleans_obsolete_snapshot_files(
+    void **state) {
+  char root[256];
+  char segment_path[512];
+  char active_snapshot_path[512];
+  char obsolete_snapshot_path[512];
+  char manifest_path[512];
+  const char manifest_text[] = "snapshot snap-0000000000000001.log\n"
+                               "snapshot snap-0000000000000002.log\n"
+                               "obsolete snap-0000000000000001.log\n";
+  const char obsolete_text[] = "obsolete snapshot bytes";
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info info;
+  lc_pouch_maintenance_res maintenance;
+  lc_error error;
+  char *text;
+  int fd;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "maintenance-snapshot-cleanup");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&info, 0, sizeof(info));
+  memset(&maintenance, 0, sizeof(maintenance));
+  store = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  opts.content_type = "text/plain";
+  source = source_from_text("active-snapshot-body");
+  rc = store->write_state(store, "default", "snap-key", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  test_segment_path(root, "default", 1UL, segment_path, sizeof(segment_path));
+  test_snapshot_path(root, "default", 1UL, obsolete_snapshot_path,
+                     sizeof(obsolete_snapshot_path));
+  test_snapshot_path(root, "default", 2UL, active_snapshot_path,
+                     sizeof(active_snapshot_path));
+  assert_int_equal(rename(segment_path, active_snapshot_path), 0);
+  fd = open(obsolete_snapshot_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, obsolete_text, sizeof(obsolete_text) - 1U),
+                   (ssize_t)(sizeof(obsolete_text) - 1U));
+  assert_int_equal(close(fd), 0);
+
+  test_manifest_path(root, "default", manifest_path, sizeof(manifest_path));
+  fd = open(manifest_path, O_WRONLY | O_TRUNC);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, manifest_text, sizeof(manifest_text) - 1U),
+                   (ssize_t)(sizeof(manifest_text) - 1U));
+  assert_int_equal(close(fd), 0);
+
+  rc = store->maintenance(store, "cleanup", &maintenance, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance.mode, "cleanup");
+  assert_string_equal(maintenance.reason, "cleanup-completed");
+  assert_int_equal(maintenance.accepted, 1);
+  assert_int_equal(maintenance.compaction_enabled, 0);
+  assert_int_equal(maintenance.compaction.accepted, 0);
+  lc_pouch_maintenance_res_cleanup(&allocator, &maintenance);
+  assert_int_equal(access(obsolete_snapshot_path, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
+  assert_int_equal(access(active_snapshot_path, R_OK), 0);
+
+  rc = store->read_state(store, "default", "snap-key", &body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, put_res.new_state_etag);
+  assert_int_equal(info.version, put_res.new_version);
+  text = read_source_text(body);
+  assert_string_equal(text, "active-snapshot-body");
+  free(text);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_replay_ignores_root_store_log_without_segments(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -15720,6 +15816,7 @@ int main(void) {
       cmocka_unit_test(test_segment_replay_honors_manifest_obsolete),
       cmocka_unit_test(test_replay_installed_snapshot_without_segment_tail),
       cmocka_unit_test(test_replay_cleans_obsolete_snapshot_files),
+      cmocka_unit_test(test_maintenance_cleanup_cleans_obsolete_snapshot_files),
       cmocka_unit_test(test_replay_ignores_root_store_log_without_segments),
       cmocka_unit_test(test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
