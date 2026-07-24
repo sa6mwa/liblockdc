@@ -141,6 +141,12 @@ typedef struct lc_pouch_document_range_term {
   const char *lte;
 } lc_pouch_document_range_term;
 
+typedef struct lc_pouch_document_in_term {
+  const char *field;
+  const char *const *values;
+  size_t value_count;
+} lc_pouch_document_in_term;
+
 typedef struct lc_pouch_document_exists_term {
   const char *field;
 } lc_pouch_document_exists_term;
@@ -153,6 +159,8 @@ typedef struct lc_pouch_query_index_scan_req {
   size_t document_eq_term_count;
   const lc_pouch_document_range_term *document_range_terms;
   size_t document_range_term_count;
+  const lc_pouch_document_in_term *document_in_terms;
+  size_t document_in_term_count;
   const lc_pouch_document_exists_term *document_exists_terms;
   size_t document_exists_term_count;
   const char *start_after;

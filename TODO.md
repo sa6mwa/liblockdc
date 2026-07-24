@@ -282,6 +282,9 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Add storage-owned `exists` candidates for full-form LQL path-string
       selectors, including object/array container presence postings, with
       scan-mode and final predicate acceptance still owned by `liblql`.
+    - [x] Add storage-owned `in` candidates for full-form LQL string `any`
+      terms; values inside each `in` term are unioned, and separate supported
+      `and` children are intersected before final `liblql` acceptance.
     - [ ] Add true ordered range traversal if candidate volume requires it;
       current range narrowing preserves query key/cursor ordering by checking
       numeric field postings from the key-ordered summary scan.
@@ -290,8 +293,8 @@ Latest release targets confirmed on 2026-07-23:
       equality postings; final predicate acceptance remains owned by `liblql`.
     - [ ] Add index-native selector families comparable to Go lockd where they
       are meaningful for pouch/public LQL: prefix, case-insensitive prefix,
-      contains, case-insensitive contains, `in`, and recursive boolean
-      composition without devolving to full namespace scans.
+      contains, case-insensitive contains, and recursive boolean composition
+      without devolving to full namespace scans.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.
