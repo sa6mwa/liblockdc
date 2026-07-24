@@ -5460,6 +5460,197 @@ test_query_index_scan_orders_paginates_and_reports_seq(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_query_index_range_scans_field_posting_candidates(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res state_low;
+  lc_pouch_put_state_res state_mid;
+  lc_pouch_put_state_res state_more;
+  lc_pouch_put_state_res state_high;
+  lc_pouch_put_state_res state_removed;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_document_range_term range;
+  lc_pouch_document_eq_term eq;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int removed;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-range-candidates");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&state_low, 0, sizeof(state_low));
+  memset(&state_mid, 0, sizeof(state_mid));
+  memset(&state_more, 0, sizeof(state_more));
+  memset(&state_high, 0, sizeof(state_high));
+  memset(&state_removed, 0, sizeof(state_removed));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&range, 0, sizeof(range));
+  memset(&eq, 0, sizeof(eq));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  put_opts.content_type = "application/json";
+  source = source_from_text("{\"score\":1,\"kind\":\"include\"}");
+  rc = store->write_state(store, "default", "low", source, &put_opts,
+                          &state_low, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"score\":3,\"kind\":\"include\"}");
+  rc = store->write_state(store, "default", "mid", source, &put_opts,
+                          &state_mid, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"score\":4,\"kind\":\"include\"}");
+  rc = store->write_state(store, "default", "omega", source, &put_opts,
+                          &state_more, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"score\":5,\"kind\":\"include\"}");
+  rc = store->write_state(store, "default", "high", source, &put_opts,
+                          &state_high, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"score\":3,\"kind\":\"include\"}");
+  rc = store->write_state(store, "default", "removed", source, &put_opts,
+                          &state_removed, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->remove_state(store, "default", "removed",
+                           state_removed.new_state_etag, &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(removed);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-low";
+  meta.state_etag = state_low.new_state_etag;
+  meta.version = state_low.new_version;
+  meta.fencing_token = state_low.new_version;
+  rc = store->store_meta(store, "default", "low", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-mid";
+  meta.state_etag = state_mid.new_state_etag;
+  meta.version = state_mid.new_version;
+  meta.fencing_token = state_mid.new_version;
+  rc = store->store_meta(store, "default", "mid", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-omega";
+  meta.state_etag = state_more.new_state_etag;
+  meta.version = state_more.new_version;
+  meta.fencing_token = state_more.new_version;
+  rc = store->store_meta(store, "default", "omega", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-high";
+  meta.state_etag = state_high.new_state_etag;
+  meta.version = state_high.new_version;
+  meta.fencing_token = state_high.new_version;
+  rc = store->store_meta(store, "default", "high", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-removed";
+  meta.state_etag = state_removed.new_state_etag;
+  meta.version = state_removed.new_version;
+  meta.fencing_token = state_removed.new_version;
+  rc = store->store_meta(store, "default", "removed", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  range.field = "/score";
+  range.gte = "n:+:2:0";
+  range.lte = "n:+:4:0";
+  req.namespace_name = "default";
+  req.limit = 1U;
+  req.document_range_terms = &range;
+  req.document_range_term_count = 1U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "mid");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "mid");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&rows, 0, sizeof(rows));
+  req.start_after = "mid";
+  req.limit = 8U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "omega");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  req.start_after = NULL;
+  req.limit = 8U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "mid");
+  assert_string_equal(keys.keys[1], "omega");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  eq.field = "/kind";
+  eq.value = "s:missing";
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 0U);
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &state_removed);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_high);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_more);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_mid);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_low);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void
 test_query_index_keys_scan_avoids_metadata_row_copies(void **state) {
   char root[256];
@@ -15556,6 +15747,7 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_can_exclude_removed_state),
       cmocka_unit_test(test_metadata_scan_paginates_across_removed_state),
       cmocka_unit_test(test_query_index_scan_orders_paginates_and_reports_seq),
+      cmocka_unit_test(test_query_index_range_scans_field_posting_candidates),
       cmocka_unit_test(test_query_index_keys_scan_avoids_metadata_row_copies),
       cmocka_unit_test(test_query_owner_index_scans_candidates_and_replays),
       cmocka_unit_test(test_query_index_scans_exclude_removed_state),

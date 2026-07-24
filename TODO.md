@@ -262,11 +262,12 @@ Latest release targets confirmed on 2026-07-23:
   - [ ] Fully build out the pouch search/index engine toward Go lockd disk
     search parity, while keeping `liblql` as the final public predicate
     authority.
-    - [ ] Add storage-owned field/range posting indexes for low-match public
+    - [x] Add storage-owned field/range posting indexes for low-match public
       LQL document predicates; indexed string/bool/null/numeric equality and
-      top-level conjunctions over those scalar equality terms now use durable
-      candidate postings, while range selector shapes still need
-      storage-owned candidate sets instead of broad summary candidates.
+      top-level conjunctions over those scalar equality terms use durable
+      candidate postings, and range-only selector shapes now collect
+      storage-owned numeric candidates from ordered field postings instead of
+      broad summary candidates.
     - [x] Add the first durable candidate-posting slice for full-form LQL
       exact equality selectors with strict JSON Pointer fields and
       string/bool/null values; final predicate acceptance remains owned by
@@ -292,9 +293,9 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Add storage-owned `contains` and `icontains` candidates for
       full-form LQL string predicate terms over strict JSON Pointer fields,
       backed by text-predicate postings and final `liblql` acceptance.
-    - [ ] Add true ordered range traversal if candidate volume requires it;
-      current range narrowing preserves query key/cursor ordering by checking
-      numeric field postings from the key-ordered summary scan.
+    - [x] Add true ordered range traversal over numeric field postings for
+      range-primary document and key-only scans, with stable key/cursor
+      ordering after candidate collection.
     - [x] Extend candidate extraction beyond single `eq` selectors to safe
       top-level `and` conjunction/intersection forms over supported scalar
       equality postings; final predicate acceptance remains owned by `liblql`.

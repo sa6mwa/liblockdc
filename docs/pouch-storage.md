@@ -577,6 +577,12 @@ deleted/live filters, and stable key ordering. The authoritative object state
 still comes from the log, but the preferred query path should touch index data
 first and load full metadata or payload bytes only for candidate rows that
 survive the index predicates.
+Current pouch field postings support strict JSON Pointer equality, `in`,
+`exists`, prefix/iprefix, contains/icontains, and numeric range candidate
+collection. Range-primary document and key-only scans walk ordered numeric field
+postings, apply upper-bound termination, filter stale/deleted rows through the
+live state etag/version check, and then restore stable key/cursor ordering for
+the public result stream.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan
