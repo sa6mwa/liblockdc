@@ -177,6 +177,8 @@ typedef struct lc_pouch_query_index_scan_req {
   size_t document_in_term_count;
   const lc_pouch_document_prefix_term *document_prefix_terms;
   size_t document_prefix_term_count;
+  const lc_pouch_document_prefix_term *document_or_prefix_terms;
+  size_t document_or_prefix_term_count;
   const lc_pouch_document_contains_term *document_contains_terms;
   size_t document_contains_term_count;
   const lc_pouch_document_exists_term *document_exists_terms;

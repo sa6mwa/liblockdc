@@ -727,8 +727,9 @@ than using value-sorted postings as the primary result order. The client
 extracts those shapes only as candidate hints; final predicate acceptance still
 runs through `liblql`. Same-field equality `or` branches lower to `in`,
 mixed-field equality `or` branches union equality postings, and path-string
-`exists` `or` branches union presence postings before stable key/cursor
-ordering is restored. Mixed equality/range/in/prefix/contains/exists `and`
+`exists` plus `prefix` / `iprefix` `or` branches union presence or text
+postings before stable key/cursor ordering is restored. Mixed
+equality/range/in/prefix/contains/exists `and`
 selectors intersect equality posting candidates with numeric range, string
 membership, text prefix/substring, and presence postings when every hinted
 child is supported.
