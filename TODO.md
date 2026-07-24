@@ -311,6 +311,11 @@ Latest release targets confirmed on 2026-07-23:
       `or` branches whose children are string `in` selectors over the same
       strict JSON Pointer field; branch `any` values are unioned through the
       existing `in` candidate path before final `liblql` acceptance.
+    - [x] Add a mixed membership/presence OR composition slice for full-form
+      `or` branches that combine strict JSON Pointer string `in` selectors
+      with path-string `exists` selectors; indexed scans union membership and
+      presence postings, de-duplicate keys, and keep final predicate
+      acceptance owned by `liblql`.
     - [x] Add a mixed membership/text OR composition slice for full-form `or`
       branches that combine strict JSON Pointer string `in` selectors with
       strict JSON Pointer `prefix` / `iprefix` selectors; indexed scans union
