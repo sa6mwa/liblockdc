@@ -32,16 +32,29 @@ Useful overrides:
 make benchmark-pouch-go POUCH_GO_BENCH='IndexedLQL' POUCH_GO_BENCHTIME=10s POUCH_GO_SEED_ROWS=100000
 ```
 
-The initial cases seed a local `pouch://` namespace, then run full-form LQL
+The query cases seed a local `pouch://` namespace, then run full-form LQL
 selectors through the public client-facing query API. The paired lockd disk
-cases seed a real lockd disk server with the same document shape and selector.
-`POUCH_GO_SEED_ROWS` defaults to `10000`; use a smaller value for build/smoke
-validation and a larger value for stress/perf runs.
+cases seed a real lockd disk server with the same document shape and equivalent
+public LQL selector. `POUCH_GO_SEED_ROWS` defaults to `10000`; use a smaller
+value for build/smoke validation and a larger value for stress/perf runs.
 
 - `BenchmarkPouchCIndexedLQLRows10k`
 - `BenchmarkPouchCIndexedLQLKeys10k`
 - `BenchmarkLockdDiskIndexedLQLRows10k`
 - `BenchmarkLockdDiskIndexedLQLKeys10k`
+
+The indexed LQL cases run the same scenario matrix for document-return and
+key-return queries:
+
+- `EqSparse`: one matching equality row.
+- `EqDense`: half the namespace matches equality.
+- `RangeHalf`: half the namespace matches a numeric lower bound.
+- `InRegion`: scalar membership over `/region`.
+- `ExistsFlag`: sparse field existence.
+- `PrefixOwner`: sparse string prefix.
+- `ContainsMessage`: sparse substring search.
+- `AndEvenRange`: equality plus numeric range.
+- `OrSparseOrFlag`: sparse equality unioned with field existence.
 
 The fast suite runs one pouch and one lockd disk case for each representative
 storage scenario:

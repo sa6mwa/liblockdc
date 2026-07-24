@@ -21,7 +21,96 @@ import (
 
 const seededRows10k = 10000
 const benchmarkNamespace = "bench"
-const benchmarkSelectorExpr = "eq{field=/bucket,value=needle}"
+
+type queryScenario struct {
+	name     string
+	lockdLQL func(rows int) string
+	expected func(rows int) int
+}
+
+var queryScenarios = []queryScenario{
+	{
+		name: "EqSparse",
+		lockdLQL: func(rows int) string {
+			return "eq{field=/bucket,value=needle}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i == targetRow(rows) })
+		},
+	},
+	{
+		name: "EqDense",
+		lockdLQL: func(rows int) string {
+			return "eq{field=/group,value=even}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%2 == 0 })
+		},
+	},
+	{
+		name: "RangeHalf",
+		lockdLQL: func(rows int) string {
+			return fmt.Sprintf("range{field=/value,gte=%d}", targetRow(rows))
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i >= targetRow(rows) })
+		},
+	},
+	{
+		name: "InRegion",
+		lockdLQL: func(rows int) string {
+			return "in{field=/region,any=us|eu}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%3 == 0 || i%3 == 1 })
+		},
+	},
+	{
+		name: "ExistsFlag",
+		lockdLQL: func(rows int) string {
+			return "exists{/flag}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%5 == 0 })
+		},
+	},
+	{
+		name: "PrefixOwner",
+		lockdLQL: func(rows int) string {
+			return "prefix{field=/owner,value=bench-owner-00}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%10 == 0 })
+		},
+	},
+	{
+		name: "ContainsMessage",
+		lockdLQL: func(rows int) string {
+			return "contains{field=/details/message,value=timeout}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%8 == 0 })
+		},
+	},
+	{
+		name: "AndEvenRange",
+		lockdLQL: func(rows int) string {
+			return fmt.Sprintf("and.eq{field=/group,value=even},and.range{field=/value,gte=%d}", targetRow(rows))
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%2 == 0 && i >= targetRow(rows) })
+		},
+	},
+	{
+		name: "OrSparseOrFlag",
+		lockdLQL: func(rows int) string {
+			return "or.eq{field=/bucket,value=needle},or.exists{/flag}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i == targetRow(rows) || i%5 == 0 })
+		},
+	},
+}
 
 func reportCResult(b *testing.B, res pouchResult) {
 	b.Helper()
@@ -55,16 +144,50 @@ func seedRows() int {
 	return rows
 }
 
+func targetRow(rows int) int {
+	if rows > 1 {
+		return rows / 2
+	}
+	return 0
+}
+
+func countMatching(rows int, match func(i int) bool) int {
+	count := 0
+	for i := 0; i < rows; i++ {
+		if match(i) {
+			count++
+		}
+	}
+	return count
+}
+
+func runPouchScenarioBenchmarks(b *testing.B, rows int, keysOnly bool) {
+	b.Helper()
+	for _, scenario := range queryScenarios {
+		scenario := scenario
+		b.Run(scenario.name, func(b *testing.B) {
+			root := b.TempDir()
+			b.ResetTimer()
+			var rc int
+			var res pouchResult
+			if keysOnly {
+				rc, res = runPouchIndexedLQLScenarioKeys(root, scenario.name, b.N, rows)
+			} else {
+				rc, res = runPouchIndexedLQLScenarioRows(root, scenario.name, b.N, rows)
+			}
+			b.StopTimer()
+			if rc != 0 {
+				b.Fatalf("%s", res.err)
+			}
+			reportCResult(b, res)
+			b.ReportMetric(float64(scenario.expected(rows)), "matched-rows")
+		})
+	}
+}
+
 func BenchmarkPouchCIndexedLQLRows10k(b *testing.B) {
 	rows := seedRows()
-	root := b.TempDir()
-	b.ResetTimer()
-	rc, res := runPouchIndexedLQLRows(root, b.N, rows)
-	b.StopTimer()
-	if rc != 0 {
-		b.Fatalf("%s", res.err)
-	}
-	reportCResult(b, res)
+	runPouchScenarioBenchmarks(b, rows, false)
 }
 
 func BenchmarkPouchCFastStateWrite(b *testing.B) {
@@ -91,16 +214,12 @@ func BenchmarkPouchCFastStateRead(b *testing.B) {
 
 func BenchmarkLockdDiskIndexedLQLRows10k(b *testing.B) {
 	rows := seedRows()
-	env := startLockdDiskBenchmarkEnv(b)
-	seedLockdRows(b, env.client, rows)
-	benchmarkLockdQuery(b, env.client, rows, false)
+	runLockdScenarioBenchmarks(b, rows, false)
 }
 
 func BenchmarkLockdDiskIndexedLQLKeys10k(b *testing.B) {
 	rows := seedRows()
-	env := startLockdDiskBenchmarkEnv(b)
-	seedLockdRows(b, env.client, rows)
-	benchmarkLockdQuery(b, env.client, rows, true)
+	runLockdScenarioBenchmarks(b, rows, true)
 }
 
 func BenchmarkLockdDiskFastStateWrite(b *testing.B) {
@@ -206,10 +325,40 @@ func seedLockdRows(b *testing.B, cli *lockdclient.Client, rows int) {
 	b.Helper()
 	for i := 0; i < rows; i++ {
 		key := fmt.Sprintf("bench/query/%08d", i)
-		payload := []byte(fmt.Sprintf(`{"bucket":"%s","value":%d}`,
-			map[bool]string{true: "needle", false: "haystack"}[i == rows/2], i))
+		payload := benchmarkRowPayload(i, rows)
 		seedLockdState(b, cli, key, payload)
 	}
+}
+
+func benchmarkRowPayload(i int, rows int) []byte {
+	bucket := "haystack"
+	if i == targetRow(rows) {
+		bucket = "needle"
+	}
+	group := "odd"
+	if i%2 == 0 {
+		group = "even"
+	}
+	region := []string{"us", "eu", "apac"}[i%3]
+	primaryTag := "ops"
+	if i%3 == 0 {
+		primaryTag = "planning"
+	}
+	secondaryTag := "runtime"
+	if i%5 == 0 {
+		secondaryTag = "finance"
+	}
+	message := "normal"
+	if i%8 == 0 {
+		message = "timeout"
+	}
+	flag := ""
+	if i%5 == 0 {
+		flag = `,"flag":true`
+	}
+	return []byte(fmt.Sprintf(
+		`{"bucket":"%s","group":"%s","region":"%s","owner":"bench-owner-%02d","value":%d,"tags":["%s","%s"],"details":{"message":"%s event %d"}%s}`,
+		bucket, group, region, i%10, i, primaryTag, secondaryTag, message, i, flag))
 }
 
 func seedLockdState(b *testing.B, cli *lockdclient.Client, key string, payload []byte) {
@@ -288,19 +437,32 @@ func benchmarkLockdStateRead(b *testing.B, cli *lockdclient.Client) {
 	b.StopTimer()
 }
 
-func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, keysOnly bool) {
+func runLockdScenarioBenchmarks(b *testing.B, rows int, keysOnly bool) {
+	b.Helper()
+	for _, scenario := range queryScenarios {
+		scenario := scenario
+		b.Run(scenario.name, func(b *testing.B) {
+			env := startLockdDiskBenchmarkEnv(b)
+			seedLockdRows(b, env.client, rows)
+			benchmarkLockdQuery(b, env.client, rows, scenario, keysOnly)
+		})
+	}
+}
+
+func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, scenario queryScenario, keysOnly bool) {
 	b.Helper()
 	ctx := context.Background()
 	returnMode := lockdclient.QueryReturnDocuments
 	if keysOnly {
 		returnMode = lockdclient.QueryReturnKeys
 	}
+	expectedRows := scenario.expected(seededRows)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		resp, err := cli.Query(ctx,
 			lockdclient.WithQueryNamespace(benchmarkNamespace),
-			lockdclient.WithQuery(benchmarkSelectorExpr),
+			lockdclient.WithQuery(scenario.lockdLQL(seededRows)),
 			lockdclient.WithQueryLimit(seededRows),
 			lockdclient.WithQueryEngineIndex(),
 			lockdclient.WithQueryRefreshWaitFor(),
@@ -331,9 +493,9 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 				b.Fatalf("drain query documents: %v", err)
 			}
 		}
-		if rows != 1 {
+		if rows != expectedRows {
 			_ = resp.Close()
-			b.Fatalf("query matched %d rows, expected 1", rows)
+			b.Fatalf("query matched %d rows, expected %d", rows, expectedRows)
 		}
 		if resp.IndexSeq == 0 {
 			_ = resp.Close()
@@ -345,54 +507,30 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(seededRows), "seeded-rows")
+	b.ReportMetric(float64(expectedRows), "matched-rows")
 }
 
 func BenchmarkPouchCIndexedLQLKeys10k(b *testing.B) {
 	rows := seedRows()
-	root := b.TempDir()
-	b.ResetTimer()
-	rc, res := runPouchIndexedLQLKeys(root, b.N, rows)
-	b.StopTimer()
-	if rc != 0 {
-		b.Fatalf("%s", res.err)
-	}
-	reportCResult(b, res)
+	runPouchScenarioBenchmarks(b, rows, true)
 }
 
 func BenchmarkPouchCFastIndexedLQLRows(b *testing.B) {
 	rows := seedRows()
-	root := b.TempDir()
-	b.ResetTimer()
-	rc, res := runPouchIndexedLQLRows(root, b.N, rows)
-	b.StopTimer()
-	if rc != 0 {
-		b.Fatalf("%s", res.err)
-	}
-	reportCResult(b, res)
+	runPouchScenarioBenchmarks(b, rows, false)
 }
 
 func BenchmarkPouchCFastIndexedLQLKeys(b *testing.B) {
 	rows := seedRows()
-	root := b.TempDir()
-	b.ResetTimer()
-	rc, res := runPouchIndexedLQLKeys(root, b.N, rows)
-	b.StopTimer()
-	if rc != 0 {
-		b.Fatalf("%s", res.err)
-	}
-	reportCResult(b, res)
+	runPouchScenarioBenchmarks(b, rows, true)
 }
 
 func BenchmarkLockdDiskFastIndexedLQLRows(b *testing.B) {
 	rows := seedRows()
-	env := startLockdDiskBenchmarkEnv(b)
-	seedLockdRows(b, env.client, rows)
-	benchmarkLockdQuery(b, env.client, rows, false)
+	runLockdScenarioBenchmarks(b, rows, false)
 }
 
 func BenchmarkLockdDiskFastIndexedLQLKeys(b *testing.B) {
 	rows := seedRows()
-	env := startLockdDiskBenchmarkEnv(b)
-	seedLockdRows(b, env.client, rows)
-	benchmarkLockdQuery(b, env.client, rows, true)
+	runLockdScenarioBenchmarks(b, rows, true)
 }

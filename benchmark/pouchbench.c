@@ -11,6 +11,10 @@ typedef struct key_count {
   uint64_t bytes;
 } key_count;
 
+typedef struct query_scenario {
+  const char *name;
+} query_scenario;
+
 static uint64_t now_ns(void) {
   struct timespec ts;
 
@@ -32,6 +36,171 @@ static void set_error(lockdc_pouch_bench_result *out, const char *where,
                  rc, message);
 }
 
+static uint64_t target_row(uint64_t rows) {
+  return rows > 1U ? rows / 2U : 0U;
+}
+
+static uint64_t count_matching(uint64_t rows,
+                               int (*match)(uint64_t i, uint64_t rows)) {
+  uint64_t count;
+  uint64_t i;
+
+  count = 0U;
+  for (i = 0U; i < rows; ++i) {
+    if (match(i, rows)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static int match_eq_sparse(uint64_t i, uint64_t rows) {
+  return i == target_row(rows);
+}
+
+static int match_eq_dense(uint64_t i, uint64_t rows) {
+  (void)rows;
+  return (i % 2U) == 0U;
+}
+
+static int match_range_half(uint64_t i, uint64_t rows) {
+  return i >= target_row(rows);
+}
+
+static int match_in_region(uint64_t i, uint64_t rows) {
+  (void)rows;
+  return (i % 3U) == 0U || (i % 3U) == 1U;
+}
+
+static int match_exists_flag(uint64_t i, uint64_t rows) {
+  (void)rows;
+  return (i % 5U) == 0U;
+}
+
+static int match_prefix_owner(uint64_t i, uint64_t rows) {
+  (void)rows;
+  return (i % 10U) == 0U;
+}
+
+static int match_contains_message(uint64_t i, uint64_t rows) {
+  (void)rows;
+  return (i % 8U) == 0U;
+}
+
+static int match_and_even_range(uint64_t i, uint64_t rows) {
+  return match_eq_dense(i, rows) && match_range_half(i, rows);
+}
+
+static int match_or_sparse_or_flag(uint64_t i, uint64_t rows) {
+  return match_eq_sparse(i, rows) || match_exists_flag(i, rows);
+}
+
+static const query_scenario *find_scenario(const char *name) {
+  static const query_scenario scenarios[] = {
+      {"EqSparse"},        {"EqDense"},       {"RangeHalf"},
+      {"InRegion"},        {"ExistsFlag"},    {"PrefixOwner"},
+      {"ContainsMessage"}, {"AndEvenRange"},  {"OrSparseOrFlag"},
+  };
+  size_t index;
+
+  if (name == NULL || name[0] == '\0') {
+    name = "EqSparse";
+  }
+  for (index = 0U; index < sizeof(scenarios) / sizeof(scenarios[0]);
+       ++index) {
+    if (strcmp(name, scenarios[index].name) == 0) {
+      return &scenarios[index];
+    }
+  }
+  return NULL;
+}
+
+static uint64_t scenario_expected_rows(const query_scenario *scenario,
+                                       uint64_t rows) {
+  if (scenario == NULL) {
+    return 0U;
+  }
+  if (strcmp(scenario->name, "EqSparse") == 0) {
+    return count_matching(rows, match_eq_sparse);
+  }
+  if (strcmp(scenario->name, "EqDense") == 0) {
+    return count_matching(rows, match_eq_dense);
+  }
+  if (strcmp(scenario->name, "RangeHalf") == 0) {
+    return count_matching(rows, match_range_half);
+  }
+  if (strcmp(scenario->name, "InRegion") == 0) {
+    return count_matching(rows, match_in_region);
+  }
+  if (strcmp(scenario->name, "ExistsFlag") == 0) {
+    return count_matching(rows, match_exists_flag);
+  }
+  if (strcmp(scenario->name, "PrefixOwner") == 0) {
+    return count_matching(rows, match_prefix_owner);
+  }
+  if (strcmp(scenario->name, "ContainsMessage") == 0) {
+    return count_matching(rows, match_contains_message);
+  }
+  if (strcmp(scenario->name, "AndEvenRange") == 0) {
+    return count_matching(rows, match_and_even_range);
+  }
+  if (strcmp(scenario->name, "OrSparseOrFlag") == 0) {
+    return count_matching(rows, match_or_sparse_or_flag);
+  }
+  return 0U;
+}
+
+static int scenario_selector_json(const query_scenario *scenario,
+                                  uint64_t rows, char *out, size_t out_len) {
+  const char *name;
+  uint64_t target;
+  int written;
+
+  if (scenario == NULL || out == NULL || out_len == 0U) {
+    return 0;
+  }
+  name = scenario->name;
+  target = target_row(rows);
+  if (strcmp(name, "EqSparse") == 0) {
+    written = snprintf(out, out_len,
+                       "{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle\"}}");
+  } else if (strcmp(name, "EqDense") == 0) {
+    written = snprintf(out, out_len,
+                       "{\"eq\":{\"field\":\"/group\",\"value\":\"even\"}}");
+  } else if (strcmp(name, "RangeHalf") == 0) {
+    written = snprintf(out, out_len,
+                       "{\"range\":{\"field\":\"/value\",\"gte\":%llu}}",
+                       (unsigned long long)target);
+  } else if (strcmp(name, "InRegion") == 0) {
+    written = snprintf(
+        out, out_len,
+        "{\"in\":{\"field\":\"/region\",\"any\":[\"us\",\"eu\"]}}");
+  } else if (strcmp(name, "ExistsFlag") == 0) {
+    written = snprintf(out, out_len, "{\"exists\":\"/flag\"}");
+  } else if (strcmp(name, "PrefixOwner") == 0) {
+    written = snprintf(
+        out, out_len,
+        "{\"prefix\":{\"field\":\"/owner\",\"value\":\"bench-owner-00\"}}");
+  } else if (strcmp(name, "ContainsMessage") == 0) {
+    written = snprintf(out, out_len,
+                       "{\"contains\":{\"field\":\"/details/message\","
+                       "\"value\":\"timeout\"}}");
+  } else if (strcmp(name, "AndEvenRange") == 0) {
+    written = snprintf(out, out_len,
+                       "{\"and\":[{\"eq\":{\"field\":\"/group\","
+                       "\"value\":\"even\"}},{\"range\":{\"field\":"
+                       "\"/value\",\"gte\":%llu}}]}",
+                       (unsigned long long)target);
+  } else if (strcmp(name, "OrSparseOrFlag") == 0) {
+    written = snprintf(out, out_len,
+                       "{\"or\":[{\"eq\":{\"field\":\"/bucket\","
+                       "\"value\":\"needle\"}},{\"exists\":\"/flag\"}]}");
+  } else {
+    return 0;
+  }
+  return written > 0 && (size_t)written < out_len;
+}
+
 static lc_source *source_from_text(const char *text, lc_error *error) {
   lc_source *source;
 
@@ -45,7 +214,8 @@ static lc_source *source_from_text(const char *text, lc_error *error) {
 static int seed_field_rows(lc_client *client, uint64_t rows, lc_error *error) {
   char key[96];
   char owner[32];
-  char json[128];
+  char json[512];
+  char flag_json[32];
   lc_acquire_req acquire;
   lc_update_opts update_opts;
   lc_lease *lease;
@@ -68,8 +238,23 @@ static int seed_field_rows(lc_client *client, uint64_t rows, lc_error *error) {
                    (unsigned long long)i);
     (void)snprintf(owner, sizeof(owner), "bench-owner-%02llu",
                    (unsigned long long)(i % 10U));
-    (void)snprintf(json, sizeof(json), "{\"bucket\":\"%s\",\"value\":%llu}",
-                   i == target ? "needle" : "haystack", (unsigned long long)i);
+    if ((i % 5U) == 0U) {
+      (void)snprintf(flag_json, sizeof(flag_json), ",\"flag\":true");
+    } else {
+      flag_json[0] = '\0';
+    }
+    (void)snprintf(
+        json, sizeof(json),
+        "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
+        "\"owner\":\"%s\",\"value\":%llu,\"tags\":[\"%s\",\"%s\"],"
+        "\"details\":{\"message\":\"%s event %llu\"}%s}",
+        i == target ? "needle" : "haystack",
+        (i % 2U) == 0U ? "even" : "odd",
+        (i % 3U) == 0U ? "us" : ((i % 3U) == 1U ? "eu" : "apac"), owner,
+        (unsigned long long)i, (i % 3U) == 0U ? "planning" : "ops",
+        (i % 5U) == 0U ? "finance" : "runtime",
+        (i % 8U) == 0U ? "timeout" : "normal", (unsigned long long)i,
+        flag_json);
     lease = NULL;
     source = NULL;
     acquire.key = key;
@@ -183,14 +368,15 @@ static int key_end(void *context, lc_error *error) {
   return 1;
 }
 
-static int run_indexed_lql(const char *root, uint64_t iterations,
-                           uint64_t seeded_rows, int keys_only,
-                           lockdc_pouch_bench_result *out) {
-  static const char selector[] =
-      "{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle\"}}";
+static int run_indexed_lql_scenario(const char *root, const char *scenario_name,
+                                    uint64_t iterations, uint64_t seeded_rows,
+                                    int keys_only,
+                                    lockdc_pouch_bench_result *out) {
+  char selector[512];
   char endpoint[512];
   lc_client_config config;
   const char *endpoints[1];
+  const query_scenario *scenario;
   lc_client *client;
   lc_query_req req;
   lc_query_res res;
@@ -201,6 +387,7 @@ static int run_indexed_lql(const char *root, uint64_t iterations,
   uint64_t start;
   uint64_t end;
   uint64_t i;
+  uint64_t expected_rows;
   int rc;
 
   if (out == NULL) {
@@ -223,6 +410,15 @@ static int run_indexed_lql(const char *root, uint64_t iterations,
   if (iterations == 0U) {
     iterations = 1U;
   }
+  scenario = find_scenario(scenario_name);
+  if (scenario == NULL ||
+      !scenario_selector_json(scenario, seeded_rows, selector,
+                              sizeof(selector))) {
+    set_error(out, "scenario validation", &error, LC_ERR_INVALID);
+    lc_error_cleanup(&error);
+    return LC_ERR_INVALID;
+  }
+  expected_rows = scenario_expected_rows(scenario, seeded_rows);
   out->iterations = iterations;
   out->operations = iterations;
   out->rows = seeded_rows;
@@ -261,7 +457,7 @@ static int run_indexed_lql(const char *root, uint64_t iterations,
       handler.end = key_end;
       rc = client->query_keys(client, &req, &handler, &keys, &res, &error);
       out->bytes += keys.bytes;
-      if (rc == LC_OK && keys.rows != 1U) {
+      if (rc == LC_OK && keys.rows != expected_rows) {
         rc = LC_ERR_PROTOCOL;
       }
     } else {
@@ -297,13 +493,29 @@ static int run_indexed_lql(const char *root, uint64_t iterations,
 int lockdc_pouch_bench_indexed_lql_rows(const char *root, uint64_t iterations,
                                         uint64_t seeded_rows,
                                         lockdc_pouch_bench_result *out) {
-  return run_indexed_lql(root, iterations, seeded_rows, 0, out);
+  return run_indexed_lql_scenario(root, "EqSparse", iterations, seeded_rows, 0,
+                                  out);
 }
 
 int lockdc_pouch_bench_indexed_lql_keys(const char *root, uint64_t iterations,
                                         uint64_t seeded_rows,
                                         lockdc_pouch_bench_result *out) {
-  return run_indexed_lql(root, iterations, seeded_rows, 1, out);
+  return run_indexed_lql_scenario(root, "EqSparse", iterations, seeded_rows, 1,
+                                  out);
+}
+
+int lockdc_pouch_bench_indexed_lql_scenario_rows(
+    const char *root, const char *scenario, uint64_t iterations,
+    uint64_t seeded_rows, lockdc_pouch_bench_result *out) {
+  return run_indexed_lql_scenario(root, scenario, iterations, seeded_rows, 0,
+                                  out);
+}
+
+int lockdc_pouch_bench_indexed_lql_scenario_keys(
+    const char *root, const char *scenario, uint64_t iterations,
+    uint64_t seeded_rows, lockdc_pouch_bench_result *out) {
+  return run_indexed_lql_scenario(root, scenario, iterations, seeded_rows, 1,
+                                  out);
 }
 
 int lockdc_pouch_bench_state_write(const char *root, uint64_t iterations,

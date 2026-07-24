@@ -33,6 +33,26 @@ func runPouchIndexedLQLKeys(root string, iterations int, seededRows int) (int, p
 	return int(rc), convertPouchResult(res)
 }
 
+func runPouchIndexedLQLScenarioRows(root string, scenario string, iterations int, seededRows int) (int, pouchResult) {
+	cRoot := C.CString(root)
+	defer C.free(unsafe.Pointer(cRoot))
+	cScenario := C.CString(scenario)
+	defer C.free(unsafe.Pointer(cScenario))
+	var res C.lockdc_pouch_bench_result
+	rc := C.lockdc_pouch_bench_indexed_lql_scenario_rows(cRoot, cScenario, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
+	return int(rc), convertPouchResult(res)
+}
+
+func runPouchIndexedLQLScenarioKeys(root string, scenario string, iterations int, seededRows int) (int, pouchResult) {
+	cRoot := C.CString(root)
+	defer C.free(unsafe.Pointer(cRoot))
+	cScenario := C.CString(scenario)
+	defer C.free(unsafe.Pointer(cScenario))
+	var res C.lockdc_pouch_bench_result
+	rc := C.lockdc_pouch_bench_indexed_lql_scenario_keys(cRoot, cScenario, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
+	return int(rc), convertPouchResult(res)
+}
+
 func runPouchStateWrite(root string, iterations int) (int, pouchResult) {
 	cRoot := C.CString(root)
 	defer C.free(unsafe.Pointer(cRoot))
