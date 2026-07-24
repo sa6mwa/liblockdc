@@ -752,10 +752,11 @@ equality/range/in/prefix/contains/exists `and`
 selectors intersect equality posting candidates with numeric range, string
 membership, text prefix/substring, and presence postings when every hinted
 child is supported.
-When a recursive `and` composition contains one supported `or` group, pouch can
-extract that positive OR candidate group through the `liblql` selector AST,
-including safe `not` exclusions as final filters and root OR groups that mix
-more than two non-equality families.
+When a recursive `and` composition contains supported `or` groups, pouch can
+extract one positive OR candidate group through the `liblql` selector AST as the
+storage-owned candidate superset. Safe `not` exclusions and remaining OR groups
+stay final `liblql` filters, while root OR groups that mix more than two
+non-equality families can also provide the candidate superset.
 The `query.index` sidecar starts with a format/version record so incompatible
 posting layouts rebuild from authoritative namespace segments/snapshots instead
 of being trusted; the text-predicate posting slice increments that format

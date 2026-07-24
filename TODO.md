@@ -393,6 +393,10 @@ Latest release targets confirmed on 2026-07-23:
       including safe positive-OR plus `not` exclusion forms and root OR groups
       that mix more than two non-equality families; final predicate acceptance
       remains owned by `liblql`.
+    - [x] Broaden liblql-AST recursive OR candidate extraction for `and`
+      selectors with multiple supported OR groups by using one OR group as a
+      storage-owned positive candidate superset and leaving remaining OR groups
+      to final `liblql` acceptance.
     - [ ] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans, including remaining mixed
       non-equality OR branch planning and broader exclusion planning for safe

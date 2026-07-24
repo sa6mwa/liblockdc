@@ -17254,22 +17254,61 @@ static int lc_pouch_lql_ast_or_terms_add_node(lc_pouch_lql_ast_or_terms *terms,
   return 0;
 }
 
-static int lc_pouch_lql_ast_find_single_or(const lql *runtime,
-                                           lql_selector_node node,
-                                           lql_selector_node *out,
-                                           size_t *count) {
+static int lc_pouch_lql_ast_or_node_parse(const lql *runtime,
+                                          lql_selector_node or_node,
+                                          lc_pouch_lql_ast_or_terms *terms) {
   lql_error lql_err;
   size_t child_count;
   size_t index;
 
-  if (runtime == NULL || out == NULL || count == NULL ||
+  if (runtime == NULL || terms == NULL ||
+      or_node.kind != LQL_SELECTOR_NODE_OR) {
+    return 0;
+  }
+  memset(terms, 0, sizeof(*terms));
+  lql_error_init(&lql_err);
+  if (runtime->selector_node_child_count(runtime, or_node, &child_count,
+                                         &lql_err) != LQL_STATUS_OK ||
+      child_count < 2U) {
+    return 0;
+  }
+  for (index = 0U; index < child_count; ++index) {
+    lql_selector_node child;
+
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_child(runtime, or_node, index, &child,
+                                     &lql_err) != LQL_STATUS_OK ||
+        !lc_pouch_lql_ast_or_terms_add_node(terms, runtime, child)) {
+      lc_pouch_lql_ast_or_terms_cleanup(terms);
+      return 0;
+    }
+  }
+  if (terms->range_count == 0U && terms->in_count == 0U &&
+      terms->prefix_count == 0U && terms->contains_count == 0U &&
+      terms->exists_count == 0U) {
+    lc_pouch_lql_ast_or_terms_cleanup(terms);
+    return 0;
+  }
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_find_supported_or(const lql *runtime, lql_selector_node node,
+                                   lc_pouch_lql_ast_or_terms *terms_out,
+                                   int *found_out) {
+  lql_error lql_err;
+  size_t child_count;
+  size_t index;
+
+  if (runtime == NULL || terms_out == NULL || found_out == NULL || *found_out ||
       node.kind == LQL_SELECTOR_NODE_NOT) {
     return 1;
   }
   if (node.kind == LQL_SELECTOR_NODE_OR) {
-    *out = node;
-    (*count)++;
-    return *count <= 1U;
+    if (lc_pouch_lql_ast_or_node_parse(runtime, node, terms_out)) {
+      *found_out = 1;
+    }
+    return 1;
   }
   if (node.kind != LQL_SELECTOR_NODE_AND) {
     return 1;
@@ -17287,8 +17326,12 @@ static int lc_pouch_lql_ast_find_single_or(const lql *runtime,
         LQL_STATUS_OK) {
       return 0;
     }
-    if (!lc_pouch_lql_ast_find_single_or(runtime, child, out, count)) {
+    if (!lc_pouch_lql_ast_find_supported_or(runtime, child, terms_out,
+                                            found_out)) {
       return 0;
+    }
+    if (*found_out) {
+      break;
     }
   }
   return 1;
@@ -17298,11 +17341,8 @@ static int
 lc_pouch_lql_ast_or_hint_parse(lc_pouch_lql_document_filter *filter) {
   lc_pouch_lql_ast_or_terms terms;
   lql_selector_node root;
-  lql_selector_node or_node;
   lql_error lql_err;
-  size_t or_count;
-  size_t child_count;
-  size_t index;
+  int found;
 
   if (filter == NULL || filter->runtime == NULL || filter->selector == NULL ||
       filter->document_eq_term_count > 0U ||
@@ -17321,39 +17361,15 @@ lc_pouch_lql_ast_or_hint_parse(lc_pouch_lql_document_filter *filter) {
   }
   memset(&terms, 0, sizeof(terms));
   memset(&root, 0, sizeof(root));
-  memset(&or_node, 0, sizeof(or_node));
   lql_error_init(&lql_err);
   if (filter->runtime->selector_root(filter->runtime, filter->selector, &root,
                                      &lql_err) != LQL_STATUS_OK) {
     return 0;
   }
-  or_count = 0U;
-  if (!lc_pouch_lql_ast_find_single_or(filter->runtime, root, &or_node,
-                                       &or_count) ||
-      or_count != 1U) {
-    return 0;
-  }
-  lql_error_init(&lql_err);
-  if (filter->runtime->selector_node_child_count(
-          filter->runtime, or_node, &child_count, &lql_err) != LQL_STATUS_OK ||
-      child_count < 2U) {
-    return 0;
-  }
-  for (index = 0U; index < child_count; ++index) {
-    lql_selector_node child;
-
-    lql_error_init(&lql_err);
-    if (filter->runtime->selector_node_child(filter->runtime, or_node, index,
-                                             &child,
-                                             &lql_err) != LQL_STATUS_OK ||
-        !lc_pouch_lql_ast_or_terms_add_node(&terms, filter->runtime, child)) {
-      lc_pouch_lql_ast_or_terms_cleanup(&terms);
-      return 0;
-    }
-  }
-  if (terms.range_count == 0U && terms.in_count == 0U &&
-      terms.prefix_count == 0U && terms.contains_count == 0U &&
-      terms.exists_count == 0U) {
+  found = 0;
+  if (!lc_pouch_lql_ast_find_supported_or(filter->runtime, root, &terms,
+                                          &found) ||
+      !found) {
     lc_pouch_lql_ast_or_terms_cleanup(&terms);
     return 0;
   }
