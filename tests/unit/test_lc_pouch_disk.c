@@ -6313,6 +6313,24 @@ test_query_index_path_pattern_scan_intersects_positive_terms(void **state) {
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  memset(&keys, 0, sizeof(keys));
+  memset(&req, 0, sizeof(req));
+  patterns[0].field = "/box/**";
+  patterns[1].field = "/rack/*";
+  req.namespace_name = "default";
+  req.document_exists_path_patterns = patterns;
+  req.document_exists_path_pattern_count = 2U;
+  req.limit = 8U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "charlie");
+  assert_string_equal(keys.keys[1], "delta");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   lc_pouch_put_state_res_cleanup(&allocator, &state_delta);
   lc_pouch_put_state_res_cleanup(&allocator, &state_charlie);
   lc_pouch_put_state_res_cleanup(&allocator, &state_bravo);

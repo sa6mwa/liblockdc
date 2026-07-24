@@ -613,9 +613,9 @@ predicate as the storage-owned candidate superset and leave exclusion semantics
 to final `liblql` acceptance. `date` selectors use strict JSON Pointer
 field-presence postings as a storage-owned candidate superset, including inside
 supported OR groups, while datetime parsing, relative-date handling, and
-boundary comparisons remain final `liblql` acceptance. Other OR branch families
-and broader safe NOT planning still need planner support before they can avoid
-broader scans safely.
+boundary comparisons remain final `liblql` acceptance. Unsupported selector
+families and path forms remain deterministic fallback rather than risking false
+negative candidate pruning.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan
@@ -803,17 +803,16 @@ When a selector has no positive storage-owned candidate term, the ordered
 summary scan still applies indexed negative equality and field-presence
 exclusions before returning document rows or keys, so negative-only predicates
 do not silently become match-all scans.
-Positive `exists` selectors with single-segment wildcard path components, such
-as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
-instead of treating the wildcard as a literal posting field; final acceptance
-still comes from `liblql`. Multiple positive wildcard `exists` selectors in an
+Positive `exists` selectors with path wildcards expand candidates from the
+indexed JSON Pointer field dictionary instead of treating wildcards as literal
+posting fields; final acceptance still comes from `liblql`. A single-segment
+`*` path component matches one non-empty field segment, and a recursive `**`
+component matches zero or more field segments as a storage-owned candidate
+superset. Multiple positive wildcard or recursive `exists` selectors in an
 `and` composition are intersected at the storage-owned candidate layer; a key
-matching only one wildcard pattern is not returned as an indexed candidate for
-the conjunction. Exists-only root `or` groups may union those single-segment
-wildcard expansions with exact presence postings before final acceptance.
-Recursive path capabilities still force a deterministic
-full-candidate indexed scan until safe recursive expansion semantics are
-available to the pouch planner.
+matching only one pattern is not returned as an indexed candidate for the
+conjunction. Exists-only root `or` groups may union wildcard/recursive
+expansions with exact presence postings before final acceptance.
 The `query.index` sidecar starts with a format/version record so incompatible
 posting layouts rebuild from authoritative namespace segments/snapshots instead
 of being trusted; the text-predicate and trigram posting slices increment that

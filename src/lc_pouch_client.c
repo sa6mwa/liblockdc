@@ -18337,14 +18337,12 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
   filter->runtime->selector_capabilities_get(filter->runtime, filter->selector,
                                              &capabilities);
   if (capabilities.wildcard_path || capabilities.recursive_path) {
-    if (capabilities.wildcard_path && !capabilities.recursive_path) {
-      if (!lc_pouch_lql_or_exists_hint_parse(
-              selector_json, &filter->document_or_exists_path_patterns,
-              &filter->document_or_exists_path_pattern_count)) {
-        lc_pouch_lql_exists_hint_parse_full_form(
-            selector_json, &filter->document_exists_path_patterns,
-            &filter->document_exists_path_pattern_count);
-      }
+    if (!lc_pouch_lql_or_exists_hint_parse(
+            selector_json, &filter->document_or_exists_path_patterns,
+            &filter->document_or_exists_path_pattern_count)) {
+      lc_pouch_lql_exists_hint_parse_full_form(
+          selector_json, &filter->document_exists_path_patterns,
+          &filter->document_exists_path_pattern_count);
     }
     lc_pouch_lql_not_eq_hint_parse(selector_json,
                                    &filter->document_not_eq_terms,

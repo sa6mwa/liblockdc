@@ -259,7 +259,7 @@ Latest release targets confirmed on 2026-07-23:
   - [x] Fix LQL document predicate pagination so scan and indexed `query` /
     `query_keys` apply `limit` to matched rows, not pre-filter storage
     candidates, and return cursors only when another matching row exists.
-  - [ ] Fully build out the pouch search/index engine toward Go lockd disk
+  - [x] Fully build out the pouch search/index engine toward Go lockd disk
     search parity, while keeping `liblql` as the final public predicate
     authority.
     - [x] Add storage-owned field/range posting indexes for low-match public
@@ -430,12 +430,12 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Flatten nested `or` nodes whose leaves are already supported
         selector families into the storage-owned OR candidate union; final
         predicate acceptance remains owned by `liblql`.
-    - [ ] Add wildcard/recursive path expansion support for indexed field
+    - [x] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.
       - [x] Detect `liblql` wildcard/recursive path capabilities during pouch
-        LQL filter initialization and force deterministic full-candidate indexed
-        fallback until concrete path expansion can be planned safely.
+        LQL filter initialization and use deterministic full-candidate indexed
+        fallback only for path forms that cannot be planned safely.
       - [x] Add bounded storage-owned expansion for positive single-segment
         wildcard `exists` path selectors by matching candidate JSON Pointer
         fields from the indexed posting dictionary and leaving final acceptance
@@ -443,9 +443,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add storage-owned union expansion for exists-only root `or` groups
         that combine single-segment wildcard path selectors with exact presence
         selectors, while keeping final acceptance owned by `liblql`.
-      - [ ] Add recursive path expansion once `liblql` exposes or documents
-        safe recursive-path planner semantics that pouch can mirror without
-        false negatives.
+      - [x] Add bounded storage-owned expansion for recursive `**` path
+        segments in positive `exists` selectors by matching indexed JSON Pointer
+        field dictionaries as a candidate superset and leaving final acceptance
+        to `liblql`.
     - [x] Add token/trigram-style candidate structures if pouch needs
       Go-style text filtering performance; keep final contains/full-text
       semantics validated by `liblql`.

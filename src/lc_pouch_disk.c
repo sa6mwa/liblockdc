@@ -8742,46 +8742,79 @@ static int lc_pouch_disk_query_field_contains_keys_scan_locked(
   return LC_OK;
 }
 
+static int lc_pouch_disk_query_path_pattern_matches_from(const char *pattern,
+                                                         const char *field) {
+  const char *pattern_segment;
+  const char *pattern_next;
+  const char *field_segment;
+  const char *field_next;
+  size_t pattern_len;
+  size_t field_len;
+
+  if (pattern == NULL || field == NULL) {
+    return 0;
+  }
+  if (*pattern == '\0') {
+    return *field == '\0';
+  }
+  if (*pattern != '/') {
+    return 0;
+  }
+  pattern++;
+  pattern_segment = pattern;
+  while (*pattern != '\0' && *pattern != '/') {
+    pattern++;
+  }
+  pattern_len = (size_t)(pattern - pattern_segment);
+  pattern_next = pattern;
+  if (pattern_len == 2U && pattern_segment[0] == '*' &&
+      pattern_segment[1] == '*') {
+    if (lc_pouch_disk_query_path_pattern_matches_from(pattern_next, field)) {
+      return 1;
+    }
+    while (*field == '/') {
+      field++;
+      while (*field != '\0' && *field != '/') {
+        field++;
+      }
+      if (lc_pouch_disk_query_path_pattern_matches_from(pattern_next, field)) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (*field != '/') {
+    return 0;
+  }
+  field++;
+  field_segment = field;
+  while (*field != '\0' && *field != '/') {
+    field++;
+  }
+  field_len = (size_t)(field - field_segment);
+  field_next = field;
+  if (pattern_len == 1U && pattern_segment[0] == '*') {
+    if (field_len == 0U) {
+      return 0;
+    }
+    return lc_pouch_disk_query_path_pattern_matches_from(pattern_next,
+                                                         field_next);
+  }
+  if (pattern_len != field_len ||
+      memcmp(pattern_segment, field_segment, pattern_len) != 0) {
+    return 0;
+  }
+  return lc_pouch_disk_query_path_pattern_matches_from(pattern_next,
+                                                       field_next);
+}
+
 static int lc_pouch_disk_query_path_pattern_matches(const char *pattern,
                                                     const char *field) {
-  const char *pattern_segment;
-  const char *field_segment;
-
   if (pattern == NULL || field == NULL || pattern[0] != '/' ||
       field[0] != '/') {
     return 0;
   }
-  while (*pattern != '\0' && *field != '\0') {
-    size_t pattern_len;
-    size_t field_len;
-
-    if (*pattern != '/' || *field != '/') {
-      return 0;
-    }
-    pattern++;
-    field++;
-    pattern_segment = pattern;
-    field_segment = field;
-    while (*pattern != '\0' && *pattern != '/') {
-      pattern++;
-    }
-    while (*field != '\0' && *field != '/') {
-      field++;
-    }
-    pattern_len = (size_t)(pattern - pattern_segment);
-    field_len = (size_t)(field - field_segment);
-    if (pattern_len == 1U && pattern_segment[0] == '*') {
-      if (field_len == 0U) {
-        return 0;
-      }
-      continue;
-    }
-    if (pattern_len != field_len ||
-        memcmp(pattern_segment, field_segment, pattern_len) != 0) {
-      return 0;
-    }
-  }
-  return *pattern == '\0' && *field == '\0';
+  return lc_pouch_disk_query_path_pattern_matches_from(pattern, field);
 }
 
 static int lc_pouch_disk_query_field_collect_path_pattern_keys_locked(
