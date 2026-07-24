@@ -22,7 +22,7 @@
 #define LC_POUCH_QUERY_INDEX_HEADER_SIZE 64U
 #define LC_POUCH_RECORD_VERSION 1U
 #define LC_POUCH_QUERY_INDEX_RECORD_VERSION 2U
-#define LC_POUCH_QUERY_INDEX_FORMAT_VERSION 2U
+#define LC_POUCH_QUERY_INDEX_FORMAT_VERSION 3U
 #define LC_POUCH_RECORD_STATE_PUT 1U
 #define LC_POUCH_RECORD_STATE_REMOVE 2U
 #define LC_POUCH_RECORD_META_PUT 3U
@@ -49,6 +49,7 @@
 #define LC_POUCH_QUERY_INDEX_RECORD_FIELD_CLEAR 2UL
 #define LC_POUCH_QUERY_INDEX_RECORD_FIELD_VALUE 3UL
 #define LC_POUCH_QUERY_INDEX_RECORD_FORMAT 4UL
+#define LC_POUCH_QUERY_TEXT_GRAM_BYTES 3U
 #define LC_POUCH_OBJECT_META_SIZE 28U
 #define LC_POUCH_QUEUE_META_SIZE 88U
 #define LC_POUCH_MAX_NAME_BYTES 4096UL
@@ -5114,6 +5115,17 @@ static unsigned char lc_pouch_disk_ascii_lower(unsigned char ch) {
   return ch;
 }
 
+static void lc_pouch_disk_query_field_make_text_gram(const char *text,
+                                                     size_t offset,
+                                                     char out[6]) {
+  out[0] = 'g';
+  out[1] = ':';
+  out[2] = (char)lc_pouch_disk_ascii_lower((unsigned char)text[offset]);
+  out[3] = (char)lc_pouch_disk_ascii_lower((unsigned char)text[offset + 1U]);
+  out[4] = (char)lc_pouch_disk_ascii_lower((unsigned char)text[offset + 2U]);
+  out[5] = '\0';
+}
+
 static int lc_pouch_disk_query_field_text_starts_with(const char *encoded,
                                                       const char *prefix,
                                                       int ignore_case) {
@@ -8330,6 +8342,139 @@ static int lc_pouch_disk_query_field_or_contains_keys_scan_locked(
   return LC_OK;
 }
 
+static size_t lc_pouch_disk_query_field_count_gram_candidates_locked(
+    lc_pouch_disk_store *store, const char *namespace_name, const char *field,
+    const char *gram) {
+  size_t position;
+  size_t index;
+  size_t count;
+
+  if (store == NULL || namespace_name == NULL || field == NULL ||
+      gram == NULL) {
+    return 0U;
+  }
+  count = 0U;
+  (void)lc_pouch_disk_query_field_find(store, namespace_name, field, gram, "",
+                                       &position);
+  for (index = position; index < store->query_field_posting_count; ++index) {
+    lc_pouch_disk_query_field_posting *posting;
+    int cmp;
+
+    posting = &store->query_field_postings[index];
+    cmp = lc_pouch_disk_query_field_compare_values(
+        posting->namespace_name, posting->field, posting->value, "",
+        namespace_name, field, gram, "");
+    if (cmp > 0) {
+      break;
+    }
+    if (cmp < 0) {
+      continue;
+    }
+    if (lc_pouch_disk_query_field_posting_has_live_state(store, posting)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static int lc_pouch_disk_query_field_choose_contains_gram_locked(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const lc_pouch_document_contains_term *term, char out[6],
+    size_t *candidate_count_out) {
+  size_t value_len;
+  size_t offset;
+  size_t best_count;
+  int have_best;
+
+  if (candidate_count_out != NULL) {
+    *candidate_count_out = 0U;
+  }
+  if (store == NULL || req == NULL || term == NULL || term->field == NULL ||
+      term->value == NULL) {
+    return 0;
+  }
+  value_len = strlen(term->value);
+  if (value_len < LC_POUCH_QUERY_TEXT_GRAM_BYTES) {
+    return 0;
+  }
+  best_count = 0U;
+  have_best = 0;
+  for (offset = 0U; offset + LC_POUCH_QUERY_TEXT_GRAM_BYTES <= value_len;
+       ++offset) {
+    char gram[6];
+    size_t candidate_count;
+
+    lc_pouch_disk_query_field_make_text_gram(term->value, offset, gram);
+    candidate_count = lc_pouch_disk_query_field_count_gram_candidates_locked(
+        store, req->namespace_name, term->field, gram);
+    if (!have_best || candidate_count < best_count) {
+      memcpy(out, gram, sizeof(gram));
+      best_count = candidate_count;
+      have_best = 1;
+      if (best_count == 0U) {
+        break;
+      }
+    }
+  }
+  if (!have_best) {
+    return 0;
+  }
+  if (candidate_count_out != NULL) {
+    *candidate_count_out = best_count;
+  }
+  return 1;
+}
+
+static int lc_pouch_disk_query_field_collect_contains_gram_keys_locked(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const lc_pouch_document_contains_term *primary, const char *gram,
+    char ***keys_out, size_t *key_count_out, lc_error *error) {
+  char **keys;
+  size_t key_count;
+  size_t position;
+  size_t index;
+  int rc;
+
+  *keys_out = NULL;
+  *key_count_out = 0U;
+  if (store == NULL || req == NULL || primary == NULL || gram == NULL) {
+    return LC_OK;
+  }
+  keys = NULL;
+  key_count = 0U;
+  (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                       primary->field, gram, "", &position);
+  for (index = position; index < store->query_field_posting_count; ++index) {
+    lc_pouch_disk_query_field_posting *posting;
+    int cmp;
+
+    posting = &store->query_field_postings[index];
+    cmp = lc_pouch_disk_query_field_compare_values(
+        posting->namespace_name, posting->field, posting->value, "",
+        req->namespace_name, primary->field, gram, "");
+    if (cmp > 0) {
+      break;
+    }
+    if (cmp < 0) {
+      continue;
+    }
+    rc = lc_pouch_disk_query_field_add_candidate_key(
+        store, req, posting, &keys, &key_count, error,
+        "failed to allocate pouch contains trigram query keys",
+        "failed to copy pouch contains trigram query key");
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  if (key_count > 1U) {
+    qsort(keys, key_count, sizeof(keys[0]),
+          lc_pouch_disk_namespace_ptr_compare);
+  }
+  *keys_out = keys;
+  *key_count_out = key_count;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_query_field_collect_contains_keys_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     char ***keys_out, size_t *key_count_out, lc_error *error) {
@@ -8338,6 +8483,9 @@ static int lc_pouch_disk_query_field_collect_contains_keys_locked(
   size_t key_count;
   size_t position;
   size_t index;
+  char gram[6];
+  size_t gram_candidate_count;
+  int has_gram;
 
   *keys_out = NULL;
   *key_count_out = 0U;
@@ -8348,6 +8496,15 @@ static int lc_pouch_disk_query_field_collect_contains_keys_locked(
     return LC_OK;
   }
   primary = &req->document_contains_terms[0];
+  has_gram = lc_pouch_disk_query_field_choose_contains_gram_locked(
+      store, req, primary, gram, &gram_candidate_count);
+  if (has_gram) {
+    if (gram_candidate_count == 0U) {
+      return LC_OK;
+    }
+    return lc_pouch_disk_query_field_collect_contains_gram_keys_locked(
+        store, req, primary, gram, keys_out, key_count_out, error);
+  }
   keys = NULL;
   key_count = 0U;
   (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
@@ -13495,6 +13652,7 @@ lc_pouch_disk_field_index_emit_value(lc_pouch_disk_field_index_visit *visit,
 static int lc_pouch_disk_field_index_emit_text_value(
     lc_pouch_disk_field_index_visit *visit, const char *text, size_t text_len) {
   int rc;
+  size_t offset;
 
   visit->text_value_len = 0U;
   if (visit->text_value != NULL) {
@@ -13512,6 +13670,19 @@ static int lc_pouch_disk_field_index_emit_text_value(
   visit->text_value_len = 0U;
   if (visit->text_value != NULL) {
     visit->text_value[0] = '\0';
+  }
+  if (rc != LC_OK || text_len < LC_POUCH_QUERY_TEXT_GRAM_BYTES) {
+    return rc;
+  }
+  for (offset = 0U; offset + LC_POUCH_QUERY_TEXT_GRAM_BYTES <= text_len;
+       ++offset) {
+    char gram[6];
+
+    lc_pouch_disk_query_field_make_text_gram(text, offset, gram);
+    rc = lc_pouch_disk_field_index_emit_value(visit, gram);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
   return rc;
 }

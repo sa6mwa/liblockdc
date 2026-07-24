@@ -446,7 +446,7 @@ Latest release targets confirmed on 2026-07-23:
       - [ ] Add recursive path expansion once `liblql` exposes or documents
         safe recursive-path planner semantics that pouch can mirror without
         false negatives.
-    - [ ] Add token/trigram-style candidate structures if pouch needs
+    - [x] Add token/trigram-style candidate structures if pouch needs
       Go-style text filtering performance; keep final contains/full-text
       semantics validated by `liblql`.
     - [x] Persist an index-format/version contract for pouch postings so

@@ -27,6 +27,7 @@
 #define TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET 12U
 #define TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET 56U
 #define TEST_POUCH_QUERY_INDEX_RECORD_META 1U
+#define TEST_POUCH_QUERY_INDEX_RECORD_FIELD_VALUE 3U
 #define TEST_POUCH_QUERY_INDEX_RECORD_FORMAT 4U
 #define TEST_POUCH_RECORD_STATE_PUT 1U
 #define TEST_POUCH_RECORD_STATE_REMOVE 2U
@@ -824,6 +825,68 @@ static size_t count_query_index_records_of_type(const char *root,
     }
     if (lseek(fd, (off_t)payload_len, SEEK_CUR) < 0) {
       break;
+    }
+  }
+  close(fd);
+  return count;
+}
+
+static size_t count_query_index_field_values_with_prefix(const char *root,
+                                                         const char *prefix) {
+  char index_path[512];
+  unsigned char header[TEST_POUCH_QUERY_INDEX_HEADER_SIZE];
+  unsigned long payload_len;
+  unsigned long record_type;
+  unsigned long ns_len;
+  unsigned long key_len;
+  unsigned long field_len;
+  unsigned long value_len;
+  unsigned long state_etag_len;
+  size_t prefix_len;
+  size_t count;
+  ssize_t got;
+  int fd;
+
+  test_query_index_path(root, index_path, sizeof(index_path));
+  fd = open(index_path, O_RDONLY);
+  assert_true(fd >= 0);
+  prefix_len = strlen(prefix);
+  count = 0U;
+  for (;;) {
+    got = read(fd, header, sizeof(header));
+    if (got == 0) {
+      break;
+    }
+    if (got != (ssize_t)sizeof(header)) {
+      break;
+    }
+    if (memcmp(header, "LCQI", 4U) != 0) {
+      break;
+    }
+    record_type = test_get_u32(header + 8);
+    ns_len = test_get_u32(header + 12);
+    key_len = test_get_u32(header + 16);
+    field_len = test_get_u32(header + 20);
+    value_len = test_get_u32(header + 24);
+    state_etag_len = test_get_u64(header + 28);
+    payload_len = test_get_u64(header + 44);
+    if (record_type == TEST_POUCH_QUERY_INDEX_RECORD_FIELD_VALUE &&
+        value_len >= prefix_len) {
+      char value_prefix[16];
+
+      assert_true(prefix_len <= sizeof(value_prefix));
+      assert_true(lseek(fd, (off_t)(ns_len + key_len + field_len), SEEK_CUR) >=
+                  0);
+      assert_int_equal(read(fd, value_prefix, prefix_len),
+                       (ssize_t)prefix_len);
+      if (memcmp(value_prefix, prefix, prefix_len) == 0) {
+        count++;
+      }
+      assert_true(lseek(fd,
+                        (off_t)(value_len - prefix_len + state_etag_len),
+                        SEEK_CUR) >= 0);
+    } else {
+      assert_true(lseek(fd, (off_t)payload_len, SEEK_CUR) >= 0);
     }
   }
   close(fd);
@@ -5837,6 +5900,132 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   lc_pouch_put_state_res_cleanup(&allocator, &state_more);
   lc_pouch_put_state_res_cleanup(&allocator, &state_mid);
   lc_pouch_put_state_res_cleanup(&allocator, &state_low);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
+test_query_index_contains_uses_trigram_posting_candidates(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res state_alpha;
+  lc_pouch_put_state_res state_bravo;
+  lc_pouch_put_state_res state_charlie;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_document_contains_term contains;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-contains-trigram");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&state_alpha, 0, sizeof(state_alpha));
+  memset(&state_bravo, 0, sizeof(state_bravo));
+  memset(&state_charlie, 0, sizeof(state_charlie));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&contains, 0, sizeof(contains));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  put_opts.content_type = "application/json";
+  source = source_from_text("{\"body\":\"xxABCxx\"}");
+  rc = store->write_state(store, "default", "alpha", source, &put_opts,
+                          &state_alpha, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"body\":\"xxabcxx\"}");
+  rc = store->write_state(store, "default", "bravo", source, &put_opts,
+                          &state_bravo, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"body\":\"nomatch\"}");
+  rc = store->write_state(store, "default", "charlie", source, &put_opts,
+                          &state_charlie, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  assert_true(count_query_index_field_values_with_prefix(root, "g:") >= 12U);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = state_alpha.new_state_etag;
+  meta.version = state_alpha.new_version;
+  meta.fencing_token = state_alpha.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = state_bravo.new_state_etag;
+  meta.version = state_bravo.new_version;
+  meta.fencing_token = state_bravo.new_version;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-charlie";
+  meta.state_etag = state_charlie.new_state_etag;
+  meta.version = state_charlie.new_version;
+  meta.fencing_token = state_charlie.new_version;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  contains.field = "/body";
+  contains.value = "ABC";
+  contains.ignore_case = 0;
+  req.namespace_name = "default";
+  req.document_contains_terms = &contains;
+  req.document_contains_term_count = 1U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  contains.ignore_case = 1;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_string_equal(keys.keys[1], "bravo");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &state_charlie);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_bravo);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_alpha);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -16710,6 +16899,8 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_paginates_across_removed_state),
       cmocka_unit_test(test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(test_query_index_range_scans_field_posting_candidates),
+      cmocka_unit_test(
+          test_query_index_contains_uses_trigram_posting_candidates),
       cmocka_unit_test(
           test_query_index_summary_scan_applies_negative_terms),
       cmocka_unit_test(

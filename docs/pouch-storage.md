@@ -739,8 +739,13 @@ Numeric equality and range bounds use canonical numeric keys so equivalent JSON
 number spellings compare consistently instead of relying on raw token text. Text
 predicate postings store the liblql string-predicate view for JSON strings,
 booleans, and number source text; JSON null still has no text-predicate posting.
-Object and array field containers also emit presence postings so `exists` can
-narrow candidates for structured values without requiring a scalar leaf.
+The same text values also emit lowercase ASCII-normalized `g:` trigram postings
+used as a candidate superset for `contains` / `icontains` terms of at least
+three bytes. Exact substring and case semantics still run through the `t:`
+posting checks and final `liblql` acceptance, so trigram rows may create false
+positives but must not create false negatives. Object and array field
+containers also emit presence postings so `exists` can narrow candidates for
+structured values without requiring a scalar leaf.
 Indexed mode also recognizes full-form `and` conjunctions made only of
 supported equality, range, string `in`, prefix, contains, and exists terms and
 intersects their storage-owned postings before loading candidate documents.
@@ -810,10 +815,10 @@ full-candidate indexed scan until safe recursive expansion semantics are
 available to the pouch planner.
 The `query.index` sidecar starts with a format/version record so incompatible
 posting layouts rebuild from authoritative namespace segments/snapshots instead
-of being trusted; the text-predicate posting slice increments that format
-version. A format-triggered rebuild must restore both the ordered query
-summary projection and the field postings used by indexed predicate document
-and key scans.
+of being trusted; the text-predicate and trigram posting slices increment that
+format version. A format-triggered rebuild must restore both the ordered query
+summary projection and the field postings used by indexed predicate document and
+key scans.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
