@@ -685,7 +685,8 @@ payload in the namespace.
 The first durable LQL posting slices index exact equality candidates for strict
 JSON Pointer document fields with string, boolean, null, and numeric values,
 plus numeric range candidate checks, string `in` candidates, text `prefix` /
-`iprefix` candidates, and `exists` presence checks over those field postings.
+`iprefix` and `contains` / `icontains` candidates, and `exists` presence checks
+over those field postings.
 Numeric equality and range bounds use canonical numeric keys so equivalent JSON
 number spellings compare consistently instead of relying on raw token text. Text
 predicate postings store the liblql string-predicate view for JSON strings,
@@ -693,16 +694,17 @@ booleans, and number source text; JSON null still has no text-predicate posting.
 Object and array field containers also emit presence postings so `exists` can
 narrow candidates for structured values without requiring a scalar leaf.
 Indexed mode also recognizes top-level full-form `and` conjunctions made only
-of supported equality, range, string `in`, prefix, and exists terms and
-intersects their storage-owned postings before loading candidate documents.
+of supported equality, range, string `in`, prefix, contains, and exists terms
+and intersects their storage-owned postings before loading candidate documents.
 Values inside one `in` term are unioned before that term is intersected with
 other supported predicates. Range-only selectors preserve existing key/cursor
 ordering by checking numeric postings from the key-ordered summary scan rather
 than using value-sorted postings as the primary result order. The client
 extracts those shapes only as candidate hints; final predicate acceptance still
-runs through `liblql`. Mixed equality/range/in/prefix/exists `and` selectors
-intersect equality posting candidates with numeric range, string membership,
-text prefix, and presence postings when every hinted child is supported.
+runs through `liblql`. Mixed equality/range/in/prefix/contains/exists `and`
+selectors intersect equality posting candidates with numeric range, string
+membership, text prefix/substring, and presence postings when every hinted
+child is supported.
 The `query.index` sidecar starts with a format/version record so incompatible
 posting layouts rebuild from authoritative namespace segments/snapshots instead
 of being trusted; the text-predicate posting slice increments that format

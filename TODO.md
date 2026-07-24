@@ -289,16 +289,17 @@ Latest release targets confirmed on 2026-07-23:
       LQL string predicate terms over strict JSON Pointer fields, backed by
       text-predicate postings for JSON strings, booleans, and number source
       text.
+    - [x] Add storage-owned `contains` and `icontains` candidates for
+      full-form LQL string predicate terms over strict JSON Pointer fields,
+      backed by text-predicate postings and final `liblql` acceptance.
     - [ ] Add true ordered range traversal if candidate volume requires it;
       current range narrowing preserves query key/cursor ordering by checking
       numeric field postings from the key-ordered summary scan.
     - [x] Extend candidate extraction beyond single `eq` selectors to safe
       top-level `and` conjunction/intersection forms over supported scalar
       equality postings; final predicate acceptance remains owned by `liblql`.
-    - [ ] Add index-native selector families comparable to Go lockd where they
-      are meaningful for pouch/public LQL: contains, case-insensitive contains,
-      and recursive boolean composition without devolving to full namespace
-      scans.
+    - [ ] Add recursive boolean composition over supported selector families
+      without devolving to full namespace scans.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.
