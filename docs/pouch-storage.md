@@ -1038,8 +1038,12 @@ size or periodic full scans.
 The marker payload should intentionally alternate or otherwise change size when
 mtime granularity is unreliable. Marker snapshots must ignore the current
 writer's own marker and compare other writers by name, size, and modification
-time. A full directory scan is required when the marker directory mtime advances
-or after a configured scan interval elapses.
+time. The current C backend uses peer-marker snapshots to avoid repeated
+manifest/segment scans after an independent handle has refreshed from a peer,
+and periodically falls back to segment validation so marker hints cannot hide
+external rewrites indefinitely. A later directory-mtime fast path should reduce
+the marker scan cost itself while still forcing full marker scans on a bounded
+interval.
 
 Refresh needs two modes:
 

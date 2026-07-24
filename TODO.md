@@ -418,22 +418,25 @@ Latest release targets confirmed on 2026-07-23:
       - [ ] Keep manual `compact(force|if_needed)` deterministic and
         foreground-safe even when background scheduling is enabled.
     - [ ] Add Go disk-style marker lifecycle for segmented pouch logstores.
-      - [ ] Clarify and implement root-level writer-presence markers for
+      - [x] Clarify and implement root-level writer-presence markers for
         exclusive writer detection/fencing, separate from namespace logstore
         query/segment files.
-      - [ ] Implement per-namespace `<logstore>/markers/writer-*.marker`
+      - [x] Implement per-namespace `<logstore>/markers/writer-*.marker`
         refresh markers that are touched after successful commit groups so
         independent handles can cheaply detect another writer's namespace
         changes before doing full manifest/segment scans.
-      - [ ] Cache marker directory snapshots by name, modtime, and size; use
-        directory mtime as a fast path but periodically force full marker scans
-        because filesystem/NFS mtime granularity can hide changes.
+      - [x] Cache peer writer marker snapshots by name, modtime, and size and
+        periodically force segment scans so marker hints cannot suppress all
+        fallback validation indefinitely.
+      - [ ] Add a marker-directory mtime fast path for the peer-marker snapshot
+        cache, with periodic forced full marker scans because filesystem/NFS
+        mtime granularity can hide changes.
       - [ ] In single-writer mode, allow marker-synced handles to skip refresh
         scans unless forced, matching Go disk's native single-writer
         optimization.
-      - [ ] Cover marker creation, refresh throttling/toggling, foreign marker
-        detection, legacy/mtime fallback behavior, and close vs abort cleanup
-        with focused pouch tests.
+      - [x] Cover marker creation, marker payload toggling, peer marker
+        detection, unchanged-marker refresh skipping, stale/legacy root marker
+        classification, and close vs abort cleanup with focused pouch tests.
     - [x] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.

@@ -1,7 +1,7 @@
+#include <errno.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,8 +14,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
-#include <utime.h>
 #include <unistd.h>
+#include <utime.h>
 
 #include "lc_pouch_store.h"
 
@@ -36,6 +36,7 @@
 #define TEST_POUCH_RECORD_HIGH_WATER 11U
 #define TEST_POUCH_MAX_INLINE_BODY_BYTES (64UL * 1024UL * 1024UL)
 #define TEST_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
+#define TEST_POUCH_LOGSTORE_WRITER_MARKER_PREFIX "writer-"
 #define TEST_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
 
 typedef struct test_same_process_key_lock_thread {
@@ -93,8 +94,7 @@ static void *tracked_realloc(void *context, void *ptr, size_t size) {
   if (size > tracked->max_realloc_size) {
     tracked->max_realloc_size = size;
   }
-  if (tracked->fail_realloc_size != 0U &&
-      size == tracked->fail_realloc_size) {
+  if (tracked->fail_realloc_size != 0U && size == tracked->fail_realloc_size) {
     return NULL;
   }
   return realloc(ptr, size);
@@ -150,6 +150,20 @@ static int test_is_queue_wake_marker(const char *name) {
          strcmp(name + name_len - marker_len, ".marker") == 0;
 }
 
+static int test_is_logstore_writer_marker(const char *name) {
+  size_t prefix_len;
+  size_t name_len;
+  size_t marker_len;
+
+  prefix_len = strlen(TEST_POUCH_LOGSTORE_WRITER_MARKER_PREFIX);
+  marker_len = strlen(".marker");
+  name_len = strlen(name);
+  return name_len > prefix_len + marker_len &&
+         strncmp(name, TEST_POUCH_LOGSTORE_WRITER_MARKER_PREFIX, prefix_len) ==
+             0 &&
+         strcmp(name + name_len - marker_len, ".marker") == 0;
+}
+
 static unsigned long test_queue_wake_hash(const char *namespace_name,
                                           const char *queue) {
   const unsigned char *cursor;
@@ -178,6 +192,29 @@ static void test_queue_wake_marker_path(const char *root,
   snprintf(path, path_size, "%s/%s%08lx.marker", root,
            TEST_POUCH_QUEUE_WAKE_PREFIX,
            test_queue_wake_hash(namespace_name, queue));
+}
+
+static size_t test_count_logstore_writer_markers(const char *root,
+                                                 const char *namespace_name) {
+  char markers_path[512];
+  DIR *dir;
+  struct dirent *entry;
+  size_t count;
+
+  snprintf(markers_path, sizeof(markers_path), "%s/%s/logstore/markers", root,
+           namespace_name);
+  dir = opendir(markers_path);
+  if (dir == NULL) {
+    return 0U;
+  }
+  count = 0U;
+  while ((entry = readdir(dir)) != NULL) {
+    if (test_is_logstore_writer_marker(entry->d_name)) {
+      count++;
+    }
+  }
+  closedir(dir);
+  return count;
 }
 
 static size_t test_count_writer_markers(const char *root) {
@@ -216,6 +253,41 @@ static size_t test_count_queue_wake_markers(const char *root) {
   }
   closedir(dir);
   return count;
+}
+
+static int test_first_logstore_writer_marker_path(const char *root,
+                                                  const char *namespace_name,
+                                                  char *path,
+                                                  size_t path_size) {
+  char markers_path[512];
+  DIR *dir;
+  struct dirent *entry;
+  int found;
+
+  snprintf(markers_path, sizeof(markers_path), "%s/%s/logstore/markers", root,
+           namespace_name);
+  dir = opendir(markers_path);
+  if (dir == NULL) {
+    return 0;
+  }
+  found = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    if (test_is_logstore_writer_marker(entry->d_name)) {
+      size_t dir_len;
+      size_t name_len;
+
+      dir_len = strlen(markers_path);
+      name_len = strlen(entry->d_name);
+      assert_true(dir_len + 1U + name_len + 1U <= path_size);
+      memcpy(path, markers_path, dir_len);
+      path[dir_len] = '/';
+      memcpy(path + dir_len + 1U, entry->d_name, name_len + 1U);
+      found = 1;
+      break;
+    }
+  }
+  closedir(dir);
+  return found;
 }
 
 static int test_first_writer_marker_path(const char *root, char *path,
@@ -376,8 +448,7 @@ static void test_cleanup_root(const char *root) {
     return;
   }
   while ((entry = readdir(dir)) != NULL) {
-    if (strcmp(entry->d_name, ".") == 0 ||
-        strcmp(entry->d_name, "..") == 0) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
     if (!test_join_path_buf(path, sizeof(path), root, entry->d_name)) {
@@ -680,8 +751,8 @@ static size_t count_namespace_segment_records_of_type(
                     strlen(entry->d_name) == 24U &&
                     strcmp(entry->d_name + 20U, ".log") == 0;
     for (name_index = 4U; valid_segment && name_index < 20U; ++name_index) {
-      valid_segment = entry->d_name[name_index] >= '0' &&
-                      entry->d_name[name_index] <= '9';
+      valid_segment =
+          entry->d_name[name_index] >= '0' && entry->d_name[name_index] <= '9';
     }
     if (!valid_segment) {
       continue;
@@ -769,16 +840,14 @@ static off_t test_log_size(const char *root) {
 static void test_segment_path(const char *root, const char *escaped_namespace,
                               unsigned long segment_number, char *path,
                               size_t path_size) {
-  snprintf(path, path_size,
-           "%s/%s/logstore/segments/seg-%016lu.log", root, escaped_namespace,
-           segment_number);
+  snprintf(path, path_size, "%s/%s/logstore/segments/seg-%016lu.log", root,
+           escaped_namespace, segment_number);
 }
 
 static void test_snapshot_path(const char *root, const char *escaped_namespace,
                                unsigned long snapshot_number, char *path,
                                size_t path_size) {
-  snprintf(path, path_size,
-           "%s/%s/logstore/snapshots/snap-%016lu.log", root,
+  snprintf(path, path_size, "%s/%s/logstore/snapshots/snap-%016lu.log", root,
            escaped_namespace, snapshot_number);
 }
 
@@ -788,8 +857,7 @@ static void test_active_segment_path(const char *root,
   test_segment_path(root, escaped_namespace, 1UL, path, path_size);
 }
 
-static off_t test_segment_size(const char *root,
-                               const char *escaped_namespace,
+static off_t test_segment_size(const char *root, const char *escaped_namespace,
                                unsigned long segment_number) {
   char segment_path[512];
   struct stat st;
@@ -842,8 +910,8 @@ static off_t test_namespace_snapshots_size(const char *root,
   struct stat st;
   off_t total;
 
-  snprintf(snapshots_path, sizeof(snapshots_path),
-           "%s/%s/logstore/snapshots", root, escaped_namespace);
+  snprintf(snapshots_path, sizeof(snapshots_path), "%s/%s/logstore/snapshots",
+           root, escaped_namespace);
   dir = opendir(snapshots_path);
   if (dir == NULL && errno == ENOENT) {
     return 0;
@@ -939,9 +1007,8 @@ static void test_put_u64(unsigned char *dst, unsigned long value) {
 #endif
 }
 
-static unsigned long test_crc32_update(unsigned long crc,
-                                       const unsigned char *bytes,
-                                       size_t count) {
+static unsigned long
+test_crc32_update(unsigned long crc, const unsigned char *bytes, size_t count) {
   size_t index;
 
   for (index = 0U; index < count; ++index) {
@@ -964,8 +1031,7 @@ static unsigned long test_crc32_update(unsigned long crc,
 static void write_root_store_log_state_put(const char *root, const char *ns,
                                            const char *key,
                                            const char *content_type,
-                                           const char *etag,
-                                           const char *body,
+                                           const char *etag, const char *body,
                                            unsigned long version) {
   char log_path[512];
   unsigned char header[TEST_POUCH_HEADER_SIZE];
@@ -1070,8 +1136,8 @@ static void rewrite_query_index_as_v1_without_owner(const char *root) {
     crc = 0xffffffffUL;
     crc = test_crc32_update(crc, payload, (size_t)(ns_len + key_len));
     if (etag_len > 0UL) {
-      crc = test_crc32_update(
-          crc, payload + ns_len + key_len + owner_len, (size_t)etag_len);
+      crc = test_crc32_update(crc, payload + ns_len + key_len + owner_len,
+                              (size_t)etag_len);
     }
     test_put_u32(header + 20, 0UL);
     test_put_u64(header + 44, new_payload_len);
@@ -1081,10 +1147,9 @@ static void rewrite_query_index_as_v1_without_owner(const char *root) {
     assert_int_equal(write(out_fd, payload, (size_t)(ns_len + key_len)),
                      ns_len + key_len);
     if (etag_len > 0UL) {
-      assert_int_equal(
-          write(out_fd, payload + ns_len + key_len + owner_len,
-                (size_t)etag_len),
-          etag_len);
+      assert_int_equal(write(out_fd, payload + ns_len + key_len + owner_len,
+                             (size_t)etag_len),
+                       etag_len);
     }
     free(payload);
   }
@@ -1146,8 +1211,7 @@ static void corrupt_first_log_match(const char *root, const char *needle) {
 
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   found = corrupt_first_log_match_at_path(log_path, needle, 0);
-  test_active_segment_path(root, "default", segment_path,
-                           sizeof(segment_path));
+  test_active_segment_path(root, "default", segment_path, sizeof(segment_path));
   found |= corrupt_first_log_match_at_path(segment_path, needle, 0);
   assert_true(found);
 }
@@ -1222,13 +1286,13 @@ static void set_first_query_index_match_record_version(const char *root,
           test_put_u32(header + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
                        version);
           assert_int_equal(
-              lseek(fd, record_offset +
-                            TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
+              lseek(fd,
+                    record_offset +
+                        TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
                     SEEK_SET),
               record_offset + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET);
           assert_int_equal(
-              write(fd,
-                    header + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
+              write(fd, header + TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET,
                     4U),
               4);
           found = 1;
@@ -1238,10 +1302,11 @@ static void set_first_query_index_match_record_version(const char *root,
     }
     free(payload);
     if (!found) {
-      assert_int_equal(lseek(fd, record_offset +
-                                     TEST_POUCH_QUERY_INDEX_HEADER_SIZE +
-                                     (off_t)payload_len,
-                              SEEK_SET),
+      assert_int_equal(lseek(fd,
+                             record_offset +
+                                 TEST_POUCH_QUERY_INDEX_HEADER_SIZE +
+                                 (off_t)payload_len,
+                             SEEK_SET),
                        record_offset + TEST_POUCH_QUERY_INDEX_HEADER_SIZE +
                            (off_t)payload_len);
     }
@@ -1299,8 +1364,7 @@ static int set_first_log_match_record_version_at_path(const char *log_path,
           test_put_u32(header + TEST_POUCH_HEADER_RECORD_VERSION_OFFSET,
                        version);
           assert_int_equal(
-              lseek(fd,
-                    record_offset + TEST_POUCH_HEADER_RECORD_VERSION_OFFSET,
+              lseek(fd, record_offset + TEST_POUCH_HEADER_RECORD_VERSION_OFFSET,
                     SEEK_SET),
               record_offset + TEST_POUCH_HEADER_RECORD_VERSION_OFFSET);
           assert_int_equal(
@@ -1313,11 +1377,10 @@ static int set_first_log_match_record_version_at_path(const char *log_path,
     }
     free(payload);
     if (!found) {
-      assert_int_equal(lseek(fd, record_offset + TEST_POUCH_HEADER_SIZE +
-                                     (off_t)payload_len,
-                              SEEK_SET),
-                       record_offset + TEST_POUCH_HEADER_SIZE +
-                           (off_t)payload_len);
+      assert_int_equal(
+          lseek(fd, record_offset + TEST_POUCH_HEADER_SIZE + (off_t)payload_len,
+                SEEK_SET),
+          record_offset + TEST_POUCH_HEADER_SIZE + (off_t)payload_len);
     }
   }
   close(fd);
@@ -1335,10 +1398,9 @@ static void set_first_log_match_record_version(const char *root,
   int found;
 
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
-  found = set_first_log_match_record_version_at_path(log_path, needle, version,
-                                                     0);
-  test_active_segment_path(root, "default", segment_path,
-                           sizeof(segment_path));
+  found =
+      set_first_log_match_record_version_at_path(log_path, needle, version, 0);
+  test_active_segment_path(root, "default", segment_path, sizeof(segment_path));
   found |= set_first_log_match_record_version_at_path(segment_path, needle,
                                                       version, 0);
   assert_true(found);
@@ -1386,7 +1448,8 @@ static int set_first_log_match_body_length_at_path(const char *log_path,
     }
     assert_int_equal(nread, sizeof(header));
     assert_memory_equal(header, "LCP1", 4U);
-    payload_len = test_get_u64(header + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET);
+    payload_len =
+        test_get_u64(header + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET);
     payload = (unsigned char *)malloc((size_t)payload_len);
     assert_non_null(payload);
     assert_int_equal(read(fd, payload, (size_t)payload_len), payload_len);
@@ -1405,16 +1468,13 @@ static int set_first_log_match_body_length_at_path(const char *log_path,
           test_put_u64(header + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET,
                        payload_len);
           assert_int_equal(
-              lseek(fd,
-                    record_offset + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET,
+              lseek(fd, record_offset + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET,
                     SEEK_SET),
               record_offset + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET);
           assert_int_equal(
-              write(fd, header + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET, 8U),
-              8);
+              write(fd, header + TEST_POUCH_HEADER_BODY_LENGTH_OFFSET, 8U), 8);
           assert_int_equal(
-              lseek(fd,
-                    record_offset + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET,
+              lseek(fd, record_offset + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET,
                     SEEK_SET),
               record_offset + TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET);
           assert_int_equal(
@@ -1427,11 +1487,10 @@ static int set_first_log_match_body_length_at_path(const char *log_path,
     }
     free(payload);
     if (!found) {
-      assert_int_equal(lseek(fd, record_offset + TEST_POUCH_HEADER_SIZE +
-                                     (off_t)payload_len,
-                              SEEK_SET),
-                       record_offset + TEST_POUCH_HEADER_SIZE +
-                           (off_t)payload_len);
+      assert_int_equal(
+          lseek(fd, record_offset + TEST_POUCH_HEADER_SIZE + (off_t)payload_len,
+                SEEK_SET),
+          record_offset + TEST_POUCH_HEADER_SIZE + (off_t)payload_len);
     }
   }
   close(fd);
@@ -1451,8 +1510,7 @@ static void set_first_log_match_body_length(const char *root,
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   found =
       set_first_log_match_body_length_at_path(log_path, needle, body_length, 0);
-  test_active_segment_path(root, "default", segment_path,
-                           sizeof(segment_path));
+  test_active_segment_path(root, "default", segment_path, sizeof(segment_path));
   found |= set_first_log_match_body_length_at_path(segment_path, needle,
                                                    body_length, 0);
   assert_true(found);
@@ -1492,8 +1550,7 @@ static void truncate_log_after_first_record(const char *root) {
 
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   found = truncate_log_after_first_record_at_path(log_path, 0);
-  test_active_segment_path(root, "default", segment_path,
-                           sizeof(segment_path));
+  test_active_segment_path(root, "default", segment_path, sizeof(segment_path));
   found |= truncate_log_after_first_record_at_path(segment_path, 0);
   assert_true(found);
 }
@@ -1522,9 +1579,10 @@ static int capture_scan_row(void *context, const lc_pouch_scan_meta_row *row,
   assert_non_null(row->key);
   assert_non_null(row->etag);
   assert_non_null(row->meta);
-  assert_true(capture->count < sizeof(capture->keys) / sizeof(capture->keys[0]));
-  snprintf(capture->keys[capture->count],
-           sizeof(capture->keys[capture->count]), "%s", row->key);
+  assert_true(capture->count <
+              sizeof(capture->keys) / sizeof(capture->keys[0]));
+  snprintf(capture->keys[capture->count], sizeof(capture->keys[capture->count]),
+           "%s", row->key);
   if (row->meta->owner != NULL) {
     snprintf(capture->owners[capture->count],
              sizeof(capture->owners[capture->count]), "%s", row->meta->owner);
@@ -1542,9 +1600,10 @@ static int capture_query_key(void *context, const char *key, lc_error *error) {
   (void)error;
   capture = (key_capture *)context;
   assert_non_null(key);
-  assert_true(capture->count < sizeof(capture->keys) / sizeof(capture->keys[0]));
-  snprintf(capture->keys[capture->count],
-           sizeof(capture->keys[capture->count]), "%s", key);
+  assert_true(capture->count <
+              sizeof(capture->keys) / sizeof(capture->keys[0]));
+  snprintf(capture->keys[capture->count], sizeof(capture->keys[capture->count]),
+           "%s", key);
   capture->count++;
   return LC_OK;
 }
@@ -1618,8 +1677,8 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_state_write_creates_segmented_namespace_logstore(
-    void **state) {
+static void
+test_state_write_creates_segmented_namespace_logstore(void **state) {
   char root[256];
   char path[512];
   char manifest_text[128];
@@ -1653,8 +1712,8 @@ static void test_state_write_creates_segmented_namespace_logstore(
 
   source = source_from_text("{\"value\":1}");
   opts.content_type = "application/json";
-  rc = store->write_state(store, "team.alpha", "alpha", source, &opts,
-                          &put_res, &error);
+  rc = store->write_state(store, "team.alpha", "alpha", source, &opts, &put_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
 
@@ -1674,8 +1733,7 @@ static void test_state_write_creates_segmented_namespace_logstore(
   assert_int_equal(stat(path, &st), 0);
   assert_true(S_ISDIR(st.st_mode));
   snprintf(path, sizeof(path),
-           "%s/team%%2ealpha/logstore/segments/seg-0000000000000001.log",
-           root);
+           "%s/team%%2ealpha/logstore/segments/seg-0000000000000001.log", root);
   assert_int_equal(stat(path, &st), 0);
   assert_true(S_ISREG(st.st_mode));
   assert_true(st.st_size > (off_t)TEST_POUCH_HEADER_SIZE);
@@ -1691,8 +1749,8 @@ static void test_state_write_creates_segmented_namespace_logstore(
   test_cleanup_root(root);
 }
 
-static void test_segment_payload_refs_survive_root_log_truncation(
-    void **state) {
+static void
+test_segment_payload_refs_survive_root_log_truncation(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -1801,8 +1859,7 @@ static void test_segment_payload_refs_survive_root_log_truncation(
   test_cleanup_root(root);
 }
 
-static void test_segment_generation_refreshes_independent_handle(
-    void **state) {
+static void test_segment_generation_refreshes_independent_handle(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -1833,8 +1890,8 @@ static void test_segment_generation_refreshes_independent_handle(
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("{\"fresh\":true}");
-  rc = writer->write_state(writer, "default", "shared", source, NULL,
-                           &put_res, &error);
+  rc = writer->write_state(writer, "default", "shared", source, NULL, &put_res,
+                           &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   truncate_store_log(root);
@@ -1898,8 +1955,8 @@ static void test_memory_records_append_only_to_segments(void **state) {
   meta.owner = "owner";
   meta.lease_id = "lease";
   meta.version = 1L;
-  rc = store->store_meta(store, "default", "meta-key", &meta, NULL,
-                         &meta_res, &error);
+  rc = store->store_meta(store, "default", "meta-key", &meta, NULL, &meta_res,
+                         &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(test_log_size(root), root_bytes);
   assert_int_equal(count_namespace_segment_records_of_type(
@@ -1989,8 +2046,8 @@ static void test_replay_recovers_state_from_namespace_segment(void **state) {
 
   source = source_from_text("{\"value\":2}");
   opts.content_type = "application/json";
-  rc = store->write_state(store, "team.alpha", "alpha", source, &opts,
-                          &put_res, &error);
+  rc = store->write_state(store, "team.alpha", "alpha", source, &opts, &put_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   assert_true(test_active_segment_size(root, "team%2ealpha") >
@@ -2005,9 +2062,8 @@ static void test_replay_recovers_state_from_namespace_segment(void **state) {
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
-  rc =
-      store->read_state(store, "team.alpha", "alpha", &read_body, &info,
-                        &error);
+  rc = store->read_state(store, "team.alpha", "alpha", &read_body, &info,
+                         &error);
   assert_int_equal(rc, LC_OK);
   assert_false(info.no_content);
   assert_string_equal(info.content_type, "application/json");
@@ -2054,8 +2110,8 @@ static void test_replay_repairs_missing_namespace_manifest(void **state) {
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("manifest-repair-body");
-  rc = store->write_state(store, "team.alpha", "alpha", source, NULL,
-                          &put_res, &error);
+  rc = store->write_state(store, "team.alpha", "alpha", source, NULL, &put_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   rc = store->close(store, &error);
@@ -2070,9 +2126,8 @@ static void test_replay_repairs_missing_namespace_manifest(void **state) {
   assert_int_equal(rc, LC_OK);
   test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
   assert_string_equal(manifest_text, "open seg-0000000000000001.log\n");
-  rc =
-      store->read_state(store, "team.alpha", "alpha", &read_body, &info,
-                        &error);
+  rc = store->read_state(store, "team.alpha", "alpha", &read_body, &info,
+                         &error);
   assert_int_equal(rc, LC_OK);
   assert_false(info.no_content);
   text = read_source_text(read_body);
@@ -2088,8 +2143,8 @@ static void test_replay_repairs_missing_namespace_manifest(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_replay_repairs_crash_incomplete_namespace_manifest(
-    void **state) {
+static void
+test_replay_repairs_crash_incomplete_namespace_manifest(void **state) {
   char root[256];
   char manifest_path[512];
   char manifest_text[1024];
@@ -2151,7 +2206,8 @@ static void test_replay_repairs_crash_incomplete_namespace_manifest(
   open2 = strstr(manifest_text, "open seg-0000000000000002.log\n");
   assert_non_null(open2);
   prefix_len = (size_t)(open2 - manifest_text);
-  assert_true(prefix_len + sizeof(partial_open) < sizeof(repaired_manifest_text));
+  assert_true(prefix_len + sizeof(partial_open) <
+              sizeof(repaired_manifest_text));
   memcpy(repaired_manifest_text, manifest_text, prefix_len);
   memcpy(repaired_manifest_text + prefix_len, partial_open,
          sizeof(partial_open));
@@ -2160,9 +2216,8 @@ static void test_replay_repairs_crash_incomplete_namespace_manifest(
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
-  assert_non_null(strstr(manifest_text,
-                         "open seg-000000000\n"
-                         "open seg-0000000000000002.log\n"));
+  assert_non_null(strstr(manifest_text, "open seg-000000000\n"
+                                        "open seg-0000000000000002.log\n"));
   rc = store->read_state(store, "default", "tail", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(info.no_content);
@@ -2223,8 +2278,7 @@ static void test_segment_rotation_replays_multiple_segments(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
   memset(&put_res, 0, sizeof(put_res));
-  assert_true(test_segment_size(root, "default", 1UL) >
-              (off_t)(64U * 1024U));
+  assert_true(test_segment_size(root, "default", 1UL) > (off_t)(64U * 1024U));
 
   source = source_from_text("rotated-tail");
   rc = store->write_state(store, "default", "tail", source, NULL, &put_res,
@@ -2248,8 +2302,8 @@ static void test_segment_rotation_replays_multiple_segments(void **state) {
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
-  rc = store->read_state(store, "default", "large-a", &read_body, &info,
-                         &error);
+  rc =
+      store->read_state(store, "default", "large-a", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(info.no_content);
   read_length = read_source_count_x(read_body);
@@ -2426,8 +2480,8 @@ static void test_segment_replay_honors_manifest_obsolete(void **state) {
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
-  rc = store->read_state(store, "default", "large-a", &read_body, &info,
-                         &error);
+  rc =
+      store->read_state(store, "default", "large-a", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(info.no_content);
   assert_null(read_body);
@@ -2485,8 +2539,8 @@ static void test_replay_installed_snapshot_without_segment_tail(void **state) {
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("snapshot-body");
-  rc = store->write_state(store, "default", "snap-key", source, &opts,
-                          &put_res, &error);
+  rc = store->write_state(store, "default", "snap-key", source, &opts, &put_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   rc = store->close(store, &error);
@@ -2589,8 +2643,8 @@ static void test_replay_cleans_obsolete_snapshot_files(void **state) {
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("active-snapshot-body");
-  rc = store->write_state(store, "default", "snap-key", source, &opts,
-                          &put_res, &error);
+  rc = store->write_state(store, "default", "snap-key", source, &opts, &put_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   rc = store->close(store, &error);
@@ -2677,8 +2731,8 @@ static void test_replay_ignores_root_store_log_without_segments(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_state_put_propagates_source_failure_before_append(
-    void **state) {
+static void
+test_state_put_propagates_source_failure_before_append(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -2845,8 +2899,7 @@ static void test_cas_and_remove_semantics(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(second.new_version, 2L);
 
-  rc = store->remove_state(store, "default", "beta", "wrong", &removed,
-                           &error);
+  rc = store->remove_state(store, "default", "beta", "wrong", &removed, &error);
   assert_int_equal(rc, LC_ERR_SERVER);
   lc_error_cleanup(&error);
 
@@ -2945,8 +2998,8 @@ static void test_cas_and_remove_semantics(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_state_write_index_allocation_failure_replays_cleanly(
-    void **state) {
+static void
+test_state_write_index_allocation_failure_replays_cleanly(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -2980,16 +3033,16 @@ static void test_state_write_index_allocation_failure_replays_cleanly(
 
   opts.content_type = "text/plain";
   source = source_from_text("payload-one");
-  rc = store->write_state(store, "default", "state-key", source, &opts,
-                          &first, &error);
+  rc = store->write_state(store, "default", "state-key", source, &opts, &first,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = replacement_type;
   tracked.fail_malloc_size = strlen(replacement_type) + 1U;
   source = source_from_text("payload-two");
-  rc = store->write_state(store, "default", "state-key", source, &opts,
-                          &second, &error);
+  rc = store->write_state(store, "default", "state-key", source, &opts, &second,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_NOMEM);
   tracked.fail_malloc_size = 0U;
@@ -3090,8 +3143,8 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
   assert_null(read_body);
   lc_pouch_state_info_cleanup(&allocator, &info);
 
-  rc = store->promote_staged_state(store, "default", "lease-key", "txn-1",
-                                   NULL, &promoted, &error);
+  rc = store->promote_staged_state(store, "default", "lease-key", "txn-1", NULL,
+                                   &promoted, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(promoted.new_state_etag);
   assert_string_equal(promoted.new_state_etag, staged.new_state_etag);
@@ -3125,8 +3178,8 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
 
-  rc = store->promote_staged_state(store, "default", "lease-key", "txn-2",
-                                   NULL, &second_promoted, &error);
+  rc = store->promote_staged_state(store, "default", "lease-key", "txn-2", NULL,
+                                   &second_promoted, &error);
   assert_int_equal(rc, LC_ERR_SERVER);
   assert_int_equal(error.http_status, 412L);
   lc_error_cleanup(&error);
@@ -3298,9 +3351,9 @@ static void test_staged_state_remove_promote_discard_and_reopen(void **state) {
                                  NULL, &discarded_remove, &error);
   assert_int_equal(rc, LC_OK);
   promote_opts.expected_head_etag = base.new_state_etag;
-  rc = store->promote_staged_state(store, "default", "lease-key",
-                                   "txn-remove-2", &promote_opts,
-                                   &promoted_remove, &error);
+  rc =
+      store->promote_staged_state(store, "default", "lease-key", "txn-remove-2",
+                                  &promote_opts, &promoted_remove, &error);
   assert_int_equal(rc, LC_OK);
   assert_null(promoted_remove.new_state_etag);
   assert_true(promoted_remove.new_version > base.new_version);
@@ -3337,8 +3390,8 @@ static void test_staged_state_remove_promote_discard_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_staged_state_listing_orders_paginates_and_replays(
-    void **state) {
+static void
+test_staged_state_listing_orders_paginates_and_replays(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -3391,8 +3444,8 @@ static void test_staged_state_listing_orders_paginates_and_replays(
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("charlie");
-  rc = store->stage_state(store, "default", "lease-key", "txn-charlie",
-                          source, &state_opts, &staged_charlie, &error);
+  rc = store->stage_state(store, "default", "lease-key", "txn-charlie", source,
+                          &state_opts, &staged_charlie, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
 
@@ -3534,8 +3587,8 @@ static void test_replay_truncates_trailing_partial_record(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_replay_rebuilds_indexes_after_external_truncation(
-    void **state) {
+static void
+test_replay_rebuilds_indexes_after_external_truncation(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -3595,8 +3648,8 @@ static void test_replay_rebuilds_indexes_after_external_truncation(
   test_cleanup_root(root);
 }
 
-static void test_replay_stops_at_corrupt_record_and_discards_later_records(
-    void **state) {
+static void
+test_replay_stops_at_corrupt_record_and_discards_later_records(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -3658,8 +3711,8 @@ static void test_replay_stops_at_corrupt_record_and_discards_later_records(
   read_body = NULL;
   lc_pouch_state_info_cleanup(&allocator, &info);
 
-  rc = store->read_state(store, "default", "corrupt", &read_body, &info,
-                         &error);
+  rc =
+      store->read_state(store, "default", "corrupt", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(info.no_content);
   assert_null(read_body);
@@ -3764,8 +3817,8 @@ static void test_replay_stops_at_unsupported_record_version(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_replay_stops_at_oversized_record_without_allocating_payload(
-    void **state) {
+static void
+test_replay_stops_at_oversized_record_without_allocating_payload(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -3800,8 +3853,8 @@ static void test_replay_stops_at_oversized_record_without_allocating_payload(
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("oversized-middle");
-  rc = store->write_state(store, "default", "oversized", source, NULL,
-                          &second, &error);
+  rc = store->write_state(store, "default", "oversized", source, NULL, &second,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("oversized-later");
@@ -5108,8 +5161,8 @@ static void test_root_staged_state_lists_and_discards(void **state) {
 
   state_opts.content_type = "application/json";
   source = source_from_text("{\"draft\":true}");
-  rc = store->stage_state(store, "default", "", "txn-root", source,
-                          &state_opts, &staged, &error);
+  rc = store->stage_state(store, "default", "", "txn-root", source, &state_opts,
+                          &staged, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   assert_non_null(staged.new_state_etag);
@@ -5179,8 +5232,8 @@ static void test_root_staged_state_lists_and_discards(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_scan_orders_paginates_and_reports_seq(
-    void **state) {
+static void
+test_query_index_scan_orders_paginates_and_reports_seq(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -5350,8 +5403,8 @@ static void test_query_index_scan_orders_paginates_and_reports_seq(
   test_cleanup_root(root);
 }
 
-static void test_query_index_keys_scan_avoids_metadata_row_copies(
-    void **state) {
+static void
+test_query_index_keys_scan_avoids_metadata_row_copies(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -5829,8 +5882,8 @@ static void test_query_index_scans_exclude_removed_state(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_owner_index_paginates_across_removed_state(
-    void **state) {
+static void
+test_query_owner_index_paginates_across_removed_state(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -6033,8 +6086,8 @@ static void test_query_owner_index_paginates_across_removed_state(
   test_cleanup_root(root);
 }
 
-static void test_query_index_scans_refresh_stale_reader_before_sidecar(
-    void **state) {
+static void
+test_query_index_scans_refresh_stale_reader_before_sidecar(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -6134,8 +6187,8 @@ static void test_query_index_scans_refresh_stale_reader_before_sidecar(
   test_cleanup_root(root);
 }
 
-static void test_query_index_projection_replays_updates_and_deletes(
-    void **state) {
+static void
+test_query_index_projection_replays_updates_and_deletes(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -6225,8 +6278,8 @@ static void test_query_index_projection_replays_updates_and_deletes(
   test_cleanup_root(root);
 }
 
-static void test_metadata_update_allocation_failure_preserves_indexes(
-    void **state) {
+static void
+test_metadata_update_allocation_failure_preserves_indexes(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -6307,8 +6360,8 @@ static void test_metadata_update_allocation_failure_preserves_indexes(
   test_cleanup_root(root);
 }
 
-static void test_retention_sweep_deletes_expired_metadata_and_state(
-    void **state) {
+static void
+test_retention_sweep_deletes_expired_metadata_and_state(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -6356,8 +6409,8 @@ static void test_retention_sweep_deletes_expired_metadata_and_state(
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
   source = source_from_text("expired-state");
-  rc = store->write_state(store, "default", "expired", source, NULL,
-                          &state_res, &error);
+  rc = store->write_state(store, "default", "expired", source, NULL, &state_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   lc_pouch_put_state_res_cleanup(&allocator, &state_res);
@@ -6371,8 +6424,8 @@ static void test_retention_sweep_deletes_expired_metadata_and_state(
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
   source = source_from_text("current-state");
-  rc = store->write_state(store, "default", "current", source, NULL,
-                          &state_res, &error);
+  rc = store->write_state(store, "default", "current", source, NULL, &state_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   lc_pouch_put_state_res_cleanup(&allocator, &state_res);
@@ -6469,8 +6522,8 @@ static void test_retention_sweep_deletes_expired_metadata_and_state(
   test_cleanup_root(root);
 }
 
-static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
-    void **state) {
+static void
+test_retention_sweep_keeps_metadata_when_state_delete_fails(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -6518,8 +6571,8 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
   source = source_from_text("expired-state");
-  rc = store->write_state(store, "default", "expired", source, NULL,
-                          &state_res, &error);
+  rc = store->write_state(store, "default", "expired", source, NULL, &state_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   lc_pouch_put_state_res_cleanup(&allocator, &state_res);
@@ -6535,9 +6588,8 @@ static void test_retention_sweep_keeps_metadata_when_state_delete_fails(
   memset(&sweep, 0, sizeof(sweep));
 
   req.updated_before_unix = 1000L;
-  tracked.fail_malloc_size = strlen(
-                                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e"
-                                 "4649b934ca495991b7852b855") +
+  tracked.fail_malloc_size = strlen("e3b0c44298fc1c149afbf4c8996fb92427ae41e"
+                                    "4649b934ca495991b7852b855") +
                              1U;
   tracked.fail_malloc_after_calls = tracked.malloc_calls + 107U;
   rc = store->retention_sweep(store, &req, &sweep, &error);
@@ -6812,8 +6864,8 @@ static void test_query_index_sidecar_appends_metadata_records(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_keys_recovers_from_missing_legacy_store_log(
-    void **state) {
+static void
+test_query_index_keys_recovers_from_missing_legacy_store_log(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -6905,8 +6957,8 @@ static void test_query_index_keys_recovers_from_missing_legacy_store_log(
   test_cleanup_root(root);
 }
 
-static void test_query_index_rebuilds_field_postings_from_segments(
-    void **state) {
+static void
+test_query_index_rebuilds_field_postings_from_segments(void **state) {
   char root[256];
   char index_path[512];
   lc_pouch_allocator allocator;
@@ -6973,8 +7025,8 @@ static void test_query_index_rebuilds_field_postings_from_segments(
   meta.state_etag = beta_state.new_state_etag;
   meta.version = beta_state.new_version;
   meta.fencing_token = beta_state.new_version;
-  rc = store->store_meta(store, "default", "beta", &meta, NULL, &stored,
-                         &error);
+  rc =
+      store->store_meta(store, "default", "beta", &meta, NULL, &stored, &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
@@ -7020,8 +7072,8 @@ static void test_query_index_rebuilds_field_postings_from_segments(
   test_cleanup_root(root);
 }
 
-static void test_query_index_keys_recovers_from_corrupt_sidecar_tail(
-    void **state) {
+static void
+test_query_index_keys_recovers_from_corrupt_sidecar_tail(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -7224,8 +7276,8 @@ static void test_query_index_keys_recreates_missing_sidecar(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_keys_rebuilds_future_sidecar_version(
-    void **state) {
+static void
+test_query_index_keys_rebuilds_future_sidecar_version(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -7311,8 +7363,8 @@ static void test_query_index_keys_rebuilds_future_sidecar_version(
   test_cleanup_root(root);
 }
 
-static void test_query_index_keys_truncates_partial_sidecar_field(
-    void **state) {
+static void
+test_query_index_keys_truncates_partial_sidecar_field(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -7522,8 +7574,8 @@ static void test_query_index_sidecar_compacts_with_segments(void **state) {
   meta.state_etag = "state-compact";
   for (index = 0U; index < 160U; ++index) {
     meta.version = (long)index + 1L;
-    rc = store->store_meta(store, "default", "compact-key", &meta,
-                           stored.etag, &updated, &error);
+    rc = store->store_meta(store, "default", "compact-key", &meta, stored.etag,
+                           &updated, &error);
     assert_int_equal(rc, LC_OK);
     lc_pouch_store_meta_res_cleanup(&allocator, &stored);
     stored = updated;
@@ -7652,8 +7704,8 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
 
   copy_opts.source.name = "result.txt";
   copy_opts.prevent_overwrite = 1;
-  rc = store->copy_object(store, "default", "lease-key", "copy-key",
-                          &copy_opts, &copied, &error);
+  rc = store->copy_object(store, "default", "lease-key", "copy-key", &copy_opts,
+                          &copied, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(copied.name, "result.txt");
   assert_string_equal(copied.id, first.id);
@@ -7662,8 +7714,8 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   assert_string_equal(copied.plaintext_sha256, payload_one_sha256);
   assert_int_equal(copied.size, 11L);
 
-  rc = store->copy_object(store, "default", "lease-key", "copy-key",
-                          &copy_opts, &fetched, &error);
+  rc = store->copy_object(store, "default", "lease-key", "copy-key", &copy_opts,
+                          &fetched, &error);
   assert_int_equal(rc, LC_ERR_SERVER);
   assert_int_equal(error.http_status, 409L);
   lc_error_cleanup(&error);
@@ -7717,8 +7769,8 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_object_overwrite_allocation_failure_replays_cleanly(
-    void **state) {
+static void
+test_object_overwrite_allocation_failure_replays_cleanly(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -8000,8 +8052,8 @@ static void test_object_max_bytes_reads_only_limit_plus_one(void **state) {
   assert_int_equal(rc, LC_ERR_SERVER);
   assert_int_equal(error.http_status, 413L);
   assert_int_equal(source.position, 6U);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
-                   0U);
+  assert_int_equal(
+      count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT), 0U);
   lc_error_cleanup(&error);
 
   rc = store->list_objects(store, "default", "lease-key", &list, &error);
@@ -8077,8 +8129,8 @@ static void test_object_put_streams_payload_without_large_alloc(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_object_copy_streams_existing_payload_without_large_alloc(
-    void **state) {
+static void
+test_object_copy_streams_existing_payload_without_large_alloc(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -8353,8 +8405,8 @@ static void test_object_copy_source_open_failure_leaves_destination_unchanged(
   put_opts.name = "large.bin";
   put_opts.content_type = "application/octet-stream";
   put_opts.prevent_overwrite = 1;
-  rc = store->put_object(store, "default", "source-key", &source.pub,
-                         &put_opts, &original, &error);
+  rc = store->put_object(store, "default", "source-key", &source.pub, &put_opts,
+                         &original, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(original.size, (long)payload_length);
   assert_int_equal(count_namespace_segment_records_of_type(
@@ -8370,7 +8422,8 @@ static void test_object_copy_source_open_failure_leaves_destination_unchanged(
                           &copy_opts, &copied, &error);
   assert_int_equal(chmod(segment_path, 0600), 0);
   assert_int_equal(rc, LC_ERR_TRANSPORT);
-  assert_string_equal(error.message, "failed to open pouch log for object copy");
+  assert_string_equal(error.message,
+                      "failed to open pouch log for object copy");
   assert_null(copied.id);
   assert_int_equal(count_namespace_segment_records_of_type(
                        root, "default", TEST_POUCH_RECORD_OBJECT_PUT),
@@ -8488,8 +8541,8 @@ static void test_object_copy_refreshes_after_segment_compaction(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
-    void **state) {
+static void
+test_queue_dequeue_skips_replay_after_same_handle_enqueue(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -8539,8 +8592,8 @@ static void test_queue_dequeue_skips_replay_after_same_handle_enqueue(
   tracked.max_realloc_size = 0U;
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   assert_int_equal(dequeued.payload_bytes, (long)payload_length);
@@ -8613,8 +8666,8 @@ static void test_queue_dequeue_honors_start_after_cursor(void **state) {
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 30L;
   dequeue_opts.start_after = enqueued[0].message_id;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   assert_string_equal(dequeued.message_id, enqueued[1].message_id);
@@ -8667,8 +8720,8 @@ static void test_queue_rejects_negative_timing_options(void **state) {
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.delay_seconds = -1L;
   source = source_from_text("bad-delay");
-  rc = store->enqueue_message(store, "default", "jobs", source,
-                              &enqueue_opts, &enqueued, &error);
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
@@ -8679,8 +8732,8 @@ static void test_queue_rejects_negative_timing_options(void **state) {
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.visibility_timeout_seconds = -1L;
   source = source_from_text("bad-visibility");
-  rc = store->enqueue_message(store, "default", "jobs", source,
-                              &enqueue_opts, &enqueued, &error);
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(
@@ -8692,8 +8745,8 @@ static void test_queue_rejects_negative_timing_options(void **state) {
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.ttl_seconds = -1L;
   source = source_from_text("bad-ttl");
-  rc = store->enqueue_message(store, "default", "jobs", source,
-                              &enqueue_opts, &enqueued, &error);
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
@@ -8704,8 +8757,8 @@ static void test_queue_rejects_negative_timing_options(void **state) {
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.max_attempts = -1;
   source = source_from_text("bad-attempts");
-  rc = store->enqueue_message(store, "default", "jobs", source,
-                              &enqueue_opts, &enqueued, &error);
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
@@ -8720,15 +8773,15 @@ static void test_queue_rejects_negative_timing_options(void **state) {
   enqueue_opts.ttl_seconds = 3600L;
   enqueue_opts.max_attempts = 3;
   source = source_from_text("valid");
-  rc = store->enqueue_message(store, "default", "jobs", source,
-                              &enqueue_opts, &enqueued, &error);
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = -1L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(payload);
   assert_string_equal(
@@ -8737,8 +8790,8 @@ static void test_queue_rejects_negative_timing_options(void **state) {
   lc_error_cleanup(&error);
 
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
 
@@ -8974,8 +9027,8 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   meta.state_etag = "state-a";
   meta.version = 10L;
   meta.fencing_token = 11L;
-  rc = store->store_meta(store, "default", "lease-key", &meta, NULL,
-                         &meta_res, &error);
+  rc = store->store_meta(store, "default", "lease-key", &meta, NULL, &meta_res,
+                         &error);
   assert_int_equal(rc, LC_OK);
 
   query_req.namespace_name = "default";
@@ -9118,8 +9171,8 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_manual_compaction_reports_stats_and_preserves_state(
-    void **state) {
+static void
+test_manual_compaction_reports_stats_and_preserves_state(void **state) {
   char root[256];
   char manifest_path[512];
   char manifest_text[1024];
@@ -9203,7 +9256,8 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   test_manifest_path(root, "default", manifest_path, sizeof(manifest_path));
   test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
   assert_non_null(strstr(manifest_text, "open seg-0000000000000001.log\n"));
-  assert_non_null(strstr(manifest_text, "snapshot snap-0000000000000001.log\n"));
+  assert_non_null(
+      strstr(manifest_text, "snapshot snap-0000000000000001.log\n"));
   assert_non_null(strstr(manifest_text, "obsolete seg-0000000000000001.log\n"));
   test_snapshot_path(root, "default", 1UL, snapshot_path,
                      sizeof(snapshot_path));
@@ -9254,8 +9308,10 @@ static void test_manual_compaction_reports_stats_and_preserves_state(
   assert_int_equal(compacted.compacted, 1);
   lc_pouch_compaction_res_cleanup(&allocator, &compacted);
   test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
-  assert_non_null(strstr(manifest_text, "snapshot snap-0000000000000002.log\n"));
-  assert_non_null(strstr(manifest_text, "obsolete snap-0000000000000001.log\n"));
+  assert_non_null(
+      strstr(manifest_text, "snapshot snap-0000000000000002.log\n"));
+  assert_non_null(
+      strstr(manifest_text, "obsolete snap-0000000000000001.log\n"));
   test_snapshot_path(root, "default", 2UL, snapshot2_path,
                      sizeof(snapshot2_path));
   assert_int_equal(access(snapshot_path, F_OK), -1);
@@ -9468,8 +9524,7 @@ static void test_compaction_preserves_promoted_staged_state_link(void **state) {
                        root, "default", TEST_POUCH_RECORD_STATE_LINK),
                    0U);
 
-  rc = store->read_state(store, "default", "linked-key", &body, &info,
-                         &error);
+  rc = store->read_state(store, "default", "linked-key", &body, &info, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(body);
   assert_false(info.no_content);
@@ -9487,8 +9542,7 @@ static void test_compaction_preserves_promoted_staged_state_link(void **state) {
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
-  rc = store->read_state(store, "default", "linked-key", &body, &info,
-                         &error);
+  rc = store->read_state(store, "default", "linked-key", &body, &info, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(body);
   assert_false(info.no_content);
@@ -9508,8 +9562,8 @@ static void test_compaction_preserves_promoted_staged_state_link(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_independent_handle_refreshes_after_segment_compaction(
-    void **state) {
+static void
+test_independent_handle_refreshes_after_segment_compaction(void **state) {
   char root[256];
   char payload[4096];
   lc_pouch_allocator allocator;
@@ -9552,8 +9606,7 @@ static void test_independent_handle_refreshes_after_segment_compaction(
   rc = lc_pouch_disk_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
 
-  rc = second->load_meta(second, "default", "lease-key", &loaded_meta,
-                         &error);
+  rc = second->load_meta(second, "default", "lease-key", &loaded_meta, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(loaded_meta.found);
   lc_pouch_meta_record_cleanup(&allocator, &loaded_meta);
@@ -9562,8 +9615,8 @@ static void test_independent_handle_refreshes_after_segment_compaction(
   meta.lease_id = "lease-a";
   meta.state_etag = "state-a";
   meta.version = 10L;
-  rc = first->store_meta(first, "default", "lease-key", &meta, NULL,
-                         &meta_res, &error);
+  rc = first->store_meta(first, "default", "lease-key", &meta, NULL, &meta_res,
+                         &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "application/octet-stream";
@@ -9583,8 +9636,7 @@ static void test_independent_handle_refreshes_after_segment_compaction(
   assert_true(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT) <
               25U);
 
-  rc = second->load_meta(second, "default", "lease-key", &loaded_meta,
-                         &error);
+  rc = second->load_meta(second, "default", "lease-key", &loaded_meta, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(loaded_meta.found);
   assert_string_equal(loaded_meta.etag, meta_res.etag);
@@ -9655,13 +9707,13 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
     memset(&dequeued, 0, sizeof(dequeued));
     memset(&ref, 0, sizeof(ref));
     source = source_from_text("queue-payload");
-    rc = store->enqueue_message(store, "default", "jobs", source,
-                                &enqueue_opts, &enqueued, &error);
+    rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                                &enqueued, &error);
     lc_source_close(source);
     assert_int_equal(rc, LC_OK);
 
-    rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                                &body, &dequeued, &error);
+    rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &body,
+                                &dequeued, &error);
     assert_int_equal(rc, LC_OK);
     assert_non_null(body);
     assert_string_equal(dequeued.message_id, enqueued.message_id);
@@ -9689,8 +9741,8 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
 
   memset(&enqueued, 0, sizeof(enqueued));
   source = source_from_text("queue-payload");
-  rc = store->enqueue_message(store, "default", "jobs", source,
-                              &enqueue_opts, &enqueued, &error);
+  rc = store->enqueue_message(store, "default", "jobs", source, &enqueue_opts,
+                              &enqueued, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
 
@@ -9779,8 +9831,8 @@ static void test_empty_identifiers_are_rejected_before_append(void **state) {
                          &object_info, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_INVALID);
-  assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT),
-                   0U);
+  assert_int_equal(
+      count_log_records_of_type(root, TEST_POUCH_RECORD_OBJECT_PUT), 0U);
   lc_error_cleanup(&error);
 
   source = source_from_text("queue");
@@ -9840,19 +9892,19 @@ static void test_pathlike_identifiers_are_rejected_before_append(void **state) {
                           &state_res, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_INVALID);
-  assert_string_equal(error.message, "write_state namespace must not contain '/'");
+  assert_string_equal(error.message,
+                      "write_state namespace must not contain '/'");
   assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
                    0U);
   lc_error_cleanup(&error);
 
   source = source_from_text("state");
-  rc = store->write_state(store, "default", "alpha//bravo", source,
-                          &state_opts, &state_res, &error);
+  rc = store->write_state(store, "default", "alpha//bravo", source, &state_opts,
+                          &state_res, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_INVALID);
-  assert_string_equal(
-      error.message,
-      "write_state key must not contain empty path components");
+  assert_string_equal(error.message,
+                      "write_state key must not contain empty path components");
   assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
                    0U);
   lc_error_cleanup(&error);
@@ -9880,10 +9932,11 @@ static void test_pathlike_identifiers_are_rejected_before_append(void **state) {
   lc_error_cleanup(&error);
 
   scan_req.namespace_name = "bad/ns";
-  rc = store->scan_meta(store, &scan_req, capture_scan_row, &capture,
-                        &scan_res, &error);
+  rc = store->scan_meta(store, &scan_req, capture_scan_row, &capture, &scan_res,
+                        &error);
   assert_int_equal(rc, LC_ERR_INVALID);
-  assert_string_equal(error.message, "scan_meta namespace must not contain '/'");
+  assert_string_equal(error.message,
+                      "scan_meta namespace must not contain '/'");
   lc_error_cleanup(&error);
 
   rc = store->close(store, &error);
@@ -10058,8 +10111,8 @@ static void test_queue_transaction_apply_touches_wake_marker(void **state) {
   dequeue_opts.owner = "worker";
   dequeue_opts.txn_id = "txn-queue-wake";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   lc_source_close(payload);
@@ -10089,8 +10142,8 @@ static void test_queue_transaction_apply_touches_wake_marker(void **state) {
   memset(&dequeue_opts, 0, sizeof(dequeue_opts));
   dequeue_opts.owner = "worker-2";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &redelivered, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &redelivered, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   lc_source_close(payload);
@@ -10106,8 +10159,8 @@ static void test_queue_transaction_apply_touches_wake_marker(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_queue_wake_marker_failure_does_not_rollback_enqueue(
-    void **state) {
+static void
+test_queue_wake_marker_failure_does_not_rollback_enqueue(void **state) {
   char root[256];
   char marker_path[512];
   lc_pouch_allocator allocator;
@@ -10160,8 +10213,8 @@ static void test_queue_wake_marker_failure_does_not_rollback_enqueue(
   assert_int_equal(rc, LC_OK);
   dequeue_opts.owner = "worker";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   assert_string_equal(dequeued.message_id, enqueued.message_id);
@@ -10199,8 +10252,7 @@ static void test_queue_wake_status_reports_polling_marker_mode(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->queue_wake_status);
 
-  rc = store->queue_wake_status(store, "default", "jobs/high", &status,
-                                &error);
+  rc = store->queue_wake_status(store, "default", "jobs/high", &status, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(status.mode, "polling");
   assert_string_equal(status.reason,
@@ -10354,8 +10406,8 @@ static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_queue_enqueue_index_allocation_failure_replays_cleanly(
-    void **state) {
+static void
+test_queue_enqueue_index_allocation_failure_replays_cleanly(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -10413,8 +10465,8 @@ static void test_queue_enqueue_index_allocation_failure_replays_cleanly(
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   assert_string_equal(dequeued.payload_content_type, content_type);
@@ -10475,8 +10527,8 @@ static void test_queue_ref_requires_current_meta_etag(void **state) {
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   lc_source_close(payload);
@@ -10570,8 +10622,8 @@ static void test_queue_delay_hides_until_visible(void **state) {
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_null(payload);
   assert_null(dequeued.message_id);
@@ -10598,8 +10650,8 @@ static void test_queue_delay_hides_until_visible(void **state) {
   assert_string_equal(stats.head_message_id, enqueued.message_id);
   lc_pouch_queue_stats_cleanup(&allocator, &stats);
 
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   assert_string_equal(dequeued.message_id, enqueued.message_id);
@@ -10617,8 +10669,8 @@ static void test_queue_delay_hides_until_visible(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_queue_ttl_expiry_removes_pending_candidate_after_replay(
-    void **state) {
+static void
+test_queue_ttl_expiry_removes_pending_candidate_after_replay(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -10678,8 +10730,8 @@ static void test_queue_ttl_expiry_removes_pending_candidate_after_replay(
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_null(payload);
   assert_null(dequeued.message_id);
@@ -10756,8 +10808,8 @@ static void test_queue_inflight_ttl_expiry_rejects_ack(void **state) {
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   lc_source_close(payload);
@@ -10812,8 +10864,8 @@ static void test_queue_inflight_ttl_expiry_rejects_ack(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_queue_nack_allocation_failure_preserves_active_lease(
-    void **state) {
+static void
+test_queue_nack_allocation_failure_preserves_active_lease(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -10862,8 +10914,8 @@ static void test_queue_nack_allocation_failure_preserves_active_lease(
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 45L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   lc_source_close(payload);
@@ -10900,8 +10952,8 @@ static void test_queue_nack_allocation_failure_preserves_active_lease(
   test_cleanup_root(root);
 }
 
-static void test_queue_extend_allocation_failure_preserves_active_lease(
-    void **state) {
+static void
+test_queue_extend_allocation_failure_preserves_active_lease(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -10950,8 +11002,8 @@ static void test_queue_extend_allocation_failure_preserves_active_lease(
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 45L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   lc_source_close(payload);
@@ -10988,8 +11040,8 @@ static void test_queue_extend_allocation_failure_preserves_active_lease(
   test_cleanup_root(root);
 }
 
-static void test_queue_retry_exhaustion_is_not_pending_after_replay(
-    void **state) {
+static void
+test_queue_retry_exhaustion_is_not_pending_after_replay(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -11036,8 +11088,8 @@ static void test_queue_retry_exhaustion_is_not_pending_after_replay(
 
   dequeue_opts.owner = "worker-a";
   dequeue_opts.visibility_timeout_seconds = 30L;
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(payload);
   lc_source_close(payload);
@@ -11062,8 +11114,8 @@ static void test_queue_retry_exhaustion_is_not_pending_after_replay(
   lc_pouch_queue_stats_cleanup(&allocator, &stats);
 
   lc_pouch_queue_message_info_cleanup(&allocator, &dequeued);
-  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts,
-                              &payload, &dequeued, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &dequeue_opts, &payload,
+                              &dequeued, &error);
   assert_int_equal(rc, LC_OK);
   assert_null(payload);
 
@@ -11143,8 +11195,8 @@ static void test_backend_hash_persists_across_handles(void **state) {
   assert_string_equal(second_hash, first_hash);
 
   selector.name = "backend-id";
-  rc = first->get_object(first, ".lockd", "backend-id", &selector, &body,
-                         &info, &error);
+  rc = first->get_object(first, ".lockd", "backend-id", &selector, &body, &info,
+                         &error);
   assert_int_equal(rc, LC_OK);
   stored_hash = read_source_text(body);
   assert_string_equal(stored_hash, first_hash);
@@ -11405,8 +11457,8 @@ static void test_fsync_stats_report_disk_sync_targets(void **state) {
   meta.state_etag = "state-a";
   meta.version = 1L;
   meta.fencing_token = 2L;
-  rc = store->store_meta(store, "default", "fsync-key", &meta, NULL,
-                         &meta_res, &error);
+  rc = store->store_meta(store, "default", "fsync-key", &meta, NULL, &meta_res,
+                         &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
 
@@ -11448,11 +11500,9 @@ static void test_fsync_stats_report_disk_sync_targets(void **state) {
   assert_true(after.root_fsyncs > before.root_fsyncs);
   assert_true(after.writer_marker_fsyncs > before.writer_marker_fsyncs);
   assert_int_equal(after.failed_fsyncs, 0UL);
-  assert_true(after.attempted_fsyncs >= after.log_fsyncs +
-                                         after.query_index_fsyncs +
-                                         after.root_fsyncs +
-                                         after.writer_marker_fsyncs +
-                                         after.queue_wake_fsyncs);
+  assert_true(after.attempted_fsyncs >=
+              after.log_fsyncs + after.query_index_fsyncs + after.root_fsyncs +
+                  after.writer_marker_fsyncs + after.queue_wake_fsyncs);
 
   rc = store->fsync_stats(NULL, &after, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
@@ -11469,8 +11519,8 @@ static void test_fsync_stats_report_disk_sync_targets(void **state) {
 static int child_exit_code(pid_t pid);
 static void child_process_backend_hash(const char *root, int start_fd);
 
-static void test_backend_hash_create_race_publishes_single_identity(
-    void **state) {
+static void
+test_backend_hash_create_race_publishes_single_identity(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -11604,8 +11654,8 @@ static void test_independent_handles_refresh_before_operations(void **state) {
 
   state_opts.if_state_etag = first_put.new_state_etag;
   source = source_from_text("{\"owner\":\"second\"}");
-  rc = second->write_state(second, "default", "shared-key", source,
-                           &state_opts, &second_put, &error);
+  rc = second->write_state(second, "default", "shared-key", source, &state_opts,
+                           &second_put, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   assert_true(second_put.new_version > first_put.new_version);
@@ -11630,8 +11680,7 @@ static void test_independent_handles_refresh_before_operations(void **state) {
                          &first_meta, &error);
   assert_int_equal(rc, LC_OK);
 
-  rc = second->load_meta(second, "default", "shared-key", &loaded_meta,
-                         &error);
+  rc = second->load_meta(second, "default", "shared-key", &loaded_meta, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(loaded_meta.found);
   assert_string_equal(loaded_meta.etag, first_meta.etag);
@@ -11654,8 +11703,8 @@ static void test_independent_handles_refresh_before_operations(void **state) {
 
   state_opts.if_state_etag = first_put.new_state_etag;
   source = source_from_text("{\"owner\":\"stale\"}");
-  rc = first->write_state(first, "default", "shared-key", source,
-                          &state_opts, &stale_put, &error);
+  rc = first->write_state(first, "default", "shared-key", source, &state_opts,
+                          &stale_put, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_SERVER);
   assert_int_equal(error.http_status, 412L);
@@ -11753,8 +11802,8 @@ static void test_independent_handles_refresh_index_projection(void **state) {
   meta.lease_id = "lease-bravo";
   meta.state_etag = "state-bravo";
   meta.version = 20L;
-  rc = second->store_meta(second, "default", "bravo", &meta, NULL,
-                          &second_meta, &error);
+  rc = second->store_meta(second, "default", "bravo", &meta, NULL, &second_meta,
+                          &error);
   assert_int_equal(rc, LC_OK);
 
   rc = first->query_index_keys_scan(first, &scan_req, capture_query_key,
@@ -11776,8 +11825,8 @@ static void test_independent_handles_refresh_index_projection(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_independent_handle_reopens_compacted_query_index(
-    void **state) {
+static void
+test_independent_handle_reopens_compacted_query_index(void **state) {
   char root[256];
   char owner[2048];
   lc_pouch_allocator allocator;
@@ -11819,8 +11868,8 @@ static void test_independent_handle_reopens_compacted_query_index(
   meta.lease_id = "lease-initial";
   meta.state_etag = "state-initial";
   meta.version = 1L;
-  rc = second->store_meta(second, "default", "shared-key", &meta, NULL,
-                          &stored, &error);
+  rc = second->store_meta(second, "default", "shared-key", &meta, NULL, &stored,
+                          &error);
   assert_int_equal(rc, LC_OK);
 
   scan_req.namespace_name = "default";
@@ -11838,8 +11887,8 @@ static void test_independent_handle_reopens_compacted_query_index(
   meta.query_hidden = 0;
   for (index = 0U; index < 160U; ++index) {
     meta.version = (long)index + 2L;
-    rc = second->store_meta(second, "default", "shared-key", &meta,
-                            stored.etag, &updated, &error);
+    rc = second->store_meta(second, "default", "shared-key", &meta, stored.etag,
+                            &updated, &error);
     assert_int_equal(rc, LC_OK);
     lc_pouch_store_meta_res_cleanup(&allocator, &stored);
     stored = updated;
@@ -11876,8 +11925,9 @@ static void test_independent_handle_reopens_compacted_query_index(
   test_cleanup_root(root);
 }
 
-static void child_process_cas_update(const char *root, const char *expected_etag,
-                                     int start_fd, const char *payload) {
+static void child_process_cas_update(const char *root,
+                                     const char *expected_etag, int start_fd,
+                                     const char *payload) {
   lc_pouch_store *store;
   lc_pouch_put_state_opts opts;
   lc_pouch_put_state_res put_res;
@@ -12000,8 +12050,8 @@ static void child_process_dequeue_one(const char *root, int start_fd) {
   }
   opts.owner = "worker";
   opts.visibility_timeout_seconds = 60L;
-  rc = store->dequeue_message(store, "default", "jobs", &opts, &body,
-                              &message, &error);
+  rc = store->dequeue_message(store, "default", "jobs", &opts, &body, &message,
+                              &error);
   if (rc != LC_OK) {
     store->close(store, NULL);
     lc_error_cleanup(&error);
@@ -12111,8 +12161,8 @@ static void test_independent_processes_contend_with_cas(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_independent_processes_dequeue_single_message_once(
-    void **state) {
+static void
+test_independent_processes_dequeue_single_message_once(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -12228,8 +12278,7 @@ static void test_query_config_defaults_and_configured_options(void **state) {
   memset(&opts, 0, sizeof(opts));
   opts.query_engine = "scan";
   opts.query_fallback_engine = "index";
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store,
-                                       &error);
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->query_config(store, "default", &config, &error);
   assert_int_equal(rc, LC_OK);
@@ -12260,8 +12309,7 @@ static void test_query_config_rejects_invalid_options(void **state) {
   store = NULL;
 
   opts.query_engine = "linear";
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store,
-                                       &error);
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
   assert_string_equal(error.message,
@@ -12271,8 +12319,7 @@ static void test_query_config_rejects_invalid_options(void **state) {
   memset(&error, 0, sizeof(error));
   opts.query_engine = "index";
   opts.query_fallback_engine = "linear";
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store,
-                                       &error);
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
   assert_string_equal(
@@ -12312,8 +12359,7 @@ static void test_open_removes_stale_compaction_temps(void **state) {
   assert_int_equal(mkdir(path, 0777), 0);
   snprintf(path, sizeof(path), "%s/%%2elockd/logstore", root);
   assert_int_equal(mkdir(path, 0777), 0);
-  test_query_index_path(root, temp_query_internal,
-                        sizeof(temp_query_internal));
+  test_query_index_path(root, temp_query_internal, sizeof(temp_query_internal));
   strncat(temp_query_internal, ".compact.tmp",
           sizeof(temp_query_internal) - strlen(temp_query_internal) - 1U);
   test_write_marker_file(temp_log);
@@ -12490,11 +12536,9 @@ static void test_writer_status_classifies_stale_markers(void **state) {
   assert_int_equal(rc, LC_OK);
   now = time(NULL);
 
-  snprintf(stale_path, sizeof(stale_path),
-           "%s/%sstale-heartbeat.marker", root,
+  snprintf(stale_path, sizeof(stale_path), "%s/%sstale-heartbeat.marker", root,
            TEST_POUCH_WRITER_MARKER_PREFIX);
-  test_write_text_file(stale_path,
-                       "pid=999\nsequence=1\nupdated_at_unix=1\n");
+  test_write_text_file(stale_path, "pid=999\nsequence=1\nupdated_at_unix=1\n");
   test_set_file_mtime(stale_path, now + 3600);
 
   snprintf(legacy_path, sizeof(legacy_path), "%s/%slegacy.marker", root,
@@ -12525,8 +12569,7 @@ static void test_writer_status_classifies_stale_markers(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_lock_status_reports_global_writer_lock_counters(
-    void **state) {
+static void test_lock_status_reports_global_writer_lock_counters(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -12575,8 +12618,8 @@ static void test_lock_status_reports_global_writer_lock_counters(
 
   opts.content_type = "text/plain";
   source = source_from_text("lock-status");
-  rc = first->write_state(first, "default", "lock-key", source, &opts,
-                          &put_res, &error);
+  rc = first->write_state(first, "default", "lock-key", source, &opts, &put_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
@@ -12646,19 +12689,19 @@ static void test_lock_key_path_escapes_namespace_and_key(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->lock_key_path);
 
-  rc = store->lock_key_path(store, "default", "alpha/beta.gamma", &path,
-                            &error);
+  rc =
+      store->lock_key_path(store, "default", "alpha/beta.gamma", &path, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(path);
   assert_non_null(strstr(path, "/locks/default/alpha%2fbeta%2egamma"));
   lc_pouch_free(&allocator, path);
   path = NULL;
 
-  rc = store->lock_key_path(store, "name-space_1", "key:with spaces/%",
-                            &path, &error);
+  rc = store->lock_key_path(store, "name-space_1", "key:with spaces/%", &path,
+                            &error);
   assert_int_equal(rc, LC_OK);
-  assert_non_null(strstr(path,
-                         "/locks/name-space_1/key%3awith%20spaces%2f%25"));
+  assert_non_null(
+      strstr(path, "/locks/name-space_1/key%3awith%20spaces%2f%25"));
   lc_pouch_free(&allocator, path);
   path = NULL;
 
@@ -12793,8 +12836,7 @@ static void child_process_probe_key_locks(const char *root) {
 }
 
 static void child_process_write_state_after_ready(const char *root,
-                                                  int start_fd,
-                                                  int ready_fd) {
+                                                  int start_fd, int ready_fd) {
   lc_pouch_store *store;
   lc_source *source;
   lc_pouch_put_state_opts opts;
@@ -12815,8 +12857,8 @@ static void child_process_write_state_after_ready(const char *root,
   }
   opts.content_type = "application/json";
   rc = lc_source_from_memory("{\"owner\":\"blocked-writer\"}",
-                             strlen("{\"owner\":\"blocked-writer\"}"),
-                             &source, &error);
+                             strlen("{\"owner\":\"blocked-writer\"}"), &source,
+                             &error);
   if (rc != LC_OK) {
     store->close(store, NULL);
     lc_error_cleanup(&error);
@@ -12849,8 +12891,7 @@ static void child_process_write_state_after_ready(const char *root,
   _exit(0);
 }
 
-static void child_process_store_meta_after_ready(const char *root,
-                                                 int start_fd,
+static void child_process_store_meta_after_ready(const char *root, int start_fd,
                                                  int ready_fd) {
   lc_pouch_store *store;
   lc_pouch_meta meta;
@@ -12895,8 +12936,7 @@ static void child_process_store_meta_after_ready(const char *root,
   _exit(0);
 }
 
-static void child_process_put_object_after_ready(const char *root,
-                                                 int start_fd,
+static void child_process_put_object_after_ready(const char *root, int start_fd,
                                                  int ready_fd) {
   lc_pouch_store *store;
   lc_source *source;
@@ -12918,8 +12958,8 @@ static void child_process_put_object_after_ready(const char *root,
   }
   opts.name = "artifact.txt";
   opts.content_type = "text/plain";
-  rc = lc_source_from_memory("blocked-object",
-                             strlen("blocked-object"), &source, &error);
+  rc = lc_source_from_memory("blocked-object", strlen("blocked-object"),
+                             &source, &error);
   if (rc != LC_OK) {
     store->close(store, NULL);
     lc_error_cleanup(&error);
@@ -12953,8 +12993,7 @@ static void child_process_put_object_after_ready(const char *root,
 }
 
 static void child_process_copy_object_after_ready(const char *root,
-                                                  int start_fd,
-                                                  int ready_fd) {
+                                                  int start_fd, int ready_fd) {
   lc_pouch_store *store;
   lc_pouch_copy_object_opts opts;
   lc_pouch_object_info info;
@@ -13022,8 +13061,8 @@ static void child_process_enqueue_after_ready(const char *root, int start_fd,
   opts.visibility_timeout_seconds = 30L;
   opts.ttl_seconds = 3600L;
   opts.max_attempts = 3;
-  rc = lc_source_from_memory("queued-blocked",
-                             strlen("queued-blocked"), &source, &error);
+  rc = lc_source_from_memory("queued-blocked", strlen("queued-blocked"),
+                             &source, &error);
   if (rc != LC_OK) {
     store->close(store, NULL);
     lc_error_cleanup(&error);
@@ -13461,7 +13500,8 @@ static void test_lock_fd_cache_reuses_released_key_descriptors(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_read_fd_cache_reuses_descriptors_without_closing_active_readers(
+static void
+test_read_fd_cache_reuses_descriptors_without_closing_active_readers(
     void **state) {
   char root[256];
   char key[32];
@@ -13531,8 +13571,8 @@ static void test_read_fd_cache_reuses_descriptors_without_closing_active_readers
 
   for (index = 0U; index < 40U; ++index) {
     snprintf(key, sizeof(key), "read-%02lu", (unsigned long)index);
-    rc = store->read_state(store, "default", key, &sources[index],
-                           &state_info, &error);
+    rc = store->read_state(store, "default", key, &sources[index], &state_info,
+                           &error);
     assert_int_equal(rc, LC_OK);
     assert_non_null(sources[index]);
     lc_pouch_state_info_cleanup(&allocator, &state_info);
@@ -13595,8 +13635,8 @@ static void test_read_fd_cache_reuses_descriptors_without_closing_active_readers
   test_cleanup_root(root);
 }
 
-static void test_read_source_survives_store_close_without_cache_owner(
-    void **state) {
+static void
+test_read_source_survives_store_close_without_cache_owner(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -13645,8 +13685,8 @@ static void test_read_source_survives_store_close_without_cache_owner(
   test_cleanup_root(root);
 }
 
-static void test_object_source_survives_store_close_without_cache_owner(
-    void **state) {
+static void
+test_object_source_survives_store_close_without_cache_owner(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -13702,8 +13742,8 @@ static void test_object_source_survives_store_close_without_cache_owner(
   test_cleanup_root(root);
 }
 
-static void test_queue_source_survives_store_close_without_cache_owner(
-    void **state) {
+static void
+test_queue_source_survives_store_close_without_cache_owner(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -14261,8 +14301,8 @@ static void test_copy_object_waits_for_cross_process_key_lock(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_enqueue_message_waits_for_cross_process_queue_lock(
-    void **state) {
+static void
+test_enqueue_message_waits_for_cross_process_queue_lock(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -14310,8 +14350,7 @@ static void test_enqueue_message_waits_for_cross_process_queue_lock(
   close(ready_pipe[1]);
   ready_pipe[1] = -1;
 
-  rc = store->try_lock_key(store, "default", "jobs", &lock, &acquired,
-                           &error);
+  rc = store->try_lock_key(store, "default", "jobs", &lock, &acquired, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(acquired);
   assert_non_null(lock);
@@ -14346,8 +14385,8 @@ static void test_enqueue_message_waits_for_cross_process_queue_lock(
   test_cleanup_root(root);
 }
 
-static void test_dequeue_message_waits_for_cross_process_queue_lock(
-    void **state) {
+static void
+test_dequeue_message_waits_for_cross_process_queue_lock(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -14413,8 +14452,7 @@ static void test_dequeue_message_waits_for_cross_process_queue_lock(
   close(ready_pipe[1]);
   ready_pipe[1] = -1;
 
-  rc = store->try_lock_key(store, "default", "jobs", &lock, &acquired,
-                           &error);
+  rc = store->try_lock_key(store, "default", "jobs", &lock, &acquired, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(acquired);
   assert_non_null(lock);
@@ -14448,8 +14486,8 @@ static void test_dequeue_message_waits_for_cross_process_queue_lock(
   test_cleanup_root(root);
 }
 
-static void test_promote_staged_state_waits_for_cross_process_key_lock(
-    void **state) {
+static void
+test_promote_staged_state_waits_for_cross_process_key_lock(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -14551,8 +14589,8 @@ static void test_promote_staged_state_waits_for_cross_process_key_lock(
   test_cleanup_root(root);
 }
 
-static void test_discard_staged_state_waits_for_cross_process_key_lock(
-    void **state) {
+static void
+test_discard_staged_state_waits_for_cross_process_key_lock(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -14684,8 +14722,8 @@ static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(test_first_writer_marker_path(root, marker_path,
-                                            sizeof(marker_path)));
+  assert_true(
+      test_first_writer_marker_path(root, marker_path, sizeof(marker_path)));
   test_read_file_text(marker_path, before, sizeof(before));
   assert_non_null(strstr(before, "sequence=1\n"));
   assert_non_null(strstr(before, "updated_at_unix="));
@@ -14719,8 +14757,169 @@ static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_writer_marker_touch_failure_does_not_rollback_commit(
-    void **state) {
+static void
+test_logstore_writer_marker_updates_after_namespace_commit(void **state) {
+  char root[256];
+  char marker_path[512];
+  char before[256];
+  char after[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "logstore-writer-marker");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_count_logstore_writer_markers(root, "default"), 0U);
+
+  opts.content_type = "text/plain";
+  source = source_from_text("first marker write");
+  rc = store->write_state(store, "default", "marker-key", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(test_count_logstore_writer_markers(root, "default"), 1U);
+  assert_true(test_first_logstore_writer_marker_path(
+      root, "default", marker_path, sizeof(marker_path)));
+  test_read_file_text(marker_path, before, sizeof(before));
+  assert_non_null(strstr(before, "sequence=2\n"));
+  assert_non_null(strstr(before, "updated_at_unix="));
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  source = source_from_text("second marker write");
+  rc = store->write_state(store, "default", "marker-key", source, &opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  test_read_file_text(marker_path, after, sizeof(after));
+  assert_non_null(strstr(after, "sequence=3\n"));
+  assert_string_not_equal(before, after);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
+test_marker_snapshot_skips_unchanged_independent_refresh(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *writer;
+  lc_pouch_store *reader;
+  lc_source *source;
+  lc_source *body;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_state_info state_info;
+  lc_pouch_lock_status before_status;
+  lc_pouch_lock_status after_status;
+  lc_pouch_lock_status changed_status;
+  lc_error error;
+  unsigned long first_refreshes;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "marker-snapshot-refresh");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&state_info, 0, sizeof(state_info));
+  memset(&before_status, 0, sizeof(before_status));
+  memset(&after_status, 0, sizeof(after_status));
+  memset(&changed_status, 0, sizeof(changed_status));
+  writer = NULL;
+  reader = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_disk_open(root, &allocator, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "text/plain";
+  source = source_from_text("visible through marker");
+  rc = writer->write_state(writer, "default", "marker-cache-key", source, &opts,
+                           &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  memset(&put_res, 0, sizeof(put_res));
+
+  rc = reader->read_state(reader, "default", "marker-cache-key", &body,
+                          &state_info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(state_info.no_content);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+  memset(&state_info, 0, sizeof(state_info));
+
+  rc = reader->lock_status(reader, &before_status, &error);
+  assert_int_equal(rc, LC_OK);
+  first_refreshes = before_status.replay_refreshes;
+
+  rc = reader->read_state(reader, "default", "marker-cache-key", &body,
+                          &state_info, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+  memset(&state_info, 0, sizeof(state_info));
+
+  rc = reader->lock_status(reader, &after_status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(after_status.replay_refreshes, first_refreshes);
+
+  source = source_from_text("changed through marker");
+  rc = writer->write_state(writer, "default", "marker-cache-key", source, &opts,
+                           &put_res, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+
+  rc = reader->read_state(reader, "default", "marker-cache-key", &body,
+                          &state_info, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = reader->lock_status(reader, &changed_status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(changed_status.replay_refreshes > first_refreshes);
+
+  lc_pouch_lock_status_cleanup(&allocator, &before_status);
+  lc_pouch_lock_status_cleanup(&allocator, &after_status);
+  lc_pouch_lock_status_cleanup(&allocator, &changed_status);
+  rc = reader->close(reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = writer->close(writer, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
+test_writer_marker_touch_failure_does_not_rollback_commit(void **state) {
   char root[256];
   char marker_path[512];
   char body_text[64];
@@ -14748,8 +14947,8 @@ static void test_writer_marker_touch_failure_does_not_rollback_commit(
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(test_first_writer_marker_path(root, marker_path,
-                                            sizeof(marker_path)));
+  assert_true(
+      test_first_writer_marker_path(root, marker_path, sizeof(marker_path)));
   assert_int_equal(unlink(marker_path), 0);
   assert_int_equal(mkdir(marker_path, 0777), 0);
 
@@ -14792,22 +14991,19 @@ int main(void) {
       cmocka_unit_test(test_allocator_from_lc_requires_matching_realloc),
       cmocka_unit_test(test_write_read_reopen_and_allocator_hooks),
       cmocka_unit_test(test_state_write_creates_segmented_namespace_logstore),
-      cmocka_unit_test(
-          test_segment_payload_refs_survive_root_log_truncation),
+      cmocka_unit_test(test_segment_payload_refs_survive_root_log_truncation),
       cmocka_unit_test(test_segment_generation_refreshes_independent_handle),
       cmocka_unit_test(test_memory_records_append_only_to_segments),
       cmocka_unit_test(test_replay_recovers_state_from_namespace_segment),
       cmocka_unit_test(test_replay_repairs_missing_namespace_manifest),
-      cmocka_unit_test(
-          test_replay_repairs_crash_incomplete_namespace_manifest),
+      cmocka_unit_test(test_replay_repairs_crash_incomplete_namespace_manifest),
       cmocka_unit_test(test_segment_rotation_replays_multiple_segments),
       cmocka_unit_test(test_segment_replay_truncates_rotated_tail),
       cmocka_unit_test(test_segment_replay_honors_manifest_obsolete),
       cmocka_unit_test(test_replay_installed_snapshot_without_segment_tail),
       cmocka_unit_test(test_replay_cleans_obsolete_snapshot_files),
       cmocka_unit_test(test_replay_ignores_root_store_log_without_segments),
-      cmocka_unit_test(
-          test_state_put_propagates_source_failure_before_append),
+      cmocka_unit_test(test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(
@@ -14834,19 +15030,14 @@ int main(void) {
       cmocka_unit_test(test_metadata_key_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_metadata_scan_can_exclude_removed_state),
       cmocka_unit_test(test_metadata_scan_paginates_across_removed_state),
-      cmocka_unit_test(
-          test_query_index_scan_orders_paginates_and_reports_seq),
-      cmocka_unit_test(
-          test_query_index_keys_scan_avoids_metadata_row_copies),
-      cmocka_unit_test(
-          test_query_owner_index_scans_candidates_and_replays),
+      cmocka_unit_test(test_query_index_scan_orders_paginates_and_reports_seq),
+      cmocka_unit_test(test_query_index_keys_scan_avoids_metadata_row_copies),
+      cmocka_unit_test(test_query_owner_index_scans_candidates_and_replays),
       cmocka_unit_test(test_query_index_scans_exclude_removed_state),
-      cmocka_unit_test(
-          test_query_owner_index_paginates_across_removed_state),
+      cmocka_unit_test(test_query_owner_index_paginates_across_removed_state),
       cmocka_unit_test(
           test_query_index_scans_refresh_stale_reader_before_sidecar),
-      cmocka_unit_test(
-          test_query_index_projection_replays_updates_and_deletes),
+      cmocka_unit_test(test_query_index_projection_replays_updates_and_deletes),
       cmocka_unit_test(
           test_metadata_update_allocation_failure_preserves_indexes),
       cmocka_unit_test(test_retention_sweep_deletes_expired_metadata_and_state),
@@ -14857,15 +15048,12 @@ int main(void) {
       cmocka_unit_test(test_query_index_sidecar_appends_metadata_records),
       cmocka_unit_test(
           test_query_index_keys_recovers_from_missing_legacy_store_log),
-      cmocka_unit_test(
-          test_query_index_rebuilds_field_postings_from_segments),
+      cmocka_unit_test(test_query_index_rebuilds_field_postings_from_segments),
       cmocka_unit_test(
           test_query_index_keys_recovers_from_corrupt_sidecar_tail),
       cmocka_unit_test(test_query_index_keys_recreates_missing_sidecar),
-      cmocka_unit_test(
-          test_query_index_keys_rebuilds_future_sidecar_version),
-      cmocka_unit_test(
-          test_query_index_keys_truncates_partial_sidecar_field),
+      cmocka_unit_test(test_query_index_keys_rebuilds_future_sidecar_version),
+      cmocka_unit_test(test_query_index_keys_truncates_partial_sidecar_field),
       cmocka_unit_test(test_scan_meta_ignores_corrupt_query_sidecar),
       cmocka_unit_test(test_query_index_sidecar_compacts_with_segments),
       cmocka_unit_test(test_object_roundtrip_overwrite_delete_and_reopen),
@@ -14886,14 +15074,11 @@ int main(void) {
       cmocka_unit_test(test_queue_dequeue_honors_start_after_cursor),
       cmocka_unit_test(test_queue_rejects_negative_timing_options),
       cmocka_unit_test(test_replay_streams_large_bodies_without_large_alloc),
-      cmocka_unit_test(
-          test_auto_compaction_preserves_live_heads_and_tokens),
+      cmocka_unit_test(test_auto_compaction_preserves_live_heads_and_tokens),
       cmocka_unit_test(
           test_manual_compaction_reports_stats_and_preserves_state),
-      cmocka_unit_test(
-          test_compaction_if_needed_skip_and_allocator_failure),
-      cmocka_unit_test(
-          test_compaction_preserves_promoted_staged_state_link),
+      cmocka_unit_test(test_compaction_if_needed_skip_and_allocator_failure),
+      cmocka_unit_test(test_compaction_preserves_promoted_staged_state_link),
       cmocka_unit_test(
           test_independent_handle_refreshes_after_segment_compaction),
       cmocka_unit_test(test_queue_dequeue_survives_compaction_refresh),
@@ -14903,8 +15088,7 @@ int main(void) {
           test_queue_wake_marker_failure_does_not_rollback_enqueue),
       cmocka_unit_test(test_queue_wake_status_reports_polling_marker_mode),
       cmocka_unit_test(test_empty_identifiers_are_rejected_before_append),
-      cmocka_unit_test(
-          test_pathlike_identifiers_are_rejected_before_append),
+      cmocka_unit_test(test_pathlike_identifiers_are_rejected_before_append),
       cmocka_unit_test(test_queue_enqueue_dequeue_nack_ack_and_reopen),
       cmocka_unit_test(
           test_queue_enqueue_index_allocation_failure_replays_cleanly),
@@ -14917,12 +15101,10 @@ int main(void) {
           test_queue_nack_allocation_failure_preserves_active_lease),
       cmocka_unit_test(
           test_queue_extend_allocation_failure_preserves_active_lease),
-      cmocka_unit_test(
-          test_queue_retry_exhaustion_is_not_pending_after_replay),
+      cmocka_unit_test(test_queue_retry_exhaustion_is_not_pending_after_replay),
       cmocka_unit_test(test_independent_handles_refresh_before_operations),
       cmocka_unit_test(test_independent_handles_refresh_index_projection),
-      cmocka_unit_test(
-          test_independent_handle_reopens_compacted_query_index),
+      cmocka_unit_test(test_independent_handle_reopens_compacted_query_index),
       cmocka_unit_test(test_independent_processes_contend_with_cas),
       cmocka_unit_test(test_independent_processes_dequeue_single_message_once),
       cmocka_unit_test(test_query_config_defaults_and_configured_options),
@@ -14959,13 +15141,16 @@ int main(void) {
           test_discard_staged_state_waits_for_cross_process_key_lock),
       cmocka_unit_test(test_writer_marker_heartbeat_updates_after_commit),
       cmocka_unit_test(
+          test_logstore_writer_marker_updates_after_namespace_commit),
+      cmocka_unit_test(
+          test_marker_snapshot_skips_unchanged_independent_refresh),
+      cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),
       cmocka_unit_test(test_list_namespaces_reports_live_projection_names),
       cmocka_unit_test(test_backend_capabilities_report_disk_writer_model),
       cmocka_unit_test(test_fsync_stats_report_disk_sync_targets),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
-      cmocka_unit_test(
-          test_backend_hash_create_race_publishes_single_identity),
+      cmocka_unit_test(test_backend_hash_create_race_publishes_single_identity),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

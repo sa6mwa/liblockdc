@@ -62,13 +62,15 @@
 #define LC_POUCH_FSYNC_WRITER_MARKER 4
 #define LC_POUCH_FSYNC_QUEUE_WAKE 5
 #define LC_POUCH_WRITER_MARKER_PREFIX "writer-presence-"
+#define LC_POUCH_LOGSTORE_WRITER_MARKER_PREFIX "writer-"
 #define LC_POUCH_QUEUE_WAKE_PREFIX "queue-wake-"
 #define LC_POUCH_WRITER_MARKER_TTL_SECONDS 60L
+#define LC_POUCH_MARKER_FORCE_SCAN_EVERY 32UL
 #define LC_POUCH_KEY_LOCK_STRIPES 64U
 #define LC_POUCH_LOCK_FD_CACHE_CAPACITY 32U
 #define LC_POUCH_READ_FD_CACHE_CAPACITY 32U
 #define LC_POUCH_SHA256_HEX_SIZE 65U
-#define LC_POUCH_EMPTY_SHA256_HEX                                               \
+#define LC_POUCH_EMPTY_SHA256_HEX                                              \
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 typedef struct lc_pouch_sha256 {
@@ -194,6 +196,12 @@ typedef struct lc_pouch_disk_queue_entry {
   int deleted;
 } lc_pouch_disk_queue_entry;
 
+typedef struct lc_pouch_disk_marker_snapshot_entry {
+  char *path;
+  unsigned long size;
+  long mtime;
+} lc_pouch_disk_marker_snapshot_entry;
+
 typedef struct lc_pouch_disk_store {
   lc_pouch_store pub;
   lc_pouch_allocator allocator;
@@ -202,6 +210,7 @@ typedef struct lc_pouch_disk_store {
   char *lock_path;
   char *query_index_path;
   char *writer_marker_path;
+  char *logstore_writer_marker_leaf;
   char *query_engine;
   char *query_fallback_engine;
   lc_pouch_read_cache_owner *read_cache_owner;
@@ -246,6 +255,11 @@ typedef struct lc_pouch_disk_store {
   unsigned long replayed_query_index_size;
   unsigned long replayed_record_count;
   unsigned long replayed_query_index_record_count;
+  lc_pouch_disk_marker_snapshot_entry *marker_snapshot_entries;
+  size_t marker_snapshot_entry_count;
+  size_t marker_snapshot_entry_capacity;
+  int marker_snapshot_synced;
+  unsigned long marker_snapshot_clean_checks;
   lc_pouch_fsync_stats fsync_stats;
   int defer_record_fsync;
   int query_index_rebuild_needed;
@@ -364,16 +378,16 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
 static int lc_pouch_disk_list_namespaces(lc_pouch_store *self,
                                          lc_pouch_namespace_list *out,
                                          lc_error *error);
-static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
-                                   const lc_pouch_scan_meta_req *req,
-                                   lc_pouch_scan_meta_visit_fn visit,
-                                   void *visit_context,
-                                   lc_pouch_scan_meta_res *out,
-                                   lc_error *error);
-static int lc_pouch_disk_scan_meta_keys(
-    lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
-    lc_pouch_query_index_key_visit_fn visit, void *visit_context,
-    lc_pouch_scan_meta_res *out, lc_error *error);
+static int
+lc_pouch_disk_scan_meta(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
+                        lc_pouch_scan_meta_visit_fn visit, void *visit_context,
+                        lc_pouch_scan_meta_res *out, lc_error *error);
+static int lc_pouch_disk_scan_meta_keys(lc_pouch_store *self,
+                                        const lc_pouch_scan_meta_req *req,
+                                        lc_pouch_query_index_key_visit_fn visit,
+                                        void *visit_context,
+                                        lc_pouch_scan_meta_res *out,
+                                        lc_error *error);
 static int lc_pouch_disk_query_index_scan(
     lc_pouch_store *self, const lc_pouch_query_index_scan_req *req,
     lc_pouch_scan_meta_visit_fn visit, void *visit_context,
@@ -396,8 +410,7 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
                                      lc_pouch_index_flush_res *out,
                                      lc_error *error);
 static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
-                                 lc_pouch_compaction_res *out,
-                                 lc_error *error);
+                                 lc_pouch_compaction_res *out, lc_error *error);
 static int lc_pouch_disk_retention_sweep(
     lc_pouch_store *self, const lc_pouch_retention_sweep_req *req,
     lc_pouch_retention_sweep_res *out, lc_error *error);
@@ -426,8 +439,7 @@ static int lc_pouch_write_all(int fd, const void *bytes, size_t count);
 static int lc_pouch_disk_fsync(lc_pouch_disk_store *store, int fd, int kind);
 static int lc_pouch_disk_write_fd_span(int out_fd, int in_fd,
                                        unsigned long in_offset,
-                                       unsigned long length,
-                                       lc_error *error);
+                                       unsigned long length, lc_error *error);
 static int lc_pouch_disk_append_segment_memory_shadow(
     lc_pouch_disk_store *store, const char *namespace_name,
     const unsigned char *header, const char *key, const char *content_type,
@@ -466,9 +478,10 @@ static int lc_pouch_disk_update_query_field_index_from_fd(
     const char *content_type, const char *state_etag, long version, int fd,
     unsigned long body_offset, unsigned long body_length, int append_records,
     int update_memory, lc_error *error);
-static int lc_pouch_disk_append_meta_remove_locked(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
-    lc_error *error);
+static int lc_pouch_disk_append_meta_remove_locked(lc_pouch_disk_store *store,
+                                                   const char *namespace_name,
+                                                   const char *key,
+                                                   lc_error *error);
 static int lc_pouch_disk_query_index_reserve(lc_pouch_disk_store *store);
 static int lc_pouch_disk_query_index_insert(lc_pouch_disk_store *store,
                                             size_t meta_index);
@@ -477,8 +490,8 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
 static int lc_pouch_disk_query_summary_upsert(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *etag, long version, const lc_pouch_meta *meta, int deleted);
-static unsigned long lc_pouch_disk_index_sequence(
-    const lc_pouch_disk_store *store);
+static unsigned long
+lc_pouch_disk_index_sequence(const lc_pouch_disk_store *store);
 static unsigned long
 lc_pouch_disk_compaction_live_record_count(lc_pouch_disk_store *store);
 static int lc_pouch_disk_total_log_bytes(lc_pouch_disk_store *store,
@@ -519,26 +532,27 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
 static int lc_pouch_disk_remove_state(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key,
-                                      const char *expected_etag,
-                                      int *removed, lc_error *error);
-static int lc_pouch_disk_append_state_remove_locked(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
-    lc_pouch_put_state_res *out, lc_error *error);
-static int lc_pouch_disk_stage_state(lc_pouch_store *self,
-                                     const char *namespace_name,
-                                     const char *key, const char *txn_id,
-                                     lc_source *body,
-                                     const lc_pouch_put_state_opts *opts,
-                                     lc_pouch_put_state_res *out,
-                                     lc_error *error);
-static int lc_pouch_disk_stage_state_remove(
-    lc_pouch_store *self, const char *namespace_name, const char *key,
-    const char *txn_id, const char *expected_etag,
-    lc_pouch_put_state_res *out, lc_error *error);
+                                      const char *expected_etag, int *removed,
+                                      lc_error *error);
+static int lc_pouch_disk_append_state_remove_locked(lc_pouch_disk_store *store,
+                                                    const char *namespace_name,
+                                                    const char *key,
+                                                    lc_pouch_put_state_res *out,
+                                                    lc_error *error);
+static int
+lc_pouch_disk_stage_state(lc_pouch_store *self, const char *namespace_name,
+                          const char *key, const char *txn_id, lc_source *body,
+                          const lc_pouch_put_state_opts *opts,
+                          lc_pouch_put_state_res *out, lc_error *error);
+static int lc_pouch_disk_stage_state_remove(lc_pouch_store *self,
+                                            const char *namespace_name,
+                                            const char *key, const char *txn_id,
+                                            const char *expected_etag,
+                                            lc_pouch_put_state_res *out,
+                                            lc_error *error);
 static int lc_pouch_disk_load_staged_state(lc_pouch_store *self,
                                            const char *namespace_name,
-                                           const char *key,
-                                           const char *txn_id,
+                                           const char *key, const char *txn_id,
                                            lc_source **body,
                                            lc_pouch_state_info *out,
                                            lc_error *error);
@@ -550,9 +564,10 @@ static int lc_pouch_disk_discard_staged_state(
     lc_pouch_store *self, const char *namespace_name, const char *key,
     const char *txn_id, const lc_pouch_discard_staged_opts *opts,
     lc_error *error);
-static int lc_pouch_disk_list_staged_state(
-    lc_pouch_store *self, const lc_pouch_list_staged_req *req,
-    lc_pouch_staged_state_list *out, lc_error *error);
+static int lc_pouch_disk_list_staged_state(lc_pouch_store *self,
+                                           const lc_pouch_list_staged_req *req,
+                                           lc_pouch_staged_state_list *out,
+                                           lc_error *error);
 static int lc_pouch_disk_put_object(lc_pouch_store *self,
                                     const char *namespace_name, const char *key,
                                     lc_source *body,
@@ -621,9 +636,11 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
                                      const char *queue,
                                      lc_pouch_queue_stats *out,
                                      lc_error *error);
-static int lc_pouch_disk_queue_wake_status(
-    lc_pouch_store *self, const char *namespace_name, const char *queue,
-    lc_pouch_queue_wake_status *out, lc_error *error);
+static int lc_pouch_disk_queue_wake_status(lc_pouch_store *self,
+                                           const char *namespace_name,
+                                           const char *queue,
+                                           lc_pouch_queue_wake_status *out,
+                                           lc_error *error);
 static int lc_pouch_disk_fsync_stats(lc_pouch_store *self,
                                      lc_pouch_fsync_stats *out,
                                      lc_error *error);
@@ -640,15 +657,12 @@ static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
                                        const char *key, char **out,
                                        lc_error *error);
 static int lc_pouch_disk_lock_fd_cache_status(
-    lc_pouch_store *self, lc_pouch_lock_fd_cache_status *out,
-    lc_error *error);
+    lc_pouch_store *self, lc_pouch_lock_fd_cache_status *out, lc_error *error);
 static int lc_pouch_disk_read_fd_cache_status(
-    lc_pouch_store *self, lc_pouch_read_fd_cache_status *out,
-    lc_error *error);
+    lc_pouch_store *self, lc_pouch_read_fd_cache_status *out, lc_error *error);
 static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
                                       const char *namespace_name,
-                                      const char *key,
-                                      lc_pouch_key_lock **lock,
+                                      const char *key, lc_pouch_key_lock **lock,
                                       int *acquired, lc_error *error);
 static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
                                        const char *namespace_name,
@@ -668,8 +682,7 @@ static int lc_pouch_disk_query_config(lc_pouch_store *self,
                                       lc_pouch_query_config *out,
                                       lc_error *error);
 static int lc_pouch_disk_backend_capabilities(
-    lc_pouch_store *self, lc_pouch_backend_capabilities *out,
-    lc_error *error);
+    lc_pouch_store *self, lc_pouch_backend_capabilities *out, lc_error *error);
 static int lc_pouch_disk_backend_hash(lc_pouch_store *self, char **out,
                                       lc_error *error);
 static int lc_pouch_disk_close(lc_pouch_store *self, lc_error *error);
@@ -702,8 +715,7 @@ static int lc_pouch_disk_validate_name(lc_error *error, const char *operation,
 
 static int lc_pouch_disk_validate_path_name(lc_error *error,
                                             const char *operation,
-                                            const char *kind,
-                                            const char *value,
+                                            const char *kind, const char *value,
                                             int allow_slash) {
   const char *cursor;
   const char *component;
@@ -724,13 +736,11 @@ static int lc_pouch_disk_validate_path_name(lc_error *error,
     component_len = (size_t)(cursor - component);
     if (component_len == 0U) {
       snprintf(message, sizeof(message),
-               "%s %s must not contain empty path components", operation,
-               kind);
+               "%s %s must not contain empty path components", operation, kind);
       return lc_pouch_set_invalid(error, message);
     }
     if ((component_len == 1U && component[0] == '.') ||
-        (component_len == 2U && component[0] == '.' &&
-         component[1] == '.')) {
+        (component_len == 2U && component[0] == '.' && component[1] == '.')) {
       snprintf(message, sizeof(message),
                "%s %s must not contain dot path components", operation, kind);
       return lc_pouch_set_invalid(error, message);
@@ -865,8 +875,8 @@ static int lc_pouch_disk_init_store_key_stripes(lc_pouch_disk_store *store,
   return LC_OK;
 }
 
-static void lc_pouch_disk_destroy_store_key_stripes(
-    lc_pouch_disk_store *store) {
+static void
+lc_pouch_disk_destroy_store_key_stripes(lc_pouch_disk_store *store) {
   size_t index;
 
   if (store == NULL || !store->key_stripes_initialized) {
@@ -901,8 +911,7 @@ static size_t lc_pouch_disk_key_lock_stripe(const char *namespace_name,
 
 static int lc_pouch_disk_lock_key_stripes(lc_pouch_disk_store *store,
                                           const char *namespace_name,
-                                          const char *key,
-                                          size_t *stripe_out,
+                                          const char *key, size_t *stripe_out,
                                           lc_error *error) {
   size_t stripe;
   int err;
@@ -918,23 +927,20 @@ static int lc_pouch_disk_lock_key_stripes(lc_pouch_disk_store *store,
   err = pthread_mutex_lock(&store->key_stripes[stripe]);
   if (err != 0) {
     errno = err;
-    return lc_pouch_set_errno(error,
-                              "failed to lock pouch store key stripe");
+    return lc_pouch_set_errno(error, "failed to lock pouch store key stripe");
   }
   err = pthread_mutex_lock(&lc_pouch_process_key_stripes[stripe]);
   if (err != 0) {
     errno = err;
     (void)pthread_mutex_unlock(&store->key_stripes[stripe]);
-    return lc_pouch_set_errno(error,
-                              "failed to lock pouch process key stripe");
+    return lc_pouch_set_errno(error, "failed to lock pouch process key stripe");
   }
   *stripe_out = stripe;
   return LC_OK;
 }
 
 static int lc_pouch_disk_unlock_key_stripes(lc_pouch_disk_store *store,
-                                            size_t stripe,
-                                            lc_error *error) {
+                                            size_t stripe, lc_error *error) {
   int rc;
   int err;
 
@@ -942,14 +948,12 @@ static int lc_pouch_disk_unlock_key_stripes(lc_pouch_disk_store *store,
   err = pthread_mutex_unlock(&lc_pouch_process_key_stripes[stripe]);
   if (err != 0) {
     errno = err;
-    rc = lc_pouch_set_errno(error,
-                            "failed to unlock pouch process key stripe");
+    rc = lc_pouch_set_errno(error, "failed to unlock pouch process key stripe");
   }
   err = pthread_mutex_unlock(&store->key_stripes[stripe]);
   if (err != 0 && rc == LC_OK) {
     errno = err;
-    rc = lc_pouch_set_errno(error,
-                            "failed to unlock pouch store key stripe");
+    rc = lc_pouch_set_errno(error, "failed to unlock pouch store key stripe");
   }
   return rc;
 }
@@ -989,8 +993,9 @@ static char *lc_pouch_disk_make_lock_key_path(lc_pouch_disk_store *store,
   return path;
 }
 
-static char *lc_pouch_disk_make_lock_namespace_path(
-    lc_pouch_disk_store *store, const char *namespace_name) {
+static char *
+lc_pouch_disk_make_lock_namespace_path(lc_pouch_disk_store *store,
+                                       const char *namespace_name) {
   const char lock_dir[] = "locks";
   size_t root_len;
   size_t dir_len;
@@ -1018,8 +1023,7 @@ static char *lc_pouch_disk_make_lock_namespace_path(
   return path;
 }
 
-static int lc_pouch_disk_ensure_directory(const char *path,
-                                          const char *message,
+static int lc_pouch_disk_ensure_directory(const char *path, const char *message,
                                           lc_error *error) {
   struct stat st;
 
@@ -1101,8 +1105,8 @@ static char *lc_pouch_disk_make_query_index_path(lc_pouch_disk_store *store,
   return index_path;
 }
 
-static char *lc_pouch_disk_make_query_index_temp_path(
-    lc_pouch_disk_store *store) {
+static char *
+lc_pouch_disk_make_query_index_temp_path(lc_pouch_disk_store *store) {
   const char suffix[] = ".compact.tmp";
   size_t path_len;
   char *temp_path;
@@ -1190,9 +1194,10 @@ static void lc_pouch_disk_segment_name(char *buffer, size_t buffer_size,
   (void)snprintf(buffer, buffer_size, "seg-%016lu.log", number);
 }
 
-static char *lc_pouch_disk_make_namespace_segment_path(
-    lc_pouch_disk_store *store, const char *namespace_name,
-    unsigned long segment_number) {
+static char *
+lc_pouch_disk_make_namespace_segment_path(lc_pouch_disk_store *store,
+                                          const char *namespace_name,
+                                          unsigned long segment_number) {
   char *namespace_path;
   char *logstore_path;
   char *segments_path;
@@ -1207,14 +1212,14 @@ static char *lc_pouch_disk_make_namespace_segment_path(
                              segment_number);
   logstore_path =
       lc_pouch_join_path(&store->allocator, namespace_path, "logstore");
-  segments_path = logstore_path != NULL
-                      ? lc_pouch_join_path(&store->allocator, logstore_path,
-                                           "segments")
-                      : NULL;
-  segment_path = segments_path != NULL
-                     ? lc_pouch_join_path(&store->allocator, segments_path,
-                                          segment_name)
-                     : NULL;
+  segments_path =
+      logstore_path != NULL
+          ? lc_pouch_join_path(&store->allocator, logstore_path, "segments")
+          : NULL;
+  segment_path =
+      segments_path != NULL
+          ? lc_pouch_join_path(&store->allocator, segments_path, segment_name)
+          : NULL;
   lc_pouch_free(&store->allocator, segments_path);
   lc_pouch_free(&store->allocator, logstore_path);
   lc_pouch_free(&store->allocator, namespace_path);
@@ -1339,8 +1344,7 @@ static char *lc_pouch_disk_make_namespace_active_segment_path(
     lc_pouch_free(&store->allocator, manifest_path);
     lc_pouch_free(&store->allocator, manifest_log_path);
     lc_pouch_free(&store->allocator, segments_path);
-    (void)lc_pouch_set_nomem(error,
-                             "failed to allocate pouch segment path");
+    (void)lc_pouch_set_nomem(error, "failed to allocate pouch segment path");
     return NULL;
   }
   rc = lc_pouch_disk_manifest_active_segment_number(
@@ -1420,8 +1424,8 @@ static char *lc_pouch_disk_make_namespace_active_segment_path(
   lc_pouch_free(&store->allocator, manifest_path);
   lc_pouch_free(&store->allocator, logstore_path);
   lc_pouch_free(&store->allocator, namespace_path);
-  return lc_pouch_disk_make_namespace_segment_path(
-      store, namespace_name, found ? max_number : 1UL);
+  return lc_pouch_disk_make_namespace_segment_path(store, namespace_name,
+                                                   found ? max_number : 1UL);
 }
 
 static int lc_pouch_disk_open_active_segment_for_append(
@@ -1443,14 +1447,12 @@ static int lc_pouch_disk_open_active_segment_for_append(
     *fd_out = -1;
   }
   if (path_out == NULL || fd_out == NULL) {
-    return lc_pouch_set_invalid(error,
-                                "active segment open requires outputs");
+    return lc_pouch_set_invalid(error, "active segment open requires outputs");
   }
   segment_path = lc_pouch_disk_make_namespace_active_segment_path(
       store, namespace_name, &needs_open_manifest, error);
   if (segment_path == NULL) {
-    return error != NULL && error->code != LC_OK ? error->code
-                                                 : LC_ERR_NOMEM;
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   if (needs_open_manifest) {
     rc = lc_pouch_disk_append_manifest_event_for_segment_path(
@@ -1479,8 +1481,7 @@ static int lc_pouch_disk_open_active_segment_for_append(
         store, namespace_name, segment_number + 1UL);
     if (next_segment_path == NULL) {
       lc_pouch_free(&store->allocator, segment_path);
-      return lc_pouch_set_nomem(error,
-                                "failed to allocate pouch segment path");
+      return lc_pouch_set_nomem(error, "failed to allocate pouch segment path");
     }
     fd = open(next_segment_path, O_RDWR | O_CREAT, 0666);
     if (fd < 0) {
@@ -1595,8 +1596,9 @@ static int lc_pouch_disk_append_manifest_record(lc_pouch_disk_store *store,
   return rc;
 }
 
-static int lc_pouch_disk_ensure_namespace_logstore(
-    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
+static int lc_pouch_disk_ensure_namespace_logstore(lc_pouch_disk_store *store,
+                                                   const char *namespace_name,
+                                                   lc_error *error) {
   char *namespace_path;
   char *logstore_path;
   char *manifest_path;
@@ -1625,8 +1627,7 @@ static int lc_pouch_disk_ensure_namespace_logstore(
   }
   namespace_path = lc_pouch_disk_make_namespace_path(store, namespace_name);
   if (namespace_path == NULL) {
-    rc = lc_pouch_set_nomem(error,
-                            "failed to allocate pouch namespace path");
+    rc = lc_pouch_set_nomem(error, "failed to allocate pouch namespace path");
     goto cleanup;
   }
   logstore_path =
@@ -1643,13 +1644,12 @@ static int lc_pouch_disk_ensure_namespace_logstore(
       lc_pouch_join_path(&store->allocator, logstore_path, "queue-notify");
   manifest_log_path =
       lc_pouch_join_path(&store->allocator, manifest_path, "manifest.log");
-  segment_path =
-      lc_pouch_join_path(&store->allocator, segments_path,
-                         "seg-0000000000000001.log");
-  if (logstore_path == NULL || manifest_path == NULL ||
-      segments_path == NULL || snapshots_path == NULL ||
-      markers_path == NULL || queue_notify_path == NULL ||
-      manifest_log_path == NULL || segment_path == NULL) {
+  segment_path = lc_pouch_join_path(&store->allocator, segments_path,
+                                    "seg-0000000000000001.log");
+  if (logstore_path == NULL || manifest_path == NULL || segments_path == NULL ||
+      snapshots_path == NULL || markers_path == NULL ||
+      queue_notify_path == NULL || manifest_log_path == NULL ||
+      segment_path == NULL) {
     rc = lc_pouch_set_nomem(error,
                             "failed to allocate pouch namespace logstore path");
     goto cleanup;
@@ -1691,8 +1691,8 @@ static int lc_pouch_disk_ensure_namespace_logstore(
   if (rc != LC_OK) {
     goto cleanup;
   }
-  rc = lc_pouch_disk_ensure_namespace_segment_manifest(
-      store, manifest_log_path, segment_path, error);
+  rc = lc_pouch_disk_ensure_namespace_segment_manifest(store, manifest_log_path,
+                                                       segment_path, error);
 
 cleanup:
   lc_pouch_free(&store->allocator, segment_path);
@@ -1719,9 +1719,8 @@ static int lc_pouch_disk_ensure_lock_namespace(lc_pouch_disk_store *store,
     return lc_pouch_set_nomem(error,
                               "failed to allocate pouch lock directory path");
   }
-  rc = lc_pouch_disk_ensure_directory(lock_root,
-                                      "failed to create pouch lock directory",
-                                      error);
+  rc = lc_pouch_disk_ensure_directory(
+      lock_root, "failed to create pouch lock directory", error);
   lc_pouch_free(&store->allocator, lock_root);
   if (rc != LC_OK) {
     return rc;
@@ -1730,8 +1729,8 @@ static int lc_pouch_disk_ensure_lock_namespace(lc_pouch_disk_store *store,
   namespace_path =
       lc_pouch_disk_make_lock_namespace_path(store, namespace_name);
   if (namespace_path == NULL) {
-    return lc_pouch_set_nomem(
-        error, "failed to allocate pouch lock namespace path");
+    return lc_pouch_set_nomem(error,
+                              "failed to allocate pouch lock namespace path");
   }
   rc = lc_pouch_disk_ensure_directory(
       namespace_path, "failed to create pouch lock namespace directory", error);
@@ -1846,8 +1845,8 @@ static int lc_pouch_disk_open_key_lock_fd(lc_pouch_disk_store *store,
   return LC_OK;
 }
 
-static int lc_pouch_disk_cache_lock_fd(lc_pouch_disk_store *store,
-                                       char **path, int fd, lc_error *error) {
+static int lc_pouch_disk_cache_lock_fd(lc_pouch_disk_store *store, char **path,
+                                       int fd, lc_error *error) {
   lc_pouch_lock_fd_cache_entry *entry;
   lc_pouch_lock_fd_cache_entry **cursor;
   lc_pouch_lock_fd_cache_entry **evict_cursor;
@@ -1861,8 +1860,8 @@ static int lc_pouch_disk_cache_lock_fd(lc_pouch_disk_store *store,
     }
     return LC_OK;
   }
-  entry = (lc_pouch_lock_fd_cache_entry *)lc_pouch_calloc(
-      &store->allocator, 1U, sizeof(*entry));
+  entry = (lc_pouch_lock_fd_cache_entry *)lc_pouch_calloc(&store->allocator, 1U,
+                                                          sizeof(*entry));
   if (entry == NULL) {
     if (close(fd) != 0) {
       return lc_pouch_set_errno(error, "failed to close pouch key lock");
@@ -1877,8 +1876,7 @@ static int lc_pouch_disk_cache_lock_fd(lc_pouch_disk_store *store,
   entry->fd = fd;
 
   (void)pthread_mutex_lock(&lc_pouch_process_lock_fd_cache_mutex);
-  if (lc_pouch_process_lock_fd_cache_count >=
-      LC_POUCH_LOCK_FD_CACHE_CAPACITY) {
+  if (lc_pouch_process_lock_fd_cache_count >= LC_POUCH_LOCK_FD_CACHE_CAPACITY) {
     evict_cursor = &lc_pouch_process_lock_fd_cache;
     oldest = (*evict_cursor)->used_at;
     cursor = &(*evict_cursor)->next;
@@ -1940,8 +1938,8 @@ static void lc_pouch_disk_close_lock_fd_cache(lc_pouch_disk_store *store) {
   (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
 }
 
-static void lc_pouch_disk_lock_fd_cache_snapshot(
-    lc_pouch_lock_fd_cache_status *out) {
+static void
+lc_pouch_disk_lock_fd_cache_snapshot(lc_pouch_lock_fd_cache_status *out) {
   if (out == NULL) {
     return;
   }
@@ -1956,8 +1954,9 @@ static void lc_pouch_disk_lock_fd_cache_snapshot(
   (void)pthread_mutex_unlock(&lc_pouch_process_lock_fd_cache_mutex);
 }
 
-static void lc_pouch_disk_process_key_lock_snapshot(
-    size_t *active_key_locks, unsigned long *contentions) {
+static void
+lc_pouch_disk_process_key_lock_snapshot(size_t *active_key_locks,
+                                        unsigned long *contentions) {
   if (active_key_locks != NULL) {
     *active_key_locks = 0U;
   }
@@ -1974,8 +1973,9 @@ static void lc_pouch_disk_process_key_lock_snapshot(
   (void)pthread_mutex_unlock(&lc_pouch_process_key_registry_mutex);
 }
 
-static lc_pouch_read_cache_owner *lc_pouch_read_cache_owner_create(
-    const lc_pouch_allocator *allocator, lc_error *error) {
+static lc_pouch_read_cache_owner *
+lc_pouch_read_cache_owner_create(const lc_pouch_allocator *allocator,
+                                 lc_error *error) {
   lc_pouch_read_cache_owner *owner;
   int err;
 
@@ -2000,8 +2000,7 @@ static lc_pouch_read_cache_owner *lc_pouch_read_cache_owner_create(
   return owner;
 }
 
-static void lc_pouch_read_cache_owner_retain(
-    lc_pouch_read_cache_owner *owner) {
+static void lc_pouch_read_cache_owner_retain(lc_pouch_read_cache_owner *owner) {
   if (owner == NULL) {
     return;
   }
@@ -2010,8 +2009,8 @@ static void lc_pouch_read_cache_owner_retain(
   (void)pthread_mutex_unlock(&owner->mutex);
 }
 
-static void lc_pouch_read_cache_owner_release(
-    lc_pouch_read_cache_owner *owner) {
+static void
+lc_pouch_read_cache_owner_release(lc_pouch_read_cache_owner *owner) {
   lc_pouch_allocator allocator;
   int destroy;
 
@@ -2034,8 +2033,8 @@ static void lc_pouch_read_cache_owner_release(
   }
 }
 
-static void lc_pouch_read_cache_owner_mark_closed(
-    lc_pouch_read_cache_owner *owner) {
+static void
+lc_pouch_read_cache_owner_mark_closed(lc_pouch_read_cache_owner *owner) {
   if (owner == NULL) {
     return;
   }
@@ -2126,8 +2125,8 @@ static int lc_pouch_disk_open_read_fd(lc_pouch_disk_store *store,
     *fd_out = -1;
   }
   if (store == NULL || path == NULL || fd_out == NULL) {
-    return lc_pouch_set_invalid(error,
-                                "open_read_fd requires store, path, and output");
+    return lc_pouch_set_invalid(
+        error, "open_read_fd requires store, path, and output");
   }
   if (lc_pouch_disk_take_cached_read_fd(store, path, fd_out)) {
     return LC_OK;
@@ -2155,8 +2154,8 @@ static int lc_pouch_disk_cache_read_fd(lc_pouch_read_cache_owner *owner,
     }
     return LC_OK;
   }
-  entry = (lc_pouch_read_fd_cache_entry *)lc_pouch_calloc(
-      &owner->allocator, 1U, sizeof(*entry));
+  entry = (lc_pouch_read_fd_cache_entry *)lc_pouch_calloc(&owner->allocator, 1U,
+                                                          sizeof(*entry));
   if (entry == NULL) {
     if (close(fd) != 0) {
       return lc_pouch_set_errno(error, "failed to close pouch read fd");
@@ -2171,8 +2170,7 @@ static int lc_pouch_disk_cache_read_fd(lc_pouch_read_cache_owner *owner,
   entry->fd = fd;
 
   (void)pthread_mutex_lock(&lc_pouch_process_read_fd_cache_mutex);
-  if (lc_pouch_process_read_fd_cache_count >=
-      LC_POUCH_READ_FD_CACHE_CAPACITY) {
+  if (lc_pouch_process_read_fd_cache_count >= LC_POUCH_READ_FD_CACHE_CAPACITY) {
     evict_cursor = &lc_pouch_process_read_fd_cache;
     oldest = (*evict_cursor)->used_at;
     cursor = &(*evict_cursor)->next;
@@ -2213,8 +2211,9 @@ static int lc_pouch_disk_cache_read_fd(lc_pouch_read_cache_owner *owner,
   return LC_OK;
 }
 
-static int lc_pouch_read_cache_owner_cache_fd(
-    lc_pouch_read_cache_owner *owner, char **path, int fd, lc_error *error) {
+static int lc_pouch_read_cache_owner_cache_fd(lc_pouch_read_cache_owner *owner,
+                                              char **path, int fd,
+                                              lc_error *error) {
   int alive;
   int rc;
 
@@ -2259,8 +2258,8 @@ static void lc_pouch_disk_close_read_fd_cache(lc_pouch_disk_store *store) {
   (void)pthread_mutex_unlock(&lc_pouch_process_read_fd_cache_mutex);
 }
 
-static void lc_pouch_disk_read_fd_cache_snapshot(
-    lc_pouch_read_fd_cache_status *out) {
+static void
+lc_pouch_disk_read_fd_cache_snapshot(lc_pouch_read_fd_cache_status *out) {
   if (out == NULL) {
     return;
   }
@@ -2282,8 +2281,7 @@ static int lc_pouch_disk_make_file_source(lc_pouch_disk_store *store,
                                           unsigned long body_length,
                                           const char *seek_error,
                                           const char *alloc_error,
-                                          lc_source **out,
-                                          lc_error *error) {
+                                          lc_source **out, lc_error *error) {
   lc_source *source_pub;
   lc_pouch_file_source *source;
   char *path;
@@ -2368,14 +2366,14 @@ static const char *lc_pouch_disk_query_fallback_default(const char *value) {
   return value != NULL && value[0] != '\0' ? value : "none";
 }
 
-static int lc_pouch_disk_validate_open_opts(
-    const lc_pouch_disk_open_opts *opts, lc_error *error) {
+static int lc_pouch_disk_validate_open_opts(const lc_pouch_disk_open_opts *opts,
+                                            lc_error *error) {
   if (opts == NULL) {
     return LC_OK;
   }
   if (!lc_pouch_disk_query_engine_supported(opts->query_engine, 0)) {
-    return lc_pouch_set_invalid(error,
-                                "pouch disk query_engine must be index or scan");
+    return lc_pouch_set_invalid(
+        error, "pouch disk query_engine must be index or scan");
   }
   if (!lc_pouch_disk_query_engine_supported(opts->query_fallback_engine, 1)) {
     return lc_pouch_set_invalid(
@@ -2384,8 +2382,7 @@ static int lc_pouch_disk_validate_open_opts(
   return LC_OK;
 }
 
-static int lc_pouch_disk_add_overflows(unsigned long left,
-                                       unsigned long right,
+static int lc_pouch_disk_add_overflows(unsigned long left, unsigned long right,
                                        unsigned long *out) {
   if (left > ((unsigned long)-1) - right) {
     return 1;
@@ -2502,21 +2499,18 @@ static void lc_pouch_sha256_put_be32(unsigned char *dst, unsigned long value) {
 static void lc_pouch_sha256_transform(lc_pouch_sha256 *ctx,
                                       const unsigned char block[64]) {
   static const unsigned long k[64] = {
-      0x428a2f98UL, 0x71374491UL, 0xb5c0fbcfUL, 0xe9b5dba5UL,
-      0x3956c25bUL, 0x59f111f1UL, 0x923f82a4UL, 0xab1c5ed5UL,
-      0xd807aa98UL, 0x12835b01UL, 0x243185beUL, 0x550c7dc3UL,
-      0x72be5d74UL, 0x80deb1feUL, 0x9bdc06a7UL, 0xc19bf174UL,
-      0xe49b69c1UL, 0xefbe4786UL, 0x0fc19dc6UL, 0x240ca1ccUL,
-      0x2de92c6fUL, 0x4a7484aaUL, 0x5cb0a9dcUL, 0x76f988daUL,
-      0x983e5152UL, 0xa831c66dUL, 0xb00327c8UL, 0xbf597fc7UL,
-      0xc6e00bf3UL, 0xd5a79147UL, 0x06ca6351UL, 0x14292967UL,
-      0x27b70a85UL, 0x2e1b2138UL, 0x4d2c6dfcUL, 0x53380d13UL,
-      0x650a7354UL, 0x766a0abbUL, 0x81c2c92eUL, 0x92722c85UL,
-      0xa2bfe8a1UL, 0xa81a664bUL, 0xc24b8b70UL, 0xc76c51a3UL,
-      0xd192e819UL, 0xd6990624UL, 0xf40e3585UL, 0x106aa070UL,
-      0x19a4c116UL, 0x1e376c08UL, 0x2748774cUL, 0x34b0bcb5UL,
-      0x391c0cb3UL, 0x4ed8aa4aUL, 0x5b9cca4fUL, 0x682e6ff3UL,
-      0x748f82eeUL, 0x78a5636fUL, 0x84c87814UL, 0x8cc70208UL,
+      0x428a2f98UL, 0x71374491UL, 0xb5c0fbcfUL, 0xe9b5dba5UL, 0x3956c25bUL,
+      0x59f111f1UL, 0x923f82a4UL, 0xab1c5ed5UL, 0xd807aa98UL, 0x12835b01UL,
+      0x243185beUL, 0x550c7dc3UL, 0x72be5d74UL, 0x80deb1feUL, 0x9bdc06a7UL,
+      0xc19bf174UL, 0xe49b69c1UL, 0xefbe4786UL, 0x0fc19dc6UL, 0x240ca1ccUL,
+      0x2de92c6fUL, 0x4a7484aaUL, 0x5cb0a9dcUL, 0x76f988daUL, 0x983e5152UL,
+      0xa831c66dUL, 0xb00327c8UL, 0xbf597fc7UL, 0xc6e00bf3UL, 0xd5a79147UL,
+      0x06ca6351UL, 0x14292967UL, 0x27b70a85UL, 0x2e1b2138UL, 0x4d2c6dfcUL,
+      0x53380d13UL, 0x650a7354UL, 0x766a0abbUL, 0x81c2c92eUL, 0x92722c85UL,
+      0xa2bfe8a1UL, 0xa81a664bUL, 0xc24b8b70UL, 0xc76c51a3UL, 0xd192e819UL,
+      0xd6990624UL, 0xf40e3585UL, 0x106aa070UL, 0x19a4c116UL, 0x1e376c08UL,
+      0x2748774cUL, 0x34b0bcb5UL, 0x391c0cb3UL, 0x4ed8aa4aUL, 0x5b9cca4fUL,
+      0x682e6ff3UL, 0x748f82eeUL, 0x78a5636fUL, 0x84c87814UL, 0x8cc70208UL,
       0x90befffaUL, 0xa4506cebUL, 0xbef9a3f7UL, 0xc67178f2UL};
   unsigned long w[64];
   unsigned long a;
@@ -2551,8 +2545,7 @@ static void lc_pouch_sha256_transform(lc_pouch_sha256 *ctx,
 
   for (index = 0U; index < 64U; ++index) {
     t1 = lc_pouch_sha256_u32(h + lc_pouch_sha256_big1(e) +
-                             lc_pouch_sha256_ch(e, f, g) + k[index] +
-                             w[index]);
+                             lc_pouch_sha256_ch(e, f, g) + k[index] + w[index]);
     t2 = lc_pouch_sha256_u32(lc_pouch_sha256_big0(a) +
                              lc_pouch_sha256_maj(a, b, c));
     h = g;
@@ -2640,8 +2633,8 @@ static void lc_pouch_sha256_finish(lc_pouch_sha256 *ctx,
   lc_pouch_sha256_put_be32(length + 4, ctx->bit_count_lo);
   memset(pad, 0, sizeof(pad));
   pad[0] = 0x80U;
-  pad_len = ctx->buffer_len < 56U ? 56U - ctx->buffer_len
-                                  : 120U - ctx->buffer_len;
+  pad_len =
+      ctx->buffer_len < 56U ? 56U - ctx->buffer_len : 120U - ctx->buffer_len;
   lc_pouch_sha256_update(ctx, pad, pad_len);
   lc_pouch_sha256_update(ctx, length, sizeof(length));
   for (index = 0U; index < 8U; ++index) {
@@ -2786,6 +2779,81 @@ static char *lc_pouch_disk_make_writer_marker_path(lc_pouch_disk_store *store) {
   return lc_pouch_join_path(&store->allocator, store->root_path, leaf);
 }
 
+static char *
+lc_pouch_disk_make_logstore_writer_marker_leaf(lc_pouch_disk_store *store) {
+  const char *root_leaf;
+  const char *writer_id;
+  size_t prefix_len;
+  size_t writer_id_len;
+  size_t leaf_len;
+  char *leaf;
+
+  root_leaf = strrchr(store->writer_marker_path, '/');
+  root_leaf = root_leaf != NULL ? root_leaf + 1 : store->writer_marker_path;
+  prefix_len = sizeof(LC_POUCH_WRITER_MARKER_PREFIX) - 1U;
+  writer_id = strncmp(root_leaf, LC_POUCH_WRITER_MARKER_PREFIX, prefix_len) == 0
+                  ? root_leaf + prefix_len
+                  : root_leaf;
+  writer_id_len = strlen(writer_id);
+  leaf_len =
+      sizeof(LC_POUCH_LOGSTORE_WRITER_MARKER_PREFIX) - 1U + writer_id_len;
+  leaf = (char *)lc_pouch_alloc(&store->allocator, leaf_len + 1U);
+  if (leaf == NULL) {
+    return NULL;
+  }
+  memcpy(leaf, LC_POUCH_LOGSTORE_WRITER_MARKER_PREFIX,
+         sizeof(LC_POUCH_LOGSTORE_WRITER_MARKER_PREFIX) - 1U);
+  memcpy(leaf + sizeof(LC_POUCH_LOGSTORE_WRITER_MARKER_PREFIX) - 1U, writer_id,
+         writer_id_len + 1U);
+  return leaf;
+}
+
+static int lc_pouch_disk_logstore_writer_marker_name(const char *name) {
+  size_t name_len;
+  size_t prefix_len;
+  size_t suffix_len;
+  const char suffix[] = ".marker";
+
+  if (name == NULL) {
+    return 0;
+  }
+  name_len = strlen(name);
+  prefix_len = sizeof(LC_POUCH_LOGSTORE_WRITER_MARKER_PREFIX) - 1U;
+  suffix_len = sizeof(suffix) - 1U;
+  return name_len > prefix_len + suffix_len &&
+         strncmp(name, LC_POUCH_LOGSTORE_WRITER_MARKER_PREFIX, prefix_len) ==
+             0 &&
+         strcmp(name + name_len - suffix_len, suffix) == 0;
+}
+
+static char *
+lc_pouch_disk_make_namespace_marker_path(lc_pouch_disk_store *store,
+                                         const char *namespace_name) {
+  char *namespace_path;
+  char *logstore_path;
+  char *markers_path;
+  char *marker_path;
+
+  namespace_path = lc_pouch_disk_make_namespace_path(store, namespace_name);
+  logstore_path =
+      namespace_path != NULL
+          ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+          : NULL;
+  markers_path =
+      logstore_path != NULL
+          ? lc_pouch_join_path(&store->allocator, logstore_path, "markers")
+          : NULL;
+  marker_path =
+      markers_path != NULL && store->logstore_writer_marker_leaf != NULL
+          ? lc_pouch_join_path(&store->allocator, markers_path,
+                               store->logstore_writer_marker_leaf)
+          : NULL;
+  lc_pouch_free(&store->allocator, markers_path);
+  lc_pouch_free(&store->allocator, logstore_path);
+  lc_pouch_free(&store->allocator, namespace_path);
+  return marker_path;
+}
+
 static unsigned long lc_pouch_disk_wake_hash(const char *namespace_name,
                                              const char *queue) {
   const unsigned char *cursor;
@@ -2887,11 +2955,318 @@ static void lc_pouch_disk_touch_writer_marker(lc_pouch_disk_store *store) {
   lc_error_cleanup(&ignored_error);
 }
 
+static void
+lc_pouch_disk_touch_namespace_writer_marker(lc_pouch_disk_store *store,
+                                            const char *namespace_name) {
+  char body[192];
+  char *path;
+  int fd;
+  size_t body_len;
+  unsigned long log_size;
+  long now_unix;
+
+  if (store == NULL || namespace_name == NULL ||
+      store->logstore_writer_marker_leaf == NULL) {
+    return;
+  }
+  path = lc_pouch_disk_make_namespace_marker_path(store, namespace_name);
+  if (path == NULL) {
+    return;
+  }
+  now_unix = (long)time(NULL);
+  log_size = store->replayed_log_size != (unsigned long)-1
+                 ? store->replayed_log_size
+                 : 0UL;
+  snprintf(body, sizeof(body),
+           "pid=%ld\nsequence=%lu\nupdated_at_unix=%ld\nlog_size=%lu\n%s",
+           (long)getpid(), store->writer_marker_seq, now_unix, log_size,
+           (store->writer_marker_seq % 2UL) != 0UL ? "pad=x\n" : "");
+  body_len = strlen(body);
+  fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd >= 0) {
+    if (lc_pouch_write_all(fd, body, body_len)) {
+      (void)lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_WRITER_MARKER);
+    }
+    (void)close(fd);
+  }
+  lc_pouch_free(&store->allocator, path);
+}
+
+static void
+lc_pouch_disk_touch_all_namespace_writer_markers(lc_pouch_disk_store *store) {
+  DIR *root_dir;
+  struct dirent *entry;
+
+  if (store == NULL) {
+    return;
+  }
+  root_dir = opendir(store->root_path);
+  if (root_dir == NULL) {
+    return;
+  }
+  while ((entry = readdir(root_dir)) != NULL) {
+    char *namespace_path;
+    char *logstore_path;
+    struct stat st;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    namespace_path =
+        lc_pouch_join_path(&store->allocator, store->root_path, entry->d_name);
+    logstore_path =
+        namespace_path != NULL
+            ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+            : NULL;
+    if (logstore_path != NULL && stat(logstore_path, &st) == 0 &&
+        S_ISDIR(st.st_mode)) {
+      lc_pouch_disk_touch_namespace_writer_marker(store, entry->d_name);
+    }
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, namespace_path);
+  }
+  (void)closedir(root_dir);
+}
+
+static int lc_pouch_disk_marker_snapshot_compare(const void *left,
+                                                 const void *right) {
+  const lc_pouch_disk_marker_snapshot_entry *left_entry;
+  const lc_pouch_disk_marker_snapshot_entry *right_entry;
+
+  left_entry = (const lc_pouch_disk_marker_snapshot_entry *)left;
+  right_entry = (const lc_pouch_disk_marker_snapshot_entry *)right;
+  return strcmp(left_entry->path, right_entry->path);
+}
+
+static void lc_pouch_disk_marker_snapshot_entries_cleanup(
+    lc_pouch_disk_store *store, lc_pouch_disk_marker_snapshot_entry *entries,
+    size_t count) {
+  size_t index;
+
+  for (index = 0U; index < count; ++index) {
+    lc_pouch_free(&store->allocator, entries[index].path);
+  }
+  lc_pouch_free(&store->allocator, entries);
+}
+
+static void lc_pouch_disk_marker_snapshot_cleanup(lc_pouch_disk_store *store) {
+  if (store == NULL) {
+    return;
+  }
+  lc_pouch_disk_marker_snapshot_entries_cleanup(
+      store, store->marker_snapshot_entries,
+      store->marker_snapshot_entry_count);
+  store->marker_snapshot_entries = NULL;
+  store->marker_snapshot_entry_count = 0U;
+  store->marker_snapshot_entry_capacity = 0U;
+  store->marker_snapshot_synced = 0;
+  store->marker_snapshot_clean_checks = 0UL;
+}
+
+static int lc_pouch_disk_marker_snapshot_add(
+    lc_pouch_disk_store *store, lc_pouch_disk_marker_snapshot_entry **entries,
+    size_t *count, size_t *capacity, char *path, const struct stat *st) {
+  lc_pouch_disk_marker_snapshot_entry *grown;
+  size_t new_capacity;
+
+  if (*count >= *capacity) {
+    new_capacity = *capacity == 0U ? 8U : *capacity * 2U;
+    grown = (lc_pouch_disk_marker_snapshot_entry *)lc_pouch_realloc(
+        &store->allocator, *entries, new_capacity * sizeof((*entries)[0]));
+    if (grown == NULL) {
+      return 0;
+    }
+    *entries = grown;
+    *capacity = new_capacity;
+  }
+  (*entries)[*count].path = path;
+  (*entries)[*count].size = (unsigned long)st->st_size;
+  (*entries)[*count].mtime = (long)st->st_mtime;
+  (*count)++;
+  return 1;
+}
+
+static int lc_pouch_disk_collect_marker_snapshot(
+    lc_pouch_disk_store *store, lc_pouch_disk_marker_snapshot_entry **entries,
+    size_t *count, size_t *capacity, lc_error *error) {
+  DIR *root_dir;
+  struct dirent *entry;
+  int rc;
+
+  *entries = NULL;
+  *count = 0U;
+  *capacity = 0U;
+  root_dir = opendir(store->root_path);
+  if (root_dir == NULL) {
+    return lc_pouch_set_errno(error, "failed to open pouch root directory");
+  }
+  rc = LC_OK;
+  while ((entry = readdir(root_dir)) != NULL) {
+    DIR *markers_dir;
+    struct dirent *marker_entry;
+    char *namespace_path;
+    char *logstore_path;
+    char *markers_path;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    namespace_path =
+        lc_pouch_join_path(&store->allocator, store->root_path, entry->d_name);
+    logstore_path =
+        namespace_path != NULL
+            ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+            : NULL;
+    markers_path =
+        logstore_path != NULL
+            ? lc_pouch_join_path(&store->allocator, logstore_path, "markers")
+            : NULL;
+    if (namespace_path == NULL || logstore_path == NULL ||
+        markers_path == NULL) {
+      lc_pouch_free(&store->allocator, namespace_path);
+      lc_pouch_free(&store->allocator, logstore_path);
+      lc_pouch_free(&store->allocator, markers_path);
+      rc = lc_pouch_set_nomem(error, "failed to allocate pouch marker path");
+      break;
+    }
+    markers_dir = opendir(markers_path);
+    if (markers_dir != NULL) {
+      while ((marker_entry = readdir(markers_dir)) != NULL) {
+        struct stat st;
+        char *marker_path;
+
+        if (!lc_pouch_disk_logstore_writer_marker_name(marker_entry->d_name) ||
+            (store->logstore_writer_marker_leaf != NULL &&
+             strcmp(marker_entry->d_name, store->logstore_writer_marker_leaf) ==
+                 0)) {
+          continue;
+        }
+        marker_path = lc_pouch_join_path(&store->allocator, markers_path,
+                                         marker_entry->d_name);
+        if (marker_path == NULL) {
+          rc =
+              lc_pouch_set_nomem(error, "failed to allocate pouch marker path");
+          break;
+        }
+        errno = 0;
+        if (stat(marker_path, &st) == 0 && S_ISREG(st.st_mode)) {
+          if (!lc_pouch_disk_marker_snapshot_add(store, entries, count,
+                                                 capacity, marker_path, &st)) {
+            lc_pouch_free(&store->allocator, marker_path);
+            rc = lc_pouch_set_nomem(error,
+                                    "failed to collect pouch marker snapshot");
+            break;
+          }
+        } else {
+          lc_pouch_free(&store->allocator, marker_path);
+          if (errno != ENOENT && errno != ENOTDIR && errno != 0) {
+            rc = lc_pouch_set_errno(error, "failed to stat pouch marker");
+            break;
+          }
+        }
+      }
+      if (closedir(markers_dir) != 0 && rc == LC_OK) {
+        rc = lc_pouch_set_errno(error,
+                                "failed to close pouch markers directory");
+      }
+    } else if (errno != ENOENT && errno != ENOTDIR) {
+      rc = lc_pouch_set_errno(error, "failed to open pouch markers directory");
+    }
+    lc_pouch_free(&store->allocator, markers_path);
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, namespace_path);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  if (closedir(root_dir) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch root directory");
+  }
+  if (rc != LC_OK) {
+    lc_pouch_disk_marker_snapshot_entries_cleanup(store, *entries, *count);
+    *entries = NULL;
+    *count = 0U;
+    *capacity = 0U;
+    return rc;
+  }
+  if (*count > 1U) {
+    qsort(*entries, *count, sizeof((*entries)[0]),
+          lc_pouch_disk_marker_snapshot_compare);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_marker_snapshot_equal(
+    const lc_pouch_disk_marker_snapshot_entry *left, size_t left_count,
+    const lc_pouch_disk_marker_snapshot_entry *right, size_t right_count) {
+  size_t index;
+
+  if (left_count != right_count) {
+    return 0;
+  }
+  for (index = 0U; index < left_count; ++index) {
+    if (strcmp(left[index].path, right[index].path) != 0 ||
+        left[index].size != right[index].size ||
+        left[index].mtime != right[index].mtime) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_disk_marker_snapshot_changed(lc_pouch_disk_store *store,
+                                                 int *changed,
+                                                 lc_error *error) {
+  lc_pouch_disk_marker_snapshot_entry *entries;
+  size_t count;
+  size_t capacity;
+  int equal;
+  int rc;
+
+  if (changed != NULL) {
+    *changed = 1;
+  }
+  entries = NULL;
+  count = 0U;
+  capacity = 0U;
+  rc = lc_pouch_disk_collect_marker_snapshot(store, &entries, &count, &capacity,
+                                             error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  equal = store->marker_snapshot_synced &&
+          lc_pouch_disk_marker_snapshot_equal(
+              store->marker_snapshot_entries,
+              store->marker_snapshot_entry_count, entries, count);
+  lc_pouch_disk_marker_snapshot_entries_cleanup(
+      store, store->marker_snapshot_entries,
+      store->marker_snapshot_entry_count);
+  store->marker_snapshot_entries = entries;
+  store->marker_snapshot_entry_count = count;
+  store->marker_snapshot_entry_capacity = capacity;
+  store->marker_snapshot_synced = 1;
+  if (changed != NULL) {
+    *changed = !equal;
+  }
+  return LC_OK;
+}
+
+static void lc_pouch_disk_sync_marker_snapshot(lc_pouch_disk_store *store) {
+  lc_error ignored_error;
+  int ignored_changed;
+
+  memset(&ignored_error, 0, sizeof(ignored_error));
+  (void)lc_pouch_disk_marker_snapshot_changed(store, &ignored_changed,
+                                              &ignored_error);
+  lc_error_cleanup(&ignored_error);
+}
+
 static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
   struct flock lock;
   struct stat st;
   struct stat path_st;
   unsigned long segment_generation;
+  int marker_changed;
   int found_segments;
   int new_fd;
   int rc;
@@ -2924,11 +3299,32 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
     store->log_fd = new_fd;
     store->replayed_log_size = (unsigned long)-1;
     store->replayed_segment_generation = (unsigned long)-1;
+    store->marker_snapshot_synced = 0;
     store->lock_log_reopens++;
     if (fstat(store->log_fd, &st) != 0) {
       lock.l_type = F_UNLCK;
       (void)fcntl(store->lock_fd, F_SETLK, &lock);
       return lc_pouch_set_errno(error, "failed to stat reopened pouch log");
+    }
+  }
+  marker_changed = 1;
+  if (store->replayed_segment_generation != (unsigned long)-1 &&
+      store->marker_snapshot_synced &&
+      store->marker_snapshot_entry_count > 0U) {
+    rc = lc_pouch_disk_marker_snapshot_changed(store, &marker_changed, error);
+    if (rc != LC_OK) {
+      lock.l_type = F_UNLCK;
+      (void)fcntl(store->lock_fd, F_SETLK, &lock);
+      return rc;
+    }
+    if (!marker_changed) {
+      store->marker_snapshot_clean_checks++;
+      if ((store->marker_snapshot_clean_checks %
+           LC_POUCH_MARKER_FORCE_SCAN_EVERY) != 0UL) {
+        return LC_OK;
+      }
+    } else {
+      store->marker_snapshot_clean_checks = 0UL;
     }
   }
   rc = lc_pouch_disk_active_segment_generation(store, &found_segments,
@@ -2944,6 +3340,9 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
     }
     store->lock_replay_refreshes++;
     rc = lc_pouch_disk_replay(store, error);
+    if (rc == LC_OK) {
+      lc_pouch_disk_sync_marker_snapshot(store);
+    }
     if (rc != LC_OK) {
       lock.l_type = F_UNLCK;
       (void)fcntl(store->lock_fd, F_SETLK, &lock);
@@ -2956,6 +3355,9 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
   }
   store->lock_replay_refreshes++;
   rc = lc_pouch_disk_replay(store, error);
+  if (rc == LC_OK) {
+    lc_pouch_disk_sync_marker_snapshot(store);
+  }
   if (rc != LC_OK) {
     lock.l_type = F_UNLCK;
     (void)fcntl(store->lock_fd, F_SETLK, &lock);
@@ -2964,7 +3366,7 @@ static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error) {
 }
 
 static int lc_pouch_disk_mark_replayed_to_current_size(
-    lc_pouch_disk_store *store, lc_error *error) {
+    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
   struct stat st;
   unsigned long total_log_bytes;
   unsigned long segment_generation;
@@ -2992,6 +3394,7 @@ static int lc_pouch_disk_mark_replayed_to_current_size(
     return rc;
   }
   lc_pouch_disk_touch_writer_marker(store);
+  lc_pouch_disk_touch_namespace_writer_marker(store, namespace_name);
   return LC_OK;
 }
 
@@ -3002,8 +3405,7 @@ static int lc_pouch_disk_force_replay_locked(lc_pouch_disk_store *store,
   return lc_pouch_disk_replay(store, error);
 }
 
-static int lc_pouch_disk_unlink_if_exists(const char *path,
-                                          const char *message,
+static int lc_pouch_disk_unlink_if_exists(const char *path, const char *message,
                                           lc_error *error) {
   if (unlink(path) == 0 || errno == ENOENT) {
     return LC_OK;
@@ -3098,7 +3500,8 @@ static int lc_pouch_disk_key_has_no_deleted_state(lc_pouch_disk_store *store,
 }
 
 static int lc_pouch_disk_summary_has_live_state(
-    lc_pouch_disk_store *store, const lc_pouch_disk_query_summary_entry *entry) {
+    lc_pouch_disk_store *store,
+    const lc_pouch_disk_query_summary_entry *entry) {
   if (entry == NULL) {
     return 0;
   }
@@ -3135,9 +3538,8 @@ static int lc_pouch_disk_upsert_entry(lc_pouch_disk_store *store,
   memset(&staged, 0, sizeof(staged));
   new_content_type = lc_pouch_strdup(&store->allocator, content_type);
   new_etag = lc_pouch_strdup(&store->allocator, etag);
-  new_body_path = lc_pouch_strdup(&store->allocator,
-                                  body_path != NULL ? body_path
-                                                    : store->log_path);
+  new_body_path = lc_pouch_strdup(
+      &store->allocator, body_path != NULL ? body_path : store->log_path);
   if ((content_type != NULL && new_content_type == NULL) ||
       (etag != NULL && new_etag == NULL) || new_body_path == NULL) {
     lc_pouch_free(&store->allocator, new_content_type);
@@ -3292,9 +3694,8 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
   existing = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
   is_new = existing < 0;
   memset(&staged, 0, sizeof(staged));
-  staged.namespace_name = is_new ? lc_pouch_strdup(&store->allocator,
-                                                   namespace_name)
-                                 : NULL;
+  staged.namespace_name =
+      is_new ? lc_pouch_strdup(&store->allocator, namespace_name) : NULL;
   staged.key = is_new ? lc_pouch_strdup(&store->allocator, key) : NULL;
   staged.etag = lc_pouch_strdup(&store->allocator, etag);
   if ((is_new && (staged.namespace_name == NULL || staged.key == NULL)) ||
@@ -3307,9 +3708,9 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
 
   if (existing >= 0) {
     entry = &store->meta_entries[existing];
-    if (!lc_pouch_disk_query_summary_upsert(
-            store, namespace_name, key, etag, meta != NULL ? meta->version : 0L,
-            meta, deleted)) {
+    if (!lc_pouch_disk_query_summary_upsert(store, namespace_name, key, etag,
+                                            meta != NULL ? meta->version : 0L,
+                                            meta, deleted)) {
       lc_pouch_disk_meta_entry_cleanup(store, &staged);
       return 0;
     }
@@ -3355,8 +3756,8 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
   entry = &store->meta_entries[store->meta_entry_count++];
   *entry = staged;
   memset(&staged, 0, sizeof(staged));
-  if (is_new && !lc_pouch_disk_query_index_insert(
-                    store, store->meta_entry_count - 1U)) {
+  if (is_new &&
+      !lc_pouch_disk_query_index_insert(store, store->meta_entry_count - 1U)) {
     store->meta_entry_count--;
     lc_pouch_disk_meta_entry_cleanup(store, entry);
     return 0;
@@ -3364,8 +3765,9 @@ static int lc_pouch_disk_upsert_meta_entry(lc_pouch_disk_store *store,
   return 1;
 }
 
-static void lc_pouch_disk_meta_upsert_cleanup(
-    lc_pouch_disk_store *store, lc_pouch_disk_meta_upsert *upsert) {
+static void
+lc_pouch_disk_meta_upsert_cleanup(lc_pouch_disk_store *store,
+                                  lc_pouch_disk_meta_upsert *upsert) {
   lc_pouch_disk_meta_entry_cleanup(store, &upsert->entry);
   upsert->existing = -1;
   upsert->is_new = 0;
@@ -3381,7 +3783,8 @@ static int lc_pouch_disk_prepare_meta_upsert(
   upsert->existing = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
   upsert->is_new = upsert->existing < 0;
   upsert->entry.namespace_name =
-      upsert->is_new ? lc_pouch_strdup(&store->allocator, namespace_name) : NULL;
+      upsert->is_new ? lc_pouch_strdup(&store->allocator, namespace_name)
+                     : NULL;
   upsert->entry.key =
       upsert->is_new ? lc_pouch_strdup(&store->allocator, key) : NULL;
   upsert->entry.etag = lc_pouch_strdup(&store->allocator, etag);
@@ -3421,8 +3824,8 @@ static int lc_pouch_disk_prepare_meta_upsert(
   return 1;
 }
 
-static int lc_pouch_disk_commit_meta_upsert(
-    lc_pouch_disk_store *store, lc_pouch_disk_meta_upsert *upsert) {
+static int lc_pouch_disk_commit_meta_upsert(lc_pouch_disk_store *store,
+                                            lc_pouch_disk_meta_upsert *upsert) {
   lc_pouch_disk_meta_entry *entry;
 
   if (!upsert->is_new) {
@@ -3620,8 +4023,7 @@ static int lc_pouch_disk_query_summary_compare(
 
 static int lc_pouch_disk_query_summary_find(lc_pouch_disk_store *store,
                                             const char *namespace_name,
-                                            const char *key,
-                                            size_t *position) {
+                                            const char *key, size_t *position) {
   size_t low;
   size_t high;
 
@@ -3652,8 +4054,7 @@ static int lc_pouch_disk_query_summary_reserve(lc_pouch_disk_store *store) {
   lc_pouch_disk_query_summary_entry *grown;
   size_t new_capacity;
 
-  if (store->query_summary_entry_count <
-      store->query_summary_entry_capacity) {
+  if (store->query_summary_entry_count < store->query_summary_entry_capacity) {
     return 1;
   }
   new_capacity = store->query_summary_entry_capacity == 0U
@@ -3705,9 +4106,11 @@ static int lc_pouch_disk_query_owner_compare_key(
   return strcmp(entry->key, key);
 }
 
-static int lc_pouch_disk_query_owner_index_find(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *owner,
-    const char *key, size_t *position) {
+static int lc_pouch_disk_query_owner_index_find(lc_pouch_disk_store *store,
+                                                const char *namespace_name,
+                                                const char *owner,
+                                                const char *key,
+                                                size_t *position) {
   size_t low;
   size_t high;
 
@@ -3743,8 +4146,8 @@ static int lc_pouch_disk_query_owner_index_find(
   return 0;
 }
 
-static int lc_pouch_disk_query_owner_index_reserve(
-    lc_pouch_disk_store *store, size_t needed) {
+static int lc_pouch_disk_query_owner_index_reserve(lc_pouch_disk_store *store,
+                                                   size_t needed) {
   size_t *grown;
   size_t new_capacity;
 
@@ -3768,8 +4171,8 @@ static int lc_pouch_disk_query_owner_index_reserve(
   return 1;
 }
 
-static void lc_pouch_disk_query_owner_index_remove(
-    lc_pouch_disk_store *store, size_t summary_index) {
+static void lc_pouch_disk_query_owner_index_remove(lc_pouch_disk_store *store,
+                                                   size_t summary_index) {
   size_t index;
 
   for (index = 0U; index < store->query_owner_index_count; ++index) {
@@ -3786,8 +4189,9 @@ static void lc_pouch_disk_query_owner_index_remove(
   }
 }
 
-static void lc_pouch_disk_query_owner_index_shift_insert(
-    lc_pouch_disk_store *store, size_t summary_position) {
+static void
+lc_pouch_disk_query_owner_index_shift_insert(lc_pouch_disk_store *store,
+                                             size_t summary_position) {
   size_t index;
 
   for (index = 0U; index < store->query_owner_index_count; ++index) {
@@ -3797,8 +4201,8 @@ static void lc_pouch_disk_query_owner_index_shift_insert(
   }
 }
 
-static int lc_pouch_disk_query_owner_index_insert(
-    lc_pouch_disk_store *store, size_t summary_index) {
+static int lc_pouch_disk_query_owner_index_insert(lc_pouch_disk_store *store,
+                                                  size_t summary_index) {
   lc_pouch_disk_query_summary_entry *entry;
   size_t position;
 
@@ -3811,11 +4215,11 @@ static int lc_pouch_disk_query_owner_index_insert(
     return 0;
   }
   position = 0U;
-  while (position < store->query_owner_index_count &&
-         lc_pouch_disk_query_owner_compare_entry(
-             &store->query_summary_entries[store->query_owner_indices
-                                               [position]],
-             entry) < 0) {
+  while (
+      position < store->query_owner_index_count &&
+      lc_pouch_disk_query_owner_compare_entry(
+          &store->query_summary_entries[store->query_owner_indices[position]],
+          entry) < 0) {
     position++;
   }
   if (position < store->query_owner_index_count) {
@@ -3859,9 +4263,10 @@ static int lc_pouch_disk_query_field_compare_key(
       namespace_name, field, value, key);
 }
 
-static int lc_pouch_disk_query_field_find(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *field,
-    const char *value, const char *key, size_t *position) {
+static int lc_pouch_disk_query_field_find(lc_pouch_disk_store *store,
+                                          const char *namespace_name,
+                                          const char *field, const char *value,
+                                          const char *key, size_t *position) {
   size_t low;
   size_t high;
 
@@ -3917,8 +4322,9 @@ static int lc_pouch_disk_query_field_reserve(lc_pouch_disk_store *store,
   return 1;
 }
 
-static void lc_pouch_disk_query_field_remove_key(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *key) {
+static void lc_pouch_disk_query_field_remove_key(lc_pouch_disk_store *store,
+                                                 const char *namespace_name,
+                                                 const char *key) {
   size_t index;
 
   index = 0U;
@@ -3944,10 +4350,12 @@ static void lc_pouch_disk_query_field_remove_key(
   }
 }
 
-static int lc_pouch_disk_query_field_insert(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
-    const char *field, const char *value, const char *state_etag,
-    long version) {
+static int lc_pouch_disk_query_field_insert(lc_pouch_disk_store *store,
+                                            const char *namespace_name,
+                                            const char *key, const char *field,
+                                            const char *value,
+                                            const char *state_etag,
+                                            long version) {
   lc_pouch_disk_query_field_posting staged;
   lc_pouch_disk_query_field_posting *posting;
   size_t position;
@@ -3975,8 +4383,7 @@ static int lc_pouch_disk_query_field_insert(
   staged.key = lc_pouch_strdup(&store->allocator, key);
   staged.state_etag = lc_pouch_strdup(&store->allocator, state_etag);
   if (staged.namespace_name == NULL || staged.field == NULL ||
-      staged.value == NULL || staged.key == NULL ||
-      staged.state_etag == NULL) {
+      staged.value == NULL || staged.key == NULL || staged.state_etag == NULL) {
     lc_pouch_disk_query_field_posting_cleanup(store, &staged);
     return 0;
   }
@@ -3998,13 +4405,14 @@ static int lc_pouch_disk_query_field_posting_has_live_state(
   lc_pouch_disk_state_entry *entry;
   int index;
 
-  index = lc_pouch_disk_find_entry(store, posting->namespace_name,
-                                   posting->key);
+  index =
+      lc_pouch_disk_find_entry(store, posting->namespace_name, posting->key);
   if (index < 0) {
     return 0;
   }
   entry = &store->state_entries[index];
-  return !entry->deleted && entry->etag != NULL && posting->state_etag != NULL &&
+  return !entry->deleted && entry->etag != NULL &&
+         posting->state_etag != NULL &&
          strcmp(entry->etag, posting->state_etag) == 0 &&
          entry->version == posting->version;
 }
@@ -4024,9 +4432,8 @@ static int lc_pouch_disk_query_field_key_matches_terms(
 
     term = &req->document_eq_terms[index];
     if (term->field == NULL || term->value == NULL ||
-        !lc_pouch_disk_query_field_find(store, req->namespace_name,
-                                        term->field, term->value, key,
-                                        &position)) {
+        !lc_pouch_disk_query_field_find(store, req->namespace_name, term->field,
+                                        term->value, key, &position)) {
       return 0;
     }
     posting = &store->query_field_postings[position];
@@ -4135,17 +4542,15 @@ static int lc_pouch_disk_query_summary_upsert(
   staged.namespace_name =
       exists ? NULL : lc_pouch_strdup(&store->allocator, namespace_name);
   staged.key = exists ? NULL : lc_pouch_strdup(&store->allocator, key);
-  staged.owner = lc_pouch_strdup(&store->allocator,
-                                 meta != NULL ? meta->owner : NULL);
+  staged.owner =
+      lc_pouch_strdup(&store->allocator, meta != NULL ? meta->owner : NULL);
   staged.etag = lc_pouch_strdup(&store->allocator, etag);
-  staged.state_etag =
-      lc_pouch_strdup(&store->allocator,
-                      meta != NULL ? meta->state_etag : NULL);
+  staged.state_etag = lc_pouch_strdup(&store->allocator,
+                                      meta != NULL ? meta->state_etag : NULL);
   if ((!exists && (staged.namespace_name == NULL || staged.key == NULL)) ||
       (meta != NULL && meta->owner != NULL && staged.owner == NULL) ||
       (etag != NULL && staged.etag == NULL) ||
-      (meta != NULL && meta->state_etag != NULL &&
-       staged.state_etag == NULL)) {
+      (meta != NULL && meta->state_etag != NULL && staged.state_etag == NULL)) {
     lc_pouch_disk_query_summary_entry_cleanup(store, &staged);
     return 0;
   }
@@ -4200,8 +4605,8 @@ static int lc_pouch_disk_query_summary_upsert(
   return lc_pouch_disk_query_owner_index_insert(store, position);
 }
 
-static unsigned long lc_pouch_disk_index_sequence(
-    const lc_pouch_disk_store *store) {
+static unsigned long
+lc_pouch_disk_index_sequence(const lc_pouch_disk_store *store) {
   unsigned long version_seq;
 
   if (store == NULL) {
@@ -4326,9 +4731,8 @@ static int lc_pouch_disk_append_query_field_record(
       lc_pouch_disk_add_overflows(payload_len, field_len, &payload_len) ||
       lc_pouch_disk_add_overflows(payload_len, value_len, &payload_len) ||
       lc_pouch_disk_add_overflows(payload_len, state_etag_len, &payload_len) ||
-      !lc_pouch_disk_validate_record_lengths(ns_len, key_len, field_len,
-                                             value_len, state_etag_len,
-                                             payload_len)) {
+      !lc_pouch_disk_validate_record_lengths(
+          ns_len, key_len, field_len, value_len, state_etag_len, payload_len)) {
     return lc_pouch_set_invalid(error,
                                 "pouch query field record exceeds limits");
   }
@@ -4473,9 +4877,9 @@ static int lc_pouch_disk_object_entry_ptr_compare(const void *left,
   return strcmp((*left_entry)->name, (*right_entry)->name);
 }
 
-static int lc_pouch_disk_queue_entry_before(
-    const lc_pouch_disk_queue_entry *candidate,
-    const lc_pouch_disk_queue_entry *current) {
+static int
+lc_pouch_disk_queue_entry_before(const lc_pouch_disk_queue_entry *candidate,
+                                 const lc_pouch_disk_queue_entry *current) {
   if (current == NULL) {
     return 1;
   }
@@ -4488,8 +4892,9 @@ static int lc_pouch_disk_queue_entry_before(
   return strcmp(candidate->message_id, current->message_id) < 0;
 }
 
-static void lc_pouch_disk_scan_meta_copy_cleanup(
-    const lc_pouch_allocator *allocator, lc_pouch_disk_scan_meta_copy *copy) {
+static void
+lc_pouch_disk_scan_meta_copy_cleanup(const lc_pouch_allocator *allocator,
+                                     lc_pouch_disk_scan_meta_copy *copy) {
   if (copy == NULL) {
     return;
   }
@@ -4499,9 +4904,10 @@ static void lc_pouch_disk_scan_meta_copy_cleanup(
   memset(copy, 0, sizeof(*copy));
 }
 
-static int lc_pouch_disk_copy_meta_for_scan(
-    lc_pouch_disk_store *store, lc_pouch_disk_scan_meta_copy *dst,
-    const lc_pouch_disk_meta_entry *src) {
+static int
+lc_pouch_disk_copy_meta_for_scan(lc_pouch_disk_store *store,
+                                 lc_pouch_disk_scan_meta_copy *dst,
+                                 const lc_pouch_disk_meta_entry *src) {
   memset(dst, 0, sizeof(*dst));
   dst->key = lc_pouch_strdup(&store->allocator, src->key);
   dst->etag = lc_pouch_strdup(&store->allocator, src->etag);
@@ -4520,8 +4926,7 @@ static int lc_pouch_disk_copy_summary_for_scan(
   dst->key = lc_pouch_strdup(&store->allocator, src->key);
   dst->etag = lc_pouch_strdup(&store->allocator, src->etag);
   dst->meta.owner = lc_pouch_strdup(&store->allocator, src->owner);
-  dst->meta.state_etag =
-      lc_pouch_strdup(&store->allocator, src->state_etag);
+  dst->meta.state_etag = lc_pouch_strdup(&store->allocator, src->state_etag);
   if (dst->key == NULL || (src->etag != NULL && dst->etag == NULL) ||
       (src->owner != NULL && dst->meta.owner == NULL) ||
       (src->state_etag != NULL && dst->meta.state_etag == NULL)) {
@@ -4559,8 +4964,8 @@ static int lc_pouch_encode_meta(lc_pouch_disk_store *store,
   state_etag_len = meta != NULL && meta->state_etag != NULL
                        ? (unsigned long)strlen(meta->state_etag)
                        : 0UL;
-  length = LC_POUCH_META_HEADER_SIZE + (size_t)owner_len +
-           (size_t)lease_len + (size_t)txn_len + (size_t)state_etag_len;
+  length = LC_POUCH_META_HEADER_SIZE + (size_t)owner_len + (size_t)lease_len +
+           (size_t)txn_len + (size_t)state_etag_len;
   bytes = (unsigned char *)lc_pouch_alloc(&store->allocator, length);
   if (bytes == NULL) {
     return 0;
@@ -4629,8 +5034,8 @@ static int lc_pouch_decode_meta(lc_pouch_disk_store *store,
     lease_len = lc_pouch_get_u32(bytes + 44);
     txn_len = lc_pouch_get_u32(bytes + 48);
     state_etag_len = lc_pouch_get_u32(bytes + 52);
-    if (LC_POUCH_META_HEADER_SIZE + (size_t)owner_len +
-            (size_t)lease_len + (size_t)txn_len + (size_t)state_etag_len ==
+    if (LC_POUCH_META_HEADER_SIZE + (size_t)owner_len + (size_t)lease_len +
+            (size_t)txn_len + (size_t)state_etag_len ==
         length) {
       header_size = LC_POUCH_META_HEADER_SIZE;
       updated_at_unix = lc_pouch_get_u64(bytes + 32);
@@ -4792,12 +5197,10 @@ static int lc_pouch_disk_upsert_object_entry(
       lc_pouch_disk_find_object_by_name(store, namespace_name, key, name);
   memset(&staged, 0, sizeof(staged));
   new_id = lc_pouch_strdup(&store->allocator, id);
-  new_plaintext_sha256 =
-      lc_pouch_strdup(&store->allocator, plaintext_sha256);
+  new_plaintext_sha256 = lc_pouch_strdup(&store->allocator, plaintext_sha256);
   new_content_type = lc_pouch_strdup(&store->allocator, content_type);
-  new_body_path = lc_pouch_strdup(&store->allocator,
-                                  body_path != NULL ? body_path
-                                                    : store->log_path);
+  new_body_path = lc_pouch_strdup(
+      &store->allocator, body_path != NULL ? body_path : store->log_path);
   if ((id != NULL && new_id == NULL) ||
       (plaintext_sha256 != NULL && new_plaintext_sha256 == NULL) ||
       (content_type != NULL && new_content_type == NULL) ||
@@ -4903,8 +5306,8 @@ static char *lc_pouch_make_object_id_from_sha256(lc_pouch_disk_store *store,
   memcpy(id, "pouch-obj-", prefix_len);
   memcpy(id + prefix_len, sha256_hex, hash_len);
   id[prefix_len + hash_len] = '-';
-  memcpy(id + prefix_len + hash_len + 1U,
-         name != NULL ? name : "attachment", name_len + 1U);
+  memcpy(id + prefix_len + hash_len + 1U, name != NULL ? name : "attachment",
+         name_len + 1U);
   return id;
 }
 
@@ -5049,10 +5452,10 @@ static int lc_pouch_disk_upsert_queue_entry(
     new_txn_id = lc_pouch_strdup(&store->allocator, txn_id);
     new_meta_etag = lc_pouch_strdup(&store->allocator, meta_etag);
     new_body_path =
-        has_body ? lc_pouch_strdup(&store->allocator,
-                                   body_path != NULL ? body_path
-                                                     : store->log_path)
-                 : NULL;
+        has_body
+            ? lc_pouch_strdup(&store->allocator,
+                              body_path != NULL ? body_path : store->log_path)
+            : NULL;
     if ((content_type != NULL && new_content_type == NULL) ||
         (lease_id != NULL && new_lease_id == NULL) ||
         (txn_id != NULL && new_txn_id == NULL) ||
@@ -5088,10 +5491,10 @@ static int lc_pouch_disk_upsert_queue_entry(
     staged.txn_id = lc_pouch_strdup(&store->allocator, txn_id);
     staged.meta_etag = lc_pouch_strdup(&store->allocator, meta_etag);
     staged.body_path =
-        has_body ? lc_pouch_strdup(&store->allocator,
-                                   body_path != NULL ? body_path
-                                                     : store->log_path)
-                 : NULL;
+        has_body
+            ? lc_pouch_strdup(&store->allocator,
+                              body_path != NULL ? body_path : store->log_path)
+            : NULL;
     if (staged.namespace_name == NULL || staged.queue == NULL ||
         staged.message_id == NULL ||
         (content_type != NULL && staged.payload_content_type == NULL) ||
@@ -5462,8 +5865,8 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
                                 "store_meta requires store, namespace, key, "
                                 "metadata, and output metadata");
   }
-  rc = lc_pouch_disk_validate_namespace_key(error, "store_meta",
-                                           namespace_name, key);
+  rc = lc_pouch_disk_validate_namespace_key(error, "store_meta", namespace_name,
+                                            key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -5516,9 +5919,9 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
     lc_pouch_disk_unlock_key(self, key_lock, error);
     return lc_pouch_set_nomem(error, "failed to update pouch metadata index");
   }
-  rc = lc_pouch_disk_append_query_index_record(
-      store, namespace_name, key, etag, effective_meta.version, &effective_meta,
-      0, error);
+  rc = lc_pouch_disk_append_query_index_record(store, namespace_name, key, etag,
+                                               effective_meta.version,
+                                               &effective_meta, 0, error);
   if (rc == LC_OK) {
     rc = lc_pouch_disk_append_record(
         store, LC_POUCH_RECORD_META_PUT, namespace_name, key, NULL, etag,
@@ -5538,7 +5941,8 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
     }
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, payload);
@@ -5546,8 +5950,7 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
@@ -5568,7 +5971,7 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
                                 "delete_meta requires store, namespace, key");
   }
   rc = lc_pouch_disk_validate_namespace_key(error, "delete_meta",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -5594,21 +5997,22 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
   rc = lc_pouch_disk_append_meta_remove_locked(store, namespace_name, key,
                                                error);
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
 }
 
-static int lc_pouch_disk_append_meta_remove_locked(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
-    lc_error *error) {
+static int lc_pouch_disk_append_meta_remove_locked(lc_pouch_disk_store *store,
+                                                   const char *namespace_name,
+                                                   const char *key,
+                                                   lc_error *error) {
   char *etag;
   unsigned long body_offset;
   long version;
@@ -5620,7 +6024,7 @@ static int lc_pouch_disk_append_meta_remove_locked(
     return lc_pouch_set_nomem(error, "failed to allocate pouch metadata etag");
   }
   rc = lc_pouch_disk_append_query_index_record(store, namespace_name, key, etag,
-                                              version, NULL, 1, error);
+                                               version, NULL, 1, error);
   if (rc == LC_OK) {
     rc = lc_pouch_disk_append_record(store, LC_POUCH_RECORD_META_REMOVE,
                                      namespace_name, key, NULL, etag, version,
@@ -5707,12 +6111,10 @@ static int lc_pouch_disk_list_namespaces(lc_pouch_store *self,
   return LC_OK;
 }
 
-static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
-                                   const lc_pouch_scan_meta_req *req,
-                                   lc_pouch_scan_meta_visit_fn visit,
-                                   void *visit_context,
-                                   lc_pouch_scan_meta_res *out,
-                                   lc_error *error) {
+static int
+lc_pouch_disk_scan_meta(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
+                        lc_pouch_scan_meta_visit_fn visit, void *visit_context,
+                        lc_pouch_scan_meta_res *out, lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_scan_meta_copy *rows;
   const char *start_key;
@@ -5724,9 +6126,8 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
 
   if (self == NULL || req == NULL || req->namespace_name == NULL ||
       visit == NULL || out == NULL) {
-    return lc_pouch_set_invalid(error,
-                                "scan_meta requires store, request, "
-                                "namespace, visitor, and output");
+    return lc_pouch_set_invalid(error, "scan_meta requires store, request, "
+                                       "namespace, visitor, and output");
   }
   rc = lc_pouch_disk_validate_path_name(error, "scan_meta", "namespace",
                                         req->namespace_name, 0);
@@ -5753,8 +6154,8 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
     if (req->start_after != NULL && strcmp(req->start_after, req->key) >= 0) {
       start_index = store->query_meta_index_count;
     } else {
-      (void)lc_pouch_disk_query_index_find(store, req->namespace_name,
-                                           req->key, &start_index);
+      (void)lc_pouch_disk_query_index_find(store, req->namespace_name, req->key,
+                                           &start_index);
     }
   } else {
     start_key = req->start_after != NULL ? req->start_after : "";
@@ -5798,9 +6199,8 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
                                                 entry->key)) {
       continue;
     }
-    if (req->owner != NULL &&
-        (entry->meta.owner == NULL ||
-         strcmp(entry->meta.owner, req->owner) != 0)) {
+    if (req->owner != NULL && (entry->meta.owner == NULL ||
+                               strcmp(entry->meta.owner, req->owner) != 0)) {
       continue;
     }
     if (req->limit > 0U && visit_count == req->limit) {
@@ -5820,8 +6220,8 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_meta_index_count &&
-                        row_index < visit_count;
+  for (index = start_index;
+       index < store->query_meta_index_count && row_index < visit_count;
        ++index) {
     lc_pouch_disk_meta_entry *entry;
     int namespace_cmp;
@@ -5855,13 +6255,11 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
                                                 entry->key)) {
       continue;
     }
-    if (req->owner != NULL &&
-        (entry->meta.owner == NULL ||
-         strcmp(entry->meta.owner, req->owner) != 0)) {
+    if (req->owner != NULL && (entry->meta.owner == NULL ||
+                               strcmp(entry->meta.owner, req->owner) != 0)) {
       continue;
     }
-    if (!lc_pouch_disk_copy_meta_for_scan(store, &rows[row_index],
-                                          entry)) {
+    if (!lc_pouch_disk_copy_meta_for_scan(store, &rows[row_index], entry)) {
       for (index = 0U; index < row_index; ++index) {
         lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
       }
@@ -5881,8 +6279,7 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
       }
       lc_pouch_free(&store->allocator, rows);
       lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to allocate pouch scan cursor");
+      return lc_pouch_set_nomem(error, "failed to allocate pouch scan cursor");
     }
   }
   rc = lc_pouch_disk_unlock(store, error);
@@ -5921,10 +6318,12 @@ static int lc_pouch_disk_scan_meta(lc_pouch_store *self,
   return LC_OK;
 }
 
-static int lc_pouch_disk_scan_meta_keys(
-    lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
-    lc_pouch_query_index_key_visit_fn visit, void *visit_context,
-    lc_pouch_scan_meta_res *out, lc_error *error) {
+static int lc_pouch_disk_scan_meta_keys(lc_pouch_store *self,
+                                        const lc_pouch_scan_meta_req *req,
+                                        lc_pouch_query_index_key_visit_fn visit,
+                                        void *visit_context,
+                                        lc_pouch_scan_meta_res *out,
+                                        lc_error *error) {
   lc_pouch_disk_store *store;
   char **keys;
   const char *start_key;
@@ -6029,8 +6428,8 @@ static int lc_pouch_disk_scan_meta_keys(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_summary_entry_count &&
-                        row_index < visit_count;
+  for (index = start_index;
+       index < store->query_summary_entry_count && row_index < visit_count;
        ++index) {
     lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
@@ -6086,8 +6485,7 @@ static int lc_pouch_disk_scan_meta_keys(
       }
       lc_pouch_free(&store->allocator, keys);
       lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to allocate pouch scan cursor");
+      return lc_pouch_set_nomem(error, "failed to allocate pouch scan cursor");
     }
   }
 
@@ -6142,22 +6540,21 @@ static int lc_pouch_disk_query_field_scan_locked(
     if (req->start_after != NULL && strcmp(req->start_after, req->key) >= 0) {
       start_index = store->query_field_posting_count;
     } else {
-      (void)lc_pouch_disk_query_field_find(
-          store, req->namespace_name, primary->field, primary->value, req->key,
-          &start_index);
+      (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                           primary->field, primary->value,
+                                           req->key, &start_index);
     }
   } else {
     start_key = req->start_after != NULL ? req->start_after : "";
-    if (lc_pouch_disk_query_field_find(
-            store, req->namespace_name, primary->field, primary->value,
-            start_key, &start_index) &&
+    if (lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                       primary->field, primary->value,
+                                       start_key, &start_index) &&
         req->start_after != NULL) {
       start_index++;
     }
   }
 
-  for (index = start_index; index < store->query_field_posting_count;
-       ++index) {
+  for (index = start_index; index < store->query_field_posting_count; ++index) {
     lc_pouch_disk_query_field_posting *posting;
     lc_pouch_disk_query_summary_entry *entry;
     size_t summary_index;
@@ -6220,8 +6617,8 @@ static int lc_pouch_disk_query_field_scan_locked(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_field_posting_count &&
-                        row_index < visit_count;
+  for (index = start_index;
+       index < store->query_field_posting_count && row_index < visit_count;
        ++index) {
     lc_pouch_disk_query_field_posting *posting;
     lc_pouch_disk_query_summary_entry *entry;
@@ -6274,8 +6671,7 @@ static int lc_pouch_disk_query_field_scan_locked(
       }
       lc_pouch_free(&store->allocator, rows);
       lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to copy pouch field query row");
+      return lc_pouch_set_nomem(error, "failed to copy pouch field query row");
     }
     row_index++;
   }
@@ -6351,22 +6747,21 @@ static int lc_pouch_disk_query_field_keys_scan_locked(
     if (req->start_after != NULL && strcmp(req->start_after, req->key) >= 0) {
       start_index = store->query_field_posting_count;
     } else {
-      (void)lc_pouch_disk_query_field_find(
-          store, req->namespace_name, primary->field, primary->value, req->key,
-          &start_index);
+      (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                           primary->field, primary->value,
+                                           req->key, &start_index);
     }
   } else {
     start_key = req->start_after != NULL ? req->start_after : "";
-    if (lc_pouch_disk_query_field_find(
-            store, req->namespace_name, primary->field, primary->value,
-            start_key, &start_index) &&
+    if (lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                       primary->field, primary->value,
+                                       start_key, &start_index) &&
         req->start_after != NULL) {
       start_index++;
     }
   }
 
-  for (index = start_index; index < store->query_field_posting_count;
-       ++index) {
+  for (index = start_index; index < store->query_field_posting_count; ++index) {
     lc_pouch_disk_query_field_posting *posting;
     lc_pouch_disk_query_summary_entry *entry;
     size_t summary_index;
@@ -6429,8 +6824,8 @@ static int lc_pouch_disk_query_field_keys_scan_locked(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_field_posting_count &&
-                        row_index < visit_count;
+  for (index = start_index;
+       index < store->query_field_posting_count && row_index < visit_count;
        ++index) {
     lc_pouch_disk_query_field_posting *posting;
     lc_pouch_disk_query_summary_entry *entry;
@@ -6484,8 +6879,7 @@ static int lc_pouch_disk_query_field_keys_scan_locked(
       }
       lc_pouch_free(&store->allocator, keys);
       lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to copy pouch field query key");
+      return lc_pouch_set_nomem(error, "failed to copy pouch field query key");
     }
     row_index++;
   }
@@ -6553,8 +6947,8 @@ static int lc_pouch_disk_query_index_scan(
                                 "query_index_scan requires store, request, "
                                 "namespace, visitor, and output");
   }
-  rc = lc_pouch_disk_validate_path_name(error, "query_index_scan",
-                                        "namespace", req->namespace_name, 0);
+  rc = lc_pouch_disk_validate_path_name(error, "query_index_scan", "namespace",
+                                        req->namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -6645,8 +7039,8 @@ static int lc_pouch_disk_query_index_scan(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_summary_entry_count &&
-                        row_index < visit_count;
+  for (index = start_index;
+       index < store->query_summary_entry_count && row_index < visit_count;
        ++index) {
     lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
@@ -6853,8 +7247,8 @@ static int lc_pouch_disk_query_index_keys_scan(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_summary_entry_count &&
-                        row_index < visit_count;
+  for (index = start_index;
+       index < store->query_summary_entry_count && row_index < visit_count;
        ++index) {
     lc_pouch_disk_query_summary_entry *entry;
     int namespace_cmp;
@@ -6894,8 +7288,7 @@ static int lc_pouch_disk_query_index_keys_scan(
       }
       lc_pouch_free(&store->allocator, keys);
       lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to copy pouch query index key");
+      return lc_pouch_set_nomem(error, "failed to copy pouch query index key");
     }
     row_index++;
   }
@@ -6963,8 +7356,8 @@ static int lc_pouch_disk_query_owner_scan(
                                 "query_owner_scan requires store, request, "
                                 "namespace, owner, visitor, and output");
   }
-  rc = lc_pouch_disk_validate_path_name(error, "query_owner_scan",
-                                        "namespace", req->namespace_name, 0);
+  rc = lc_pouch_disk_validate_path_name(error, "query_owner_scan", "namespace",
+                                        req->namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -7025,8 +7418,8 @@ static int lc_pouch_disk_query_owner_scan(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_owner_index_count &&
-                        row_index < visit_count;
+  for (index = start_index;
+       index < store->query_owner_index_count && row_index < visit_count;
        ++index) {
     lc_pouch_disk_query_summary_entry *entry;
     int cmp;
@@ -7050,8 +7443,7 @@ static int lc_pouch_disk_query_owner_scan(
       }
       lc_pouch_free(&store->allocator, rows);
       lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to copy pouch owner query row");
+      return lc_pouch_set_nomem(error, "failed to copy pouch owner query row");
     }
     row_index++;
   }
@@ -7188,8 +7580,8 @@ static int lc_pouch_disk_query_owner_keys_scan(
     }
   }
   row_index = 0U;
-  for (index = start_index; index < store->query_owner_index_count &&
-                        row_index < visit_count;
+  for (index = start_index;
+       index < store->query_owner_index_count && row_index < visit_count;
        ++index) {
     lc_pouch_disk_query_summary_entry *entry;
     int cmp;
@@ -7214,8 +7606,7 @@ static int lc_pouch_disk_query_owner_keys_scan(
       }
       lc_pouch_free(&store->allocator, keys);
       lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to copy pouch owner query key");
+      return lc_pouch_set_nomem(error, "failed to copy pouch owner query key");
     }
     row_index++;
   }
@@ -7274,9 +7665,8 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
   int rc;
 
   if (self == NULL || namespace_name == NULL || out == NULL) {
-    return lc_pouch_set_invalid(error,
-                                "flush_index requires store, namespace, "
-                                "and output");
+    return lc_pouch_set_invalid(error, "flush_index requires store, namespace, "
+                                       "and output");
   }
   rc = lc_pouch_disk_validate_path_name(error, "flush_index", "namespace",
                                         namespace_name, 0);
@@ -7354,9 +7744,8 @@ static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
   effective_mode = mode != NULL && mode[0] != '\0' ? mode : "force";
   if (strcmp(effective_mode, "force") != 0 &&
       strcmp(effective_mode, "if_needed") != 0) {
-    return lc_pouch_set_invalid(error,
-                                "pouch compaction mode must be force or "
-                                "if_needed");
+    return lc_pouch_set_invalid(error, "pouch compaction mode must be force or "
+                                       "if_needed");
   }
 
   store = (lc_pouch_disk_store *)self->impl;
@@ -7407,6 +7796,7 @@ static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
       return rc;
     }
     lc_pouch_disk_touch_writer_marker(store);
+    lc_pouch_disk_touch_all_namespace_writer_markers(store);
   }
 
   rc = lc_pouch_disk_total_log_bytes(store, &after_log_bytes, error);
@@ -7425,12 +7815,10 @@ static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
   if (skip_reason != NULL) {
     out->skip_reason = lc_pouch_strdup(&store->allocator, skip_reason);
   }
-  if (out->mode == NULL ||
-      (skip_reason != NULL && out->skip_reason == NULL)) {
+  if (out->mode == NULL || (skip_reason != NULL && out->skip_reason == NULL)) {
     lc_pouch_compaction_res_cleanup(&store->allocator, out);
     lc_pouch_disk_unlock(store, error);
-    return lc_pouch_set_nomem(error,
-                              "failed to copy pouch compaction result");
+    return lc_pouch_set_nomem(error, "failed to copy pouch compaction result");
   }
   out->accepted = 1;
   out->compacted = should_compact;
@@ -7495,8 +7883,8 @@ static int lc_pouch_disk_retention_sweep(
     }
 
     out->expired_metadata++;
-    state_index = lc_pouch_disk_find_entry(
-        store, meta_entry->namespace_name, meta_entry->key);
+    state_index = lc_pouch_disk_find_entry(store, meta_entry->namespace_name,
+                                           meta_entry->key);
     state_entry = state_index >= 0 ? &store->state_entries[state_index] : NULL;
     state_live = state_entry != NULL && !state_entry->deleted;
 
@@ -7522,9 +7910,11 @@ static int lc_pouch_disk_retention_sweep(
       continue;
     }
     out->deleted_metadata++;
+    lc_pouch_disk_touch_namespace_writer_marker(store,
+                                                meta_entry->namespace_name);
   }
 
-  rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+  rc = lc_pouch_disk_mark_replayed_to_current_size(store, NULL, error);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -7545,8 +7935,8 @@ static int lc_pouch_disk_append_segment_memory_shadow(
   int fd;
   int rc;
 
-  rc = lc_pouch_disk_open_active_segment_for_append(
-      store, namespace_name, &segment_path, &fd, error);
+  rc = lc_pouch_disk_open_active_segment_for_append(store, namespace_name,
+                                                    &segment_path, &fd, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -7601,8 +7991,8 @@ static int lc_pouch_disk_append_segment_fd_shadow(
   if (segment_path_out != NULL) {
     *segment_path_out = NULL;
   }
-  rc = lc_pouch_disk_open_active_segment_for_append(
-      store, namespace_name, &segment_path, &fd, error);
+  rc = lc_pouch_disk_open_active_segment_for_append(store, namespace_name,
+                                                    &segment_path, &fd, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -7674,9 +8064,9 @@ static int lc_pouch_disk_append_record(
       lc_pouch_disk_add_overflows(payload_len, etag_len, &payload_len) ||
       lc_pouch_disk_add_overflows(payload_len, (unsigned long)body_length,
                                   &payload_len) ||
-      !lc_pouch_disk_validate_record_lengths(
-          ns_len, key_len, ct_len, etag_len, (unsigned long)body_length,
-          payload_len)) {
+      !lc_pouch_disk_validate_record_lengths(ns_len, key_len, ct_len, etag_len,
+                                             (unsigned long)body_length,
+                                             payload_len)) {
     return lc_pouch_set_invalid(error,
                                 "pouch log record exceeds inline limits");
   }
@@ -7711,8 +8101,8 @@ static int lc_pouch_disk_append_record(
   lc_pouch_put_u32(header + 52, crc ^ 0xffffffffUL);
 
   rc = lc_pouch_disk_append_segment_memory_shadow(
-      store, namespace_name, header, key, content_type, etag, body,
-      body_length, body_offset_out, error);
+      store, namespace_name, header, key, content_type, etag, body, body_length,
+      body_offset_out, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -7738,8 +8128,8 @@ static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
   lc_pouch_put_u32(header + 52, lc_pouch_crc32(NULL, 0U));
   lc_pouch_put_u32(header + 56, LC_POUCH_RECORD_VERSION);
 
-  rc = lc_pouch_disk_ensure_namespace_logstore(store, LC_POUCH_BACKEND_NAMESPACE,
-                                               error);
+  rc = lc_pouch_disk_ensure_namespace_logstore(
+      store, LC_POUCH_BACKEND_NAMESPACE, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -7803,8 +8193,7 @@ static int lc_pouch_disk_crc_fd_span(int fd, unsigned long offset,
 
 static int lc_pouch_disk_write_fd_span(int out_fd, int in_fd,
                                        unsigned long offset,
-                                       unsigned long length,
-                                       lc_error *error) {
+                                       unsigned long length, lc_error *error) {
   unsigned char buffer[8192];
   unsigned long remaining;
   size_t want;
@@ -7888,8 +8277,8 @@ static int lc_pouch_disk_append_fd_record(
     crc = lc_pouch_crc32_update(crc, (const unsigned char *)etag,
                                 (size_t)etag_len);
   }
-  rc = lc_pouch_disk_crc_fd_span(body_fd, body_offset, body_length, &crc,
-                                 error);
+  rc =
+      lc_pouch_disk_crc_fd_span(body_fd, body_offset, body_length, &crc, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -7999,7 +8388,8 @@ static int lc_pouch_disk_spool_source_to_temp(
       return lc_pouch_set_invalid(error,
                                   "pouch inline payload exceeds storage limit");
     }
-    if (has_max_bytes && length + (unsigned long)got > (unsigned long)max_bytes) {
+    if (has_max_bytes &&
+        length + (unsigned long)got > (unsigned long)max_bytes) {
       close(fd);
       return lc_error_set(error, LC_ERR_SERVER, 413L,
                           "pouch object exceeds max_bytes", NULL,
@@ -8102,8 +8492,9 @@ static int lc_pouch_disk_field_index_append_buffer(
   return 1;
 }
 
-static int lc_pouch_disk_field_index_set_path(
-    lc_pouch_disk_field_index_visit *visit, const lonejson_value_path *path) {
+static int
+lc_pouch_disk_field_index_set_path(lc_pouch_disk_field_index_visit *visit,
+                                   const lonejson_value_path *path) {
   size_t index;
 
   visit->field_len = 0U;
@@ -8129,14 +8520,14 @@ static int lc_pouch_disk_field_index_set_path(
       ch = segment->data[pos];
       if (ch == '~') {
         if (!lc_pouch_disk_field_index_append_buffer(
-                visit, &visit->field, &visit->field_len,
-                &visit->field_capacity, "~0", 2U)) {
+                visit, &visit->field, &visit->field_len, &visit->field_capacity,
+                "~0", 2U)) {
           return 0;
         }
       } else if (ch == '/') {
         if (!lc_pouch_disk_field_index_append_buffer(
-                visit, &visit->field, &visit->field_len,
-                &visit->field_capacity, "~1", 2U)) {
+                visit, &visit->field, &visit->field_len, &visit->field_capacity,
+                "~1", 2U)) {
           return 0;
         }
       } else if (!lc_pouch_disk_field_index_append_buffer(
@@ -8186,8 +8577,8 @@ lc_pouch_disk_field_string_chunk(void *user, const lonejson_value_path *path,
     return LONEJSON_STATUS_INVALID_ARGUMENT;
   }
   if (!lc_pouch_disk_field_index_append_buffer(
-          visit, &visit->value, &visit->value_len, &visit->value_capacity,
-          data, len)) {
+          visit, &visit->value, &visit->value_len, &visit->value_capacity, data,
+          len)) {
     visit->failed = 1;
     return LONEJSON_STATUS_ALLOCATION_FAILED;
   }
@@ -8279,13 +8670,13 @@ lc_pouch_disk_field_null_value(void *user, const lonejson_value_path *path,
   rc = LC_OK;
   if (visit->append_records) {
     rc = lc_pouch_disk_append_query_field_value_record(
-        visit->store, visit->namespace_name, visit->key, visit->field, "z:",
-        visit->state_etag, visit->version, NULL);
+        visit->store, visit->namespace_name, visit->key, visit->field,
+        "z:", visit->state_etag, visit->version, NULL);
   }
   if (rc == LC_OK && visit->update_memory &&
-      !lc_pouch_disk_query_field_insert(visit->store, visit->namespace_name,
-                                        visit->key, visit->field, "z:",
-                                        visit->state_etag, visit->version)) {
+      !lc_pouch_disk_query_field_insert(
+          visit->store, visit->namespace_name, visit->key, visit->field,
+          "z:", visit->state_etag, visit->version)) {
     rc = LC_ERR_NOMEM;
   }
   if (rc != LC_OK) {
@@ -8333,8 +8724,8 @@ lc_pouch_disk_field_number_chunk(void *user, const lonejson_value_path *path,
     return LONEJSON_STATUS_OK;
   }
   if (!lc_pouch_disk_field_index_append_buffer(
-          visit, &visit->value, &visit->value_len, &visit->value_capacity,
-          data, len)) {
+          visit, &visit->value, &visit->value_len, &visit->value_capacity, data,
+          len)) {
     visit->failed = 1;
     return LONEJSON_STATUS_ALLOCATION_FAILED;
   }
@@ -8565,9 +8956,9 @@ static void lc_pouch_disk_compact_segment_backups_cleanup(
         char *active_path;
 
         backup_len = strlen(backups->items[index]);
-        active_path = lc_pouch_dup_bytes(&store->allocator,
-                                         backups->items[index],
-                                         backup_len - strlen(".compact.bak"));
+        active_path =
+            lc_pouch_dup_bytes(&store->allocator, backups->items[index],
+                               backup_len - strlen(".compact.bak"));
         if (active_path != NULL) {
           (void)unlink(active_path);
           (void)rename(backups->items[index], active_path);
@@ -8582,7 +8973,8 @@ static void lc_pouch_disk_compact_segment_backups_cleanup(
 }
 
 static int lc_pouch_disk_prepare_compact_segment_backups(
-    lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *active_paths,
+    lc_pouch_disk_store *store,
+    lc_pouch_disk_segment_replay_paths *active_paths,
     lc_pouch_disk_segment_replay_paths *backups, lc_error *error) {
   size_t index;
 
@@ -8590,8 +8982,8 @@ static int lc_pouch_disk_prepare_compact_segment_backups(
   for (index = 0U; index < active_paths->count; ++index) {
     char *backup_path;
 
-    backup_path =
-        lc_pouch_disk_make_compact_backup_path(store, active_paths->items[index]);
+    backup_path = lc_pouch_disk_make_compact_backup_path(
+        store, active_paths->items[index]);
     if (backup_path == NULL) {
       lc_pouch_disk_compact_segment_backups_cleanup(store, backups, 1);
       return lc_pouch_set_nomem(error,
@@ -8607,8 +8999,7 @@ static int lc_pouch_disk_prepare_compact_segment_backups(
       (void)rename(backup_path, active_paths->items[index]);
       lc_pouch_free(&store->allocator, backup_path);
       lc_pouch_disk_compact_segment_backups_cleanup(store, backups, 1);
-      return lc_pouch_set_nomem(error,
-                                "failed to track pouch segment backup");
+      return lc_pouch_set_nomem(error, "failed to track pouch segment backup");
     }
   }
   return LC_OK;
@@ -8671,8 +9062,7 @@ static char *lc_pouch_disk_make_compact_snapshot_path(
   if (logstore_path == NULL || snapshots_path == NULL) {
     lc_pouch_free(&store->allocator, logstore_path);
     lc_pouch_free(&store->allocator, snapshots_path);
-    (void)lc_pouch_set_nomem(error,
-                             "failed to allocate pouch snapshot path");
+    (void)lc_pouch_set_nomem(error, "failed to allocate pouch snapshot path");
     return NULL;
   }
   if (lc_pouch_disk_ensure_directory(
@@ -8719,7 +9109,8 @@ static char *lc_pouch_disk_make_compact_snapshot_path(
   if (closedir(dir) != 0) {
     lc_pouch_free(&store->allocator, logstore_path);
     lc_pouch_free(&store->allocator, snapshots_path);
-    (void)lc_pouch_set_errno(error, "failed to close pouch snapshots directory");
+    (void)lc_pouch_set_errno(error,
+                             "failed to close pouch snapshots directory");
     return NULL;
   }
   if (max_number == (unsigned long)-1) {
@@ -8734,8 +9125,7 @@ static char *lc_pouch_disk_make_compact_snapshot_path(
   snapshot_path =
       lc_pouch_join_path(&store->allocator, snapshots_path, snapshot_name);
   if (snapshot_path == NULL) {
-    (void)lc_pouch_set_nomem(error,
-                             "failed to allocate pouch snapshot path");
+    (void)lc_pouch_set_nomem(error, "failed to allocate pouch snapshot path");
   }
   lc_pouch_free(&store->allocator, logstore_path);
   lc_pouch_free(&store->allocator, snapshots_path);
@@ -8783,8 +9173,7 @@ static int lc_pouch_disk_append_manifest_event_for_segment_path(
     lc_pouch_free(&store->allocator, logstore_path);
     lc_pouch_free(&store->allocator, manifest_path);
     lc_pouch_free(&store->allocator, manifest_log_path);
-    return lc_pouch_set_nomem(error,
-                              "failed to allocate pouch manifest path");
+    return lc_pouch_set_nomem(error, "failed to allocate pouch manifest path");
   }
   rc = lc_pouch_disk_ensure_directory(
       manifest_path, "failed to create pouch manifest directory", error);
@@ -8810,7 +9199,8 @@ static int lc_pouch_disk_repair_manifest_for_segment_path(
 
   marker_at = strstr(segment_path, marker);
   if (marker_at == NULL) {
-    return lc_pouch_set_invalid(error, "pouch segment path is not manifestable");
+    return lc_pouch_set_invalid(error,
+                                "pouch segment path is not manifestable");
   }
   logstore_len = (size_t)(marker_at - segment_path);
   logstore_path =
@@ -8828,8 +9218,7 @@ static int lc_pouch_disk_repair_manifest_for_segment_path(
     lc_pouch_free(&store->allocator, logstore_path);
     lc_pouch_free(&store->allocator, manifest_path);
     lc_pouch_free(&store->allocator, manifest_log_path);
-    return lc_pouch_set_nomem(error,
-                              "failed to allocate pouch manifest path");
+    return lc_pouch_set_nomem(error, "failed to allocate pouch manifest path");
   }
   rc = lc_pouch_disk_ensure_directory(
       manifest_path, "failed to create pouch manifest directory", error);
@@ -8924,7 +9313,8 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
           entry->body_length, 1, 1, error);
     }
     if (close(body_fd) != 0 && rc == LC_OK) {
-      rc = lc_pouch_set_errno(error, "failed to close pouch compact state body");
+      rc =
+          lc_pouch_set_errno(error, "failed to close pouch compact state body");
     }
   }
   for (index = 0U; rc == LC_OK && index < store->meta_entry_count; ++index) {
@@ -8938,8 +9328,7 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     meta_payload_length = 0U;
     if (!lc_pouch_encode_meta(store, &entry->meta, &meta_payload,
                               &meta_payload_length)) {
-      rc = lc_pouch_set_nomem(error,
-                              "failed to encode pouch compact metadata");
+      rc = lc_pouch_set_nomem(error, "failed to encode pouch compact metadata");
     } else {
       rc = lc_pouch_disk_append_record(
           store, LC_POUCH_RECORD_META_PUT, entry->namespace_name, entry->key,
@@ -8981,8 +9370,8 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
         entry->created_at_unix, entry->updated_at_unix, NULL, &payload_offset,
         error);
     if (close(body_fd) != 0 && rc == LC_OK) {
-      rc =
-          lc_pouch_set_errno(error, "failed to close pouch compact object body");
+      rc = lc_pouch_set_errno(error,
+                              "failed to close pouch compact object body");
     }
   }
   for (index = 0U; rc == LC_OK && index < store->queue_entry_count; ++index) {
@@ -9000,18 +9389,16 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
                                                  : LC_ERR_TRANSPORT;
       break;
     }
-    rc = lc_pouch_disk_append_queue_put_fd_entry(store, entry, body_fd,
-                                                 entry->body_offset,
-                                                 entry->body_length, error);
+    rc = lc_pouch_disk_append_queue_put_fd_entry(
+        store, entry, body_fd, entry->body_offset, entry->body_length, error);
     if (close(body_fd) != 0 && rc == LC_OK) {
-      rc = lc_pouch_set_errno(error, "failed to close pouch compact queue body");
+      rc =
+          lc_pouch_set_errno(error, "failed to close pouch compact queue body");
     }
   }
-  if (rc == LC_OK &&
-      lc_pouch_disk_fsync(store, temp_query_fd,
-                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
-    rc = lc_pouch_set_errno(error,
-                            "failed to fsync pouch compact query index");
+  if (rc == LC_OK && lc_pouch_disk_fsync(store, temp_query_fd,
+                                         LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
+    rc = lc_pouch_set_errno(error, "failed to fsync pouch compact query index");
   }
   store->defer_record_fsync = 0;
   if (rc == LC_OK) {
@@ -9079,8 +9466,7 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
         store, snapshot_path, "snapshot", error);
     lc_pouch_free(&store->allocator, snapshot_path);
   }
-  for (index = 0U; rc == LC_OK && index < segment_active_paths.count;
-       ++index) {
+  for (index = 0U; rc == LC_OK && index < segment_active_paths.count; ++index) {
     rc = lc_pouch_disk_append_manifest_event_for_segment_path(
         store, segment_active_paths.items[index], "obsolete", error);
   }
@@ -9169,10 +9555,9 @@ static int lc_pouch_disk_append_object_copy_record(
   crc = 0xffffffffUL;
   crc = lc_pouch_crc32_update(crc, (const unsigned char *)namespace_name,
                               (size_t)ns_len);
-  crc = lc_pouch_crc32_update(crc, (const unsigned char *)key,
-                              (size_t)key_len);
-  crc = lc_pouch_crc32_update(crc, (const unsigned char *)name,
-                              (size_t)name_len);
+  crc = lc_pouch_crc32_update(crc, (const unsigned char *)key, (size_t)key_len);
+  crc =
+      lc_pouch_crc32_update(crc, (const unsigned char *)name, (size_t)name_len);
   crc = lc_pouch_crc32_update(crc, (const unsigned char *)id, (size_t)id_len);
   crc = lc_pouch_crc32_update(crc, object_meta, sizeof(object_meta));
   crc = lc_pouch_crc32_update(crc, (const unsigned char *)payload_content_type,
@@ -9237,9 +9622,8 @@ static int lc_pouch_disk_append_object_copy_record(
     return lc_pouch_set_errno(error, "failed to close pouch segment");
   }
 
-  *payload_offset_out = (unsigned long)segment_start +
-                        LC_POUCH_HEADER_SIZE + ns_len +
-                        key_len + name_len + id_len +
+  *payload_offset_out = (unsigned long)segment_start + LC_POUCH_HEADER_SIZE +
+                        ns_len + key_len + name_len + id_len +
                         LC_POUCH_OBJECT_META_SIZE + payload_ct_len;
   if (payload_path_out != NULL) {
     *payload_path_out = segment_path;
@@ -9279,8 +9663,8 @@ static int lc_pouch_disk_replay_skip_crc(int fd, unsigned long length,
   while (remaining > 0UL) {
     want = remaining < (unsigned long)sizeof(buffer) ? (size_t)remaining
                                                      : sizeof(buffer);
-    rc = lc_pouch_disk_replay_read_crc(fd, buffer, want, crc, short_read,
-                                       error);
+    rc =
+        lc_pouch_disk_replay_read_crc(fd, buffer, want, crc, short_read, error);
     if (rc != LC_OK || *short_read) {
       return rc;
     }
@@ -9289,9 +9673,11 @@ static int lc_pouch_disk_replay_skip_crc(int fd, unsigned long length,
   return LC_OK;
 }
 
-static int lc_pouch_disk_replay_skip_crc_sha256(
-    int fd, unsigned long length, unsigned long *crc, lc_pouch_sha256 *sha256,
-    int *short_read, lc_error *error) {
+static int lc_pouch_disk_replay_skip_crc_sha256(int fd, unsigned long length,
+                                                unsigned long *crc,
+                                                lc_pouch_sha256 *sha256,
+                                                int *short_read,
+                                                lc_error *error) {
   unsigned char buffer[8192];
   unsigned long remaining;
   size_t want;
@@ -9301,8 +9687,8 @@ static int lc_pouch_disk_replay_skip_crc_sha256(
   while (remaining > 0UL) {
     want = remaining < (unsigned long)sizeof(buffer) ? (size_t)remaining
                                                      : sizeof(buffer);
-    rc = lc_pouch_disk_replay_read_crc(fd, buffer, want, crc, short_read,
-                                       error);
+    rc =
+        lc_pouch_disk_replay_read_crc(fd, buffer, want, crc, short_read, error);
     if (rc != LC_OK || *short_read) {
       return rc;
     }
@@ -9337,9 +9723,11 @@ static char *lc_pouch_disk_replay_read_string(lc_pouch_disk_replay_input *input,
   return copy;
 }
 
-static char *lc_pouch_disk_replay_query_index_string(
-    lc_pouch_disk_store *store, unsigned long length, unsigned long *crc,
-    int *short_read, lc_error *error) {
+static char *lc_pouch_disk_replay_query_index_string(lc_pouch_disk_store *store,
+                                                     unsigned long length,
+                                                     unsigned long *crc,
+                                                     int *short_read,
+                                                     lc_error *error) {
   char *copy;
 
   copy = (char *)lc_pouch_alloc(&store->allocator, (size_t)length + 1U);
@@ -9431,8 +9819,8 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
       return error != NULL ? error->code : LC_ERR_TRANSPORT;
     }
     if (fstat(store->query_index_fd, &st) != 0) {
-      return lc_pouch_set_errno(
-          error, "failed to stat recreated pouch query index");
+      return lc_pouch_set_errno(error,
+                                "failed to stat recreated pouch query index");
     }
     memset(&path_st, 0, sizeof(path_st));
     path_st.st_dev = st.st_dev;
@@ -9532,9 +9920,8 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
     } else if (record_version == LC_POUCH_QUERY_INDEX_RECORD_VERSION &&
                (type == LC_POUCH_QUERY_INDEX_RECORD_FIELD_CLEAR ||
                 type == LC_POUCH_QUERY_INDEX_RECORD_FIELD_VALUE)) {
-      if (!lc_pouch_disk_validate_record_lengths(ns_len, key_len, ct_len,
-                                                 etag_len, body_len,
-                                                 payload_len) ||
+      if (!lc_pouch_disk_validate_record_lengths(
+              ns_len, key_len, ct_len, etag_len, body_len, payload_len) ||
           payload_len != ns_len + key_len + ct_len + etag_len + body_len ||
           (flags & ~(LC_POUCH_QUERY_INDEX_FLAG_DELETED)) != 0UL ||
           (type == LC_POUCH_QUERY_INDEX_RECORD_FIELD_VALUE &&
@@ -9550,8 +9937,7 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
       if (short_read) {
         break;
       }
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     }
     key = lc_pouch_disk_replay_query_index_string(store, key_len, &crc,
                                                   &short_read, error);
@@ -9560,12 +9946,11 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
       if (short_read) {
         break;
       }
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     }
     if (ct_len > 0UL) {
-      owner = lc_pouch_disk_replay_query_index_string(
-          store, ct_len, &crc, &short_read, error);
+      owner = lc_pouch_disk_replay_query_index_string(store, ct_len, &crc,
+                                                      &short_read, error);
       if (owner == NULL) {
         lc_pouch_free(&store->allocator, namespace_name);
         lc_pouch_free(&store->allocator, key);
@@ -9577,8 +9962,8 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
       }
     }
     if (etag_len > 0UL) {
-      etag = lc_pouch_disk_replay_query_index_string(
-          store, etag_len, &crc, &short_read, error);
+      etag = lc_pouch_disk_replay_query_index_string(store, etag_len, &crc,
+                                                     &short_read, error);
       if (etag == NULL) {
         lc_pouch_free(&store->allocator, namespace_name);
         lc_pouch_free(&store->allocator, key);
@@ -9627,8 +10012,8 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
       meta.query_hidden =
           (flags & LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN) != 0UL;
       meta_index = lc_pouch_disk_find_meta_entry(store, namespace_name, key);
-      summary_meta = meta_index >= 0 ? &store->meta_entries[meta_index].meta
-                                     : &meta;
+      summary_meta =
+          meta_index >= 0 ? &store->meta_entries[meta_index].meta : &meta;
       if (owner != NULL && summary_meta == &meta) {
         meta.owner = owner;
       }
@@ -9646,8 +10031,7 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
       int state_index;
 
       state_index = lc_pouch_disk_find_entry(store, namespace_name, key);
-      if (state_index >= 0 &&
-          store->state_entries[state_index].etag != NULL &&
+      if (state_index >= 0 && store->state_entries[state_index].etag != NULL &&
           state_etag != NULL &&
           strcmp(store->state_entries[state_index].etag, state_etag) == 0 &&
           store->state_entries[state_index].version == (long)version &&
@@ -9666,15 +10050,13 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
       staged.version = (long)version;
       if (lc_pouch_disk_query_field_posting_has_live_state(store, &staged) &&
           !lc_pouch_disk_query_field_insert(store, namespace_name, key, owner,
-                                            etag, state_etag,
-                                            (long)version)) {
+                                            etag, state_etag, (long)version)) {
         lc_pouch_free(&store->allocator, namespace_name);
         lc_pouch_free(&store->allocator, key);
         lc_pouch_free(&store->allocator, owner);
         lc_pouch_free(&store->allocator, etag);
         lc_pouch_free(&store->allocator, state_etag);
-        return lc_pouch_set_nomem(error,
-                                  "failed to replay pouch field index");
+        return lc_pouch_set_nomem(error, "failed to replay pouch field index");
       }
     }
     lc_pouch_free(&store->allocator, namespace_name);
@@ -9766,16 +10148,16 @@ static int lc_pouch_disk_replay_stream_index_record(
   crc = 0xffffffffUL;
   short_read = 0;
 
-  ns_copy = lc_pouch_disk_replay_read_string(input, ns_len, &crc, &short_read,
-                                             error);
+  ns_copy =
+      lc_pouch_disk_replay_read_string(input, ns_len, &crc, &short_read, error);
   if (ns_copy == NULL) {
     *stop = short_read;
     return short_read ? LC_OK
                       : (error != NULL && error->code != LC_OK ? error->code
                                                                : LC_ERR_NOMEM);
   }
-  key_copy = lc_pouch_disk_replay_read_string(input, key_len, &crc,
-                                              &short_read, error);
+  key_copy = lc_pouch_disk_replay_read_string(input, key_len, &crc, &short_read,
+                                              error);
   if (key_copy == NULL) {
     lc_pouch_disk_replay_free_fields(store, ns_copy, NULL, NULL, NULL);
     *stop = short_read;
@@ -9784,15 +10166,15 @@ static int lc_pouch_disk_replay_stream_index_record(
                                                                : LC_ERR_NOMEM);
   }
   if (ct_len > 0UL) {
-    ct_copy = lc_pouch_disk_replay_read_string(input, ct_len, &crc,
-                                               &short_read, error);
+    ct_copy = lc_pouch_disk_replay_read_string(input, ct_len, &crc, &short_read,
+                                               error);
     if (ct_copy == NULL) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, NULL, NULL);
       *stop = short_read;
-      return short_read ? LC_OK
-                        : (error != NULL && error->code != LC_OK
-                               ? error->code
-                               : LC_ERR_NOMEM);
+      return short_read
+                 ? LC_OK
+                 : (error != NULL && error->code != LC_OK ? error->code
+                                                          : LC_ERR_NOMEM);
     }
   }
   if (etag_len > 0UL) {
@@ -9801,10 +10183,10 @@ static int lc_pouch_disk_replay_stream_index_record(
     if (etag_copy == NULL) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy, NULL);
       *stop = short_read;
-      return short_read ? LC_OK
-                        : (error != NULL && error->code != LC_OK
-                               ? error->code
-                               : LC_ERR_NOMEM);
+      return short_read
+                 ? LC_OK
+                 : (error != NULL && error->code != LC_OK ? error->code
+                                                          : LC_ERR_NOMEM);
     }
   }
 
@@ -9813,8 +10195,8 @@ static int lc_pouch_disk_replay_stream_index_record(
   indexed_body_len = body_len;
   if (type == LC_POUCH_RECORD_STATE_PUT ||
       type == LC_POUCH_RECORD_STATE_REMOVE) {
-    rc = lc_pouch_disk_replay_skip_crc(input->fd, body_len, &crc,
-                                       &short_read, error);
+    rc = lc_pouch_disk_replay_skip_crc(input->fd, body_len, &crc, &short_read,
+                                       error);
     if (rc != LC_OK || short_read) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -9827,10 +10209,10 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
-    if (!lc_pouch_disk_upsert_entry(
-            store, ns_copy, key_copy, ct_copy, etag_copy, (long)version,
-            input->path, indexed_body_offset, indexed_body_len,
-            type == LC_POUCH_RECORD_STATE_REMOVE)) {
+    if (!lc_pouch_disk_upsert_entry(store, ns_copy, key_copy, ct_copy,
+                                    etag_copy, (long)version, input->path,
+                                    indexed_body_offset, indexed_body_len,
+                                    type == LC_POUCH_RECORD_STATE_REMOVE)) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
       return lc_pouch_set_nomem(error, "failed to index pouch replay record");
@@ -9842,9 +10224,8 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
-    rc = lc_pouch_disk_replay_read_crc(input->fd, link_body,
-                                       sizeof(link_body), &crc, &short_read,
-                                       error);
+    rc = lc_pouch_disk_replay_read_crc(input->fd, link_body, sizeof(link_body),
+                                       &crc, &short_read, error);
     if (rc != LC_OK || short_read) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -9867,9 +10248,8 @@ static int lc_pouch_disk_replay_stream_index_record(
       return LC_OK;
     }
     if (!lc_pouch_disk_upsert_entry(store, ns_copy, key_copy, ct_copy,
-                                    etag_copy, (long)version,
-                                    input->path, indexed_body_offset,
-                                    indexed_body_len, 0)) {
+                                    etag_copy, (long)version, input->path,
+                                    indexed_body_offset, indexed_body_len, 0)) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
       return lc_pouch_set_nomem(error, "failed to index pouch replay record");
@@ -9882,9 +10262,8 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
-    rc = lc_pouch_disk_replay_read_crc(input->fd, object_meta,
-                                       sizeof(object_meta), &crc, &short_read,
-                                       error);
+    rc = lc_pouch_disk_replay_read_crc(
+        input->fd, object_meta, sizeof(object_meta), &crc, &short_read, error);
     if (rc != LC_OK || short_read) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -9903,21 +10282,20 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
-    object_ct_copy = lc_pouch_disk_replay_read_string(
-        input, object_ct_len, &crc, &short_read, error);
+    object_ct_copy = lc_pouch_disk_replay_read_string(input, object_ct_len,
+                                                      &crc, &short_read, error);
     if (object_ct_copy == NULL) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
       *stop = short_read;
-      return short_read ? LC_OK
-                        : (error != NULL && error->code != LC_OK
-                               ? error->code
-                               : LC_ERR_NOMEM);
+      return short_read
+                 ? LC_OK
+                 : (error != NULL && error->code != LC_OK ? error->code
+                                                          : LC_ERR_NOMEM);
     }
     lc_pouch_sha256_init(&object_sha256);
     rc = lc_pouch_disk_replay_skip_crc_sha256(
-        input->fd, object_body_len, &crc, &object_sha256, &short_read,
-        error);
+        input->fd, object_body_len, &crc, &object_sha256, &short_read, error);
     if (rc != LC_OK || short_read) {
       lc_pouch_free(&store->allocator, object_ct_copy);
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
@@ -9947,8 +10325,8 @@ static int lc_pouch_disk_replay_stream_index_record(
     }
     lc_pouch_free(&store->allocator, object_ct_copy);
   } else if (type == LC_POUCH_RECORD_OBJECT_REMOVE) {
-    rc = lc_pouch_disk_replay_skip_crc(input->fd, body_len, &crc,
-                                       &short_read, error);
+    rc = lc_pouch_disk_replay_skip_crc(input->fd, body_len, &crc, &short_read,
+                                       error);
     if (rc != LC_OK || short_read) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -9970,8 +10348,8 @@ static int lc_pouch_disk_replay_stream_index_record(
 
       memset(&selector, 0, sizeof(selector));
       selector.id = etag_copy;
-      object_index = lc_pouch_disk_find_object(store, ns_copy, key_copy,
-                                               &selector);
+      object_index =
+          lc_pouch_disk_find_object(store, ns_copy, key_copy, &selector);
     }
     if (object_index >= 0) {
       store->object_entries[object_index].deleted = 1;
@@ -9986,9 +10364,8 @@ static int lc_pouch_disk_replay_stream_index_record(
       *stop = 1;
       return LC_OK;
     }
-    rc = lc_pouch_disk_replay_read_crc(input->fd, queue_meta,
-                                       sizeof(queue_meta), &crc, &short_read,
-                                       error);
+    rc = lc_pouch_disk_replay_read_crc(
+        input->fd, queue_meta, sizeof(queue_meta), &crc, &short_read, error);
     if (rc != LC_OK || short_read) {
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
@@ -10029,10 +10406,10 @@ static int lc_pouch_disk_replay_stream_index_record(
       lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                        etag_copy);
       *stop = short_read;
-      return short_read ? LC_OK
-                        : (error != NULL && error->code != LC_OK
-                               ? error->code
-                               : LC_ERR_NOMEM);
+      return short_read
+                 ? LC_OK
+                 : (error != NULL && error->code != LC_OK ? error->code
+                                                          : LC_ERR_NOMEM);
     }
     if (queue_lease_id_len > 0UL) {
       queue_lease_id = lc_pouch_disk_replay_read_string(
@@ -10042,30 +10419,29 @@ static int lc_pouch_disk_replay_stream_index_record(
         lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                          etag_copy);
         *stop = short_read;
-        return short_read ? LC_OK
-                          : (error != NULL && error->code != LC_OK
-                                 ? error->code
-                                 : LC_ERR_NOMEM);
+        return short_read
+                   ? LC_OK
+                   : (error != NULL && error->code != LC_OK ? error->code
+                                                            : LC_ERR_NOMEM);
       }
     }
     if (queue_txn_id_len > 0UL) {
-      queue_txn_id = lc_pouch_disk_replay_read_string(
-          input, queue_txn_id_len, &crc, &short_read, error);
+      queue_txn_id = lc_pouch_disk_replay_read_string(input, queue_txn_id_len,
+                                                      &crc, &short_read, error);
       if (queue_txn_id == NULL) {
         lc_pouch_free(&store->allocator, queue_content_type);
         lc_pouch_free(&store->allocator, queue_lease_id);
         lc_pouch_disk_replay_free_fields(store, ns_copy, key_copy, ct_copy,
                                          etag_copy);
         *stop = short_read;
-        return short_read ? LC_OK
-                          : (error != NULL && error->code != LC_OK
-                                 ? error->code
-                                 : LC_ERR_NOMEM);
+        return short_read
+                   ? LC_OK
+                   : (error != NULL && error->code != LC_OK ? error->code
+                                                            : LC_ERR_NOMEM);
       }
     }
-    queue_payload_offset =
-        LC_POUCH_QUEUE_META_SIZE + queue_content_type_len +
-        queue_lease_id_len + queue_txn_id_len;
+    queue_payload_offset = LC_POUCH_QUEUE_META_SIZE + queue_content_type_len +
+                           queue_lease_id_len + queue_txn_id_len;
     rc = lc_pouch_disk_replay_skip_crc(input->fd, queue_payload_len, &crc,
                                        &short_read, error);
     if (rc != LC_OK || short_read) {
@@ -10093,9 +10469,8 @@ static int lc_pouch_disk_replay_stream_index_record(
             store, ns_copy, key_copy, ct_copy, queue_content_type,
             queue_lease_id, queue_txn_id, etag_copy, queue_attempts,
             queue_max_attempts, queue_failure_attempts, queue_enqueued_at,
-            queue_not_visible_until, queue_visibility_timeout,
-            queue_expires_at, queue_lease_expires_at, (long)version,
-            input->path,
+            queue_not_visible_until, queue_visibility_timeout, queue_expires_at,
+            queue_lease_expires_at, (long)version, input->path,
             offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
                 etag_len + queue_payload_offset,
             queue_payload_len, type == LC_POUCH_RECORD_QUEUE_PUT,
@@ -10122,9 +10497,11 @@ static int lc_pouch_disk_replay_stream_index_record(
   return LC_OK;
 }
 
-static int lc_pouch_disk_replay_input_records(
-    lc_pouch_disk_replay_input *input, int reset_indexes, int truncate_tail,
-    unsigned long *offset_out, lc_error *error) {
+static int lc_pouch_disk_replay_input_records(lc_pouch_disk_replay_input *input,
+                                              int reset_indexes,
+                                              int truncate_tail,
+                                              unsigned long *offset_out,
+                                              lc_error *error) {
   lc_pouch_disk_store *store;
   unsigned char header[LC_POUCH_HEADER_SIZE];
   unsigned char *payload;
@@ -10152,8 +10529,7 @@ static int lc_pouch_disk_replay_input_records(
     return lc_pouch_set_errno(error, "failed to rewind pouch log");
   }
   while (1) {
-    if (!lc_pouch_read_all(input->fd, header, sizeof(header),
-                           &short_read)) {
+    if (!lc_pouch_read_all(input->fd, header, sizeof(header), &short_read)) {
       return lc_pouch_set_errno(error, "failed to read pouch log header");
     }
     if (short_read) {
@@ -10178,8 +10554,8 @@ static int lc_pouch_disk_replay_input_records(
       break;
     }
     if (type == LC_POUCH_RECORD_HIGH_WATER) {
-      if (ns_len != 0UL || key_len != 0UL || ct_len != 0UL ||
-          etag_len != 0UL || body_len != 0UL || payload_len != 0UL ||
+      if (ns_len != 0UL || key_len != 0UL || ct_len != 0UL || etag_len != 0UL ||
+          body_len != 0UL || payload_len != 0UL ||
           expected_crc != lc_pouch_crc32(NULL, 0U)) {
         break;
       }
@@ -10292,9 +10668,8 @@ static int lc_pouch_disk_replay_input_records(
         unsigned long indexed_body_offset;
         unsigned long indexed_body_len;
 
-        indexed_body_offset =
-            offset + LC_POUCH_HEADER_SIZE + ns_len + key_len + ct_len +
-            etag_len;
+        indexed_body_offset = offset + LC_POUCH_HEADER_SIZE + ns_len + key_len +
+                              ct_len + etag_len;
         indexed_body_len = body_len;
         if (type == LC_POUCH_RECORD_STATE_LINK) {
           if (body_len != 16UL) {
@@ -10317,10 +10692,10 @@ static int lc_pouch_disk_replay_input_records(
             break;
           }
         }
-        if (!lc_pouch_disk_upsert_entry(
-                store, ns_copy, key_copy, ct_copy, etag_copy, (long)version,
-                input->path, indexed_body_offset, indexed_body_len,
-                type == LC_POUCH_RECORD_STATE_REMOVE)) {
+        if (!lc_pouch_disk_upsert_entry(store, ns_copy, key_copy, ct_copy,
+                                        etag_copy, (long)version, input->path,
+                                        indexed_body_offset, indexed_body_len,
+                                        type == LC_POUCH_RECORD_STATE_REMOVE)) {
           lc_pouch_free(&store->allocator, ns_copy);
           lc_pouch_free(&store->allocator, key_copy);
           lc_pouch_free(&store->allocator, ct_copy);
@@ -10414,10 +10789,10 @@ static int lc_pouch_disk_replay_input_records(
           char object_sha256_hex[LC_POUCH_SHA256_HEX_SIZE];
 
           lc_pouch_sha256_init(&object_sha256);
-          lc_pouch_sha256_update(
-              &object_sha256,
-              body_begin + LC_POUCH_OBJECT_META_SIZE + object_ct_len,
-              (size_t)object_body_len);
+          lc_pouch_sha256_update(&object_sha256,
+                                 body_begin + LC_POUCH_OBJECT_META_SIZE +
+                                     object_ct_len,
+                                 (size_t)object_body_len);
           lc_pouch_sha256_finish_hex(&object_sha256, object_sha256_hex);
           if (!lc_pouch_disk_upsert_object_entry(
                   store, ns_copy, key_copy, etag_copy, ct_copy,
@@ -10727,8 +11102,7 @@ static int lc_pouch_disk_read_namespace_manifest_segments(
     if (lc_pouch_disk_segment_name_parse(file_name, &ignored_number)) {
       record_path =
           lc_pouch_join_path(&store->allocator, segments_path, file_name);
-    } else if (lc_pouch_disk_snapshot_name_parse(file_name,
-                                                 &ignored_number)) {
+    } else if (lc_pouch_disk_snapshot_name_parse(file_name, &ignored_number)) {
       record_path =
           lc_pouch_join_path(&store->allocator, snapshots_path, file_name);
     } else {
@@ -10740,12 +11114,12 @@ static int lc_pouch_disk_read_namespace_manifest_segments(
       break;
     }
     if (lc_pouch_disk_segment_name_parse(file_name, &ignored_number)) {
-      rc = lc_pouch_disk_segment_replay_paths_add_copy(
-          store, mentioned_paths, record_path, error);
+      rc = lc_pouch_disk_segment_replay_paths_add_copy(store, mentioned_paths,
+                                                       record_path, error);
     }
     if (rc == LC_OK && strcmp(event, "obsolete") == 0) {
-      rc = lc_pouch_disk_segment_replay_paths_add_copy(
-          store, obsolete_paths, record_path, error);
+      rc = lc_pouch_disk_segment_replay_paths_add_copy(store, obsolete_paths,
+                                                       record_path, error);
     }
     if (rc == LC_OK && strcmp(event, "snapshot") == 0 &&
         lc_pouch_disk_snapshot_name_parse(file_name, &ignored_number)) {
@@ -10753,8 +11127,7 @@ static int lc_pouch_disk_read_namespace_manifest_segments(
                                                        record_path, error);
     } else if (rc == LC_OK &&
                lc_pouch_disk_segment_name_parse(file_name, &ignored_number) &&
-               (strcmp(event, "open") == 0 ||
-                strcmp(event, "compact") == 0)) {
+               (strcmp(event, "open") == 0 || strcmp(event, "compact") == 0)) {
       rc = lc_pouch_disk_segment_replay_paths_add_copy(store, paths,
                                                        record_path, error);
     } else if (rc == LC_OK && strcmp(event, "obsolete") == 0) {
@@ -10851,15 +11224,13 @@ static int lc_pouch_disk_collect_active_segment_paths(
         logstore_path != NULL
             ? lc_pouch_join_path(&store->allocator, logstore_path, "manifest")
             : NULL;
-    manifest_log_path =
-        manifest_path != NULL
-            ? lc_pouch_join_path(&store->allocator, manifest_path,
-                                 "manifest.log")
-            : NULL;
+    manifest_log_path = manifest_path != NULL
+                            ? lc_pouch_join_path(&store->allocator,
+                                                 manifest_path, "manifest.log")
+                            : NULL;
     if (namespace_path == NULL || logstore_path == NULL ||
         segments_path == NULL || snapshots_path == NULL ||
-        manifest_path == NULL ||
-        manifest_log_path == NULL) {
+        manifest_path == NULL || manifest_log_path == NULL) {
       lc_pouch_free(&store->allocator, namespace_path);
       lc_pouch_free(&store->allocator, logstore_path);
       lc_pouch_free(&store->allocator, segments_path);
@@ -10898,8 +11269,7 @@ static int lc_pouch_disk_collect_active_segment_paths(
       }
     }
     if (rc != LC_OK) {
-      lc_pouch_disk_segment_replay_paths_cleanup(store,
-                                                 &manifest_active_paths);
+      lc_pouch_disk_segment_replay_paths_cleanup(store, &manifest_active_paths);
       lc_pouch_disk_segment_replay_paths_cleanup(store, &mentioned_paths);
       lc_pouch_disk_segment_replay_paths_cleanup(store, &obsolete_paths);
       lc_pouch_free(&store->allocator, namespace_path);
@@ -10999,8 +11369,9 @@ static int lc_pouch_disk_collect_active_segment_paths(
   return LC_OK;
 }
 
-static unsigned long lc_pouch_disk_mix_segment_generation(unsigned long current,
-                                                          const struct stat *st) {
+static unsigned long
+lc_pouch_disk_mix_segment_generation(unsigned long current,
+                                     const struct stat *st) {
   unsigned long value;
 
   value = (unsigned long)st->st_size;
@@ -11056,8 +11427,7 @@ static int lc_pouch_disk_active_segment_generation(lc_pouch_disk_store *store,
 }
 
 static int lc_pouch_disk_replay_active_segments(lc_pouch_disk_store *store,
-                                                int *found,
-                                                lc_error *error) {
+                                                int *found, lc_error *error) {
   lc_pouch_disk_segment_replay_paths paths;
   unsigned long segment_generation;
   size_t index;
@@ -11190,8 +11560,7 @@ static void lc_pouch_file_source_close(lc_source *self) {
     allocator = source->allocator;
     if (source->fd >= 0) {
       (void)lc_pouch_read_cache_owner_cache_fd(source->read_cache_owner,
-                                               &source->path, source->fd,
-                                               NULL);
+                                               &source->path, source->fd, NULL);
       source->fd = -1;
     }
     lc_pouch_free(&allocator, source->path);
@@ -11235,8 +11604,7 @@ static int lc_pouch_disk_read_state(lc_pouch_store *self,
       out->etag = lc_pouch_strdup(&store->allocator, entry->etag);
       if (entry->etag != NULL && out->etag == NULL) {
         lc_pouch_disk_unlock(store, error);
-        return lc_pouch_set_nomem(error,
-                                  "failed to copy pouch state metadata");
+        return lc_pouch_set_nomem(error, "failed to copy pouch state metadata");
       }
       out->version = entry->version;
     }
@@ -11304,7 +11672,7 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
                                 "body, and output metadata");
   }
   rc = lc_pouch_disk_validate_namespace_key(error, "write_state",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -11333,9 +11701,9 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
     return rc;
   }
   temp_fd = -1;
-  rc = lc_pouch_disk_spool_source_to_temp(
-      store, body, 0, 0U, &temp_fd, &payload_length, &payload_crc,
-      payload_sha256, error);
+  rc = lc_pouch_disk_spool_source_to_temp(store, body, 0, 0U, &temp_fd,
+                                          &payload_length, &payload_crc,
+                                          payload_sha256, error);
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key(self, key_lock, error);
@@ -11356,15 +11724,14 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
       store, namespace_name, key, content_type, etag, version, temp_fd, 0UL,
       payload_length, 1, 0, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_append_fd_record(
-        store, LC_POUCH_RECORD_STATE_PUT, namespace_name, key, content_type,
-        etag, version, temp_fd, 0UL, payload_length, &body_path, &body_offset,
-        error);
+    rc = lc_pouch_disk_append_fd_record(store, LC_POUCH_RECORD_STATE_PUT,
+                                        namespace_name, key, content_type, etag,
+                                        version, temp_fd, 0UL, payload_length,
+                                        &body_path, &body_offset, error);
   }
-  if (rc == LC_OK &&
-      !lc_pouch_disk_upsert_entry(store, namespace_name, key, content_type,
-                                  etag, version, body_path, body_offset,
-                                  payload_length, 0)) {
+  if (rc == LC_OK && !lc_pouch_disk_upsert_entry(
+                         store, namespace_name, key, content_type, etag,
+                         version, body_path, body_offset, payload_length, 0)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch state index");
   }
   if (rc == LC_OK) {
@@ -11382,15 +11749,15 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
     }
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, body_path);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
@@ -11399,8 +11766,8 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
 static int lc_pouch_disk_remove_state(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key,
-                                      const char *expected_etag,
-                                      int *removed, lc_error *error) {
+                                      const char *expected_etag, int *removed,
+                                      lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_state_entry *entry;
   lc_pouch_key_lock *key_lock;
@@ -11418,7 +11785,7 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
   }
   *removed = 0;
   rc = lc_pouch_disk_validate_namespace_key(error, "remove_state",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -11458,30 +11825,29 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
     lc_pouch_disk_unlock_key(self, key_lock, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch remove etag");
   }
-  rc = lc_pouch_disk_append_query_field_clear_record(
-      store, namespace_name, key, etag, version, 1, error);
+  rc = lc_pouch_disk_append_query_field_clear_record(store, namespace_name, key,
+                                                     etag, version, 1, error);
   if (rc == LC_OK) {
     rc = lc_pouch_disk_append_record(store, LC_POUCH_RECORD_STATE_REMOVE,
                                      namespace_name, key, NULL, etag, version,
                                      NULL, 0U, &body_offset, error);
   }
-  if (rc == LC_OK &&
-      !lc_pouch_disk_upsert_entry(store, namespace_name, key, NULL, etag,
-                                  version, store->log_path, body_offset, 0UL,
-                                  1)) {
+  if (rc == LC_OK && !lc_pouch_disk_upsert_entry(
+                         store, namespace_name, key, NULL, etag, version,
+                         store->log_path, body_offset, 0UL, 1)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch remove index");
   }
   if (rc == LC_OK) {
     lc_pouch_disk_query_field_remove_key(store, namespace_name, key);
     *removed = 1;
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   lc_pouch_free(&store->allocator, etag);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
@@ -11522,17 +11888,15 @@ static char *lc_pouch_disk_make_staged_key(lc_pouch_disk_store *store,
   return staged_key;
 }
 
-static int lc_pouch_disk_validate_staged_args(lc_error *error,
-                                             const char *operation,
-                                             lc_pouch_store *self,
-                                             const char *namespace_name,
-                                             const char *key,
-                                             const char *txn_id,
-                                             int allow_empty_key) {
+static int
+lc_pouch_disk_validate_staged_args(lc_error *error, const char *operation,
+                                   lc_pouch_store *self,
+                                   const char *namespace_name, const char *key,
+                                   const char *txn_id, int allow_empty_key) {
   size_t key_len;
 
-  if (self == NULL || namespace_name == NULL || key == NULL ||
-      txn_id == NULL || txn_id[0] == '\0') {
+  if (self == NULL || namespace_name == NULL || key == NULL || txn_id == NULL ||
+      txn_id[0] == '\0') {
     return lc_pouch_set_invalid(error, operation);
   }
   if (namespace_name[0] == '\0') {
@@ -11543,9 +11907,8 @@ static int lc_pouch_disk_validate_staged_args(lc_error *error,
                                        namespace_name, 0) != LC_OK) {
     return error != NULL ? error->code : LC_ERR_INVALID;
   }
-  if (key[0] != '\0' &&
-      lc_pouch_disk_validate_path_name(error, operation, "key", key, 1) !=
-          LC_OK) {
+  if (key[0] != '\0' && lc_pouch_disk_validate_path_name(
+                            error, operation, "key", key, 1) != LC_OK) {
     return error != NULL ? error->code : LC_ERR_INVALID;
   }
   key_len = strlen(key);
@@ -11572,13 +11935,11 @@ static char *lc_pouch_disk_dup_trimmed_key(lc_pouch_disk_store *store,
   return lc_pouch_dup_bytes(&store->allocator, key, key_len);
 }
 
-static int lc_pouch_disk_stage_state(lc_pouch_store *self,
-                                     const char *namespace_name,
-                                     const char *key, const char *txn_id,
-                                     lc_source *body,
-                                     const lc_pouch_put_state_opts *opts,
-                                     lc_pouch_put_state_res *out,
-                                     lc_error *error) {
+static int
+lc_pouch_disk_stage_state(lc_pouch_store *self, const char *namespace_name,
+                          const char *key, const char *txn_id, lc_source *body,
+                          const lc_pouch_put_state_opts *opts,
+                          lc_pouch_put_state_res *out, lc_error *error) {
   lc_pouch_disk_store *store;
   char *staged_key;
   int rc;
@@ -11608,10 +11969,12 @@ static int lc_pouch_disk_stage_state(lc_pouch_store *self,
   return rc;
 }
 
-static int lc_pouch_disk_stage_state_remove(
-    lc_pouch_store *self, const char *namespace_name, const char *key,
-    const char *txn_id, const char *expected_etag,
-    lc_pouch_put_state_res *out, lc_error *error) {
+static int lc_pouch_disk_stage_state_remove(lc_pouch_store *self,
+                                            const char *namespace_name,
+                                            const char *key, const char *txn_id,
+                                            const char *expected_etag,
+                                            lc_pouch_put_state_res *out,
+                                            lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_state_entry *entry;
   lc_pouch_key_lock *key_lock;
@@ -11657,17 +12020,17 @@ static int lc_pouch_disk_stage_state_remove(
   entry = index >= 0 ? &store->state_entries[index] : NULL;
   rc = lc_pouch_check_cas(entry, expected_etag, 0L, 0, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_append_state_remove_locked(
-        store, namespace_name, staged_key, out, error);
+    rc = lc_pouch_disk_append_state_remove_locked(store, namespace_name,
+                                                  staged_key, out, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   lc_pouch_free(&store->allocator, staged_key);
@@ -11676,8 +12039,7 @@ static int lc_pouch_disk_stage_state_remove(
 
 static int lc_pouch_disk_load_staged_state(lc_pouch_store *self,
                                            const char *namespace_name,
-                                           const char *key,
-                                           const char *txn_id,
+                                           const char *key, const char *txn_id,
                                            lc_source **body,
                                            lc_pouch_state_info *out,
                                            lc_error *error) {
@@ -11710,9 +12072,11 @@ static int lc_pouch_disk_load_staged_state(lc_pouch_store *self,
   return rc;
 }
 
-static int lc_pouch_disk_append_state_remove_locked(
-    lc_pouch_disk_store *store, const char *namespace_name, const char *key,
-    lc_pouch_put_state_res *out, lc_error *error) {
+static int lc_pouch_disk_append_state_remove_locked(lc_pouch_disk_store *store,
+                                                    const char *namespace_name,
+                                                    const char *key,
+                                                    lc_pouch_put_state_res *out,
+                                                    lc_error *error) {
   char *etag;
   unsigned long body_offset;
   long version;
@@ -11726,10 +12090,9 @@ static int lc_pouch_disk_append_state_remove_locked(
   rc = lc_pouch_disk_append_record(store, LC_POUCH_RECORD_STATE_REMOVE,
                                    namespace_name, key, NULL, etag, version,
                                    NULL, 0U, &body_offset, error);
-  if (rc == LC_OK &&
-      !lc_pouch_disk_upsert_entry(store, namespace_name, key, NULL, etag,
-                                  version, store->log_path, body_offset, 0UL,
-                                  1)) {
+  if (rc == LC_OK && !lc_pouch_disk_upsert_entry(
+                         store, namespace_name, key, NULL, etag, version,
+                         store->log_path, body_offset, 0UL, 1)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch remove index");
   }
   if (rc == LC_OK && out != NULL) {
@@ -11758,15 +12121,14 @@ static int lc_pouch_disk_append_state_link_locked(
       target->content_type != NULL ? target->content_type : "application/json";
   lc_pouch_put_u64(link_body, target->body_offset);
   lc_pouch_put_u64(link_body + 8, target->body_length);
-  rc = lc_pouch_disk_append_record(
-      store, LC_POUCH_RECORD_STATE_LINK, namespace_name, key, content_type,
-      target->etag, version, link_body, sizeof(link_body), &link_body_offset,
-      error);
+  rc = lc_pouch_disk_append_record(store, LC_POUCH_RECORD_STATE_LINK,
+                                   namespace_name, key, content_type,
+                                   target->etag, version, link_body,
+                                   sizeof(link_body), &link_body_offset, error);
   if (rc == LC_OK &&
-      !lc_pouch_disk_upsert_entry(store, namespace_name, key, content_type,
-                                  target->etag, version, target->body_path,
-                                  target->body_offset,
-                                  target->body_length, 0)) {
+      !lc_pouch_disk_upsert_entry(
+          store, namespace_name, key, content_type, target->etag, version,
+          target->body_path, target->body_offset, target->body_length, 0)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch state link index");
   }
   if (rc == LC_OK && out != NULL) {
@@ -11866,7 +12228,8 @@ static int lc_pouch_disk_promote_staged_state(
                                                   staged_key, NULL, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
@@ -11896,8 +12259,9 @@ static int lc_pouch_disk_discard_staged_state(
   int rc;
 
   rc = lc_pouch_disk_validate_staged_args(
-      error, "discard_staged_state requires store, namespace, key, and "
-             "transaction id",
+      error,
+      "discard_staged_state requires store, namespace, key, and "
+      "transaction id",
       self, namespace_name, key, txn_id, 1);
   if (rc != LC_OK) {
     return rc;
@@ -11941,13 +12305,13 @@ static int lc_pouch_disk_discard_staged_state(
                                                   staged_key, NULL, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   lc_pouch_free(&store->allocator, staged_key);
@@ -11984,9 +12348,10 @@ static int lc_pouch_disk_copy_staged_info(
   return 1;
 }
 
-static int lc_pouch_disk_list_staged_state(
-    lc_pouch_store *self, const lc_pouch_list_staged_req *req,
-    lc_pouch_staged_state_list *out, lc_error *error) {
+static int lc_pouch_disk_list_staged_state(lc_pouch_store *self,
+                                           const lc_pouch_list_staged_req *req,
+                                           lc_pouch_staged_state_list *out,
+                                           lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_disk_staged_match *matches;
   char *staged_prefix;
@@ -12003,8 +12368,8 @@ static int lc_pouch_disk_list_staged_state(
                                 "list_staged_state requires store, request, "
                                 "namespace, key, and output");
   }
-  rc = lc_pouch_disk_validate_path_name(error, "list_staged_state",
-                                        "namespace", req->namespace_name, 0);
+  rc = lc_pouch_disk_validate_path_name(error, "list_staged_state", "namespace",
+                                        req->namespace_name, 0);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12086,8 +12451,7 @@ static int lc_pouch_disk_list_staged_state(
       lc_pouch_disk_unlock(store, error);
       lc_pouch_free(&store->allocator, staged_prefix);
       lc_pouch_free(&store->allocator, base_key);
-      return lc_pouch_set_nomem(error,
-                                "failed to allocate pouch staged rows");
+      return lc_pouch_set_nomem(error, "failed to allocate pouch staged rows");
     }
   }
   for (index = 0U; index < copy_count; ++index) {
@@ -12155,8 +12519,8 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
                                 "put_object requires store, namespace, key, "
                                 "body, name, and output metadata");
   }
-  rc = lc_pouch_disk_validate_namespace_key(error, "put_object",
-                                           namespace_name, key);
+  rc = lc_pouch_disk_validate_namespace_key(error, "put_object", namespace_name,
+                                            key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12215,11 +12579,10 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
       payload_length, now_unix, now_unix, &payload_path, &payload_offset,
       error);
   close(temp_fd);
-  if (rc == LC_OK &&
-      !lc_pouch_disk_upsert_object_entry(
-          store, namespace_name, key, id, name, payload_sha256, content_type,
-          (long)payload_length, now_unix, now_unix, payload_path,
-          payload_offset, payload_length, 0)) {
+  if (rc == LC_OK && !lc_pouch_disk_upsert_object_entry(
+                         store, namespace_name, key, id, name, payload_sha256,
+                         content_type, (long)payload_length, now_unix, now_unix,
+                         payload_path, payload_offset, payload_length, 0)) {
     rc = lc_pouch_set_nomem(error, "failed to update pouch object index");
   }
   if (rc == LC_OK) {
@@ -12232,15 +12595,15 @@ static int lc_pouch_disk_put_object(lc_pouch_store *self,
     }
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   lc_pouch_free(&store->allocator, id);
   lc_pouch_free(&store->allocator, payload_path);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
@@ -12263,7 +12626,7 @@ static int lc_pouch_disk_list_objects(lc_pouch_store *self,
                                 "and output list");
   }
   rc = lc_pouch_disk_validate_namespace_key(error, "list_objects",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12400,9 +12763,8 @@ static int lc_pouch_disk_scan_object_keys(
       continue;
     }
     if (key_count == 0U) {
-      keys = (char **)lc_pouch_calloc(&store->allocator,
-                                      store->object_entry_count,
-                                      sizeof(keys[0]));
+      keys = (char **)lc_pouch_calloc(
+          &store->allocator, store->object_entry_count, sizeof(keys[0]));
       if (keys == NULL) {
         lc_pouch_disk_unlock(store, error);
         return lc_pouch_set_nomem(error,
@@ -12441,8 +12803,8 @@ static int lc_pouch_disk_scan_object_keys(
     visit_count++;
   }
   if (out->truncated && visit_count > 0U) {
-    out->next_start_after =
-        lc_pouch_strdup(&store->allocator, keys[start_index + visit_count - 1U]);
+    out->next_start_after = lc_pouch_strdup(
+        &store->allocator, keys[start_index + visit_count - 1U]);
     if (out->next_start_after == NULL) {
       for (index = 0U; index < key_count; ++index) {
         lc_pouch_free(&store->allocator, keys[index]);
@@ -12582,8 +12944,8 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_disk_validate_path_name(error, "copy_object",
-                                        "destination key", dst_key, 1);
+  rc = lc_pouch_disk_validate_path_name(error, "copy_object", "destination key",
+                                        dst_key, 1);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12613,8 +12975,8 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     lc_pouch_disk_unlock_key_set(self, &key_locks, error);
     return rc;
   }
-  existing = lc_pouch_disk_find_object(store, namespace_name, src_key,
-                                       &opts->source);
+  existing =
+      lc_pouch_disk_find_object(store, namespace_name, src_key, &opts->source);
   if (existing < 0) {
     lc_pouch_disk_unlock(store, error);
     lc_pouch_disk_unlock_key_set(self, &key_locks, error);
@@ -12635,7 +12997,8 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   name = opts->name != NULL ? opts->name : src_entry->name;
   src_plaintext_sha256 =
       lc_pouch_strdup(&store->allocator, src_entry->plaintext_sha256);
-  src_content_type = lc_pouch_strdup(&store->allocator, src_entry->content_type);
+  src_content_type =
+      lc_pouch_strdup(&store->allocator, src_entry->content_type);
   if (src_plaintext_sha256 == NULL || src_content_type == NULL) {
     lc_pouch_free(&store->allocator, src_plaintext_sha256);
     lc_pouch_free(&store->allocator, src_content_type);
@@ -12645,11 +13008,11 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   }
   src_body_offset = src_entry->body_offset;
   src_body_length = src_entry->body_length;
-  src_body_path = src_entry->body_path != NULL ? src_entry->body_path
-                                               : store->log_path;
+  src_body_path =
+      src_entry->body_path != NULL ? src_entry->body_path : store->log_path;
   src_size = src_entry->size;
-  existing = lc_pouch_disk_find_object_by_name(store, namespace_name, dst_key,
-                                               name);
+  existing =
+      lc_pouch_disk_find_object_by_name(store, namespace_name, dst_key, name);
   if (existing >= 0 && opts->prevent_overwrite) {
     lc_pouch_free(&store->allocator, src_plaintext_sha256);
     lc_pouch_free(&store->allocator, src_content_type);
@@ -12679,9 +13042,9 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
   }
   now_unix = (long)time(NULL);
   rc = lc_pouch_disk_append_object_copy_record(
-      store, read_fd, namespace_name, dst_key, name, id,
-      src_content_type, src_body_offset, src_body_length, now_unix, now_unix,
-      &payload_path, &payload_offset, error);
+      store, read_fd, namespace_name, dst_key, name, id, src_content_type,
+      src_body_offset, src_body_length, now_unix, now_unix, &payload_path,
+      &payload_offset, error);
   close(read_fd);
   if (rc == LC_OK &&
       !lc_pouch_disk_upsert_object_entry(
@@ -12691,8 +13054,8 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     rc = lc_pouch_set_nomem(error, "failed to update pouch object index");
   }
   if (rc == LC_OK) {
-    existing = lc_pouch_disk_find_object_by_name(store, namespace_name, dst_key,
-                                                 name);
+    existing =
+        lc_pouch_disk_find_object_by_name(store, namespace_name, dst_key, name);
     if (existing >= 0 &&
         !lc_pouch_object_info_from_entry(&store->allocator, out,
                                          &store->object_entries[existing])) {
@@ -12700,7 +13063,8 @@ static int lc_pouch_disk_copy_object(lc_pouch_store *self,
     }
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   lc_pouch_free(&store->allocator, id);
   lc_pouch_free(&store->allocator, payload_path);
@@ -12735,7 +13099,7 @@ static int lc_pouch_disk_delete_object(lc_pouch_store *self,
                                 "selector, and deleted output");
   }
   rc = lc_pouch_disk_validate_namespace_key(error, "delete_object",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12763,13 +13127,13 @@ static int lc_pouch_disk_delete_object(lc_pouch_store *self,
     }
   }
   if (rc == LC_OK && *deleted) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
@@ -12792,7 +13156,7 @@ static int lc_pouch_disk_delete_all_objects(lc_pouch_store *self,
                                 "key, and deleted_count");
   }
   rc = lc_pouch_disk_validate_namespace_key(error, "delete_all_objects",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12825,13 +13189,13 @@ static int lc_pouch_disk_delete_all_objects(lc_pouch_store *self,
     }
   }
   if (rc == LC_OK && *deleted_count > 0) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
-  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK &&
-      rc == LC_OK) {
+  if (lc_pouch_disk_unlock_key(self, key_lock, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
   return rc;
@@ -12875,8 +13239,7 @@ static int lc_pouch_disk_queue_ref_valid(lc_pouch_disk_queue_entry *entry,
                         "message lease",
                         NULL, "txn_mismatch", NULL);
   }
-  if (entry->txn_id == NULL && ref->txn_id != NULL &&
-      ref->txn_id[0] != '\0') {
+  if (entry->txn_id == NULL && ref->txn_id != NULL && ref->txn_id[0] != '\0') {
     return lc_error_set(error, LC_ERR_SERVER, 409L,
                         "pouch queue transaction id does not match active "
                         "message lease",
@@ -13082,17 +13445,14 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
     return lc_pouch_set_errno(error, "failed to seek pouch segment");
   }
   if (!lc_pouch_write_all(segment_fd, header, sizeof(header)) ||
-      !lc_pouch_write_all(segment_fd, entry->namespace_name,
-                          (size_t)ns_len) ||
+      !lc_pouch_write_all(segment_fd, entry->namespace_name, (size_t)ns_len) ||
       !lc_pouch_write_all(segment_fd, entry->queue, (size_t)queue_len) ||
       !lc_pouch_write_all(segment_fd, entry->message_id,
                           (size_t)message_id_len) ||
-      (meta_etag_len > 0UL &&
-       !lc_pouch_write_all(segment_fd, entry->meta_etag,
-                           (size_t)meta_etag_len)) ||
+      (meta_etag_len > 0UL && !lc_pouch_write_all(segment_fd, entry->meta_etag,
+                                                  (size_t)meta_etag_len)) ||
       !lc_pouch_write_all(segment_fd, queue_meta, sizeof(queue_meta)) ||
-      !lc_pouch_write_all(segment_fd, content_type,
-                          (size_t)content_type_len) ||
+      !lc_pouch_write_all(segment_fd, content_type, (size_t)content_type_len) ||
       (lease_id_len > 0UL &&
        !lc_pouch_write_all(segment_fd, lease_id, (size_t)lease_id_len)) ||
       (txn_id_len > 0UL &&
@@ -13122,12 +13482,11 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
                 queue_len + message_id_len + meta_etag_len;
   if (!lc_pouch_disk_upsert_queue_entry(
           store, entry->namespace_name, entry->queue, entry->message_id,
-          content_type, entry->lease_id, entry->txn_id,
-          entry->meta_etag, entry->attempts, entry->max_attempts,
-          entry->failure_attempts, entry->enqueued_at_unix,
-          entry->not_visible_until_unix, entry->visibility_timeout_seconds,
-          entry->expires_at_unix, entry->lease_expires_at_unix,
-          entry->fencing_token, segment_path,
+          content_type, entry->lease_id, entry->txn_id, entry->meta_etag,
+          entry->attempts, entry->max_attempts, entry->failure_attempts,
+          entry->enqueued_at_unix, entry->not_visible_until_unix,
+          entry->visibility_timeout_seconds, entry->expires_at_unix,
+          entry->lease_expires_at_unix, entry->fencing_token, segment_path,
           body_offset + LC_POUCH_QUEUE_META_SIZE + content_type_len +
               lease_id_len + txn_id_len,
           payload_length, 1, entry->deleted)) {
@@ -13191,9 +13550,8 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
   temp_fd = -1;
   payload_length = 0UL;
   payload_crc = 0UL;
-  rc = lc_pouch_disk_spool_source_to_temp(store, body, 0, 0U, &temp_fd,
-                                          &payload_length, &payload_crc, NULL,
-                                          error);
+  rc = lc_pouch_disk_spool_source_to_temp(
+      store, body, 0, 0U, &temp_fd, &payload_length, &payload_crc, NULL, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -13257,7 +13615,8 @@ static int lc_pouch_disk_enqueue_message(lc_pouch_store *self,
     }
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   if (rc == LC_OK) {
     lc_pouch_disk_touch_queue_wake(store, namespace_name, queue);
@@ -13377,10 +13736,11 @@ static int lc_pouch_disk_dequeue_message(
   updated.meta_etag = meta_etag;
   updated.attempts += 1;
   updated.fencing_token += 1L;
-  updated.visibility_timeout_seconds =
-      opts->visibility_timeout_seconds > 0L ? opts->visibility_timeout_seconds
-                                            : entry->visibility_timeout_seconds;
-  updated.not_visible_until_unix = now_unix + updated.visibility_timeout_seconds;
+  updated.visibility_timeout_seconds = opts->visibility_timeout_seconds > 0L
+                                           ? opts->visibility_timeout_seconds
+                                           : entry->visibility_timeout_seconds;
+  updated.not_visible_until_unix =
+      now_unix + updated.visibility_timeout_seconds;
   updated.lease_expires_at_unix = updated.not_visible_until_unix;
   rc = lc_pouch_disk_append_queue_entry(store, LC_POUCH_RECORD_QUEUE_UPDATE,
                                         &updated, NULL, 0U, 0, error);
@@ -13388,7 +13748,8 @@ static int lc_pouch_disk_dequeue_message(
   lc_pouch_free(&store->allocator, txn_id);
   lc_pouch_free(&store->allocator, meta_etag);
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
+                                                     error);
   }
   if (rc == LC_OK) {
     lc_pouch_disk_touch_queue_wake(store, namespace_name, queue);
@@ -13486,7 +13847,8 @@ static int lc_pouch_disk_ack_message(lc_pouch_store *self,
     }
   }
   if (rc == LC_OK && *acked) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, ref->namespace_name,
+                                                     error);
   }
   if (rc == LC_OK && *acked) {
     lc_pouch_disk_touch_queue_wake(store, ref->namespace_name, ref->queue);
@@ -13552,9 +13914,9 @@ static int lc_pouch_disk_nack_message(lc_pouch_store *self,
       updated.failure_attempts += 1;
     }
     updated.lease_id = NULL;
-    meta_etag = lc_pouch_make_etag(store, updated.fencing_token,
-                                   updated.message_id,
-                                   strlen(updated.message_id));
+    meta_etag =
+        lc_pouch_make_etag(store, updated.fencing_token, updated.message_id,
+                           strlen(updated.message_id));
     updated.meta_etag = meta_etag;
     if (meta_etag == NULL) {
       rc = lc_pouch_set_nomem(error, "failed to allocate pouch queue etag");
@@ -13574,7 +13936,8 @@ static int lc_pouch_disk_nack_message(lc_pouch_store *self,
     rc = lc_pouch_set_nomem(error, "failed to copy pouch queue message");
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, ref->namespace_name,
+                                                     error);
   }
   if (rc == LC_OK) {
     lc_pouch_disk_touch_queue_wake(store, ref->namespace_name, ref->queue);
@@ -13632,16 +13995,16 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
   rc = lc_pouch_disk_queue_ref_valid(entry, ref, error);
   if (rc == LC_OK) {
     updated = *entry;
-    updated.visibility_timeout_seconds = extend_by_seconds > 0L
-                                             ? extend_by_seconds
-                                             : entry->visibility_timeout_seconds;
+    updated.visibility_timeout_seconds =
+        extend_by_seconds > 0L ? extend_by_seconds
+                               : entry->visibility_timeout_seconds;
     updated.not_visible_until_unix =
         (long)time(NULL) + updated.visibility_timeout_seconds;
     updated.lease_expires_at_unix = updated.not_visible_until_unix;
     updated.fencing_token += 1L;
-    meta_etag = lc_pouch_make_etag(store, updated.fencing_token,
-                                   updated.message_id,
-                                   strlen(updated.message_id));
+    meta_etag =
+        lc_pouch_make_etag(store, updated.fencing_token, updated.message_id,
+                           strlen(updated.message_id));
     updated.meta_etag = meta_etag;
     if (meta_etag == NULL) {
       rc = lc_pouch_set_nomem(error, "failed to allocate pouch queue etag");
@@ -13661,7 +14024,8 @@ static int lc_pouch_disk_extend_message(lc_pouch_store *self,
     rc = lc_pouch_set_nomem(error, "failed to copy pouch queue message");
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, ref->namespace_name,
+                                                     error);
   }
   if (rc == LC_OK) {
     lc_pouch_disk_touch_queue_wake(store, ref->namespace_name, ref->queue);
@@ -13718,28 +14082,30 @@ static int lc_pouch_disk_apply_queue_txn(lc_pouch_store *self,
       updated.deleted = 0;
       updated.not_visible_until_unix = now_unix;
     }
-    meta_etag = lc_pouch_make_etag(store, updated.fencing_token,
-                                   updated.message_id,
-                                   strlen(updated.message_id));
+    meta_etag =
+        lc_pouch_make_etag(store, updated.fencing_token, updated.message_id,
+                           strlen(updated.message_id));
     if (meta_etag == NULL) {
       rc = lc_pouch_set_nomem(error, "failed to allocate pouch queue etag");
       break;
     }
     updated.meta_etag = meta_etag;
-    rc = lc_pouch_disk_append_queue_entry(
-        store, updated.deleted ? LC_POUCH_RECORD_QUEUE_REMOVE
-                               : LC_POUCH_RECORD_QUEUE_UPDATE,
-        &updated, NULL, 0U, 0, error);
+    rc = lc_pouch_disk_append_queue_entry(store,
+                                          updated.deleted
+                                              ? LC_POUCH_RECORD_QUEUE_REMOVE
+                                              : LC_POUCH_RECORD_QUEUE_UPDATE,
+                                          &updated, NULL, 0U, 0, error);
     lc_pouch_free(&store->allocator, meta_etag);
     if (rc != LC_OK) {
       break;
     }
     lc_pouch_disk_touch_queue_wake(store, updated.namespace_name,
                                    updated.queue);
+    lc_pouch_disk_touch_namespace_writer_marker(store, updated.namespace_name);
     touched = 1;
   }
   if (rc == LC_OK && touched) {
-    rc = lc_pouch_disk_mark_replayed_to_current_size(store, error);
+    rc = lc_pouch_disk_mark_replayed_to_current_size(store, NULL, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
@@ -13773,9 +14139,8 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
   memset(out, 0, sizeof(*out));
   out->correlation_id = lc_pouch_strdup(&store->allocator, "pouch-queue-stats");
   if (out->correlation_id == NULL) {
-    return lc_pouch_set_nomem(error,
-                              "failed to allocate pouch queue stats "
-                              "correlation id");
+    return lc_pouch_set_nomem(error, "failed to allocate pouch queue stats "
+                                     "correlation id");
   }
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
@@ -13815,9 +14180,11 @@ static int lc_pouch_disk_queue_stats(lc_pouch_store *self,
   return LC_OK;
 }
 
-static int lc_pouch_disk_queue_wake_status(
-    lc_pouch_store *self, const char *namespace_name, const char *queue,
-    lc_pouch_queue_wake_status *out, lc_error *error) {
+static int lc_pouch_disk_queue_wake_status(lc_pouch_store *self,
+                                           const char *namespace_name,
+                                           const char *queue,
+                                           lc_pouch_queue_wake_status *out,
+                                           lc_error *error) {
   lc_pouch_disk_store *store;
   int rc;
 
@@ -13838,8 +14205,7 @@ static int lc_pouch_disk_queue_wake_status(
       "disk pouch uses polling with best-effort queue marker hints");
   if (out->mode == NULL || out->reason == NULL) {
     lc_pouch_queue_wake_status_cleanup(&store->allocator, out);
-    return lc_pouch_set_nomem(error,
-                              "failed to copy pouch queue wake status");
+    return lc_pouch_set_nomem(error, "failed to copy pouch queue wake status");
   }
   out->uses_marker_hints = 1;
   out->uses_filesystem_notifications = 0;
@@ -13860,8 +14226,7 @@ static int lc_pouch_disk_fsync_stats(lc_pouch_store *self,
   return LC_OK;
 }
 
-static int lc_pouch_disk_parse_marker_updated_at(const char *bytes,
-                                                 long *out) {
+static int lc_pouch_disk_parse_marker_updated_at(const char *bytes, long *out) {
   const char *cursor;
   const char *line;
   const char *value;
@@ -13906,13 +14271,11 @@ static int lc_pouch_disk_writer_marker_stale(const char *path,
     if (got > 0) {
       bytes[(size_t)got] = '\0';
       if (lc_pouch_disk_parse_marker_updated_at(bytes, &updated_at_unix)) {
-        return updated_at_unix <=
-               now_unix - LC_POUCH_WRITER_MARKER_TTL_SECONDS;
+        return updated_at_unix <= now_unix - LC_POUCH_WRITER_MARKER_TTL_SECONDS;
       }
     }
   }
-  return (long)st->st_mtime <=
-         now_unix - LC_POUCH_WRITER_MARKER_TTL_SECONDS;
+  return (long)st->st_mtime <= now_unix - LC_POUCH_WRITER_MARKER_TTL_SECONDS;
 }
 
 static int lc_pouch_disk_writer_status(lc_pouch_store *self,
@@ -13984,7 +14347,8 @@ static int lc_pouch_disk_writer_status(lc_pouch_store *self,
   }
   if (closedir(dir) != 0) {
     lc_pouch_writer_status_cleanup(&store->allocator, out);
-    return lc_pouch_set_errno(error, "failed to close pouch writer marker scan");
+    return lc_pouch_set_errno(error,
+                              "failed to close pouch writer marker scan");
   }
   return LC_OK;
 }
@@ -14062,7 +14426,7 @@ static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
         error, "lock_key_path requires store, namespace, key, and output");
   }
   rc = lc_pouch_disk_validate_namespace_key(error, "lock_key_path",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -14075,8 +14439,7 @@ static int lc_pouch_disk_lock_key_path(lc_pouch_store *self,
 }
 
 static int lc_pouch_disk_lock_fd_cache_status(
-    lc_pouch_store *self, lc_pouch_lock_fd_cache_status *out,
-    lc_error *error) {
+    lc_pouch_store *self, lc_pouch_lock_fd_cache_status *out, lc_error *error) {
   if (self == NULL || out == NULL) {
     return lc_pouch_set_invalid(
         error, "lock_fd_cache_status requires store and output");
@@ -14086,8 +14449,7 @@ static int lc_pouch_disk_lock_fd_cache_status(
 }
 
 static int lc_pouch_disk_read_fd_cache_status(
-    lc_pouch_store *self, lc_pouch_read_fd_cache_status *out,
-    lc_error *error) {
+    lc_pouch_store *self, lc_pouch_read_fd_cache_status *out, lc_error *error) {
   if (self == NULL || out == NULL) {
     return lc_pouch_set_invalid(
         error, "read_fd_cache_status requires store and output");
@@ -14098,8 +14460,7 @@ static int lc_pouch_disk_read_fd_cache_status(
 
 static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
                                       const char *namespace_name,
-                                      const char *key,
-                                      lc_pouch_key_lock **lock,
+                                      const char *key, lc_pouch_key_lock **lock,
                                       int *acquired, lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_key_lock *key_lock;
@@ -14122,7 +14483,7 @@ static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
         error, "try_lock_key requires store, namespace, key, lock, and output");
   }
   rc = lc_pouch_disk_validate_namespace_key(error, "try_lock_key",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -14173,8 +14534,8 @@ static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
     return lc_pouch_set_errno(error, "failed to lock pouch key lock");
   }
 
-  key_lock = (lc_pouch_key_lock *)lc_pouch_calloc(
-      &store->allocator, 1U, sizeof(*key_lock));
+  key_lock = (lc_pouch_key_lock *)lc_pouch_calloc(&store->allocator, 1U,
+                                                  sizeof(*key_lock));
   if (key_lock == NULL) {
     fcntl_lock.l_type = F_UNLCK;
     (void)fcntl(fd, F_SETLK, &fcntl_lock);
@@ -14220,7 +14581,7 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
         error, "lock_key_wait requires store, namespace, key, and lock");
   }
   rc = lc_pouch_disk_validate_namespace_key(error, "lock_key_wait",
-                                           namespace_name, key);
+                                            namespace_name, key);
   if (rc != LC_OK) {
     return rc;
   }
@@ -14266,8 +14627,8 @@ static int lc_pouch_disk_lock_key_wait(lc_pouch_store *self,
     return lc_pouch_set_errno(error, "failed to lock pouch key lock");
   }
 
-  key_lock = (lc_pouch_key_lock *)lc_pouch_calloc(
-      &store->allocator, 1U, sizeof(*key_lock));
+  key_lock = (lc_pouch_key_lock *)lc_pouch_calloc(&store->allocator, 1U,
+                                                  sizeof(*key_lock));
   if (key_lock == NULL) {
     fcntl_lock.l_type = F_UNLCK;
     (void)fcntl(fd, F_SETLK, &fcntl_lock);
@@ -14388,17 +14749,18 @@ static int lc_pouch_disk_unlock_key(lc_pouch_store *self,
   }
   if (lock->fd >= 0) {
     if (rc == LC_OK) {
-      rc = lc_pouch_disk_cache_lock_fd(lock->store != NULL ? lock->store : store,
-                                       &lock->path, lock->fd, error);
+      rc =
+          lc_pouch_disk_cache_lock_fd(lock->store != NULL ? lock->store : store,
+                                      &lock->path, lock->fd, error);
     } else if (close(lock->fd) != 0) {
       (void)lc_pouch_set_errno(error, "failed to close pouch key lock");
     }
   }
   lock->fd = -1;
   if ((lock->process_stripe_locked || lock->local_stripe_locked) &&
-      lc_pouch_disk_unlock_key_stripes(
-          lock->store != NULL ? lock->store : store, lock->process_stripe,
-          error) != LC_OK &&
+      lc_pouch_disk_unlock_key_stripes(lock->store != NULL ? lock->store
+                                                           : store,
+                                       lock->process_stripe, error) != LC_OK &&
       rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
   }
@@ -14413,8 +14775,7 @@ static int lc_pouch_disk_unlock_key(lc_pouch_store *self,
 }
 
 static int lc_pouch_disk_backend_capabilities(
-    lc_pouch_store *self, lc_pouch_backend_capabilities *out,
-    lc_error *error) {
+    lc_pouch_store *self, lc_pouch_backend_capabilities *out, lc_error *error) {
   lc_pouch_disk_store *store;
 
   if (self == NULL || out == NULL) {
@@ -14449,8 +14810,7 @@ static char *lc_pouch_disk_make_backend_hash(lc_pouch_disk_store *store) {
 }
 
 static int lc_pouch_disk_read_backend_hash_object(lc_pouch_store *self,
-                                                  char **out,
-                                                  lc_error *error) {
+                                                  char **out, lc_error *error) {
   lc_pouch_disk_store *store;
   lc_pouch_object_selector selector;
   lc_pouch_object_info info;
@@ -14609,6 +14969,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->query_field_postings);
   lc_pouch_free(&allocator, store->object_entries);
   lc_pouch_free(&allocator, store->queue_entries);
+  lc_pouch_disk_marker_snapshot_cleanup(store);
   lc_pouch_disk_close_lock_fd_cache(store);
   lc_pouch_read_cache_owner_mark_closed(store->read_cache_owner);
   lc_pouch_disk_close_read_fd_cache(store);
@@ -14618,6 +14979,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->lock_path);
   lc_pouch_free(&allocator, store->query_index_path);
   lc_pouch_free(&allocator, store->writer_marker_path);
+  lc_pouch_free(&allocator, store->logstore_writer_marker_leaf);
   lc_pouch_free(&allocator, store->query_engine);
   lc_pouch_free(&allocator, store->query_fallback_engine);
   lc_pouch_disk_destroy_store_key_stripes(store);
@@ -14704,13 +15066,18 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       lc_pouch_join_path(&store->allocator, root_path, "writer.lock");
   store->query_index_path = lc_pouch_disk_make_query_index_path(store, error);
   store->writer_marker_path = lc_pouch_disk_make_writer_marker_path(store);
+  if (store->writer_marker_path != NULL) {
+    store->logstore_writer_marker_leaf =
+        lc_pouch_disk_make_logstore_writer_marker_leaf(store);
+  }
   store->query_engine = lc_pouch_strdup(&store->allocator, query_engine);
   store->query_fallback_engine =
       lc_pouch_strdup(&store->allocator, query_fallback_engine);
   if (store->root_path == NULL || store->log_path == NULL ||
       store->lock_path == NULL || store->query_index_path == NULL ||
-      store->writer_marker_path == NULL || store->query_engine == NULL ||
-      store->query_fallback_engine == NULL) {
+      store->writer_marker_path == NULL ||
+      store->logstore_writer_marker_leaf == NULL ||
+      store->query_engine == NULL || store->query_fallback_engine == NULL) {
     lc_pouch_disk_close(&store->pub, error);
     return lc_pouch_set_nomem(error, "failed to allocate pouch disk options");
   }
