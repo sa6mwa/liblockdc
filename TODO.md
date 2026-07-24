@@ -404,6 +404,9 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.
+      - [x] Detect `liblql` wildcard/recursive path capabilities during pouch
+        LQL filter initialization and force deterministic full-candidate indexed
+        fallback until concrete path expansion can be planned safely.
     - [ ] Add token/trigram-style candidate structures if pouch needs
       Go-style text filtering performance; keep final contains/full-text
       semantics validated by `liblql`.

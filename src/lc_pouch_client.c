@@ -17391,6 +17391,7 @@ static int
 lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
                                   const char *selector_json, lc_error *error) {
   lql_error lql_err;
+  lql_selector_capabilities capabilities;
   lql_status status;
   int has_mixed_or_exists_range;
   int has_mixed_or_exists_prefix;
@@ -17421,6 +17422,13 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
     lc_pouch_lql_document_filter_cleanup(filter);
     return lc_pouch_lql_set_error(error, status, &lql_err,
                                   "failed to parse pouch LQL selector");
+  }
+  memset(&capabilities, 0, sizeof(capabilities));
+  filter->runtime->selector_capabilities_get(filter->runtime, filter->selector,
+                                             &capabilities);
+  if (capabilities.wildcard_path || capabilities.recursive_path) {
+    filter->enabled = 1;
+    return LC_OK;
   }
   (void)lc_pouch_lql_eq_hint_parse(selector_json, &filter->document_eq_terms,
                                    &filter->document_eq_term_count);
