@@ -5975,6 +5975,151 @@ static void test_query_index_summary_scan_applies_negative_terms(void **state) {
 }
 
 static void
+test_query_index_path_pattern_scan_intersects_positive_terms(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res state_alpha;
+  lc_pouch_put_state_res state_bravo;
+  lc_pouch_put_state_res state_charlie;
+  lc_pouch_put_state_res state_delta;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_document_exists_term patterns[2];
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-path-pattern-and");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&state_alpha, 0, sizeof(state_alpha));
+  memset(&state_bravo, 0, sizeof(state_bravo));
+  memset(&state_charlie, 0, sizeof(state_charlie));
+  memset(&state_delta, 0, sizeof(state_delta));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&patterns, 0, sizeof(patterns));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  put_opts.content_type = "application/json";
+  source = source_from_text("{\"box\":{\"a\":1}}");
+  rc = store->write_state(store, "default", "alpha", source, &put_opts,
+                          &state_alpha, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"rack\":{\"b\":2}}");
+  rc = store->write_state(store, "default", "bravo", source, &put_opts,
+                          &state_bravo, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"box\":{\"a\":1},\"rack\":{\"b\":2}}");
+  rc = store->write_state(store, "default", "charlie", source, &put_opts,
+                          &state_charlie, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("{\"box\":{\"c\":3},\"rack\":{\"d\":4}}");
+  rc = store->write_state(store, "default", "delta", source, &put_opts,
+                          &state_delta, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = state_alpha.new_state_etag;
+  meta.version = state_alpha.new_version;
+  meta.fencing_token = state_alpha.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = state_bravo.new_state_etag;
+  meta.version = state_bravo.new_version;
+  meta.fencing_token = state_bravo.new_version;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-charlie";
+  meta.state_etag = state_charlie.new_state_etag;
+  meta.version = state_charlie.new_version;
+  meta.fencing_token = state_charlie.new_version;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-delta";
+  meta.state_etag = state_delta.new_state_etag;
+  meta.version = state_delta.new_version;
+  meta.fencing_token = state_delta.new_version;
+  rc = store->store_meta(store, "default", "delta", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  patterns[0].field = "/box/*";
+  patterns[1].field = "/rack/*";
+  req.namespace_name = "default";
+  req.document_exists_path_patterns = patterns;
+  req.document_exists_path_pattern_count = 2U;
+  req.limit = 1U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "charlie");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "charlie");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  req.start_after = "charlie";
+  req.limit = 8U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "delta");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &state_delta);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_charlie);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_bravo);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_alpha);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_query_index_keys_scan_avoids_metadata_row_copies(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -16422,6 +16567,8 @@ int main(void) {
       cmocka_unit_test(test_query_index_range_scans_field_posting_candidates),
       cmocka_unit_test(
           test_query_index_summary_scan_applies_negative_terms),
+      cmocka_unit_test(
+          test_query_index_path_pattern_scan_intersects_positive_terms),
       cmocka_unit_test(test_query_index_keys_scan_avoids_metadata_row_copies),
       cmocka_unit_test(test_query_owner_index_scans_candidates_and_replays),
       cmocka_unit_test(test_query_index_scans_exclude_removed_state),
