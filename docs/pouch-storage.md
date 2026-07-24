@@ -792,6 +792,10 @@ Negated string `in` and numeric `range` leaves under recursive `and`
 composition use the same storage-owned exclusion model, rejecting live
 membership or numeric range posting matches while preserving final predicate
 authority in `liblql`.
+When a selector has no positive storage-owned candidate term, the ordered
+summary scan still applies indexed negative equality and field-presence
+exclusions before returning document rows or keys, so negative-only predicates
+do not silently become match-all scans.
 Positive `exists` selectors with single-segment wildcard path components, such
 as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
 instead of treating the wildcard as a literal posting field; final acceptance
