@@ -33,6 +33,22 @@ func runPouchIndexedLQLKeys(root string, iterations int, seededRows int) (int, p
 	return int(rc), convertPouchResult(res)
 }
 
+func runPouchStateWrite(root string, iterations int) (int, pouchResult) {
+	cRoot := C.CString(root)
+	defer C.free(unsafe.Pointer(cRoot))
+	var res C.lockdc_pouch_bench_result
+	rc := C.lockdc_pouch_bench_state_write(cRoot, C.uint64_t(iterations), &res)
+	return int(rc), convertPouchResult(res)
+}
+
+func runPouchStateRead(root string, iterations int) (int, pouchResult) {
+	cRoot := C.CString(root)
+	defer C.free(unsafe.Pointer(cRoot))
+	var res C.lockdc_pouch_bench_result
+	rc := C.lockdc_pouch_bench_state_read(cRoot, C.uint64_t(iterations), &res)
+	return int(rc), convertPouchResult(res)
+}
+
 func convertPouchResult(res C.lockdc_pouch_bench_result) pouchResult {
 	return pouchResult{
 		operations: uint64(res.operations),

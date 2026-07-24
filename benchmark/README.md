@@ -20,6 +20,12 @@ Run from the repository root:
 make benchmark-pouch-go
 ```
 
+Fast iteration suite, capped by Go's test timeout at 30 seconds:
+
+```sh
+make benchmark-pouch-go-fast
+```
+
 Useful overrides:
 
 ```sh
@@ -36,3 +42,11 @@ validation and a larger value for stress/perf runs.
 - `BenchmarkPouchCIndexedLQLKeys10k`
 - `BenchmarkLockdDiskIndexedLQLRows10k`
 - `BenchmarkLockdDiskIndexedLQLKeys10k`
+
+The fast suite runs one pouch and one lockd disk case for each representative
+storage scenario:
+
+- state write
+- state read
+- indexed LQL document query
+- indexed LQL key query

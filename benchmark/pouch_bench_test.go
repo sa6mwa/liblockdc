@@ -32,7 +32,9 @@ func reportCResult(b *testing.B, res pouchResult) {
 	cNsPerOp := float64(res.elapsedNS) / float64(ops)
 	b.ReportMetric(cNsPerOp, "ns/op")
 	b.ReportMetric(cNsPerOp, "c-ns/op")
-	b.ReportMetric(float64(res.rows), "seeded-rows")
+	if res.rows != 0 {
+		b.ReportMetric(float64(res.rows), "seeded-rows")
+	}
 	if res.indexSeq != 0 {
 		b.ReportMetric(float64(res.indexSeq), "index-seq")
 	}
@@ -65,6 +67,28 @@ func BenchmarkPouchCIndexedLQLRows10k(b *testing.B) {
 	reportCResult(b, res)
 }
 
+func BenchmarkPouchCFastStateWrite(b *testing.B) {
+	root := b.TempDir()
+	b.ResetTimer()
+	rc, res := runPouchStateWrite(root, b.N)
+	b.StopTimer()
+	if rc != 0 {
+		b.Fatalf("%s", res.err)
+	}
+	reportCResult(b, res)
+}
+
+func BenchmarkPouchCFastStateRead(b *testing.B) {
+	root := b.TempDir()
+	b.ResetTimer()
+	rc, res := runPouchStateRead(root, b.N)
+	b.StopTimer()
+	if rc != 0 {
+		b.Fatalf("%s", res.err)
+	}
+	reportCResult(b, res)
+}
+
 func BenchmarkLockdDiskIndexedLQLRows10k(b *testing.B) {
 	rows := seedRows()
 	env := startLockdDiskBenchmarkEnv(b)
@@ -77,6 +101,17 @@ func BenchmarkLockdDiskIndexedLQLKeys10k(b *testing.B) {
 	env := startLockdDiskBenchmarkEnv(b)
 	seedLockdRows(b, env.client, rows)
 	benchmarkLockdQuery(b, env.client, rows, true)
+}
+
+func BenchmarkLockdDiskFastStateWrite(b *testing.B) {
+	env := startLockdDiskBenchmarkEnv(b)
+	benchmarkLockdStateWrite(b, env.client)
+}
+
+func BenchmarkLockdDiskFastStateRead(b *testing.B) {
+	env := startLockdDiskBenchmarkEnv(b)
+	seedLockdState(b, env.client, "bench-read-hot", []byte(`{"bucket":"read","value":1}`))
+	benchmarkLockdStateRead(b, env.client)
 }
 
 type lockdDiskEnv struct {
@@ -169,29 +204,88 @@ func waitForHealth(b *testing.B, baseURL string, output *strings.Builder) {
 
 func seedLockdRows(b *testing.B, cli *lockdclient.Client, rows int) {
 	b.Helper()
-	ctx := context.Background()
 	for i := 0; i < rows; i++ {
 		key := fmt.Sprintf("bench/query/%08d", i)
+		payload := []byte(fmt.Sprintf(`{"bucket":"%s","value":%d}`,
+			map[bool]string{true: "needle", false: "haystack"}[i == rows/2], i))
+		seedLockdState(b, cli, key, payload)
+	}
+}
+
+func seedLockdState(b *testing.B, cli *lockdclient.Client, key string, payload []byte) {
+	b.Helper()
+	ctx := context.Background()
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  benchmarkNamespace,
+		Key:        key,
+		Owner:      "bench-owner",
+		TTLSeconds: 3600,
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		b.Fatalf("acquire %s: %v", key, err)
+	}
+	if _, err := lease.UpdateBytes(ctx, payload); err != nil {
+		_ = lease.Release(ctx)
+		b.Fatalf("update %s: %v", key, err)
+	}
+	if err := lease.Release(ctx); err != nil {
+		b.Fatalf("release %s: %v", key, err)
+	}
+}
+
+func benchmarkLockdStateWrite(b *testing.B, cli *lockdclient.Client) {
+	b.Helper()
+	ctx := context.Background()
+	b.SetBytes(int64(len([]byte(`{"bucket":"write","value":0}`))))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("bench/write/%08d", i)
+		payload := []byte(fmt.Sprintf(`{"bucket":"write","value":%d}`, i))
 		lease, err := cli.Acquire(ctx, api.AcquireRequest{
 			Namespace:  benchmarkNamespace,
 			Key:        key,
-			Owner:      fmt.Sprintf("bench-owner-%02d", i%10),
+			Owner:      fmt.Sprintf("bench-writer-%02d", i%10),
 			TTLSeconds: 3600,
 			BlockSecs:  api.BlockNoWait,
 		})
 		if err != nil {
-			b.Fatalf("acquire seed row %d: %v", i, err)
+			b.Fatalf("acquire write %d: %v", i, err)
 		}
-		payload := []byte(fmt.Sprintf(`{"bucket":"%s","value":%d}`,
-			map[bool]string{true: "needle", false: "haystack"}[i == rows/2], i))
 		if _, err := lease.UpdateBytes(ctx, payload); err != nil {
 			_ = lease.Release(ctx)
-			b.Fatalf("update seed row %d: %v", i, err)
+			b.Fatalf("update write %d: %v", i, err)
 		}
 		if err := lease.Release(ctx); err != nil {
-			b.Fatalf("release seed row %d: %v", i, err)
+			b.Fatalf("release write %d: %v", i, err)
 		}
 	}
+	b.StopTimer()
+}
+
+func benchmarkLockdStateRead(b *testing.B, cli *lockdclient.Client) {
+	b.Helper()
+	ctx := context.Background()
+	b.SetBytes(int64(len([]byte(`{"bucket":"read","value":1}`))))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := cli.Get(ctx, "bench-read-hot", lockdclient.WithGetNamespace(benchmarkNamespace))
+		if err != nil {
+			b.Fatalf("get read %d: %v", i, err)
+		}
+		if !resp.HasState {
+			_ = resp.Close()
+			b.Fatalf("get read %d returned no state", i)
+		}
+		if _, err := io.Copy(io.Discard, resp.Reader()); err != nil {
+			_ = resp.Close()
+			b.Fatalf("drain read %d: %v", i, err)
+		}
+		if err := resp.Close(); err != nil {
+			b.Fatalf("close read %d: %v", i, err)
+		}
+	}
+	b.StopTimer()
 }
 
 func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, keysOnly bool) {
@@ -263,4 +357,42 @@ func BenchmarkPouchCIndexedLQLKeys10k(b *testing.B) {
 		b.Fatalf("%s", res.err)
 	}
 	reportCResult(b, res)
+}
+
+func BenchmarkPouchCFastIndexedLQLRows(b *testing.B) {
+	rows := seedRows()
+	root := b.TempDir()
+	b.ResetTimer()
+	rc, res := runPouchIndexedLQLRows(root, b.N, rows)
+	b.StopTimer()
+	if rc != 0 {
+		b.Fatalf("%s", res.err)
+	}
+	reportCResult(b, res)
+}
+
+func BenchmarkPouchCFastIndexedLQLKeys(b *testing.B) {
+	rows := seedRows()
+	root := b.TempDir()
+	b.ResetTimer()
+	rc, res := runPouchIndexedLQLKeys(root, b.N, rows)
+	b.StopTimer()
+	if rc != 0 {
+		b.Fatalf("%s", res.err)
+	}
+	reportCResult(b, res)
+}
+
+func BenchmarkLockdDiskFastIndexedLQLRows(b *testing.B) {
+	rows := seedRows()
+	env := startLockdDiskBenchmarkEnv(b)
+	seedLockdRows(b, env.client, rows)
+	benchmarkLockdQuery(b, env.client, rows, false)
+}
+
+func BenchmarkLockdDiskFastIndexedLQLKeys(b *testing.B) {
+	rows := seedRows()
+	env := startLockdDiskBenchmarkEnv(b)
+	seedLockdRows(b, env.client, rows)
+	benchmarkLockdQuery(b, env.client, rows, true)
 }

@@ -28,7 +28,12 @@ POUCH_GO_BENCH ?= .
 POUCH_GO_BENCHTIME ?= 3s
 POUCH_GO_BENCH_COUNT ?= 1
 POUCH_GO_SEED_ROWS ?= 10000
+POUCH_GO_TEST_TIMEOUT ?= 10m
 LOCKD_GO_VERSION ?= v0.9.0
+POUCH_GO_FAST_BENCH ?= Fast
+POUCH_GO_FAST_BENCHTIME ?= 1x
+POUCH_GO_FAST_SEED_ROWS ?= 64
+POUCH_GO_FAST_TIMEOUT ?= 30s
 FUZZ_TIME ?= 30
 POUCH_GO_BENCH_CFLAGS := \
 	-I$(ROOT)/include \
@@ -62,7 +67,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__format \
-	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-go \
+	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-go __benchmark-pouch-go-fast \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __clean-dist \
 	__lua-rock __lua-test __lua-env \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test \
@@ -71,7 +76,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
-	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-go \
+	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-go benchmark-pouch-go-fast \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives clean-dist \
 	lua-rock lua-test lua-env \
 	dev-up dev-down dev-reset cross-build cross-preset-test cross-test \
@@ -110,6 +115,7 @@ help:
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
 		'make bench-gate         Compatibility alias for benchmarks.' \
 		'make benchmark-pouch-go Run opt-in Go e2e lockd-disk vs pouch perf/stress benchmarks outside release gates (POUCH_GO_BENCH=$(POUCH_GO_BENCH), POUCH_GO_BENCHTIME=$(POUCH_GO_BENCHTIME), POUCH_GO_SEED_ROWS=$(POUCH_GO_SEED_ROWS)).' \
+		'make benchmark-pouch-go-fast Run the bounded Go e2e pouch-vs-disk iteration suite (timeout $(POUCH_GO_FAST_TIMEOUT), seed rows $(POUCH_GO_FAST_SEED_ROWS)).' \
 		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive, source archive, and Lua source rock to dist/.' \
 		'make package-source     Build the source-only release archive.' \
 		'make package-source-smoke  Build and verify the source-only release archive.' \
@@ -324,7 +330,17 @@ __benchmark-pouch-go: __build-x86_64-linux-gnu-release
 	  LOCKDC_BENCH_SEED_ROWS="$(POUCH_GO_SEED_ROWS)" \
 	  CGO_CFLAGS="$(POUCH_GO_BENCH_CFLAGS)" \
 	  CGO_LDFLAGS="$(POUCH_GO_BENCH_LDFLAGS)" \
-	  $(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)'
+	  $(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)' -timeout '$(POUCH_GO_TEST_TIMEOUT)'
+
+benchmark-pouch-go-fast:
+	$(TIMED) benchmark-pouch-go-fast $(MAKE) __benchmark-pouch-go-fast
+
+__benchmark-pouch-go-fast:
+	$(MAKE) __benchmark-pouch-go \
+	  POUCH_GO_BENCH='$(POUCH_GO_FAST_BENCH)' \
+	  POUCH_GO_BENCHTIME='$(POUCH_GO_FAST_BENCHTIME)' \
+	  POUCH_GO_SEED_ROWS='$(POUCH_GO_FAST_SEED_ROWS)' \
+	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_FAST_TIMEOUT)'
 
 package:
 	$(TIMED) package $(MAKE) __package
