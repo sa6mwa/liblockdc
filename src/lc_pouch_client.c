@@ -17397,6 +17397,14 @@ lc_pouch_lql_ast_or_terms_add_exists(lc_pouch_lql_ast_or_terms *terms,
   return 1;
 }
 
+static int lc_pouch_lql_ast_or_terms_add_date_exists(
+    lc_pouch_lql_ast_or_terms *terms, const lql_selector_date_term *source) {
+  if (source == NULL) {
+    return 0;
+  }
+  return lc_pouch_lql_ast_or_terms_add_exists(terms, source->field);
+}
+
 static int
 lc_pouch_lql_ast_range_bound_copy(const lql_selector_range_bound *bound,
                                   char **out) {
@@ -17600,6 +17608,16 @@ static int lc_pouch_lql_ast_or_terms_add_node(lc_pouch_lql_ast_or_terms *terms,
       return 0;
     }
     return lc_pouch_lql_ast_or_terms_add_range(terms, &term);
+  }
+  if (node.kind == LQL_SELECTOR_NODE_DATE) {
+    lql_selector_date_term term;
+
+    memset(&term, 0, sizeof(term));
+    if (runtime->selector_node_date_term(runtime, node, &term, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    return lc_pouch_lql_ast_or_terms_add_date_exists(terms, &term);
   }
   if (node.kind == LQL_SELECTOR_NODE_IN) {
     lql_selector_in_term term;
@@ -17859,6 +17877,79 @@ lc_pouch_lql_ast_not_exists_hint_parse(lc_pouch_lql_document_filter *filter) {
 }
 
 static int
+lc_pouch_lql_ast_collect_date_exists(const lql *runtime, lql_selector_node node,
+                                     lc_pouch_lql_ast_or_terms *terms) {
+  lql_error lql_err;
+  size_t child_count;
+  size_t index;
+
+  if (runtime == NULL || terms == NULL || node.kind == LQL_SELECTOR_NODE_OR ||
+      node.kind == LQL_SELECTOR_NODE_NOT) {
+    return 1;
+  }
+  if (node.kind == LQL_SELECTOR_NODE_DATE) {
+    lql_selector_date_term term;
+
+    memset(&term, 0, sizeof(term));
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_date_term(runtime, node, &term, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    return lc_pouch_lql_ast_or_terms_add_date_exists(terms, &term);
+  }
+  if (node.kind != LQL_SELECTOR_NODE_AND) {
+    return 1;
+  }
+  lql_error_init(&lql_err);
+  if (runtime->selector_node_child_count(runtime, node, &child_count,
+                                         &lql_err) != LQL_STATUS_OK) {
+    return 0;
+  }
+  for (index = 0U; index < child_count; ++index) {
+    lql_selector_node child;
+
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_child(runtime, node, index, &child, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    if (!lc_pouch_lql_ast_collect_date_exists(runtime, child, terms)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_date_exists_hint_parse(lc_pouch_lql_document_filter *filter) {
+  lc_pouch_lql_ast_or_terms terms;
+  lql_selector_node root;
+  lql_error lql_err;
+
+  if (filter == NULL || filter->runtime == NULL || filter->selector == NULL ||
+      filter->document_exists_term_count > 0U) {
+    return 0;
+  }
+  memset(&terms, 0, sizeof(terms));
+  memset(&root, 0, sizeof(root));
+  lql_error_init(&lql_err);
+  if (filter->runtime->selector_root(filter->runtime, filter->selector, &root,
+                                     &lql_err) != LQL_STATUS_OK ||
+      !lc_pouch_lql_ast_collect_date_exists(filter->runtime, root, &terms) ||
+      terms.exists_count == 0U) {
+    lc_pouch_lql_ast_or_terms_cleanup(&terms);
+    return 0;
+  }
+  filter->document_exists_terms = terms.exists_terms;
+  filter->document_exists_term_count = terms.exists_count;
+  terms.exists_terms = NULL;
+  terms.exists_count = 0U;
+  lc_pouch_lql_ast_or_terms_cleanup(&terms);
+  return 1;
+}
+
+static int
 lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
                                   const char *selector_json, lc_error *error) {
   lql_error lql_err;
@@ -17910,6 +18001,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
     lc_pouch_lql_not_eq_hint_parse(selector_json,
                                    &filter->document_not_eq_terms,
                                    &filter->document_not_eq_term_count);
+    (void)lc_pouch_lql_ast_date_exists_hint_parse(filter);
     (void)lc_pouch_lql_ast_not_exists_hint_parse(filter);
     filter->enabled = 1;
     return LC_OK;
@@ -18063,6 +18155,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
         &filter->document_exists_term_count);
   }
   (void)lc_pouch_lql_ast_or_hint_parse(filter);
+  (void)lc_pouch_lql_ast_date_exists_hint_parse(filter);
   lc_pouch_lql_not_eq_hint_parse(selector_json, &filter->document_not_eq_terms,
                                  &filter->document_not_eq_term_count);
   (void)lc_pouch_lql_ast_not_exists_hint_parse(filter);

@@ -6121,10 +6121,15 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   client = open_pouch_client(endpoint);
 
   alpha = pouch_acquire_query_key(client, "alpha", &error);
-  pouch_save_query_json(alpha, "{\"value\":\"alpha\",\"n\":1.0}", &error);
+  pouch_save_query_json(alpha,
+                        "{\"value\":\"alpha\",\"n\":1.0,"
+                        "\"created_at\":\"2026-01-01T00:00:00Z\"}",
+                        &error);
   bravo = pouch_acquire_query_key(client, "bravo", &error);
-  pouch_save_query_json(
-      bravo, "{\"value\":\"beta\",\"kind\":\"selected\",\"n\":2}", &error);
+  pouch_save_query_json(bravo,
+                        "{\"value\":\"beta\",\"kind\":\"selected\",\"n\":2,"
+                        "\"created_at\":\"2024-01-01T00:00:00Z\"}",
+                        &error);
   charlie = pouch_acquire_query_key(client, "charlie", &error);
   pouch_save_query_json(charlie,
                         "{\"other\":\"alpha\",\"n\":3,"
@@ -6152,11 +6157,33 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_int_equal(rc, LC_OK);
   text = memory_sink_text(sink);
   assert_non_null(strstr(text, "{\"key\":\"alpha\""));
-  assert_non_null(strstr(text, "\"document\":{\"value\":\"alpha\",\"n\":1.0}"));
+  assert_non_null(strstr(text, "\"document\":{\"value\":\"alpha\",\"n\":1.0,"
+                               "\"created_at\":\"2026-01-01T00:00:00Z\"}"));
   assert_null(strstr(text, "bravo"));
   assert_null(strstr(text, "charlie"));
   assert_null(strstr(text, "delta"));
   assert_string_equal(res.return_mode, "documents");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"date\":{\"field\":\"/created_at\","
+                      "\"after\":\"2025-01-01T00:00:00Z\"}}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_null(strstr(text, "{\"key\":\"delta\""));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
   assert_int_equal(res.index_seq, 0UL);
   free(text);
   lc_sink_close(sink);
@@ -6179,6 +6206,47 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_null(strstr(text, "charlie"));
   assert_null(strstr(text, "delta"));
   assert_string_equal(res.return_mode, "documents");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"date\":{\"field\":\"/created_at\","
+                      "\"after\":\"2025-01-01T00:00:00Z\"}}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_null(strstr(text, "{\"key\":\"delta\""));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"or\":[{\"date\":{\"field\":\"/created_at\","
+                      "\"after\":\"2025-01-01T00:00:00Z\"}},"
+                      "{\"eq\":{\"field\":\"/value\",\"value\":\"beta\"}}]}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_non_null(strstr(text, "{\"key\":\"delta\""));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);
@@ -8067,6 +8135,18 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_string_equal(capture.keys[1], "bravo");
   assert_string_equal(capture.keys[2], "delta");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&req);
+  req.selector_json = "{\"date\":{\"field\":\"/created_at\","
+                      "\"after\":\"2025-01-01T00:00:00Z\"}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
 

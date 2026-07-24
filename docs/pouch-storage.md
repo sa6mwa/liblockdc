@@ -600,8 +600,12 @@ that combine numeric `range` selectors with strict JSON Pointer `prefix` /
 union ordered numeric and text postings. Full-form `and` selectors that combine
 a positive supported indexed predicate with a `not` exclusion use the positive
 predicate as the storage-owned candidate superset and leave exclusion semantics
-to final `liblql` acceptance. Other OR branch families and broader safe NOT
-planning still need planner support before they can avoid broader scans safely.
+to final `liblql` acceptance. `date` selectors use strict JSON Pointer
+field-presence postings as a storage-owned candidate superset, including inside
+supported OR groups, while datetime parsing, relative-date handling, and
+boundary comparisons remain final `liblql` acceptance. Other OR branch families
+and broader safe NOT planning still need planner support before they can avoid
+broader scans safely.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan
@@ -765,6 +769,9 @@ excluded JSON Pointer field before final `liblql` acceptance.
 String-literal `not eq` leaves under recursive `and` composition similarly
 exclude keys with live exact text equality postings for that field/value; typed
 non-string equality exclusions remain final-acceptance-only.
+Date selectors use indexed field-presence postings for their strict JSON
+Pointer field as a candidate superset. Pouch does not duplicate liblql's
+datetime parser or comparison rules; final date acceptance remains in `liblql`.
 Positive `exists` selectors with single-segment wildcard path components, such
 as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
 instead of treating the wildcard as a literal posting field; final acceptance
