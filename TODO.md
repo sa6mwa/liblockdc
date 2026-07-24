@@ -303,8 +303,14 @@ Latest release targets confirmed on 2026-07-23:
       supported range, `in`, prefix/iprefix, contains/icontains, and `exists`
       terms; typed equality keeps the existing root/top-level `and` extractor
       until the planner can preserve JSON scalar type information recursively.
+    - [x] Add a first OR composition slice for full-form `or` branches whose
+      children are exact equality selectors over the same strict JSON Pointer
+      field; the planner maps those to the existing storage-owned `in`
+      candidate path and still lets `liblql` perform final acceptance.
     - [ ] Add recursive boolean composition over supported selector families
-      without devolving to full namespace scans.
+      without devolving to full namespace scans, including branch-union
+      cursors/de-duplication for mixed-field `or` and exclusion planning for
+      safe `not` forms.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.
