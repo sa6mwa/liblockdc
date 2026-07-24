@@ -693,9 +693,12 @@ predicate postings store the liblql string-predicate view for JSON strings,
 booleans, and number source text; JSON null still has no text-predicate posting.
 Object and array field containers also emit presence postings so `exists` can
 narrow candidates for structured values without requiring a scalar leaf.
-Indexed mode also recognizes top-level full-form `and` conjunctions made only
-of supported equality, range, string `in`, prefix, contains, and exists terms
-and intersects their storage-owned postings before loading candidate documents.
+Indexed mode also recognizes full-form `and` conjunctions made only of
+supported equality, range, string `in`, prefix, contains, and exists terms and
+intersects their storage-owned postings before loading candidate documents.
+Range, `in`, prefix/iprefix, contains/icontains, and `exists` hints are
+extracted through nested `and` trees; typed equality currently uses the
+root/top-level `and` extractor so raw JSON scalar type information is preserved.
 Values inside one `in` term are unioned before that term is intersected with
 other supported predicates. Range-only selectors preserve existing key/cursor
 ordering by checking numeric postings from the key-ordered summary scan rather

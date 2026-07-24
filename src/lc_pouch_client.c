@@ -5639,6 +5639,52 @@ static int lc_pouch_lql_eq_hint_parse_index(
   return 1;
 }
 
+static int lc_pouch_lql_hint_path_is_recursive_and_leaf(
+    const lonejson_value_path *path, const char *operator_name,
+    size_t suffix_len, size_t *term_index) {
+  size_t op_index;
+  size_t index;
+  size_t value;
+
+  if (path == NULL || operator_name == NULL || suffix_len == 0U ||
+      path->segment_count < suffix_len) {
+    return 0;
+  }
+  op_index = path->segment_count - suffix_len;
+  if (!lc_pouch_lql_eq_hint_segment_is(path, op_index, operator_name)) {
+    return 0;
+  }
+  if (op_index == 0U) {
+    if (term_index != NULL) {
+      *term_index = 0U;
+    }
+    return 1;
+  }
+  if ((op_index % 2U) != 0U) {
+    return 0;
+  }
+  value = 0U;
+  for (index = 0U; index < op_index; index += 2U) {
+    size_t child_index;
+
+    if (!lc_pouch_lql_eq_hint_segment_is(path, index, "and") ||
+        !lc_pouch_lql_eq_hint_parse_index(path, index + 1U, &child_index)) {
+      return 0;
+    }
+    if (value > (((size_t)-1) - child_index - 1U) / 257U) {
+      return 0;
+    }
+    value = value * 257U + child_index + 1U;
+    if (value > 4096U) {
+      return 0;
+    }
+  }
+  if (term_index != NULL) {
+    *term_index = value;
+  }
+  return 1;
+}
+
 static int lc_pouch_lql_eq_hint_path_is_and_array(
     const lonejson_value_path *path) {
   return path != NULL && path->segment_count == 1U &&
@@ -6288,19 +6334,11 @@ static void lc_pouch_lql_range_hint_raw_term_cleanup(
 
 static int lc_pouch_lql_range_hint_path_is_member(
     const lonejson_value_path *path, const char *member, size_t *term_index) {
-  if (path != NULL && path->segment_count == 2U &&
-      lc_pouch_lql_eq_hint_segment_is(path, 0U, "range") &&
-      lc_pouch_lql_eq_hint_segment_is(path, 1U, member)) {
-    if (term_index != NULL) {
-      *term_index = 0U;
-    }
-    return 1;
-  }
-  return path != NULL && path->segment_count == 4U &&
-         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
-         lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
-         lc_pouch_lql_eq_hint_segment_is(path, 2U, "range") &&
-         lc_pouch_lql_eq_hint_segment_is(path, 3U, member);
+  return path != NULL && path->segment_count >= 2U &&
+         lc_pouch_lql_eq_hint_segment_is(path, path->segment_count - 1U,
+                                         member) &&
+         lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "range", 2U,
+                                                      term_index);
 }
 
 static int lc_pouch_lql_range_hint_ensure_term(
@@ -6654,41 +6692,24 @@ static void lc_pouch_lql_in_hint_raw_term_cleanup(
 
 static int lc_pouch_lql_in_hint_path_is_member(
     const lonejson_value_path *path, const char *member, size_t *term_index) {
-  if (path != NULL && path->segment_count == 2U &&
-      lc_pouch_lql_eq_hint_segment_is(path, 0U, "in") &&
-      lc_pouch_lql_eq_hint_segment_is(path, 1U, member)) {
-    if (term_index != NULL) {
-      *term_index = 0U;
-    }
-    return 1;
-  }
-  return path != NULL && path->segment_count == 4U &&
-         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
-         lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
-         lc_pouch_lql_eq_hint_segment_is(path, 2U, "in") &&
-         lc_pouch_lql_eq_hint_segment_is(path, 3U, member);
+  return path != NULL && path->segment_count >= 2U &&
+         lc_pouch_lql_eq_hint_segment_is(path, path->segment_count - 1U,
+                                         member) &&
+         lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "in", 2U,
+                                                      term_index);
 }
 
 static int lc_pouch_lql_in_hint_path_is_any_value(
     const lonejson_value_path *path, size_t *term_index) {
   size_t any_index;
 
-  if (path != NULL && path->segment_count == 3U &&
-      lc_pouch_lql_eq_hint_segment_is(path, 0U, "in") &&
-      lc_pouch_lql_eq_hint_segment_is(path, 1U, "any") &&
-      lc_pouch_lql_eq_hint_parse_index(path, 2U, &any_index)) {
-    (void)any_index;
-    if (term_index != NULL) {
-      *term_index = 0U;
-    }
-    return 1;
-  }
-  return path != NULL && path->segment_count == 5U &&
-         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
-         lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
-         lc_pouch_lql_eq_hint_segment_is(path, 2U, "in") &&
-         lc_pouch_lql_eq_hint_segment_is(path, 3U, "any") &&
-         lc_pouch_lql_eq_hint_parse_index(path, 4U, &any_index);
+  return path != NULL && path->segment_count >= 3U &&
+         lc_pouch_lql_eq_hint_segment_is(path, path->segment_count - 2U,
+                                         "any") &&
+         lc_pouch_lql_eq_hint_parse_index(path, path->segment_count - 1U,
+                                          &any_index) &&
+         lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "in", 3U,
+                                                      term_index);
 }
 
 static int lc_pouch_lql_in_hint_ensure_term(
@@ -6946,24 +6967,17 @@ static void lc_pouch_lql_prefix_hint_raw_term_cleanup(
 
 static int lc_pouch_lql_prefix_hint_path_is_object(
     const lonejson_value_path *path, size_t *term_index, int *ignore_case) {
-  if (path != NULL && path->segment_count == 1U &&
-      (lc_pouch_lql_eq_hint_segment_is(path, 0U, "prefix") ||
-       lc_pouch_lql_eq_hint_segment_is(path, 0U, "iprefix"))) {
-    if (term_index != NULL) {
-      *term_index = 0U;
-    }
+  if (lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "prefix", 1U,
+                                                   term_index)) {
     if (ignore_case != NULL) {
-      *ignore_case = lc_pouch_lql_eq_hint_segment_is(path, 0U, "iprefix");
+      *ignore_case = 0;
     }
     return 1;
   }
-  if (path != NULL && path->segment_count == 3U &&
-      lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
-      lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
-      (lc_pouch_lql_eq_hint_segment_is(path, 2U, "prefix") ||
-       lc_pouch_lql_eq_hint_segment_is(path, 2U, "iprefix"))) {
+  if (lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "iprefix", 1U,
+                                                   term_index)) {
     if (ignore_case != NULL) {
-      *ignore_case = lc_pouch_lql_eq_hint_segment_is(path, 2U, "iprefix");
+      *ignore_case = 1;
     }
     return 1;
   }
@@ -6973,26 +6987,22 @@ static int lc_pouch_lql_prefix_hint_path_is_object(
 static int lc_pouch_lql_prefix_hint_path_is_member(
     const lonejson_value_path *path, const char *member, size_t *term_index,
     int *ignore_case) {
-  if (path != NULL && path->segment_count == 2U &&
-      (lc_pouch_lql_eq_hint_segment_is(path, 0U, "prefix") ||
-       lc_pouch_lql_eq_hint_segment_is(path, 0U, "iprefix")) &&
-      lc_pouch_lql_eq_hint_segment_is(path, 1U, member)) {
-    if (term_index != NULL) {
-      *term_index = 0U;
-    }
+  if (path == NULL || path->segment_count < 2U ||
+      !lc_pouch_lql_eq_hint_segment_is(path, path->segment_count - 1U,
+                                       member)) {
+    return 0;
+  }
+  if (lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "prefix", 2U,
+                                                   term_index)) {
     if (ignore_case != NULL) {
-      *ignore_case = lc_pouch_lql_eq_hint_segment_is(path, 0U, "iprefix");
+      *ignore_case = 0;
     }
     return 1;
   }
-  if (path != NULL && path->segment_count == 4U &&
-      lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
-      lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
-      (lc_pouch_lql_eq_hint_segment_is(path, 2U, "prefix") ||
-       lc_pouch_lql_eq_hint_segment_is(path, 2U, "iprefix")) &&
-      lc_pouch_lql_eq_hint_segment_is(path, 3U, member)) {
+  if (lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "iprefix", 2U,
+                                                   term_index)) {
     if (ignore_case != NULL) {
-      *ignore_case = lc_pouch_lql_eq_hint_segment_is(path, 2U, "iprefix");
+      *ignore_case = 1;
     }
     return 1;
   }
@@ -7363,24 +7373,17 @@ typedef struct lc_pouch_lql_contains_hint_visit {
 
 static int lc_pouch_lql_contains_hint_path_is_object(
     const lonejson_value_path *path, size_t *term_index, int *ignore_case) {
-  if (path != NULL && path->segment_count == 1U &&
-      (lc_pouch_lql_eq_hint_segment_is(path, 0U, "contains") ||
-       lc_pouch_lql_eq_hint_segment_is(path, 0U, "icontains"))) {
-    if (term_index != NULL) {
-      *term_index = 0U;
-    }
+  if (lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "contains", 1U,
+                                                   term_index)) {
     if (ignore_case != NULL) {
-      *ignore_case = lc_pouch_lql_eq_hint_segment_is(path, 0U, "icontains");
+      *ignore_case = 0;
     }
     return 1;
   }
-  if (path != NULL && path->segment_count == 3U &&
-      lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
-      lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
-      (lc_pouch_lql_eq_hint_segment_is(path, 2U, "contains") ||
-       lc_pouch_lql_eq_hint_segment_is(path, 2U, "icontains"))) {
+  if (lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "icontains", 1U,
+                                                   term_index)) {
     if (ignore_case != NULL) {
-      *ignore_case = lc_pouch_lql_eq_hint_segment_is(path, 2U, "icontains");
+      *ignore_case = 1;
     }
     return 1;
   }
@@ -7390,26 +7393,22 @@ static int lc_pouch_lql_contains_hint_path_is_object(
 static int lc_pouch_lql_contains_hint_path_is_member(
     const lonejson_value_path *path, const char *member, size_t *term_index,
     int *ignore_case) {
-  if (path != NULL && path->segment_count == 2U &&
-      (lc_pouch_lql_eq_hint_segment_is(path, 0U, "contains") ||
-       lc_pouch_lql_eq_hint_segment_is(path, 0U, "icontains")) &&
-      lc_pouch_lql_eq_hint_segment_is(path, 1U, member)) {
-    if (term_index != NULL) {
-      *term_index = 0U;
-    }
+  if (path == NULL || path->segment_count < 2U ||
+      !lc_pouch_lql_eq_hint_segment_is(path, path->segment_count - 1U,
+                                       member)) {
+    return 0;
+  }
+  if (lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "contains", 2U,
+                                                   term_index)) {
     if (ignore_case != NULL) {
-      *ignore_case = lc_pouch_lql_eq_hint_segment_is(path, 0U, "icontains");
+      *ignore_case = 0;
     }
     return 1;
   }
-  if (path != NULL && path->segment_count == 4U &&
-      lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
-      lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
-      (lc_pouch_lql_eq_hint_segment_is(path, 2U, "contains") ||
-       lc_pouch_lql_eq_hint_segment_is(path, 2U, "icontains")) &&
-      lc_pouch_lql_eq_hint_segment_is(path, 3U, member)) {
+  if (lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "icontains", 2U,
+                                                   term_index)) {
     if (ignore_case != NULL) {
-      *ignore_case = lc_pouch_lql_eq_hint_segment_is(path, 2U, "icontains");
+      *ignore_case = 1;
     }
     return 1;
   }
@@ -7792,17 +7791,8 @@ static void lc_pouch_lql_exists_hint_raw_term_cleanup(
 
 static int lc_pouch_lql_exists_hint_path_is_term(
     const lonejson_value_path *path, size_t *term_index) {
-  if (path != NULL && path->segment_count == 1U &&
-      lc_pouch_lql_eq_hint_segment_is(path, 0U, "exists")) {
-    if (term_index != NULL) {
-      *term_index = 0U;
-    }
-    return 1;
-  }
-  return path != NULL && path->segment_count == 3U &&
-         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
-         lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
-         lc_pouch_lql_eq_hint_segment_is(path, 2U, "exists");
+  return lc_pouch_lql_hint_path_is_recursive_and_leaf(path, "exists", 1U,
+                                                      term_index);
 }
 
 static int lc_pouch_lql_exists_hint_ensure_term(

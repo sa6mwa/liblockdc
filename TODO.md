@@ -298,6 +298,10 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Extend candidate extraction beyond single `eq` selectors to safe
       top-level `and` conjunction/intersection forms over supported scalar
       equality postings; final predicate acceptance remains owned by `liblql`.
+    - [x] Extend candidate extraction to nested full-form `and` trees for
+      supported range, `in`, prefix/iprefix, contains/icontains, and `exists`
+      terms; typed equality keeps the existing root/top-level `and` extractor
+      until the planner can preserve JSON scalar type information recursively.
     - [ ] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans.
     - [ ] Add wildcard/recursive path expansion support for indexed field

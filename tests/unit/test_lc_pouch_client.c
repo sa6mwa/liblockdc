@@ -6857,6 +6857,20 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   memset(&capture, 0, sizeof(capture));
   lc_query_req_init(&req);
   req.selector_json =
+      "{\"and\":[{\"contains\":{\"field\":\"/value\",\"value\":\"et\"}},"
+      "{\"and\":[{\"range\":{\"field\":\"/n\",\"gt\":1,\"lt\":4}},"
+      "{\"exists\":\"/value\"}]}]}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&req);
+  req.selector_json =
       "{\"and\":[{\"in\":{\"field\":\"/value\",\"any\":[\"alpha\",\"beta\"]}},"
       "{\"range\":{\"field\":\"/n\",\"gt\":1,\"lt\":4}}]}";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
