@@ -259,11 +259,14 @@ Latest release targets confirmed on 2026-07-23:
   - [x] Fix LQL document predicate pagination so scan and indexed `query` /
     `query_keys` apply `limit` to matched rows, not pre-filter storage
     candidates, and return cursors only when another matching row exists.
-  - [ ] Add storage-owned field/range posting indexes for low-match public LQL
-    document predicates; indexed string/bool/null/numeric equality and
-    top-level conjunctions over those scalar equality terms now use durable
-    candidate postings, while range selector shapes still need storage-owned
-    candidate sets instead of broad summary candidates.
+  - [ ] Fully build out the pouch search/index engine toward Go lockd disk
+    search parity, while keeping `liblql` as the final public predicate
+    authority.
+    - [ ] Add storage-owned field/range posting indexes for low-match public
+      LQL document predicates; indexed string/bool/null/numeric equality and
+      top-level conjunctions over those scalar equality terms now use durable
+      candidate postings, while range selector shapes still need
+      storage-owned candidate sets instead of broad summary candidates.
     - [x] Add the first durable candidate-posting slice for full-form LQL
       exact equality selectors with strict JSON Pointer fields and
       string/bool/null values; final predicate acceptance remains owned by
@@ -282,6 +285,19 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Extend candidate extraction beyond single `eq` selectors to safe
       top-level `and` conjunction/intersection forms over supported scalar
       equality postings; final predicate acceptance remains owned by `liblql`.
+    - [ ] Add index-native selector families comparable to Go lockd where they
+      are meaningful for pouch/public LQL: prefix, case-insensitive prefix,
+      contains, case-insensitive contains, `in`, `exists`, and recursive
+      boolean composition without devolving to full namespace scans.
+    - [ ] Add wildcard/recursive path expansion support for indexed field
+      dictionaries where `liblql` exposes safe planner hints, with bounded
+      expansion and deterministic fallback semantics.
+    - [ ] Add token/trigram-style candidate structures if pouch needs
+      Go-style text filtering performance; keep final contains/full-text
+      semantics validated by `liblql`.
+    - [ ] Persist an index-format/version contract for pouch postings so
+      incompatible sidecars rebuild from namespace segments/snapshots instead
+      of being trusted.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
@@ -388,6 +404,36 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Materialize live state-link payloads into compacted snapshots under
         the writer lock so old segment/snapshot bodies can be obsoleted without
         dangling linked payload references.
+    - [ ] Add optional background compaction scheduling for pouch, modeled
+      after Go lockd disk but scoped to embedded C lifecycle constraints.
+      - [ ] Add open options for enabling/disabling background compaction,
+        interval, minimum sealed/snapshot candidates, minimum reclaimable
+        bytes, delete grace, and optional I/O throttling.
+      - [ ] Run scheduled compaction/obsolete cleanup from an explicit
+        store-owned lifecycle path that never races foreground writes and can
+        be stopped during close/abort.
+      - [ ] Report scheduled compaction diagnostics through the private pouch
+        control surface and tests, including skipped reasons and cleanup-only
+        passes.
+      - [ ] Keep manual `compact(force|if_needed)` deterministic and
+        foreground-safe even when background scheduling is enabled.
+    - [ ] Add Go disk-style marker lifecycle for segmented pouch logstores.
+      - [ ] Clarify and implement root-level writer-presence markers for
+        exclusive writer detection/fencing, separate from namespace logstore
+        query/segment files.
+      - [ ] Implement per-namespace `<logstore>/markers/writer-*.marker`
+        refresh markers that are touched after successful commit groups so
+        independent handles can cheaply detect another writer's namespace
+        changes before doing full manifest/segment scans.
+      - [ ] Cache marker directory snapshots by name, modtime, and size; use
+        directory mtime as a fast path but periodically force full marker scans
+        because filesystem/NFS mtime granularity can hide changes.
+      - [ ] In single-writer mode, allow marker-synced handles to skip refresh
+        scans unless forced, matching Go disk's native single-writer
+        optimization.
+      - [ ] Cover marker creation, refresh throttling/toggling, foreign marker
+        detection, legacy/mtime fallback behavior, and close vs abort cleanup
+        with focused pouch tests.
     - [x] Move durable query summary/posting sidecars into the segmented
       lifecycle so index rebuild, compaction, and crash recovery are tied to
       namespace log generations.
