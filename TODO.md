@@ -307,10 +307,13 @@ Latest release targets confirmed on 2026-07-23:
       children are exact equality selectors over the same strict JSON Pointer
       field; the planner maps those to the existing storage-owned `in`
       candidate path and still lets `liblql` perform final acceptance.
+    - [x] Add storage-owned branch-union candidates for mixed-field full-form
+      `or` branches whose children are exact equality selectors; the disk
+      backend de-duplicates unioned posting keys, restores stable cursor
+      ordering, and final acceptance remains owned by `liblql`.
     - [ ] Add recursive boolean composition over supported selector families
-      without devolving to full namespace scans, including branch-union
-      cursors/de-duplication for mixed-field `or` and exclusion planning for
-      safe `not` forms.
+      without devolving to full namespace scans, including non-equality OR
+      branch planning and exclusion planning for safe `not` forms.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.

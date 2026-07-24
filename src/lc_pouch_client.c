@@ -6844,6 +6844,85 @@ cleanup:
   lc_free_with_allocator(NULL, visit.terms);
 }
 
+static int lc_pouch_lql_or_eq_hint_parse(
+    const char *selector_json, lc_pouch_document_eq_term **terms_out,
+    size_t *term_count_out) {
+  lc_pouch_lql_or_eq_hint_visit visit;
+  lonejson_path_value_visitor visitor;
+  lonejson_error error;
+  lonejson_status status;
+  lonejson *runtime;
+  lc_pouch_document_eq_term *terms;
+  size_t index;
+
+  if (terms_out != NULL) {
+    *terms_out = NULL;
+  }
+  if (term_count_out != NULL) {
+    *term_count_out = 0U;
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL || selector_json == NULL || terms_out == NULL ||
+      term_count_out == NULL) {
+    return 0;
+  }
+  memset(&visit, 0, sizeof(visit));
+  visit.valid = 1;
+  visitor = lonejson_default_path_value_visitor();
+  visitor.object_begin = lc_pouch_lql_or_eq_hint_object_begin;
+  visitor.array_begin = lc_pouch_lql_or_eq_hint_array_begin;
+  visitor.object_key_begin = lc_pouch_lql_or_eq_hint_key_begin;
+  visitor.object_key_chunk = lc_pouch_lql_or_eq_hint_key_chunk;
+  visitor.object_key_end = lc_pouch_lql_or_eq_hint_key_end;
+  visitor.string_begin = lc_pouch_lql_or_eq_hint_string_begin;
+  visitor.string_chunk = lc_pouch_lql_or_eq_hint_string_chunk;
+  visitor.string_end = lc_pouch_lql_or_eq_hint_string_end;
+  visitor.number_begin = lc_pouch_lql_or_eq_hint_number_begin;
+  visitor.number_chunk = lc_pouch_lql_or_eq_hint_number_chunk;
+  visitor.number_end = lc_pouch_lql_or_eq_hint_number_end;
+  visitor.boolean_value = lc_pouch_lql_or_eq_hint_bool_value;
+  visitor.null_value = lc_pouch_lql_or_eq_hint_null_value;
+  lonejson_error_init(&error);
+  status = runtime->visit_path_value_cstr(runtime, selector_json, &visitor,
+                                          &visit, &error);
+  if (status == LONEJSON_STATUS_OK && visit.valid && visit.root_is_object &&
+      visit.root_key_count == 1U && visit.or_array_seen &&
+      visit.term_count > 1U) {
+    for (index = 0U; index < visit.term_count; ++index) {
+      lc_pouch_lql_eq_hint_term *term;
+
+      term = &visit.terms[index];
+      if (term->wrapper_key_count != 1U || term->eq_key_count != 2U ||
+          !term->saw_field || !term->saw_value || !term->value_supported ||
+          term->field == NULL || term->value == NULL) {
+        visit.valid = 0;
+        break;
+      }
+    }
+  } else {
+    visit.valid = 0;
+  }
+  if (visit.valid) {
+    terms = (lc_pouch_document_eq_term *)lc_calloc_with_allocator(
+        NULL, visit.term_count, sizeof(terms[0]));
+    if (terms != NULL) {
+      for (index = 0U; index < visit.term_count; ++index) {
+        terms[index].field = visit.terms[index].field;
+        terms[index].value = visit.terms[index].value;
+        visit.terms[index].field = NULL;
+        visit.terms[index].value = NULL;
+      }
+      *terms_out = terms;
+      *term_count_out = visit.term_count;
+    }
+  }
+  for (index = 0U; index < visit.term_count; ++index) {
+    lc_pouch_lql_eq_hint_term_cleanup(&visit.terms[index]);
+  }
+  lc_free_with_allocator(NULL, visit.terms);
+  return *terms_out != NULL && *term_count_out > 0U;
+}
+
 typedef struct lc_pouch_lql_range_hint_term {
   char *field;
   size_t field_len;
@@ -8690,6 +8769,8 @@ typedef struct lc_pouch_lql_document_filter {
   lql_selector *selector;
   lc_pouch_document_eq_term *document_eq_terms;
   size_t document_eq_term_count;
+  lc_pouch_document_eq_term *document_or_eq_terms;
+  size_t document_or_eq_term_count;
   lc_pouch_document_range_term *document_range_terms;
   size_t document_range_term_count;
   lc_pouch_document_in_term *document_in_terms;
@@ -8809,6 +8890,13 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
     lc_free_with_allocator(NULL, (char *)filter->document_eq_terms[index].value);
   }
   lc_free_with_allocator(NULL, filter->document_eq_terms);
+  for (index = 0U; index < filter->document_or_eq_term_count; ++index) {
+    lc_free_with_allocator(NULL,
+                           (char *)filter->document_or_eq_terms[index].field);
+    lc_free_with_allocator(NULL,
+                           (char *)filter->document_or_eq_terms[index].value);
+  }
+  lc_free_with_allocator(NULL, filter->document_or_eq_terms);
   for (index = 0U; index < filter->document_range_term_count; ++index) {
     lc_free_with_allocator(NULL,
                            (char *)filter->document_range_terms[index].field);
@@ -8895,6 +8983,11 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
     lc_pouch_lql_or_eq_hint_parse_as_in(selector_json,
                                         &filter->document_in_terms,
                                         &filter->document_in_term_count);
+  }
+  if (filter->document_in_term_count == 0U) {
+    (void)lc_pouch_lql_or_eq_hint_parse(selector_json,
+                                        &filter->document_or_eq_terms,
+                                        &filter->document_or_eq_term_count);
   }
   lc_pouch_lql_prefix_hint_parse_full_form(
       selector_json, &filter->document_prefix_terms,
@@ -9722,6 +9815,8 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
   scan_req.document_eq_terms = filter.document_eq_terms;
   scan_req.document_eq_term_count = filter.document_eq_term_count;
+  scan_req.document_or_eq_terms = filter.document_or_eq_terms;
+  scan_req.document_or_eq_term_count = filter.document_or_eq_term_count;
   scan_req.document_range_terms = filter.document_range_terms;
   scan_req.document_range_term_count = filter.document_range_term_count;
   scan_req.document_in_terms = filter.document_in_terms;
@@ -10088,6 +10183,8 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
   scan_req.document_eq_terms = filter.document_eq_terms;
   scan_req.document_eq_term_count = filter.document_eq_term_count;
+  scan_req.document_or_eq_terms = filter.document_or_eq_terms;
+  scan_req.document_or_eq_term_count = filter.document_or_eq_term_count;
   scan_req.document_range_terms = filter.document_range_terms;
   scan_req.document_range_term_count = filter.document_range_term_count;
   scan_req.document_in_terms = filter.document_in_terms;
