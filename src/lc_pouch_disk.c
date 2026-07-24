@@ -5461,6 +5461,53 @@ static int lc_pouch_disk_query_field_or_eq_keys_scan_locked(
 static int lc_pouch_disk_query_range_upper_exceeded(
     const char *value, const lc_pouch_document_range_term *term);
 
+static int lc_pouch_disk_query_field_collect_or_in_term_keys_locked(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const lc_pouch_document_in_term *term, char ***keys_io,
+    size_t *key_count_io, lc_error *error, const char *alloc_message,
+    const char *copy_message) {
+  size_t value_index;
+
+  if (store == NULL || req == NULL || term == NULL || term->field == NULL ||
+      term->values == NULL || term->value_count == 0U) {
+    return LC_OK;
+  }
+  for (value_index = 0U; value_index < term->value_count; ++value_index) {
+    size_t position;
+    size_t index;
+
+    if (term->values[value_index] == NULL) {
+      continue;
+    }
+    (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                         term->field, term->values[value_index],
+                                         "", &position);
+    for (index = position; index < store->query_field_posting_count; ++index) {
+      lc_pouch_disk_query_field_posting *posting;
+      int cmp;
+      int rc;
+
+      posting = &store->query_field_postings[index];
+      cmp = lc_pouch_disk_query_field_compare_values(
+          posting->namespace_name, posting->field, posting->value, "",
+          req->namespace_name, term->field, term->values[value_index], "");
+      if (cmp > 0) {
+        break;
+      }
+      if (cmp < 0) {
+        continue;
+      }
+      rc = lc_pouch_disk_query_field_add_candidate_key(
+          store, req, posting, keys_io, key_count_io, error, alloc_message,
+          copy_message);
+      if (rc != LC_OK) {
+        return rc;
+      }
+    }
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     char ***keys_out, size_t *key_count_out, lc_error *error) {
@@ -5475,6 +5522,8 @@ static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
                        req->document_or_exists_terms == NULL) &&
                       (req->document_or_range_term_count == 0U ||
                        req->document_or_range_terms == NULL) &&
+                      (req->document_or_in_term_count == 0U ||
+                       req->document_or_in_terms == NULL) &&
                       (req->document_or_prefix_term_count == 0U ||
                        req->document_or_prefix_terms == NULL) &&
                       (req->document_or_contains_term_count == 0U ||
@@ -5563,6 +5612,16 @@ static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
       if (rc != LC_OK) {
         return rc;
       }
+    }
+  }
+  for (term_index = 0U; term_index < req->document_or_in_term_count;
+       ++term_index) {
+    rc = lc_pouch_disk_query_field_collect_or_in_term_keys_locked(
+        store, req, &req->document_or_in_terms[term_index], &keys, &key_count,
+        error, "failed to allocate pouch or exists/in query keys",
+        "failed to copy pouch or exists/in query key");
+    if (rc != LC_OK) {
+      return rc;
     }
   }
   for (term_index = 0U; term_index < req->document_or_prefix_term_count;
@@ -5975,6 +6034,8 @@ static int lc_pouch_disk_query_field_collect_or_range_keys_locked(
   *key_count_out = 0U;
   if (req == NULL || ((req->document_or_range_term_count == 0U ||
                        req->document_or_range_terms == NULL) &&
+                      (req->document_or_in_term_count == 0U ||
+                       req->document_or_in_terms == NULL) &&
                       (req->document_or_prefix_term_count == 0U ||
                        req->document_or_prefix_terms == NULL) &&
                       (req->document_or_contains_term_count == 0U ||
@@ -6028,6 +6089,16 @@ static int lc_pouch_disk_query_field_collect_or_range_keys_locked(
       if (rc != LC_OK) {
         return rc;
       }
+    }
+  }
+  for (term_index = 0U; term_index < req->document_or_in_term_count;
+       ++term_index) {
+    rc = lc_pouch_disk_query_field_collect_or_in_term_keys_locked(
+        store, req, &req->document_or_in_terms[term_index], &keys, &key_count,
+        error, "failed to allocate pouch or range/in query keys",
+        "failed to copy pouch or range/in query key");
+    if (rc != LC_OK) {
+      return rc;
     }
   }
   for (term_index = 0U; term_index < req->document_or_contains_term_count;
@@ -7088,6 +7159,8 @@ static int lc_pouch_disk_query_field_collect_or_prefix_keys_locked(
   *key_count_out = 0U;
   if (req == NULL || ((req->document_or_prefix_term_count == 0U ||
                        req->document_or_prefix_terms == NULL) &&
+                      (req->document_or_in_term_count == 0U ||
+                       req->document_or_in_terms == NULL) &&
                       (req->document_or_contains_term_count == 0U ||
                        req->document_or_contains_terms == NULL))) {
     return LC_OK;
@@ -7131,6 +7204,16 @@ static int lc_pouch_disk_query_field_collect_or_prefix_keys_locked(
       if (rc != LC_OK) {
         return rc;
       }
+    }
+  }
+  for (term_index = 0U; term_index < req->document_or_in_term_count;
+       ++term_index) {
+    rc = lc_pouch_disk_query_field_collect_or_in_term_keys_locked(
+        store, req, &req->document_or_in_terms[term_index], &keys, &key_count,
+        error, "failed to allocate pouch or prefix/in query keys",
+        "failed to copy pouch or prefix/in query key");
+    if (rc != LC_OK) {
+      return rc;
     }
   }
   for (term_index = 0U; term_index < req->document_or_contains_term_count;
@@ -7667,12 +7750,24 @@ static int lc_pouch_disk_query_field_collect_or_contains_keys_locked(
 
   *keys_out = NULL;
   *key_count_out = 0U;
-  if (req == NULL || req->document_or_contains_term_count == 0U ||
-      req->document_or_contains_terms == NULL) {
+  if (req == NULL || ((req->document_or_contains_term_count == 0U ||
+                       req->document_or_contains_terms == NULL) &&
+                      (req->document_or_in_term_count == 0U ||
+                       req->document_or_in_terms == NULL))) {
     return LC_OK;
   }
   keys = NULL;
   key_count = 0U;
+  for (term_index = 0U; term_index < req->document_or_in_term_count;
+       ++term_index) {
+    rc = lc_pouch_disk_query_field_collect_or_in_term_keys_locked(
+        store, req, &req->document_or_in_terms[term_index], &keys, &key_count,
+        error, "failed to allocate pouch or contains/in query keys",
+        "failed to copy pouch or contains/in query key");
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   for (term_index = 0U; term_index < req->document_or_contains_term_count;
        ++term_index) {
     const lc_pouch_document_contains_term *term;
