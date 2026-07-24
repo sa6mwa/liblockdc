@@ -570,9 +570,11 @@ subsequent ticks inside the configured interval return `interval-not-elapsed`
 without entering compaction. Manual `compact(force|if_needed)` is not throttled.
 `maintenance("cleanup")` runs the store-owned replay/manifest cleanup path
 without entering compaction, so manifest-obsolete segment and snapshot file
-deletes can be retried even when scheduled compaction is disabled. Later
-lifecycle work can layer deadline scheduling, reclaim-byte thresholds, delete
-grace, and throttling on that explicit store-owned path.
+deletes can be retried even when scheduled compaction is disabled. Private disk
+open options can also apply delete grace to obsolete-file cleanup; files whose
+mtime is still inside the grace window stay tracked and are retried by a later
+replay or cleanup tick. Later lifecycle work can layer deadline scheduling,
+reclaim-byte thresholds, and throttling on that explicit store-owned path.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query

@@ -282,6 +282,7 @@ typedef struct lc_pouch_disk_store {
   unsigned long compaction_obsolete_multiplier;
   unsigned long background_compaction_interval_seconds;
   unsigned long background_compaction_min_candidate_files;
+  unsigned long background_compaction_delete_grace_seconds;
   long background_compaction_last_run_unix;
 } lc_pouch_disk_store;
 
@@ -15967,11 +15968,29 @@ static int lc_pouch_disk_cleanup_obsolete_manifest_paths(
     const lc_pouch_disk_segment_replay_paths *obsolete_paths, lc_error *error) {
   size_t index;
 
-  (void)store;
   for (index = 0U; index < obsolete_paths->count; ++index) {
     if (lc_pouch_disk_segment_replay_paths_contains(
             active_paths, obsolete_paths->items[index])) {
       continue;
+    }
+    if (store->background_compaction_delete_grace_seconds > 0UL) {
+      struct stat st;
+      time_t now;
+
+      if (stat(obsolete_paths->items[index], &st) != 0) {
+        if (errno == ENOENT || errno == ENOTDIR) {
+          continue;
+        }
+        return lc_pouch_set_errno(error,
+                                  "failed to stat obsolete pouch logstore");
+      }
+      now = time(NULL);
+      if (now != (time_t)-1 &&
+          (now <= st.st_mtime ||
+           (unsigned long)(now - st.st_mtime) <
+               store->background_compaction_delete_grace_seconds)) {
+        continue;
+      }
     }
     if (unlink(obsolete_paths->items[index]) != 0 && errno != ENOENT &&
         errno != ENOTDIR) {
@@ -19948,6 +19967,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       opts != NULL ? opts->background_compaction_interval_seconds : 0UL;
   store->background_compaction_min_candidate_files =
       opts != NULL ? opts->background_compaction_min_candidate_files : 0UL;
+  store->background_compaction_delete_grace_seconds =
+      opts != NULL ? opts->background_compaction_delete_grace_seconds : 0UL;
   store->background_compaction_last_run_unix = 0L;
   store->next_version = 1L;
   store->pub.impl = store;
