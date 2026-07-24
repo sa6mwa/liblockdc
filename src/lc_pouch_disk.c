@@ -5976,7 +5976,9 @@ static int lc_pouch_disk_query_field_collect_or_range_keys_locked(
   if (req == NULL || ((req->document_or_range_term_count == 0U ||
                        req->document_or_range_terms == NULL) &&
                       (req->document_or_prefix_term_count == 0U ||
-                       req->document_or_prefix_terms == NULL))) {
+                       req->document_or_prefix_terms == NULL) &&
+                      (req->document_or_contains_term_count == 0U ||
+                       req->document_or_contains_terms == NULL))) {
     return LC_OK;
   }
   keys = NULL;
@@ -6023,6 +6025,45 @@ static int lc_pouch_disk_query_field_collect_or_range_keys_locked(
           store, req, posting, &keys, &key_count, error,
           "failed to allocate pouch or range query keys",
           "failed to copy pouch or range query key");
+      if (rc != LC_OK) {
+        return rc;
+      }
+    }
+  }
+  for (term_index = 0U; term_index < req->document_or_contains_term_count;
+       ++term_index) {
+    const lc_pouch_document_contains_term *term;
+    size_t position;
+    size_t index;
+
+    term = &req->document_or_contains_terms[term_index];
+    if (term->field == NULL || term->value == NULL) {
+      continue;
+    }
+    (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                         term->field, "t:", "", &position);
+    for (index = position; index < store->query_field_posting_count; ++index) {
+      lc_pouch_disk_query_field_posting *posting;
+      int cmp;
+
+      posting = &store->query_field_postings[index];
+      cmp = lc_pouch_disk_query_field_compare_values(
+          posting->namespace_name, posting->field, "t:", "",
+          req->namespace_name, term->field, "t:", "");
+      if (cmp > 0) {
+        break;
+      }
+      if (cmp < 0 || strncmp(posting->value, "t:", 2U) != 0) {
+        continue;
+      }
+      if (!lc_pouch_disk_query_field_text_contains(posting->value, term->value,
+                                                   term->ignore_case)) {
+        continue;
+      }
+      rc = lc_pouch_disk_query_field_add_candidate_key(
+          store, req, posting, &keys, &key_count, error,
+          "failed to allocate pouch or range/contains query keys",
+          "failed to copy pouch or range/contains query key");
       if (rc != LC_OK) {
         return rc;
       }

@@ -596,12 +596,12 @@ text postings. Mixed OR branches that combine strict JSON Pointer `prefix` /
 `iprefix` selectors with strict JSON Pointer `contains` / `icontains`
 selectors union text postings from both branch families. Mixed OR branches
 that combine numeric `range` selectors with strict JSON Pointer `prefix` /
-`iprefix` selectors union ordered numeric and text postings. Full-form `and`
-selectors that combine a positive supported indexed predicate with a `not`
-exclusion use the positive predicate as the storage-owned candidate superset
-and leave exclusion semantics to final `liblql` acceptance. Other OR branch
-families and broader safe NOT planning still need planner support before they
-can avoid broader scans safely.
+`iprefix` selectors or strict JSON Pointer `contains` / `icontains` selectors
+union ordered numeric and text postings. Full-form `and` selectors that combine
+a positive supported indexed predicate with a `not` exclusion use the positive
+predicate as the storage-owned candidate superset and leave exclusion semantics
+to final `liblql` acceptance. Other OR branch families and broader safe NOT
+planning still need planner support before they can avoid broader scans safely.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan
@@ -743,8 +743,8 @@ mixed-field equality `or` branches union equality postings, and path-string
 `exists` plus numeric `range`, `prefix` / `iprefix`, or `contains` /
 `icontains` `or` branches, plus mixed `prefix` / `iprefix` and `contains` /
 `icontains` `or` branches and mixed numeric `range` plus `prefix` / `iprefix`
-`or` branches, union presence, ordered numeric, or text postings before stable
-key/cursor ordering is restored.
+or `contains` / `icontains` `or` branches, union presence, ordered numeric, or
+text postings before stable key/cursor ordering is restored.
 Mixed
 equality/range/in/prefix/contains/exists `and`
 selectors intersect equality posting candidates with numeric range, string
