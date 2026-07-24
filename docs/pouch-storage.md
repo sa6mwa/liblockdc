@@ -741,9 +741,10 @@ predicate postings store the liblql string-predicate view for JSON strings,
 booleans, and number source text; JSON null still has no text-predicate posting.
 The same text values also emit lowercase ASCII-normalized `g:` trigram postings
 used as a candidate superset for `contains` / `icontains` terms of at least
-three bytes. Exact substring and case semantics still run through the `t:`
-posting checks and final `liblql` acceptance, so trigram rows may create false
-positives but must not create false negatives. Object and array field
+three bytes, including supported OR branch collection. Exact substring and case
+semantics still run through the `t:` posting checks and final `liblql`
+acceptance, so trigram rows may create false positives but must not create false
+negatives. Object and array field
 containers also emit presence postings so `exists` can narrow candidates for
 structured values without requiring a scalar leaf.
 Indexed mode also recognizes full-form `and` conjunctions made only of

@@ -6012,6 +6012,21 @@ test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  memset(&rows, 0, sizeof(rows));
+  contains.ignore_case = 0;
+  req.document_contains_terms = NULL;
+  req.document_contains_term_count = 0U;
+  req.document_or_contains_terms = &contains;
+  req.document_or_contains_term_count = 1U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   memset(&keys, 0, sizeof(keys));
   contains.ignore_case = 1;
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
