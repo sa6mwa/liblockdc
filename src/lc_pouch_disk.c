@@ -280,6 +280,8 @@ typedef struct lc_pouch_disk_store {
   int background_compaction;
   unsigned long compaction_min_log_bytes;
   unsigned long compaction_obsolete_multiplier;
+  unsigned long background_compaction_interval_seconds;
+  long background_compaction_last_run_unix;
 } lc_pouch_disk_store;
 
 typedef struct lc_pouch_disk_replay_input {
@@ -12468,11 +12470,38 @@ static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
     }
     return LC_OK;
   }
+  if (store->background_compaction_interval_seconds > 0UL &&
+      store->background_compaction_last_run_unix > 0L) {
+    time_t now;
+
+    now = time(NULL);
+    if (now != (time_t)-1 &&
+        (now <= (time_t)store->background_compaction_last_run_unix ||
+         (unsigned long)(now -
+                         (time_t)store->background_compaction_last_run_unix) <
+             store->background_compaction_interval_seconds)) {
+      out->reason = lc_pouch_strdup(&store->allocator, "interval-not-elapsed");
+      if (out->reason == NULL) {
+        lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+        return lc_pouch_set_nomem(error,
+                                  "failed to copy pouch maintenance reason");
+      }
+      return LC_OK;
+    }
+  }
 
   rc = lc_pouch_disk_compact(self, "if_needed", &out->compaction, error);
   if (rc != LC_OK) {
     lc_pouch_maintenance_res_cleanup(&store->allocator, out);
     return rc;
+  }
+  if (store->background_compaction_interval_seconds > 0UL) {
+    time_t now;
+
+    now = time(NULL);
+    if (now != (time_t)-1) {
+      store->background_compaction_last_run_unix = (long)now;
+    }
   }
   out->reason = lc_pouch_strdup(
       &store->allocator,
@@ -19774,6 +19803,9 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       opts != NULL && opts->background_compaction_obsolete_multiplier != 0UL
           ? opts->background_compaction_obsolete_multiplier
           : LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER;
+  store->background_compaction_interval_seconds =
+      opts != NULL ? opts->background_compaction_interval_seconds : 0UL;
+  store->background_compaction_last_run_unix = 0L;
   store->next_version = 1L;
   store->pub.impl = store;
   store->read_cache_owner =

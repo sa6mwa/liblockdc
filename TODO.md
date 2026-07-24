@@ -570,9 +570,12 @@ Latest release targets confirmed on 2026-07-23:
         outcomes.
       - [x] Keep manual `compact(force|if_needed)` deterministic and
         foreground-safe even when background scheduling is enabled.
-      - [ ] Add interval/deadline scheduling, minimum sealed/snapshot
-        candidates, minimum reclaimable bytes, delete grace, cleanup-only
-        maintenance passes, and optional I/O throttling.
+      - [x] Add interval scheduling for explicit scheduled maintenance ticks
+        with observable `interval-not-elapsed` diagnostics and no effect on
+        foreground-safe manual compaction.
+      - [ ] Add deadline scheduling, minimum sealed/snapshot candidates,
+        minimum reclaimable bytes, delete grace, cleanup-only maintenance
+        passes, and optional I/O throttling.
     - [x] Add Go disk-style marker lifecycle for segmented pouch logstores.
       - [x] Clarify and implement root-level writer-presence markers for
         exclusive writer detection/fencing, separate from namespace logstore

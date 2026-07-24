@@ -564,8 +564,12 @@ obsolete-record multiplier thresholds can be overridden. The private
 `maintenance("scheduled")` tick runs through the same foreground-safe writer
 lock path as manual `compact(if_needed)`, reports whether scheduling is disabled,
 skipped, or compacted, and does not create worker threads or hidden background
-I/O. Later lifecycle work can layer interval/deadline scheduling, cleanup-only
-passes, reclaim-byte thresholds, delete grace, and throttling on that explicit
+I/O. Scheduled maintenance can be interval-throttled through the private disk
+open options: once a scheduled tick reaches the compaction decision path,
+subsequent ticks inside the configured interval return `interval-not-elapsed`
+without entering compaction. Manual `compact(force|if_needed)` is not throttled.
+Later lifecycle work can layer deadline scheduling, cleanup-only passes,
+reclaim-byte thresholds, delete grace, and throttling on that explicit
 store-owned path.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable

@@ -9933,6 +9933,7 @@ static void test_scheduled_maintenance_reports_compaction_diagnostics(
   opts.background_compaction = 1;
   opts.background_compaction_min_log_bytes = 1UL;
   opts.background_compaction_obsolete_multiplier = 2UL;
+  opts.background_compaction_interval_seconds = 3600UL;
   rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -9956,10 +9957,11 @@ static void test_scheduled_maintenance_reports_compaction_diagnostics(
   memset(&maintenance, 0, sizeof(maintenance));
   rc = store->maintenance(store, "scheduled", &maintenance, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(maintenance.reason, "below-obsolete-threshold");
+  assert_string_equal(maintenance.reason, "interval-not-elapsed");
   assert_int_equal(maintenance.compaction_enabled, 1);
+  assert_int_equal(maintenance.compaction.accepted, 0);
   assert_int_equal(maintenance.compaction.compacted, 0);
-  assert_int_equal(maintenance.compaction.skipped, 1);
+  assert_int_equal(maintenance.compaction.skipped, 0);
   lc_pouch_maintenance_res_cleanup(&allocator, &maintenance);
 
   rc = store->maintenance(store, "manual", &maintenance, &error);
