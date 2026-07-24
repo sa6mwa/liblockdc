@@ -564,9 +564,9 @@ obsolete-record multiplier thresholds can be overridden. The private
 `maintenance("scheduled")` tick runs through the same foreground-safe writer
 lock path as manual `compact(if_needed)`, reports whether scheduling is disabled,
 skipped, or compacted, and does not create worker threads or hidden background
-I/O. Scheduled maintenance can be interval-throttled through the private disk
-open options: once a scheduled tick reaches the compaction decision path,
-subsequent ticks inside the configured interval return `interval-not-elapsed`
+I/O. Scheduled maintenance can be interval-throttled or held until a not-before
+Unix deadline through the private disk open options: interval skips report
+`interval-not-elapsed`, and not-before skips report `deadline-not-reached`,
 without entering compaction. Manual `compact(force|if_needed)` is not throttled.
 `maintenance("cleanup")` runs the store-owned replay/manifest cleanup path
 without entering compaction, so manifest-obsolete segment and snapshot file
@@ -1429,8 +1429,9 @@ files count only when a later segment exists for the same namespace, so the
 current append tail does not trigger background compaction by itself. It can
 also require a minimum estimated number of reclaimable bytes by comparing
 current log bytes to the compacted live-record estimate. Skipped scheduled ticks
-report `below-candidate-threshold` or `below-reclaimable-threshold`; manual
-compaction remains deterministic and unaffected by these scheduling gates.
+report `below-candidate-threshold`, `below-reclaimable-threshold`, or
+`deadline-not-reached`; manual compaction remains deterministic and unaffected by
+these scheduling gates.
 
 Compaction flow:
 

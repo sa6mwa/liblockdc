@@ -283,6 +283,7 @@ typedef struct lc_pouch_disk_open_opts {
   unsigned long background_compaction_min_log_bytes;
   unsigned long background_compaction_obsolete_multiplier;
   unsigned long background_compaction_interval_seconds;
+  long background_compaction_not_before_unix;
   unsigned long background_compaction_min_candidate_files;
   unsigned long background_compaction_min_reclaimable_bytes;
   unsigned long background_compaction_delete_grace_seconds;

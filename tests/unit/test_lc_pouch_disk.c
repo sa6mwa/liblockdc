@@ -10167,6 +10167,125 @@ static void test_scheduled_maintenance_reports_compaction_diagnostics(
   test_cleanup_root(root);
 }
 
+static void test_scheduled_maintenance_honors_not_before_deadline(
+    void **state) {
+  char root[256];
+  char payload[4096];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_disk_open_opts generate_opts;
+  lc_pouch_disk_open_opts opts;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_maintenance_res maintenance;
+  lc_error error;
+  off_t before_log_size;
+  time_t now;
+  size_t index;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "scheduled-maintenance-deadline");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&generate_opts, 0, sizeof(generate_opts));
+  memset(&opts, 0, sizeof(opts));
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&maintenance, 0, sizeof(maintenance));
+  memset(payload, 'd', sizeof(payload));
+  payload[sizeof(payload) - 1U] = '\0';
+  store = NULL;
+  source = NULL;
+
+  now = time(NULL);
+  assert_true(now > (time_t)0);
+
+  generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &generate_opts, &store,
+                                       &error);
+  assert_int_equal(rc, LC_OK);
+
+  state_opts.content_type = "application/octet-stream";
+  for (index = 0U; index < 24U; ++index) {
+    source = source_from_text(payload);
+    rc = store->write_state(store, "default", "deadline-key", source,
+                            &state_opts, &put_res, &error);
+    lc_source_close(source);
+    source = NULL;
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+    memset(&put_res, 0, sizeof(put_res));
+  }
+  before_log_size =
+      test_log_size(root) + test_namespace_segments_size(root, "default");
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  opts.background_compaction = 1;
+  opts.background_compaction_min_log_bytes = 1UL;
+  opts.background_compaction_obsolete_multiplier = 2UL;
+  opts.background_compaction_not_before_unix = (long)now + 3600L;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->maintenance(store, "scheduled", &maintenance, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance.mode, "scheduled");
+  assert_string_equal(maintenance.reason, "deadline-not-reached");
+  assert_int_equal(maintenance.accepted, 1);
+  assert_int_equal(maintenance.compaction_enabled, 1);
+  assert_int_equal(maintenance.compaction.accepted, 0);
+  assert_int_equal(maintenance.compaction.compacted, 0);
+  assert_int_equal(test_log_size(root) +
+                       test_namespace_segments_size(root, "default"),
+                   before_log_size);
+  lc_pouch_maintenance_res_cleanup(&allocator, &maintenance);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  opts.background_compaction_not_before_unix = (long)now - 1L;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  memset(&maintenance, 0, sizeof(maintenance));
+  rc = store->maintenance(store, "scheduled", &maintenance, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance.reason, "compacted");
+  assert_int_equal(maintenance.compaction_enabled, 1);
+  assert_int_equal(maintenance.compaction.accepted, 1);
+  assert_int_equal(maintenance.compaction.compacted, 1);
+  assert_int_equal(maintenance.compaction.skipped, 0);
+  assert_true(maintenance.compaction.before_log_bytes ==
+              (unsigned long)before_log_size);
+  assert_true(maintenance.compaction.after_log_bytes <
+              maintenance.compaction.before_log_bytes);
+  lc_pouch_maintenance_res_cleanup(&allocator, &maintenance);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  memset(&opts, 0, sizeof(opts));
+  opts.background_compaction_not_before_unix = -1L;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(store);
+  assert_string_equal(
+      error.message,
+      "pouch disk background_compaction_not_before_unix must be non-negative");
+
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_scheduled_maintenance_honors_min_candidate_files(
     void **state) {
   char root[256];
@@ -16222,6 +16341,8 @@ int main(void) {
       cmocka_unit_test(test_compaction_if_needed_skip_and_allocator_failure),
       cmocka_unit_test(
           test_scheduled_maintenance_reports_compaction_diagnostics),
+      cmocka_unit_test(
+          test_scheduled_maintenance_honors_not_before_deadline),
       cmocka_unit_test(
           test_scheduled_maintenance_honors_min_candidate_files),
       cmocka_unit_test(

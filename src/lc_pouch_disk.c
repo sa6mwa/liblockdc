@@ -281,6 +281,7 @@ typedef struct lc_pouch_disk_store {
   unsigned long compaction_min_log_bytes;
   unsigned long compaction_obsolete_multiplier;
   unsigned long background_compaction_interval_seconds;
+  long background_compaction_not_before_unix;
   unsigned long background_compaction_min_candidate_files;
   unsigned long background_compaction_min_reclaimable_bytes;
   unsigned long background_compaction_delete_grace_seconds;
@@ -2433,6 +2434,11 @@ static int lc_pouch_disk_validate_open_opts(const lc_pouch_disk_open_opts *opts,
     return lc_pouch_set_invalid(
         error, "pouch disk background_compaction_obsolete_multiplier must be "
                "0 or at least 2");
+  }
+  if (opts->background_compaction_not_before_unix < 0L) {
+    return lc_pouch_set_invalid(
+        error, "pouch disk background_compaction_not_before_unix must be "
+               "non-negative");
   }
   return LC_OK;
 }
@@ -12515,6 +12521,21 @@ static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
     }
     return LC_OK;
   }
+  if (store->background_compaction_not_before_unix > 0L) {
+    time_t now;
+
+    now = time(NULL);
+    if (now != (time_t)-1 &&
+        now < (time_t)store->background_compaction_not_before_unix) {
+      out->reason = lc_pouch_strdup(&store->allocator, "deadline-not-reached");
+      if (out->reason == NULL) {
+        lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+        return lc_pouch_set_nomem(error,
+                                  "failed to copy pouch maintenance reason");
+      }
+      return LC_OK;
+    }
+  }
   if (store->background_compaction_interval_seconds > 0UL &&
       store->background_compaction_last_run_unix > 0L) {
     time_t now;
@@ -20177,6 +20198,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
           : LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER;
   store->background_compaction_interval_seconds =
       opts != NULL ? opts->background_compaction_interval_seconds : 0UL;
+  store->background_compaction_not_before_unix =
+      opts != NULL ? opts->background_compaction_not_before_unix : 0L;
   store->background_compaction_min_candidate_files =
       opts != NULL ? opts->background_compaction_min_candidate_files : 0UL;
   store->background_compaction_min_reclaimable_bytes =
