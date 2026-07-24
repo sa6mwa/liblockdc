@@ -281,6 +281,7 @@ typedef struct lc_pouch_disk_store {
   unsigned long compaction_min_log_bytes;
   unsigned long compaction_obsolete_multiplier;
   unsigned long background_compaction_interval_seconds;
+  unsigned long background_compaction_min_candidate_files;
   long background_compaction_last_run_unix;
 } lc_pouch_disk_store;
 
@@ -542,6 +543,8 @@ static void lc_pouch_disk_segment_replay_paths_cleanup(
 static int lc_pouch_disk_collect_active_segment_paths(
     lc_pouch_disk_store *store, lc_pouch_disk_segment_replay_paths *paths,
     lc_error *error);
+static size_t lc_pouch_disk_compaction_candidate_file_count(
+    const lc_pouch_disk_segment_replay_paths *paths);
 static int lc_pouch_disk_active_segment_generation(lc_pouch_disk_store *store,
                                                    int *found,
                                                    unsigned long *generation,
@@ -12514,6 +12517,44 @@ static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
       return LC_OK;
     }
   }
+  if (store->background_compaction_min_candidate_files > 0UL) {
+    lc_pouch_disk_segment_replay_paths candidate_paths;
+    size_t candidate_count;
+
+    memset(&candidate_paths, 0, sizeof(candidate_paths));
+    rc = lc_pouch_disk_lock(store, error);
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+    rc = lc_pouch_disk_force_replay_locked(store, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_disk_collect_active_segment_paths(store, &candidate_paths,
+                                                      error);
+    }
+    if (lc_pouch_disk_unlock(store, rc == LC_OK ? error : NULL) != LC_OK &&
+        rc == LC_OK) {
+      rc = LC_ERR_TRANSPORT;
+    }
+    if (rc != LC_OK) {
+      lc_pouch_disk_segment_replay_paths_cleanup(store, &candidate_paths);
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+    candidate_count =
+        lc_pouch_disk_compaction_candidate_file_count(&candidate_paths);
+    lc_pouch_disk_segment_replay_paths_cleanup(store, &candidate_paths);
+    if (candidate_count < store->background_compaction_min_candidate_files) {
+      out->reason =
+          lc_pouch_strdup(&store->allocator, "below-candidate-threshold");
+      if (out->reason == NULL) {
+        lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+        return lc_pouch_set_nomem(error,
+                                  "failed to copy pouch maintenance reason");
+      }
+      return LC_OK;
+    }
+  }
 
   rc = lc_pouch_disk_compact(self, "if_needed", &out->compaction, error);
   if (rc != LC_OK) {
@@ -16140,6 +16181,81 @@ static int lc_pouch_disk_collect_active_segment_paths(
           lc_pouch_disk_segment_path_compare);
   }
   return LC_OK;
+}
+
+static int lc_pouch_disk_path_segment_number(const char *path,
+                                             unsigned long *number_out) {
+  const char *marker;
+  const char *file_name;
+
+  marker = strstr(path, "/logstore/segments/");
+  if (marker == NULL) {
+    return 0;
+  }
+  file_name = strrchr(path, '/');
+  file_name = file_name != NULL ? file_name + 1 : path;
+  return lc_pouch_disk_segment_name_parse(file_name, number_out);
+}
+
+static int lc_pouch_disk_paths_same_logstore_prefix(const char *left,
+                                                    const char *right) {
+  const char *left_marker;
+  const char *right_marker;
+  size_t left_len;
+  size_t right_len;
+
+  left_marker = strstr(left, "/logstore/segments/");
+  right_marker = strstr(right, "/logstore/segments/");
+  if (left_marker == NULL || right_marker == NULL) {
+    return 0;
+  }
+  left_len = (size_t)(left_marker - left);
+  right_len = (size_t)(right_marker - right);
+  return left_len == right_len && strncmp(left, right, left_len) == 0;
+}
+
+static size_t lc_pouch_disk_compaction_candidate_file_count(
+    const lc_pouch_disk_segment_replay_paths *paths) {
+  size_t candidates;
+  size_t index;
+
+  if (paths == NULL) {
+    return 0U;
+  }
+  candidates = 0U;
+  for (index = 0U; index < paths->count; ++index) {
+    unsigned long number;
+    size_t other_index;
+    int has_later_segment;
+
+    if (strstr(paths->items[index], "/logstore/snapshots/") != NULL) {
+      candidates++;
+      continue;
+    }
+    if (!lc_pouch_disk_path_segment_number(paths->items[index], &number)) {
+      continue;
+    }
+    has_later_segment = 0;
+    for (other_index = 0U; other_index < paths->count; ++other_index) {
+      unsigned long other_number;
+
+      if (other_index == index ||
+          !lc_pouch_disk_paths_same_logstore_prefix(
+              paths->items[index], paths->items[other_index]) ||
+          !lc_pouch_disk_path_segment_number(paths->items[other_index],
+                                             &other_number)) {
+        continue;
+      }
+      if (other_number > number) {
+        has_later_segment = 1;
+        break;
+      }
+    }
+    if (has_later_segment) {
+      candidates++;
+    }
+  }
+  return candidates;
 }
 
 static unsigned long
@@ -19830,6 +19946,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
           : LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER;
   store->background_compaction_interval_seconds =
       opts != NULL ? opts->background_compaction_interval_seconds : 0UL;
+  store->background_compaction_min_candidate_files =
+      opts != NULL ? opts->background_compaction_min_candidate_files : 0UL;
   store->background_compaction_last_run_unix = 0L;
   store->next_version = 1L;
   store->pub.impl = store;

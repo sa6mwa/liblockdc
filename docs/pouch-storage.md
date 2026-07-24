@@ -1419,6 +1419,14 @@ construction or manifest install fails, active segment backups are restored and
 indexes are rebuilt from the still-authoritative segmented history before
 returning.
 
+Scheduled maintenance can additionally require a minimum number of compactable
+history files before it calls the foreground-safe `if_needed` compaction path.
+The candidate count is conservative: active snapshot files count, and segment
+files count only when a later segment exists for the same namespace, so the
+current append tail does not trigger background compaction by itself. A skipped
+scheduled tick reports `below-candidate-threshold`; manual compaction remains
+deterministic and unaffected by this scheduling gate.
+
 Compaction flow:
 
 1. Refresh namespace indexes.

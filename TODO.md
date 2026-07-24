@@ -576,8 +576,12 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add cleanup-only maintenance passes that retry manifest-obsolete
         segment/snapshot file cleanup without requiring scheduled compaction to
         be enabled.
-      - [ ] Add deadline scheduling, minimum sealed/snapshot candidates,
-        minimum reclaimable bytes, delete grace, and optional I/O throttling.
+      - [x] Add a scheduled compaction minimum-candidate-files gate that counts
+        active snapshots plus non-current segment tails per namespace and
+        reports `below-candidate-threshold` without affecting foreground-safe
+        manual compaction.
+      - [ ] Add deadline scheduling, minimum reclaimable bytes, delete grace,
+        and optional I/O throttling.
     - [x] Add Go disk-style marker lifecycle for segmented pouch logstores.
       - [x] Clarify and implement root-level writer-presence markers for
         exclusive writer detection/fencing, separate from namespace logstore
