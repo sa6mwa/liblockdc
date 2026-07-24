@@ -388,6 +388,11 @@ Latest release targets confirmed on 2026-07-23:
       numeric `range` selectors; indexed scans union membership and ordered
       numeric postings, de-duplicate keys, and keep final predicate acceptance
       owned by `liblql`.
+    - [x] Add a liblql-AST-backed OR candidate extraction slice for selectors
+      with one supported OR group inside recursive `and` composition,
+      including safe positive-OR plus `not` exclusion forms and root OR groups
+      that mix more than two non-equality families; final predicate acceptance
+      remains owned by `liblql`.
     - [ ] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans, including remaining mixed
       non-equality OR branch planning and broader exclusion planning for safe

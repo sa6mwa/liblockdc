@@ -16878,6 +16878,499 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
   memset(filter, 0, sizeof(*filter));
 }
 
+typedef struct lc_pouch_lql_ast_or_terms {
+  lc_pouch_document_range_term *range_terms;
+  size_t range_count;
+  size_t range_capacity;
+  lc_pouch_document_in_term *in_terms;
+  size_t in_count;
+  size_t in_capacity;
+  lc_pouch_document_prefix_term *prefix_terms;
+  size_t prefix_count;
+  size_t prefix_capacity;
+  lc_pouch_document_contains_term *contains_terms;
+  size_t contains_count;
+  size_t contains_capacity;
+  lc_pouch_document_exists_term *exists_terms;
+  size_t exists_count;
+  size_t exists_capacity;
+} lc_pouch_lql_ast_or_terms;
+
+static int lc_pouch_lql_ast_view_is_cstr(lql_string_view view) {
+  return view.data != NULL && memchr(view.data, '\0', view.len) == NULL;
+}
+
+static int lc_pouch_lql_ast_view_is_pointer(lql_string_view view) {
+  return lc_pouch_lql_ast_view_is_cstr(view) && view.len > 0U &&
+         view.data[0] == '/';
+}
+
+static char *lc_pouch_lql_ast_view_copy(lql_string_view view) {
+  char *copy;
+
+  if (!lc_pouch_lql_ast_view_is_cstr(view)) {
+    return NULL;
+  }
+  copy = (char *)lc_alloc_with_allocator(NULL, view.len + 1U);
+  if (copy == NULL) {
+    return NULL;
+  }
+  memcpy(copy, view.data, view.len);
+  copy[view.len] = '\0';
+  return copy;
+}
+
+static char *lc_pouch_lql_ast_string_value_copy(lql_string_view view) {
+  char *copy;
+
+  if (!lc_pouch_lql_ast_view_is_cstr(view) || view.len > ((size_t)-1) - 3U) {
+    return NULL;
+  }
+  copy = (char *)lc_alloc_with_allocator(NULL, view.len + 3U);
+  if (copy == NULL) {
+    return NULL;
+  }
+  copy[0] = 's';
+  copy[1] = ':';
+  memcpy(copy + 2U, view.data, view.len);
+  copy[view.len + 2U] = '\0';
+  return copy;
+}
+
+static void
+lc_pouch_lql_ast_or_terms_cleanup(lc_pouch_lql_ast_or_terms *terms) {
+  size_t index;
+
+  if (terms == NULL) {
+    return;
+  }
+  for (index = 0U; index < terms->range_count; ++index) {
+    lc_free_with_allocator(NULL, (char *)terms->range_terms[index].field);
+    lc_free_with_allocator(NULL, (char *)terms->range_terms[index].gt);
+    lc_free_with_allocator(NULL, (char *)terms->range_terms[index].gte);
+    lc_free_with_allocator(NULL, (char *)terms->range_terms[index].lt);
+    lc_free_with_allocator(NULL, (char *)terms->range_terms[index].lte);
+  }
+  lc_free_with_allocator(NULL, terms->range_terms);
+  for (index = 0U; index < terms->in_count; ++index) {
+    size_t value_index;
+
+    lc_free_with_allocator(NULL, (char *)terms->in_terms[index].field);
+    for (value_index = 0U; value_index < terms->in_terms[index].value_count;
+         ++value_index) {
+      lc_free_with_allocator(
+          NULL, (char *)terms->in_terms[index].values[value_index]);
+    }
+    lc_free_with_allocator(NULL, (char **)terms->in_terms[index].values);
+  }
+  lc_free_with_allocator(NULL, terms->in_terms);
+  for (index = 0U; index < terms->prefix_count; ++index) {
+    lc_free_with_allocator(NULL, (char *)terms->prefix_terms[index].field);
+    lc_free_with_allocator(NULL, (char *)terms->prefix_terms[index].value);
+  }
+  lc_free_with_allocator(NULL, terms->prefix_terms);
+  for (index = 0U; index < terms->contains_count; ++index) {
+    lc_free_with_allocator(NULL, (char *)terms->contains_terms[index].field);
+    lc_free_with_allocator(NULL, (char *)terms->contains_terms[index].value);
+  }
+  lc_free_with_allocator(NULL, terms->contains_terms);
+  for (index = 0U; index < terms->exists_count; ++index) {
+    lc_free_with_allocator(NULL, (char *)terms->exists_terms[index].field);
+  }
+  lc_free_with_allocator(NULL, terms->exists_terms);
+  memset(terms, 0, sizeof(*terms));
+}
+
+static int lc_pouch_lql_ast_or_terms_grow(void **items, size_t *capacity,
+                                          size_t count, size_t item_size) {
+  void *grown;
+  size_t new_capacity;
+
+  if (count + 1U <= *capacity) {
+    return 1;
+  }
+  new_capacity = *capacity == 0U ? 4U : *capacity * 2U;
+  if (new_capacity < count + 1U || new_capacity > ((size_t)-1) / item_size) {
+    return 0;
+  }
+  grown = lc_realloc_with_allocator(NULL, *items, new_capacity * item_size);
+  if (grown == NULL) {
+    return 0;
+  }
+  memset((unsigned char *)grown + (*capacity * item_size), 0,
+         (new_capacity - *capacity) * item_size);
+  *items = grown;
+  *capacity = new_capacity;
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_or_terms_add_exists(lc_pouch_lql_ast_or_terms *terms,
+                                     lql_string_view path) {
+  lc_pouch_document_exists_term *term;
+
+  if (!lc_pouch_lql_ast_view_is_pointer(path) ||
+      !lc_pouch_lql_ast_or_terms_grow(
+          (void **)&terms->exists_terms, &terms->exists_capacity,
+          terms->exists_count, sizeof(terms->exists_terms[0]))) {
+    return 0;
+  }
+  term = &terms->exists_terms[terms->exists_count];
+  term->field = lc_pouch_lql_ast_view_copy(path);
+  if (term->field == NULL) {
+    return 0;
+  }
+  terms->exists_count++;
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_range_bound_copy(const lql_selector_range_bound *bound,
+                                  char **out) {
+  char *raw;
+  char *encoded;
+
+  *out = NULL;
+  if (bound->kind == LQL_SELECTOR_BOUND_ABSENT) {
+    return 1;
+  }
+  if (bound->kind != LQL_SELECTOR_BOUND_NUMBER ||
+      !lc_pouch_lql_ast_view_is_cstr(bound->number_text)) {
+    return 0;
+  }
+  raw = lc_pouch_lql_ast_view_copy(bound->number_text);
+  if (raw == NULL) {
+    return 0;
+  }
+  encoded = NULL;
+  if (!lc_pouch_number_eq_key(raw, bound->number_text.len, &encoded)) {
+    lc_free_with_allocator(NULL, raw);
+    return 0;
+  }
+  lc_free_with_allocator(NULL, raw);
+  *out = encoded;
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_or_terms_add_range(lc_pouch_lql_ast_or_terms *terms,
+                                    const lql_selector_range_term *source) {
+  lc_pouch_document_range_term *term;
+
+  if (source == NULL || !lc_pouch_lql_ast_view_is_pointer(source->field) ||
+      (source->gt.kind == LQL_SELECTOR_BOUND_ABSENT &&
+       source->gte.kind == LQL_SELECTOR_BOUND_ABSENT &&
+       source->lt.kind == LQL_SELECTOR_BOUND_ABSENT &&
+       source->lte.kind == LQL_SELECTOR_BOUND_ABSENT) ||
+      !lc_pouch_lql_ast_or_terms_grow(
+          (void **)&terms->range_terms, &terms->range_capacity,
+          terms->range_count, sizeof(terms->range_terms[0]))) {
+    return 0;
+  }
+  term = &terms->range_terms[terms->range_count];
+  term->field = lc_pouch_lql_ast_view_copy(source->field);
+  if (term->field == NULL ||
+      !lc_pouch_lql_ast_range_bound_copy(&source->gt, (char **)&term->gt) ||
+      !lc_pouch_lql_ast_range_bound_copy(&source->gte, (char **)&term->gte) ||
+      !lc_pouch_lql_ast_range_bound_copy(&source->lt, (char **)&term->lt) ||
+      !lc_pouch_lql_ast_range_bound_copy(&source->lte, (char **)&term->lte)) {
+    lc_free_with_allocator(NULL, (char *)term->field);
+    lc_free_with_allocator(NULL, (char *)term->gt);
+    lc_free_with_allocator(NULL, (char *)term->gte);
+    lc_free_with_allocator(NULL, (char *)term->lt);
+    lc_free_with_allocator(NULL, (char *)term->lte);
+    memset(term, 0, sizeof(*term));
+    return 0;
+  }
+  terms->range_count++;
+  return 1;
+}
+
+static int lc_pouch_lql_ast_or_terms_add_in(lc_pouch_lql_ast_or_terms *terms,
+                                            const lql_selector_in_term *source,
+                                            const lql *runtime,
+                                            lql_selector_node node) {
+  lc_pouch_document_in_term *term;
+  char **values;
+  size_t index;
+  lql_error lql_err;
+
+  if (source == NULL || runtime == NULL ||
+      !lc_pouch_lql_ast_view_is_pointer(source->field) ||
+      source->any_count == 0U ||
+      !lc_pouch_lql_ast_or_terms_grow((void **)&terms->in_terms,
+                                      &terms->in_capacity, terms->in_count,
+                                      sizeof(terms->in_terms[0]))) {
+    return 0;
+  }
+  term = &terms->in_terms[terms->in_count];
+  term->field = lc_pouch_lql_ast_view_copy(source->field);
+  values = (char **)lc_calloc_with_allocator(NULL, source->any_count,
+                                             sizeof(values[0]));
+  if (term->field == NULL || values == NULL) {
+    lc_free_with_allocator(NULL, (char *)term->field);
+    term->field = NULL;
+    lc_free_with_allocator(NULL, values);
+    return 0;
+  }
+  for (index = 0U; index < source->any_count; ++index) {
+    lql_string_view value;
+
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_in_term_any(runtime, node, index, &value,
+                                           &lql_err) != LQL_STATUS_OK) {
+      size_t cleanup_index;
+
+      for (cleanup_index = 0U; cleanup_index < index; ++cleanup_index) {
+        lc_free_with_allocator(NULL, values[cleanup_index]);
+      }
+      lc_free_with_allocator(NULL, (char *)term->field);
+      term->field = NULL;
+      lc_free_with_allocator(NULL, values);
+      return 0;
+    }
+    values[index] = lc_pouch_lql_ast_string_value_copy(value);
+    if (values[index] == NULL) {
+      size_t cleanup_index;
+
+      for (cleanup_index = 0U; cleanup_index < index; ++cleanup_index) {
+        lc_free_with_allocator(NULL, values[cleanup_index]);
+      }
+      lc_free_with_allocator(NULL, (char *)term->field);
+      term->field = NULL;
+      lc_free_with_allocator(NULL, values);
+      return 0;
+    }
+  }
+  term->values = (const char *const *)values;
+  term->value_count = source->any_count;
+  terms->in_count++;
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_or_terms_add_string(lc_pouch_lql_ast_or_terms *terms,
+                                     lql_selector_node_kind kind,
+                                     const lql_selector_string_term *source) {
+  if (source == NULL || !source->value_present ||
+      !lc_pouch_lql_ast_view_is_pointer(source->field) ||
+      !lc_pouch_lql_ast_view_is_cstr(source->value)) {
+    return 0;
+  }
+  if (kind == LQL_SELECTOR_NODE_PREFIX || kind == LQL_SELECTOR_NODE_IPREFIX) {
+    lc_pouch_document_prefix_term *term;
+
+    if (!lc_pouch_lql_ast_or_terms_grow(
+            (void **)&terms->prefix_terms, &terms->prefix_capacity,
+            terms->prefix_count, sizeof(terms->prefix_terms[0]))) {
+      return 0;
+    }
+    term = &terms->prefix_terms[terms->prefix_count];
+    term->field = lc_pouch_lql_ast_view_copy(source->field);
+    term->value = lc_pouch_lql_ast_view_copy(source->value);
+    term->ignore_case = kind == LQL_SELECTOR_NODE_IPREFIX;
+    if (term->field == NULL || term->value == NULL) {
+      lc_free_with_allocator(NULL, (char *)term->field);
+      lc_free_with_allocator(NULL, (char *)term->value);
+      memset(term, 0, sizeof(*term));
+      return 0;
+    }
+    terms->prefix_count++;
+    return 1;
+  }
+  if (kind == LQL_SELECTOR_NODE_CONTAINS ||
+      kind == LQL_SELECTOR_NODE_ICONTAINS) {
+    lc_pouch_document_contains_term *term;
+
+    if (!lc_pouch_lql_ast_or_terms_grow(
+            (void **)&terms->contains_terms, &terms->contains_capacity,
+            terms->contains_count, sizeof(terms->contains_terms[0]))) {
+      return 0;
+    }
+    term = &terms->contains_terms[terms->contains_count];
+    term->field = lc_pouch_lql_ast_view_copy(source->field);
+    term->value = lc_pouch_lql_ast_view_copy(source->value);
+    term->ignore_case = kind == LQL_SELECTOR_NODE_ICONTAINS;
+    if (term->field == NULL || term->value == NULL) {
+      lc_free_with_allocator(NULL, (char *)term->field);
+      lc_free_with_allocator(NULL, (char *)term->value);
+      memset(term, 0, sizeof(*term));
+      return 0;
+    }
+    terms->contains_count++;
+    return 1;
+  }
+  return 0;
+}
+
+static int lc_pouch_lql_ast_or_terms_add_node(lc_pouch_lql_ast_or_terms *terms,
+                                              const lql *runtime,
+                                              lql_selector_node node) {
+  lql_error lql_err;
+
+  lql_error_init(&lql_err);
+  if (node.kind == LQL_SELECTOR_NODE_EXISTS) {
+    lql_string_view path;
+
+    if (runtime->selector_node_exists_path(runtime, node, &path, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    return lc_pouch_lql_ast_or_terms_add_exists(terms, path);
+  }
+  if (node.kind == LQL_SELECTOR_NODE_RANGE) {
+    lql_selector_range_term term;
+
+    memset(&term, 0, sizeof(term));
+    if (runtime->selector_node_range_term(runtime, node, &term, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    return lc_pouch_lql_ast_or_terms_add_range(terms, &term);
+  }
+  if (node.kind == LQL_SELECTOR_NODE_IN) {
+    lql_selector_in_term term;
+
+    memset(&term, 0, sizeof(term));
+    if (runtime->selector_node_in_term(runtime, node, &term, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    return lc_pouch_lql_ast_or_terms_add_in(terms, &term, runtime, node);
+  }
+  if (node.kind == LQL_SELECTOR_NODE_PREFIX ||
+      node.kind == LQL_SELECTOR_NODE_IPREFIX ||
+      node.kind == LQL_SELECTOR_NODE_CONTAINS ||
+      node.kind == LQL_SELECTOR_NODE_ICONTAINS) {
+    lql_selector_string_term term;
+
+    memset(&term, 0, sizeof(term));
+    if (runtime->selector_node_string_term(runtime, node, &term, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    return lc_pouch_lql_ast_or_terms_add_string(terms, node.kind, &term);
+  }
+  return 0;
+}
+
+static int lc_pouch_lql_ast_find_single_or(const lql *runtime,
+                                           lql_selector_node node,
+                                           lql_selector_node *out,
+                                           size_t *count) {
+  lql_error lql_err;
+  size_t child_count;
+  size_t index;
+
+  if (runtime == NULL || out == NULL || count == NULL ||
+      node.kind == LQL_SELECTOR_NODE_NOT) {
+    return 1;
+  }
+  if (node.kind == LQL_SELECTOR_NODE_OR) {
+    *out = node;
+    (*count)++;
+    return *count <= 1U;
+  }
+  if (node.kind != LQL_SELECTOR_NODE_AND) {
+    return 1;
+  }
+  lql_error_init(&lql_err);
+  if (runtime->selector_node_child_count(runtime, node, &child_count,
+                                         &lql_err) != LQL_STATUS_OK) {
+    return 0;
+  }
+  for (index = 0U; index < child_count; ++index) {
+    lql_selector_node child;
+
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_child(runtime, node, index, &child, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    if (!lc_pouch_lql_ast_find_single_or(runtime, child, out, count)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_or_hint_parse(lc_pouch_lql_document_filter *filter) {
+  lc_pouch_lql_ast_or_terms terms;
+  lql_selector_node root;
+  lql_selector_node or_node;
+  lql_error lql_err;
+  size_t or_count;
+  size_t child_count;
+  size_t index;
+
+  if (filter == NULL || filter->runtime == NULL || filter->selector == NULL ||
+      filter->document_eq_term_count > 0U ||
+      filter->document_or_eq_term_count > 0U ||
+      filter->document_range_term_count > 0U ||
+      filter->document_or_range_term_count > 0U ||
+      filter->document_in_term_count > 0U ||
+      filter->document_or_in_term_count > 0U ||
+      filter->document_prefix_term_count > 0U ||
+      filter->document_or_prefix_term_count > 0U ||
+      filter->document_contains_term_count > 0U ||
+      filter->document_or_contains_term_count > 0U ||
+      filter->document_exists_term_count > 0U ||
+      filter->document_or_exists_term_count > 0U) {
+    return 0;
+  }
+  memset(&terms, 0, sizeof(terms));
+  memset(&root, 0, sizeof(root));
+  memset(&or_node, 0, sizeof(or_node));
+  lql_error_init(&lql_err);
+  if (filter->runtime->selector_root(filter->runtime, filter->selector, &root,
+                                     &lql_err) != LQL_STATUS_OK) {
+    return 0;
+  }
+  or_count = 0U;
+  if (!lc_pouch_lql_ast_find_single_or(filter->runtime, root, &or_node,
+                                       &or_count) ||
+      or_count != 1U) {
+    return 0;
+  }
+  lql_error_init(&lql_err);
+  if (filter->runtime->selector_node_child_count(
+          filter->runtime, or_node, &child_count, &lql_err) != LQL_STATUS_OK ||
+      child_count < 2U) {
+    return 0;
+  }
+  for (index = 0U; index < child_count; ++index) {
+    lql_selector_node child;
+
+    lql_error_init(&lql_err);
+    if (filter->runtime->selector_node_child(filter->runtime, or_node, index,
+                                             &child,
+                                             &lql_err) != LQL_STATUS_OK ||
+        !lc_pouch_lql_ast_or_terms_add_node(&terms, filter->runtime, child)) {
+      lc_pouch_lql_ast_or_terms_cleanup(&terms);
+      return 0;
+    }
+  }
+  if (terms.range_count == 0U && terms.in_count == 0U &&
+      terms.prefix_count == 0U && terms.contains_count == 0U &&
+      terms.exists_count == 0U) {
+    lc_pouch_lql_ast_or_terms_cleanup(&terms);
+    return 0;
+  }
+  filter->document_or_range_terms = terms.range_terms;
+  filter->document_or_range_term_count = terms.range_count;
+  filter->document_or_in_terms = terms.in_terms;
+  filter->document_or_in_term_count = terms.in_count;
+  filter->document_or_prefix_terms = terms.prefix_terms;
+  filter->document_or_prefix_term_count = terms.prefix_count;
+  filter->document_or_contains_terms = terms.contains_terms;
+  filter->document_or_contains_term_count = terms.contains_count;
+  filter->document_or_exists_terms = terms.exists_terms;
+  filter->document_or_exists_term_count = terms.exists_count;
+  memset(&terms, 0, sizeof(terms));
+  return 1;
+}
+
 static int
 lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
                                   const char *selector_json, lc_error *error) {
@@ -17061,6 +17554,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
         selector_json, &filter->document_exists_terms,
         &filter->document_exists_term_count);
   }
+  (void)lc_pouch_lql_ast_or_hint_parse(filter);
   filter->enabled = 1;
   return LC_OK;
 }
