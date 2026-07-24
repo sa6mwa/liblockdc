@@ -589,11 +589,12 @@ field equality OR branches use a storage-owned branch-union posting path.
 `exists`, prefix/iprefix, contains/icontains, and numeric range OR branches use
 storage-owned branch-union posting paths as well, de-duplicating keys before
 restoring stable cursor ordering. Mixed OR branches that combine path-string
-`exists` selectors with numeric `range` selectors or strict JSON Pointer
-`prefix` / `iprefix` selectors union the same durable presence, ordered
-numeric, and text postings. Full-form `and` selectors that combine a positive
-supported indexed predicate with a `not` exclusion use the positive predicate
-as the storage-owned candidate superset and leave exclusion semantics to final
+`exists` selectors with numeric `range` selectors, strict JSON Pointer
+`prefix` / `iprefix` selectors, or strict JSON Pointer `contains` /
+`icontains` selectors union the same durable presence, ordered numeric, and
+text postings. Full-form `and` selectors that combine a positive supported
+indexed predicate with a `not` exclusion use the positive predicate as the
+storage-owned candidate superset and leave exclusion semantics to final
 `liblql` acceptance. Other OR branch families and broader safe NOT planning
 still need planner support before they can avoid broader scans safely.
 
@@ -734,9 +735,9 @@ than using value-sorted postings as the primary result order. The client
 extracts those shapes only as candidate hints; final predicate acceptance still
 runs through `liblql`. Same-field equality `or` branches lower to `in`,
 mixed-field equality `or` branches union equality postings, and path-string
-`exists` plus numeric `range` or `prefix` / `iprefix` `or` branches union
-presence, ordered numeric, or text postings before stable key/cursor ordering
-is restored.
+`exists` plus numeric `range`, `prefix` / `iprefix`, or `contains` /
+`icontains` `or` branches union presence, ordered numeric, or text postings
+before stable key/cursor ordering is restored.
 Mixed
 equality/range/in/prefix/contains/exists `and`
 selectors intersect equality posting candidates with numeric range, string
