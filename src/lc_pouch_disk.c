@@ -277,6 +277,9 @@ typedef struct lc_pouch_disk_store {
   lc_pouch_fsync_stats fsync_stats;
   int defer_record_fsync;
   int query_index_rebuild_needed;
+  int background_compaction;
+  unsigned long compaction_min_log_bytes;
+  unsigned long compaction_obsolete_multiplier;
 } lc_pouch_disk_store;
 
 typedef struct lc_pouch_disk_replay_input {
@@ -428,6 +431,9 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
                                      lc_error *error);
 static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
                                  lc_pouch_compaction_res *out, lc_error *error);
+static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
+                                     lc_pouch_maintenance_res *out,
+                                     lc_error *error);
 static int lc_pouch_disk_retention_sweep(
     lc_pouch_store *self, const lc_pouch_retention_sweep_req *req,
     lc_pouch_retention_sweep_res *out, lc_error *error);
@@ -2407,6 +2413,15 @@ static int lc_pouch_disk_validate_open_opts(const lc_pouch_disk_open_opts *opts,
   if (opts->single_writer != 0 && opts->single_writer != 1) {
     return lc_pouch_set_invalid(error,
                                 "pouch disk single_writer must be 0 or 1");
+  }
+  if (opts->background_compaction != 0 && opts->background_compaction != 1) {
+    return lc_pouch_set_invalid(
+        error, "pouch disk background_compaction must be 0 or 1");
+  }
+  if (opts->background_compaction_obsolete_multiplier == 1UL) {
+    return lc_pouch_set_invalid(
+        error, "pouch disk background_compaction_obsolete_multiplier must be "
+               "0 or at least 2");
   }
   return LC_OK;
 }
@@ -9685,11 +9700,11 @@ static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
   should_compact = 1;
   skip_reason = NULL;
   if (strcmp(effective_mode, "if_needed") == 0) {
-    if (before_log_bytes < LC_POUCH_COMPACT_MIN_LOG_BYTES) {
+    if (before_log_bytes < store->compaction_min_log_bytes) {
       should_compact = 0;
       skip_reason = "below-min-log-size";
     } else if (before_record_count <=
-               live_record_count * LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER) {
+               live_record_count * store->compaction_obsolete_multiplier) {
       should_compact = 0;
       skip_reason = "below-obsolete-threshold";
     }
@@ -9740,6 +9755,56 @@ static int lc_pouch_disk_compact(lc_pouch_store *self, const char *mode,
   if (lc_pouch_disk_unlock(store, error) != LC_OK) {
     lc_pouch_compaction_res_cleanup(&store->allocator, out);
     return LC_ERR_TRANSPORT;
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
+                                     lc_pouch_maintenance_res *out,
+                                     lc_error *error) {
+  lc_pouch_disk_store *store;
+  const char *effective_mode;
+  int rc;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(error, "maintenance requires store and output");
+  }
+  effective_mode = mode != NULL && mode[0] != '\0' ? mode : "scheduled";
+  if (strcmp(effective_mode, "scheduled") != 0) {
+    return lc_pouch_set_invalid(error,
+                                "pouch maintenance mode must be scheduled");
+  }
+
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  out->mode = lc_pouch_strdup(&store->allocator, effective_mode);
+  if (out->mode == NULL) {
+    return lc_pouch_set_nomem(error, "failed to copy pouch maintenance mode");
+  }
+  out->accepted = 1;
+  out->compaction_enabled = store->background_compaction;
+  if (!store->background_compaction) {
+    out->reason = lc_pouch_strdup(&store->allocator, "background-disabled");
+    if (out->reason == NULL) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return lc_pouch_set_nomem(error,
+                                "failed to copy pouch maintenance reason");
+    }
+    return LC_OK;
+  }
+
+  rc = lc_pouch_disk_compact(self, "if_needed", &out->compaction, error);
+  if (rc != LC_OK) {
+    lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+    return rc;
+  }
+  out->reason = lc_pouch_strdup(&store->allocator,
+                                out->compaction.compacted
+                                    ? "compacted"
+                                    : out->compaction.skip_reason);
+  if (out->reason == NULL) {
+    lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+    return lc_pouch_set_nomem(error, "failed to copy pouch maintenance reason");
   }
   return LC_OK;
 }
@@ -11441,12 +11506,12 @@ static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
                                               lc_error *error) {
   unsigned long live_count;
 
-  if (log_size < LC_POUCH_COMPACT_MIN_LOG_BYTES) {
+  if (log_size < store->compaction_min_log_bytes) {
     return LC_OK;
   }
   live_count = lc_pouch_disk_compaction_live_record_count(store);
   if (store->replayed_record_count <=
-      live_count * LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER) {
+      live_count * store->compaction_obsolete_multiplier) {
     return LC_OK;
   }
   return lc_pouch_disk_compact_locked(store, error);
@@ -17024,6 +17089,16 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->replayed_segment_generation = (unsigned long)-1;
   store->replayed_query_index_size = (unsigned long)-1;
   store->single_writer = opts != NULL ? opts->single_writer : 0;
+  store->background_compaction =
+      opts != NULL ? opts->background_compaction : 0;
+  store->compaction_min_log_bytes =
+      opts != NULL && opts->background_compaction_min_log_bytes != 0UL
+          ? opts->background_compaction_min_log_bytes
+          : LC_POUCH_COMPACT_MIN_LOG_BYTES;
+  store->compaction_obsolete_multiplier =
+      opts != NULL && opts->background_compaction_obsolete_multiplier != 0UL
+          ? opts->background_compaction_obsolete_multiplier
+          : LC_POUCH_COMPACT_OBSOLETE_MULTIPLIER;
   store->next_version = 1L;
   store->pub.impl = store;
   store->read_cache_owner =
@@ -17113,6 +17188,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.query_owner_keys_scan = lc_pouch_disk_query_owner_keys_scan;
   store->pub.flush_index = lc_pouch_disk_flush_index;
   store->pub.compact = lc_pouch_disk_compact;
+  store->pub.maintenance = lc_pouch_disk_maintenance;
   store->pub.retention_sweep = lc_pouch_disk_retention_sweep;
   store->pub.read_state = lc_pouch_disk_read_state;
   store->pub.write_state = lc_pouch_disk_write_state;

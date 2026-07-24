@@ -222,6 +222,14 @@ typedef struct lc_pouch_compaction_res {
   unsigned long live_record_count;
 } lc_pouch_compaction_res;
 
+typedef struct lc_pouch_maintenance_res {
+  char *mode;
+  char *reason;
+  int accepted;
+  int compaction_enabled;
+  lc_pouch_compaction_res compaction;
+} lc_pouch_maintenance_res;
+
 typedef struct lc_pouch_retention_sweep_req {
   long updated_before_unix;
 } lc_pouch_retention_sweep_req;
@@ -243,6 +251,9 @@ typedef struct lc_pouch_disk_open_opts {
   const char *query_engine;
   const char *query_fallback_engine;
   int single_writer;
+  int background_compaction;
+  unsigned long background_compaction_min_log_bytes;
+  unsigned long background_compaction_obsolete_multiplier;
 } lc_pouch_disk_open_opts;
 
 typedef struct lc_pouch_object_info {
@@ -468,6 +479,8 @@ struct lc_pouch_store {
                      lc_error *error);
   int (*compact)(lc_pouch_store *self, const char *mode,
                  lc_pouch_compaction_res *out, lc_error *error);
+  int (*maintenance)(lc_pouch_store *self, const char *mode,
+                     lc_pouch_maintenance_res *out, lc_error *error);
   int (*retention_sweep)(lc_pouch_store *self,
                          const lc_pouch_retention_sweep_req *req,
                          lc_pouch_retention_sweep_res *out, lc_error *error);
@@ -617,6 +630,8 @@ void lc_pouch_index_flush_res_cleanup(const lc_pouch_allocator *allocator,
                                       lc_pouch_index_flush_res *res);
 void lc_pouch_compaction_res_cleanup(const lc_pouch_allocator *allocator,
                                      lc_pouch_compaction_res *res);
+void lc_pouch_maintenance_res_cleanup(const lc_pouch_allocator *allocator,
+                                      lc_pouch_maintenance_res *res);
 void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
                                    lc_pouch_query_config *config);
 void lc_pouch_queue_wake_status_cleanup(

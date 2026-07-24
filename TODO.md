@@ -421,17 +421,19 @@ Latest release targets confirmed on 2026-07-23:
         dangling linked payload references.
     - [ ] Add optional background compaction scheduling for pouch, modeled
       after Go lockd disk but scoped to embedded C lifecycle constraints.
-      - [ ] Add open options for enabling/disabling background compaction,
-        interval, minimum sealed/snapshot candidates, minimum reclaimable
-        bytes, delete grace, and optional I/O throttling.
-      - [ ] Run scheduled compaction/obsolete cleanup from an explicit
-        store-owned lifecycle path that never races foreground writes and can
-        be stopped during close/abort.
-      - [ ] Report scheduled compaction diagnostics through the private pouch
-        control surface and tests, including skipped reasons and cleanup-only
-        passes.
-      - [ ] Keep manual `compact(force|if_needed)` deterministic and
+      - [x] Add open options for enabling/disabling scheduled compaction and
+        configuring the first threshold surface: minimum log bytes and obsolete
+        record multiplier.
+      - [x] Run scheduled compaction from an explicit store-owned maintenance
+        tick that uses the writer lock and never races foreground writes.
+      - [x] Report scheduled compaction diagnostics through the private pouch
+        control surface and tests, including disabled, skipped, and compacted
+        outcomes.
+      - [x] Keep manual `compact(force|if_needed)` deterministic and
         foreground-safe even when background scheduling is enabled.
+      - [ ] Add interval/deadline scheduling, minimum sealed/snapshot
+        candidates, minimum reclaimable bytes, delete grace, cleanup-only
+        maintenance passes, and optional I/O throttling.
     - [x] Add Go disk-style marker lifecycle for segmented pouch logstores.
       - [x] Clarify and implement root-level writer-presence markers for
         exclusive writer detection/fencing, separate from namespace logstore

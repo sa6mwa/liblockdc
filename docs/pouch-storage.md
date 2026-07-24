@@ -558,6 +558,15 @@ rewriting below-threshold stores. Both modes report before/after log bytes,
 query-index bytes, record counts, and live-record counts so tests and future
 management tooling can treat compaction as observable behavior rather than an
 implicit side effect.
+The disk open options also expose the first scheduled-maintenance knobs:
+scheduled compaction can be enabled explicitly, and the minimum log byte and
+obsolete-record multiplier thresholds can be overridden. The private
+`maintenance("scheduled")` tick runs through the same foreground-safe writer
+lock path as manual `compact(if_needed)`, reports whether scheduling is disabled,
+skipped, or compacted, and does not create worker threads or hidden background
+I/O. Later lifecycle work can layer interval/deadline scheduling, cleanup-only
+passes, reclaim-byte thresholds, delete grace, and throttling on that explicit
+store-owned path.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query
