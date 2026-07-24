@@ -404,7 +404,7 @@ Latest release targets confirmed on 2026-07-23:
       by unioning equality, membership, ordered numeric, text, and presence
       postings in storage-owned candidate scans while keeping final predicate
       acceptance in `liblql`.
-    - [ ] Add recursive boolean composition over supported selector families
+    - [x] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans, including remaining mixed
       nested OR branch planning and broader exclusion planning for safe `not`
       forms.
