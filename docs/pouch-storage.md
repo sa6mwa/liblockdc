@@ -573,7 +573,8 @@ without entering compaction, so manifest-obsolete segment and snapshot file
 deletes can be retried even when scheduled compaction is disabled. Private disk
 open options can also apply delete grace to obsolete-file cleanup; files whose
 mtime is still inside the grace window stay tracked and are retried by a later
-replay or cleanup tick. Later lifecycle work can layer deadline scheduling,
+replay or cleanup tick. Later lifecycle work can layer deadline scheduling and
+I/O throttling.
 reclaim-byte thresholds, and throttling on that explicit store-owned path.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
@@ -1425,9 +1426,11 @@ Scheduled maintenance can additionally require a minimum number of compactable
 history files before it calls the foreground-safe `if_needed` compaction path.
 The candidate count is conservative: active snapshot files count, and segment
 files count only when a later segment exists for the same namespace, so the
-current append tail does not trigger background compaction by itself. A skipped
-scheduled tick reports `below-candidate-threshold`; manual compaction remains
-deterministic and unaffected by this scheduling gate.
+current append tail does not trigger background compaction by itself. It can
+also require a minimum estimated number of reclaimable bytes by comparing
+current log bytes to the compacted live-record estimate. Skipped scheduled ticks
+report `below-candidate-threshold` or `below-reclaimable-threshold`; manual
+compaction remains deterministic and unaffected by these scheduling gates.
 
 Compaction flow:
 

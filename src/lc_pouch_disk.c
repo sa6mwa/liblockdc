@@ -282,6 +282,7 @@ typedef struct lc_pouch_disk_store {
   unsigned long compaction_obsolete_multiplier;
   unsigned long background_compaction_interval_seconds;
   unsigned long background_compaction_min_candidate_files;
+  unsigned long background_compaction_min_reclaimable_bytes;
   unsigned long background_compaction_delete_grace_seconds;
   long background_compaction_last_run_unix;
 } lc_pouch_disk_store;
@@ -534,6 +535,8 @@ lc_pouch_disk_compaction_live_record_count(lc_pouch_disk_store *store);
 static int lc_pouch_disk_total_log_bytes(lc_pouch_disk_store *store,
                                          unsigned long *bytes_out,
                                          lc_error *error);
+static int lc_pouch_disk_compaction_estimated_after_log_bytes(
+    lc_pouch_disk_store *store, unsigned long *bytes_out, lc_error *error);
 static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
                                         lc_error *error);
 static int lc_pouch_disk_maybe_compact_locked(lc_pouch_disk_store *store,
@@ -4190,6 +4193,19 @@ static int lc_pouch_namespace_list_contains(const lc_pouch_namespace_list *list,
     }
   }
   return 0;
+}
+
+static int lc_pouch_disk_add_record_size(unsigned long *total,
+                                         unsigned long payload_len) {
+  unsigned long record_len;
+
+  if (total == NULL ||
+      lc_pouch_disk_add_overflows(LC_POUCH_HEADER_SIZE, payload_len,
+                                  &record_len) ||
+      lc_pouch_disk_add_overflows(*total, record_len, total)) {
+    return 0;
+  }
+  return 1;
 }
 
 static int lc_pouch_disk_namespace_is_reserved(const char *namespace_name) {
@@ -12556,6 +12572,49 @@ static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
       return LC_OK;
     }
   }
+  if (store->background_compaction_min_reclaimable_bytes > 0UL) {
+    unsigned long before_log_bytes;
+    unsigned long estimated_after_log_bytes;
+    unsigned long reclaimable_bytes;
+
+    before_log_bytes = 0UL;
+    estimated_after_log_bytes = 0UL;
+    rc = lc_pouch_disk_lock(store, error);
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+    rc = lc_pouch_disk_force_replay_locked(store, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_disk_total_log_bytes(store, &before_log_bytes, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_disk_compaction_estimated_after_log_bytes(
+          store, &estimated_after_log_bytes, error);
+    }
+    if (lc_pouch_disk_unlock(store, rc == LC_OK ? error : NULL) != LC_OK &&
+        rc == LC_OK) {
+      rc = LC_ERR_TRANSPORT;
+    }
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+    reclaimable_bytes = before_log_bytes > estimated_after_log_bytes
+                            ? before_log_bytes - estimated_after_log_bytes
+                            : 0UL;
+    if (reclaimable_bytes <
+        store->background_compaction_min_reclaimable_bytes) {
+      out->reason =
+          lc_pouch_strdup(&store->allocator, "below-reclaimable-threshold");
+      if (out->reason == NULL) {
+        lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+        return lc_pouch_set_nomem(error,
+                                  "failed to copy pouch maintenance reason");
+      }
+      return LC_OK;
+    }
+  }
 
   rc = lc_pouch_disk_compact(self, "if_needed", &out->compaction, error);
   if (rc != LC_OK) {
@@ -13669,6 +13728,159 @@ lc_pouch_disk_compaction_live_record_count(lc_pouch_disk_store *store) {
     }
   }
   return count;
+}
+
+static int lc_pouch_disk_compaction_estimated_after_log_bytes(
+    lc_pouch_disk_store *store, unsigned long *bytes_out, lc_error *error) {
+  unsigned long total;
+  size_t index;
+
+  if (bytes_out == NULL) {
+    return lc_pouch_set_invalid(error, "pouch log byte output is required");
+  }
+  total = 0UL;
+  if (store->next_version > 1L && !lc_pouch_disk_add_record_size(&total, 0UL)) {
+    return lc_pouch_set_invalid(error,
+                                "pouch compacted log size exceeds limits");
+  }
+  for (index = 0U; index < store->state_entry_count; ++index) {
+    lc_pouch_disk_state_entry *entry;
+    unsigned long payload_len;
+
+    entry = &store->state_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    if (lc_pouch_disk_add_overflows(
+            (unsigned long)strlen(entry->namespace_name),
+            (unsigned long)strlen(entry->key), &payload_len) ||
+        lc_pouch_disk_add_overflows(
+            payload_len,
+            entry->content_type != NULL
+                ? (unsigned long)strlen(entry->content_type)
+                : 0UL,
+            &payload_len) ||
+        lc_pouch_disk_add_overflows(
+            payload_len,
+            entry->etag != NULL ? (unsigned long)strlen(entry->etag) : 0UL,
+            &payload_len) ||
+        lc_pouch_disk_add_overflows(payload_len, entry->body_length,
+                                    &payload_len) ||
+        !lc_pouch_disk_add_record_size(&total, payload_len)) {
+      return lc_pouch_set_invalid(error,
+                                  "pouch compacted log size exceeds limits");
+    }
+  }
+  for (index = 0U; index < store->meta_entry_count; ++index) {
+    lc_pouch_disk_meta_entry *entry;
+    unsigned char *meta_payload;
+    size_t meta_payload_length;
+    unsigned long payload_len;
+
+    entry = &store->meta_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    meta_payload = NULL;
+    meta_payload_length = 0U;
+    if (!lc_pouch_encode_meta(store, &entry->meta, &meta_payload,
+                              &meta_payload_length)) {
+      return lc_pouch_set_nomem(error,
+                                "failed to estimate pouch compacted metadata");
+    }
+    if (lc_pouch_disk_add_overflows(
+            (unsigned long)strlen(entry->namespace_name),
+            (unsigned long)strlen(entry->key), &payload_len) ||
+        lc_pouch_disk_add_overflows(
+            payload_len,
+            entry->etag != NULL ? (unsigned long)strlen(entry->etag) : 0UL,
+            &payload_len) ||
+        lc_pouch_disk_add_overflows(
+            payload_len, (unsigned long)meta_payload_length, &payload_len) ||
+        !lc_pouch_disk_add_record_size(&total, payload_len)) {
+      lc_pouch_free(&store->allocator, meta_payload);
+      return lc_pouch_set_invalid(error,
+                                  "pouch compacted log size exceeds limits");
+    }
+    lc_pouch_free(&store->allocator, meta_payload);
+  }
+  for (index = 0U; index < store->object_entry_count; ++index) {
+    lc_pouch_disk_object_entry *entry;
+    unsigned long object_body_len;
+    unsigned long payload_len;
+
+    entry = &store->object_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    if (lc_pouch_disk_add_overflows(
+            LC_POUCH_OBJECT_META_SIZE,
+            entry->content_type != NULL
+                ? (unsigned long)strlen(entry->content_type)
+                : 0UL,
+            &object_body_len) ||
+        lc_pouch_disk_add_overflows(object_body_len, entry->body_length,
+                                    &object_body_len) ||
+        lc_pouch_disk_add_overflows(
+            (unsigned long)strlen(entry->namespace_name),
+            (unsigned long)strlen(entry->key), &payload_len) ||
+        lc_pouch_disk_add_overflows(
+            payload_len, (unsigned long)strlen(entry->name), &payload_len) ||
+        lc_pouch_disk_add_overflows(
+            payload_len, (unsigned long)strlen(entry->id), &payload_len) ||
+        lc_pouch_disk_add_overflows(payload_len, object_body_len,
+                                    &payload_len) ||
+        !lc_pouch_disk_add_record_size(&total, payload_len)) {
+      return lc_pouch_set_invalid(error,
+                                  "pouch compacted log size exceeds limits");
+    }
+  }
+  for (index = 0U; index < store->queue_entry_count; ++index) {
+    lc_pouch_disk_queue_entry *entry;
+    const char *content_type;
+    const char *lease_id;
+    const char *txn_id;
+    unsigned long queue_body_len;
+    unsigned long payload_len;
+
+    entry = &store->queue_entries[index];
+    if (entry->deleted) {
+      continue;
+    }
+    content_type = entry->payload_content_type != NULL
+                       ? entry->payload_content_type
+                       : "application/octet-stream";
+    lease_id = entry->lease_id != NULL ? entry->lease_id : "";
+    txn_id = entry->txn_id != NULL ? entry->txn_id : "";
+    if (lc_pouch_disk_add_overflows(LC_POUCH_QUEUE_META_SIZE,
+                                    (unsigned long)strlen(content_type),
+                                    &queue_body_len) ||
+        lc_pouch_disk_add_overflows(
+            queue_body_len, (unsigned long)strlen(lease_id), &queue_body_len) ||
+        lc_pouch_disk_add_overflows(
+            queue_body_len, (unsigned long)strlen(txn_id), &queue_body_len) ||
+        lc_pouch_disk_add_overflows(queue_body_len, entry->body_length,
+                                    &queue_body_len) ||
+        lc_pouch_disk_add_overflows(
+            (unsigned long)strlen(entry->namespace_name),
+            (unsigned long)strlen(entry->queue), &payload_len) ||
+        lc_pouch_disk_add_overflows(payload_len,
+                                    (unsigned long)strlen(entry->message_id),
+                                    &payload_len) ||
+        lc_pouch_disk_add_overflows(
+            payload_len,
+            entry->meta_etag != NULL ? (unsigned long)strlen(entry->meta_etag)
+                                     : 0UL,
+            &payload_len) ||
+        lc_pouch_disk_add_overflows(payload_len, queue_body_len,
+                                    &payload_len) ||
+        !lc_pouch_disk_add_record_size(&total, payload_len)) {
+      return lc_pouch_set_invalid(error,
+                                  "pouch compacted log size exceeds limits");
+    }
+  }
+  *bytes_out = total;
+  return LC_OK;
 }
 
 static int lc_pouch_disk_total_log_bytes(lc_pouch_disk_store *store,
@@ -19967,6 +20179,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       opts != NULL ? opts->background_compaction_interval_seconds : 0UL;
   store->background_compaction_min_candidate_files =
       opts != NULL ? opts->background_compaction_min_candidate_files : 0UL;
+  store->background_compaction_min_reclaimable_bytes =
+      opts != NULL ? opts->background_compaction_min_reclaimable_bytes : 0UL;
   store->background_compaction_delete_grace_seconds =
       opts != NULL ? opts->background_compaction_delete_grace_seconds : 0UL;
   store->background_compaction_last_run_unix = 0L;

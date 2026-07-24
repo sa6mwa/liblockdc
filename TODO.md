@@ -582,8 +582,10 @@ Latest release targets confirmed on 2026-07-23:
         manual compaction.
       - [x] Add obsolete-file delete grace for scheduled/cleanup maintenance
         so manifest-obsolete segment and snapshot files can age before unlink.
-      - [ ] Add deadline scheduling, minimum reclaimable bytes, and optional
-        I/O throttling.
+      - [x] Add a scheduled compaction minimum-reclaimable-bytes gate that
+        estimates compacted live log bytes and reports
+        `below-reclaimable-threshold` without entering compaction.
+      - [ ] Add deadline scheduling and optional I/O throttling.
     - [x] Add Go disk-style marker lifecycle for segmented pouch logstores.
       - [x] Clarify and implement root-level writer-presence markers for
         exclusive writer detection/fencing, separate from namespace logstore
