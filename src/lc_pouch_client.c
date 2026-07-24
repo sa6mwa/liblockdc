@@ -6611,6 +6611,210 @@ cleanup:
   lc_free_with_allocator(NULL, visit.terms);
 }
 
+typedef struct lc_pouch_lql_exists_hint_term {
+  char *field;
+  size_t field_len;
+  size_t field_capacity;
+  int saw_field;
+} lc_pouch_lql_exists_hint_term;
+
+typedef struct lc_pouch_lql_exists_hint_visit {
+  lc_pouch_lql_exists_hint_term *terms;
+  size_t term_count;
+  size_t term_capacity;
+  int string_field_active;
+  size_t active_term_index;
+} lc_pouch_lql_exists_hint_visit;
+
+static void lc_pouch_lql_exists_hint_raw_term_cleanup(
+    lc_pouch_lql_exists_hint_term *term) {
+  if (term == NULL) {
+    return;
+  }
+  lc_free_with_allocator(NULL, term->field);
+  memset(term, 0, sizeof(*term));
+}
+
+static int lc_pouch_lql_exists_hint_path_is_term(
+    const lonejson_value_path *path, size_t *term_index) {
+  if (path != NULL && path->segment_count == 1U &&
+      lc_pouch_lql_eq_hint_segment_is(path, 0U, "exists")) {
+    if (term_index != NULL) {
+      *term_index = 0U;
+    }
+    return 1;
+  }
+  return path != NULL && path->segment_count == 3U &&
+         lc_pouch_lql_eq_hint_segment_is(path, 0U, "and") &&
+         lc_pouch_lql_eq_hint_parse_index(path, 1U, term_index) &&
+         lc_pouch_lql_eq_hint_segment_is(path, 2U, "exists");
+}
+
+static int lc_pouch_lql_exists_hint_ensure_term(
+    lc_pouch_lql_exists_hint_visit *visit, size_t term_index) {
+  lc_pouch_lql_exists_hint_term *grown;
+  size_t new_capacity;
+  size_t index;
+
+  if (term_index < visit->term_count) {
+    return 1;
+  }
+  if (term_index + 1U > visit->term_capacity) {
+    new_capacity = visit->term_capacity == 0U ? 4U : visit->term_capacity;
+    while (new_capacity < term_index + 1U) {
+      if (new_capacity > ((size_t)-1) / 2U) {
+        return 0;
+      }
+      new_capacity *= 2U;
+    }
+    grown = (lc_pouch_lql_exists_hint_term *)lc_realloc_with_allocator(
+        NULL, visit->terms, new_capacity * sizeof(visit->terms[0]));
+    if (grown == NULL) {
+      return 0;
+    }
+    memset(grown + visit->term_capacity, 0,
+           (new_capacity - visit->term_capacity) * sizeof(grown[0]));
+    visit->terms = grown;
+    visit->term_capacity = new_capacity;
+  }
+  for (index = visit->term_count; index <= term_index; ++index) {
+    memset(&visit->terms[index], 0, sizeof(visit->terms[index]));
+  }
+  visit->term_count = term_index + 1U;
+  return 1;
+}
+
+static lonejson_status
+lc_pouch_lql_exists_hint_string_begin(void *user,
+                                      const lonejson_value_path *path,
+                                      lonejson_error *error) {
+  lc_pouch_lql_exists_hint_visit *visit;
+  size_t term_index;
+
+  (void)error;
+  visit = (lc_pouch_lql_exists_hint_visit *)user;
+  if (visit != NULL &&
+      lc_pouch_lql_exists_hint_path_is_term(path, &term_index)) {
+    if (!lc_pouch_lql_exists_hint_ensure_term(visit, term_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    visit->string_field_active = 1;
+    visit->active_term_index = term_index;
+    visit->terms[term_index].field_len = 0U;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_exists_hint_string_chunk(void *user,
+                                      const lonejson_value_path *path,
+                                      const char *data, size_t len,
+                                      lonejson_error *error) {
+  lc_pouch_lql_exists_hint_visit *visit;
+  lc_pouch_lql_exists_hint_term *term;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_exists_hint_visit *)user;
+  if (visit == NULL || !visit->string_field_active ||
+      visit->active_term_index >= visit->term_count) {
+    return LONEJSON_STATUS_OK;
+  }
+  term = &visit->terms[visit->active_term_index];
+  if (!lc_pouch_lql_eq_hint_append(&term->field, &term->field_len,
+                                   &term->field_capacity, data, len)) {
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_exists_hint_string_end(void *user,
+                                    const lonejson_value_path *path,
+                                    lonejson_error *error) {
+  lc_pouch_lql_exists_hint_visit *visit;
+  size_t term_index;
+
+  (void)error;
+  visit = (lc_pouch_lql_exists_hint_visit *)user;
+  if (visit != NULL &&
+      lc_pouch_lql_exists_hint_path_is_term(path, &term_index) &&
+      term_index < visit->term_count) {
+    visit->string_field_active = 0;
+    visit->terms[term_index].saw_field =
+        visit->terms[term_index].field != NULL &&
+        visit->terms[term_index].field[0] == '/';
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static void lc_pouch_lql_exists_hint_parse_full_form(
+    const char *selector_json, lc_pouch_document_exists_term **terms_out,
+    size_t *term_count_out) {
+  lc_pouch_lql_exists_hint_visit visit;
+  lonejson_path_value_visitor visitor;
+  lonejson_error error;
+  lonejson_status status;
+  lonejson *runtime;
+  lc_pouch_document_exists_term *terms;
+  size_t count;
+  size_t index;
+
+  if (terms_out != NULL) {
+    *terms_out = NULL;
+  }
+  if (term_count_out != NULL) {
+    *term_count_out = 0U;
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL || selector_json == NULL || terms_out == NULL ||
+      term_count_out == NULL) {
+    return;
+  }
+  memset(&visit, 0, sizeof(visit));
+  visitor = lonejson_default_path_value_visitor();
+  visitor.string_begin = lc_pouch_lql_exists_hint_string_begin;
+  visitor.string_chunk = lc_pouch_lql_exists_hint_string_chunk;
+  visitor.string_end = lc_pouch_lql_exists_hint_string_end;
+  lonejson_error_init(&error);
+  status = runtime->visit_path_value_cstr(runtime, selector_json, &visitor,
+                                          &visit, &error);
+  if (status != LONEJSON_STATUS_OK) {
+    goto cleanup;
+  }
+  count = 0U;
+  for (index = 0U; index < visit.term_count; ++index) {
+    if (visit.terms[index].saw_field) {
+      count++;
+    }
+  }
+  if (count == 0U) {
+    goto cleanup;
+  }
+  terms = (lc_pouch_document_exists_term *)lc_calloc_with_allocator(
+      NULL, count, sizeof(terms[0]));
+  if (terms == NULL) {
+    goto cleanup;
+  }
+  count = 0U;
+  for (index = 0U; index < visit.term_count; ++index) {
+    if (!visit.terms[index].saw_field) {
+      continue;
+    }
+    terms[count].field = visit.terms[index].field;
+    memset(&visit.terms[index], 0, sizeof(visit.terms[index]));
+    count++;
+  }
+  *terms_out = terms;
+  *term_count_out = count;
+
+cleanup:
+  for (index = 0U; index < visit.term_count; ++index) {
+    lc_pouch_lql_exists_hint_raw_term_cleanup(&visit.terms[index]);
+  }
+  lc_free_with_allocator(NULL, visit.terms);
+}
+
 static int lc_pouch_lql_status_to_error(lql_status status) {
   switch (status) {
   case LQL_STATUS_OK:
@@ -6789,6 +6993,8 @@ typedef struct lc_pouch_lql_document_filter {
   size_t document_eq_term_count;
   lc_pouch_document_range_term *document_range_terms;
   size_t document_range_term_count;
+  lc_pouch_document_exists_term *document_exists_terms;
+  size_t document_exists_term_count;
   int enabled;
 } lc_pouch_lql_document_filter;
 
@@ -6911,6 +7117,11 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
                            (char *)filter->document_range_terms[index].lte);
   }
   lc_free_with_allocator(NULL, filter->document_range_terms);
+  for (index = 0U; index < filter->document_exists_term_count; ++index) {
+    lc_free_with_allocator(
+        NULL, (char *)filter->document_exists_terms[index].field);
+  }
+  lc_free_with_allocator(NULL, filter->document_exists_terms);
   memset(filter, 0, sizeof(*filter));
 }
 
@@ -6946,6 +7157,9 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
   lc_pouch_lql_range_hint_parse_full_form(selector_json,
                                           &filter->document_range_terms,
                                           &filter->document_range_term_count);
+  lc_pouch_lql_exists_hint_parse_full_form(
+      selector_json, &filter->document_exists_terms,
+      &filter->document_exists_term_count);
   filter->enabled = 1;
   return LC_OK;
 }
@@ -7765,6 +7979,8 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   scan_req.document_eq_term_count = filter.document_eq_term_count;
   scan_req.document_range_terms = filter.document_range_terms;
   scan_req.document_range_term_count = filter.document_range_term_count;
+  scan_req.document_exists_terms = filter.document_exists_terms;
+  scan_req.document_exists_term_count = filter.document_exists_term_count;
   visit.scan.client = client;
   visit.scan.dst = dst;
   visit.scan.filter = &filter;
@@ -8123,6 +8339,8 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   scan_req.document_eq_term_count = filter.document_eq_term_count;
   scan_req.document_range_terms = filter.document_range_terms;
   scan_req.document_range_term_count = filter.document_range_term_count;
+  scan_req.document_exists_terms = filter.document_exists_terms;
+  scan_req.document_exists_term_count = filter.document_exists_term_count;
   scan_context.handler = handler;
   scan_context.handler_context = context;
   scan_context.filter = &filter;

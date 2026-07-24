@@ -684,17 +684,20 @@ posting/candidate sets without loading every metadata summary or every document
 payload in the namespace.
 The first durable LQL posting slices index exact equality candidates for strict
 JSON Pointer document fields with string, boolean, null, and numeric values,
-plus numeric range candidate checks over those field postings. Numeric equality
-and range bounds use canonical numeric keys so equivalent JSON number spellings
-compare consistently instead of relying on raw token text. Indexed mode also
-recognizes top-level full-form `and` conjunctions made only of scalar equality
-terms and intersects their storage-owned postings before loading candidate
-documents. Range-only selectors preserve existing key/cursor ordering by
-checking numeric postings from the key-ordered summary scan rather than using
-value-sorted postings as the primary result order. The client extracts those
-shapes only as candidate hints; final predicate acceptance still runs through
-`liblql`. Mixed equality/range `and` selectors intersect equality posting
-candidates with numeric range postings when every hinted child is supported.
+plus numeric range candidate checks and `exists` presence checks over those
+field postings. Numeric equality and range bounds use canonical numeric keys so
+equivalent JSON number spellings compare consistently instead of relying on raw
+token text. Object and array field containers also emit presence postings so
+`exists` can narrow candidates for structured values without requiring a scalar
+leaf. Indexed mode also recognizes top-level full-form `and` conjunctions made
+only of supported equality, range, and exists terms and intersects their
+storage-owned postings before loading candidate documents. Range-only selectors
+preserve existing key/cursor ordering by checking numeric postings from the
+key-ordered summary scan rather than using value-sorted postings as the primary
+result order. The client extracts those shapes only as candidate hints; final
+predicate acceptance still runs through `liblql`. Mixed equality/range/exists
+`and` selectors intersect equality posting candidates with numeric range and
+presence postings when every hinted child is supported.
 The `query.index` sidecar starts with a format/version record so incompatible
 posting layouts rebuild from authoritative namespace segments/snapshots instead
 of being trusted.
