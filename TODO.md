@@ -307,6 +307,10 @@ Latest release targets confirmed on 2026-07-23:
       children are exact equality selectors over the same strict JSON Pointer
       field; the planner maps those to the existing storage-owned `in`
       candidate path and still lets `liblql` perform final acceptance.
+    - [x] Add storage-owned same-field `in` candidate lowering for full-form
+      `or` branches whose children are string `in` selectors over the same
+      strict JSON Pointer field; branch `any` values are unioned through the
+      existing `in` candidate path before final `liblql` acceptance.
     - [x] Add storage-owned branch-union candidates for mixed-field full-form
       `or` branches whose children are exact equality selectors; the disk
       backend de-duplicates unioned posting keys, restores stable cursor

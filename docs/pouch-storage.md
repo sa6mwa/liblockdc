@@ -738,13 +738,14 @@ other supported predicates. Range-only selectors preserve existing key/cursor
 ordering by checking numeric postings from the key-ordered summary scan rather
 than using value-sorted postings as the primary result order. The client
 extracts those shapes only as candidate hints; final predicate acceptance still
-runs through `liblql`. Same-field equality `or` branches lower to `in`,
-mixed-field equality `or` branches union equality postings, and path-string
-`exists` plus numeric `range`, `prefix` / `iprefix`, or `contains` /
-`icontains` `or` branches, plus mixed `prefix` / `iprefix` and `contains` /
-`icontains` `or` branches and mixed numeric `range` plus `prefix` / `iprefix`
-or `contains` / `icontains` `or` branches, union presence, ordered numeric, or
-text postings before stable key/cursor ordering is restored.
+runs through `liblql`. Same-field equality and same-field string `in` `or`
+branches lower to `in`, mixed-field equality `or` branches union equality
+postings, and path-string `exists` plus numeric `range`, `prefix` / `iprefix`,
+or `contains` / `icontains` `or` branches, plus mixed `prefix` / `iprefix` and
+`contains` / `icontains` `or` branches and mixed numeric `range` plus
+`prefix` / `iprefix` or `contains` / `icontains` `or` branches, union
+presence, ordered numeric, or text postings before stable key/cursor ordering
+is restored.
 Mixed
 equality/range/in/prefix/contains/exists `and`
 selectors intersect equality posting candidates with numeric range, string
