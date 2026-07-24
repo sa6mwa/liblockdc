@@ -759,6 +759,9 @@ stay final `liblql` filters, while equality-only OR groups use typed equality
 candidate supersets generated from liblql's textual equality view and root OR
 groups that mix equality, membership, numeric range, text prefix/substring, and
 presence families can also provide the candidate superset.
+Exact `not exists` leaves under recursive `and` composition are also used as
+storage-owned exclusions: candidate scans reject keys with live postings for the
+excluded JSON Pointer field before final `liblql` acceptance.
 Positive `exists` selectors with single-segment wildcard path components, such
 as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
 instead of treating the wildcard as a literal posting field; final acceptance

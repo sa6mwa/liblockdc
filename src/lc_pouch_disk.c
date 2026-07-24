@@ -4877,10 +4877,54 @@ static int lc_pouch_disk_query_field_key_matches_exists_from(
   return 1;
 }
 
+static int lc_pouch_disk_query_field_key_matches_not_exists(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const char *key) {
+  size_t term_index;
+
+  if (req == NULL || key == NULL || req->document_not_exists_term_count == 0U) {
+    return 1;
+  }
+  for (term_index = 0U; term_index < req->document_not_exists_term_count;
+       ++term_index) {
+    const lc_pouch_document_exists_term *term;
+    size_t position;
+    size_t index;
+
+    term = &req->document_not_exists_terms[term_index];
+    if (term->field == NULL) {
+      continue;
+    }
+    (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                         term->field, "", "", &position);
+    for (index = position; index < store->query_field_posting_count; ++index) {
+      lc_pouch_disk_query_field_posting *posting;
+      int cmp;
+
+      posting = &store->query_field_postings[index];
+      cmp = lc_pouch_disk_query_field_compare_values(
+          posting->namespace_name, posting->field, "", "", req->namespace_name,
+          term->field, "", "");
+      if (cmp > 0) {
+        break;
+      }
+      if (cmp < 0 || strcmp(posting->key, key) != 0) {
+        continue;
+      }
+      if (lc_pouch_disk_query_field_posting_has_live_state(store, posting)) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
 static int lc_pouch_disk_query_field_key_matches_exists(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const char *key) {
-  return lc_pouch_disk_query_field_key_matches_exists_from(store, req, key, 0U);
+  return lc_pouch_disk_query_field_key_matches_exists_from(store, req, key,
+                                                           0U) &&
+         lc_pouch_disk_query_field_key_matches_not_exists(store, req, key);
 }
 
 static int lc_pouch_disk_query_field_key_matches_in_term(
@@ -6722,6 +6766,8 @@ static int lc_pouch_disk_query_field_collect_exists_keys_locked(
                                                         posting->key) ||
         !lc_pouch_disk_query_field_key_matches_exists_from(store, req,
                                                            posting->key, 1U) ||
+        !lc_pouch_disk_query_field_key_matches_not_exists(store, req,
+                                                          posting->key) ||
         !lc_pouch_disk_query_summary_find(store, posting->namespace_name,
                                           posting->key, &summary_index)) {
       continue;

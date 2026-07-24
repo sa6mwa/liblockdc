@@ -408,6 +408,10 @@ Latest release targets confirmed on 2026-07-23:
       without devolving to full namespace scans, including remaining mixed
       nested OR branch planning and broader exclusion planning for safe `not`
       forms.
+      - [x] Add storage-owned exclusion for safe exact `not exists` leaves
+        under recursive `and` composition; candidate scans reject keys with live
+        postings for the excluded JSON Pointer field while final predicate
+        acceptance remains owned by `liblql`.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.
