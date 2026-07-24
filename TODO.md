@@ -295,7 +295,7 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Add token/trigram-style candidate structures if pouch needs
       Go-style text filtering performance; keep final contains/full-text
       semantics validated by `liblql`.
-    - [ ] Persist an index-format/version contract for pouch postings so
+    - [x] Persist an index-format/version contract for pouch postings so
       incompatible sidecars rebuild from namespace segments/snapshots instead
       of being trusted.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented

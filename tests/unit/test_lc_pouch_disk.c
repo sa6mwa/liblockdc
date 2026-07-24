@@ -24,8 +24,10 @@
 #define TEST_POUCH_HEADER_PAYLOAD_LENGTH_OFFSET 44U
 #define TEST_POUCH_HEADER_RECORD_VERSION_OFFSET 56U
 #define TEST_POUCH_QUERY_INDEX_HEADER_SIZE 64U
+#define TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET 12U
 #define TEST_POUCH_QUERY_INDEX_RECORD_VERSION_OFFSET 56U
 #define TEST_POUCH_QUERY_INDEX_RECORD_META 1U
+#define TEST_POUCH_QUERY_INDEX_RECORD_FORMAT 4U
 #define TEST_POUCH_RECORD_STATE_PUT 1U
 #define TEST_POUCH_RECORD_STATE_REMOVE 2U
 #define TEST_POUCH_RECORD_META_PUT 3U
@@ -1312,6 +1314,61 @@ static void set_first_query_index_match_record_version(const char *root,
     }
   }
   close(fd);
+}
+
+static void set_query_index_format_version(const char *root,
+                                           unsigned long version) {
+  char index_path[512];
+  unsigned char header[TEST_POUCH_QUERY_INDEX_HEADER_SIZE];
+  int fd;
+
+  test_query_index_path(root, index_path, sizeof(index_path));
+  fd = open(index_path, O_RDWR);
+  assert_true(fd >= 0);
+  assert_int_equal(read(fd, header, sizeof(header)), sizeof(header));
+  assert_memory_equal(header, "LCQI", 4U);
+  assert_int_equal(test_get_u32(header + 8),
+                   TEST_POUCH_QUERY_INDEX_RECORD_FORMAT);
+  test_put_u32(header + TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET, version);
+  assert_int_equal(lseek(fd, TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET,
+                         SEEK_SET),
+                   TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET);
+  assert_int_equal(write(fd,
+                         header + TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET,
+                         4U),
+                   4);
+  assert_int_equal(fsync(fd), 0);
+  assert_int_equal(close(fd), 0);
+}
+
+static void strip_query_index_format_record(const char *root) {
+  char index_path[512];
+  char temp_path[512];
+  unsigned char buffer[4096];
+  ssize_t got;
+  int in_fd;
+  int out_fd;
+
+  test_query_index_path(root, index_path, sizeof(index_path));
+  snprintf(temp_path, sizeof(temp_path), "%s/query.index.no-format.tmp", root);
+  in_fd = open(index_path, O_RDONLY);
+  assert_true(in_fd >= 0);
+  assert_int_equal(lseek(in_fd, TEST_POUCH_QUERY_INDEX_HEADER_SIZE, SEEK_SET),
+                   TEST_POUCH_QUERY_INDEX_HEADER_SIZE);
+  out_fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  assert_true(out_fd >= 0);
+  for (;;) {
+    got = read(in_fd, buffer, sizeof(buffer));
+    assert_true(got >= 0);
+    if (got == 0) {
+      break;
+    }
+    assert_int_equal(write(out_fd, buffer, (size_t)got), got);
+  }
+  assert_int_equal(close(in_fd), 0);
+  assert_int_equal(fsync(out_fd), 0);
+  assert_int_equal(close(out_fd), 0);
+  assert_int_equal(rename(temp_path, index_path), 0);
 }
 
 static int set_first_log_match_record_version_at_path(const char *log_path,
@@ -7355,6 +7412,163 @@ test_query_index_keys_rebuilds_future_sidecar_version(void **state) {
   assert_string_equal(capture.keys[1], "bravo");
   assert_false(scan.truncated);
   assert_int_equal(test_query_index_size(root), original_query_index_size);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_index_rebuilds_future_format_version(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture row_capture;
+  lc_error error;
+  off_t original_query_index_size;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-format-future-version");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&row_capture, 0, sizeof(row_capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  assert_int_equal(count_query_index_records_of_type(
+                       root, TEST_POUCH_QUERY_INDEX_RECORD_FORMAT),
+                   1U);
+  original_query_index_size = test_query_index_size(root);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  set_query_index_format_version(root, 99UL);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  req.namespace_name = "default";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
+                               &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(row_capture.count, 2U);
+  assert_string_equal(row_capture.keys[0], "alpha");
+  assert_string_equal(row_capture.keys[1], "bravo");
+  assert_false(scan.truncated);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
+  assert_int_equal(count_query_index_records_of_type(
+                       root, TEST_POUCH_QUERY_INDEX_RECORD_FORMAT),
+                   1U);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_index_rebuilds_legacy_sidecar_without_format(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture row_capture;
+  lc_error error;
+  off_t original_query_index_size;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-format-legacy-missing");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&row_capture, 0, sizeof(row_capture));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "owner";
+  meta.lease_id = "lease-alpha";
+  meta.state_etag = "state-alpha";
+  meta.version = 1L;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  meta.lease_id = "lease-bravo";
+  meta.state_etag = "state-bravo";
+  meta.version = 2L;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+  original_query_index_size = test_query_index_size(root);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  strip_query_index_format_record(root);
+  assert_int_equal(test_query_index_size(root),
+                   original_query_index_size -
+                       (off_t)TEST_POUCH_QUERY_INDEX_HEADER_SIZE);
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  req.namespace_name = "default";
+  rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
+                               &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(row_capture.count, 2U);
+  assert_string_equal(row_capture.keys[0], "alpha");
+  assert_string_equal(row_capture.keys[1], "bravo");
+  assert_false(scan.truncated);
+  assert_int_equal(test_query_index_size(root), original_query_index_size);
+  assert_int_equal(count_query_index_records_of_type(
+                       root, TEST_POUCH_QUERY_INDEX_RECORD_FORMAT),
+                   1U);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   rc = store->close(store, &error);
@@ -15233,6 +15447,9 @@ int main(void) {
           test_query_index_keys_recovers_from_corrupt_sidecar_tail),
       cmocka_unit_test(test_query_index_keys_recreates_missing_sidecar),
       cmocka_unit_test(test_query_index_keys_rebuilds_future_sidecar_version),
+      cmocka_unit_test(test_query_index_rebuilds_future_format_version),
+      cmocka_unit_test(
+          test_query_index_rebuilds_legacy_sidecar_without_format),
       cmocka_unit_test(test_query_index_keys_truncates_partial_sidecar_field),
       cmocka_unit_test(test_scan_meta_ignores_corrupt_query_sidecar),
       cmocka_unit_test(test_query_index_sidecar_compacts_with_segments),

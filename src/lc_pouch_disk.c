@@ -22,6 +22,7 @@
 #define LC_POUCH_QUERY_INDEX_HEADER_SIZE 64U
 #define LC_POUCH_RECORD_VERSION 1U
 #define LC_POUCH_QUERY_INDEX_RECORD_VERSION 2U
+#define LC_POUCH_QUERY_INDEX_FORMAT_VERSION 1U
 #define LC_POUCH_RECORD_STATE_PUT 1U
 #define LC_POUCH_RECORD_STATE_REMOVE 2U
 #define LC_POUCH_RECORD_META_PUT 3U
@@ -47,6 +48,7 @@
 #define LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN 4UL
 #define LC_POUCH_QUERY_INDEX_RECORD_FIELD_CLEAR 2UL
 #define LC_POUCH_QUERY_INDEX_RECORD_FIELD_VALUE 3UL
+#define LC_POUCH_QUERY_INDEX_RECORD_FORMAT 4UL
 #define LC_POUCH_OBJECT_META_SIZE 28U
 #define LC_POUCH_QUEUE_META_SIZE 88U
 #define LC_POUCH_MAX_NAME_BYTES 4096UL
@@ -4895,6 +4897,44 @@ lc_pouch_disk_index_sequence(const lc_pouch_disk_store *store) {
                     : store->replayed_query_index_record_count);
 }
 
+static int lc_pouch_disk_append_query_index_format_record(
+    lc_pouch_disk_store *store, lc_error *error) {
+  unsigned char header[LC_POUCH_QUERY_INDEX_HEADER_SIZE];
+
+  memset(header, 0, sizeof(header));
+  memcpy(header, LC_POUCH_QUERY_INDEX_MAGIC, 4U);
+  lc_pouch_put_u32(header + 4, LC_POUCH_QUERY_INDEX_HEADER_SIZE);
+  lc_pouch_put_u32(header + 8, LC_POUCH_QUERY_INDEX_RECORD_FORMAT);
+  lc_pouch_put_u32(header + 12, LC_POUCH_QUERY_INDEX_FORMAT_VERSION);
+  lc_pouch_put_u32(header + 56, LC_POUCH_QUERY_INDEX_RECORD_VERSION);
+
+  if (lseek(store->query_index_fd, 0, SEEK_END) < 0) {
+    return lc_pouch_set_errno(error, "failed to seek pouch query index");
+  }
+  if (!lc_pouch_write_all(store->query_index_fd, header, sizeof(header))) {
+    return lc_pouch_set_errno(error,
+                              "failed to append pouch query index format");
+  }
+  if (lc_pouch_disk_fsync(store, store->query_index_fd,
+                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
+    return lc_pouch_set_errno(error, "failed to fsync pouch query index");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_ensure_query_index_format_record(
+    lc_pouch_disk_store *store, lc_error *error) {
+  struct stat st;
+
+  if (fstat(store->query_index_fd, &st) != 0) {
+    return lc_pouch_set_errno(error, "failed to stat pouch query index");
+  }
+  if (st.st_size != 0) {
+    return LC_OK;
+  }
+  return lc_pouch_disk_append_query_index_format_record(store, error);
+}
+
 static int lc_pouch_disk_append_query_index_record(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *etag, long version, const lc_pouch_meta *meta, int deleted,
@@ -4931,6 +4971,9 @@ static int lc_pouch_disk_append_query_index_record(
     flags |= LC_POUCH_QUERY_INDEX_FLAG_QUERY_HIDDEN;
   }
 
+  if (lc_pouch_disk_ensure_query_index_format_record(store, error) != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
+  }
   memset(header, 0, sizeof(header));
   memcpy(header, LC_POUCH_QUERY_INDEX_MAGIC, 4U);
   lc_pouch_put_u32(header + 4, LC_POUCH_QUERY_INDEX_HEADER_SIZE);
@@ -5008,6 +5051,9 @@ static int lc_pouch_disk_append_query_field_record(
   }
 
   flags = deleted ? LC_POUCH_QUERY_INDEX_FLAG_DELETED : 0UL;
+  if (lc_pouch_disk_ensure_query_index_format_record(store, error) != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
+  }
   memset(header, 0, sizeof(header));
   memcpy(header, LC_POUCH_QUERY_INDEX_MAGIC, 4U);
   lc_pouch_put_u32(header + 4, LC_POUCH_QUERY_INDEX_HEADER_SIZE);
@@ -5090,6 +5136,10 @@ static int lc_pouch_disk_rebuild_query_index(lc_pouch_disk_store *store,
   }
   if (ftruncate(store->query_index_fd, 0) != 0) {
     return lc_pouch_set_errno(error, "failed to truncate pouch query index");
+  }
+  rc = lc_pouch_disk_append_query_index_format_record(store, error);
+  if (rc != LC_OK) {
+    return rc;
   }
   for (index = 0U; index < store->state_entry_count; ++index) {
     lc_pouch_disk_state_entry *entry;
@@ -10121,6 +10171,15 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
                                 "failed to stat rebuilt pouch query index");
     }
   }
+  if (st.st_size == 0) {
+    if (lc_pouch_disk_rebuild_query_index(store, error) != LC_OK) {
+      return error != NULL ? error->code : LC_ERR_TRANSPORT;
+    }
+    if (fstat(store->query_index_fd, &st) != 0) {
+      return lc_pouch_set_errno(error,
+                                "failed to stat rebuilt pouch query index");
+    }
+  }
   if ((unsigned long)st.st_size == store->replayed_query_index_size) {
     return LC_OK;
   }
@@ -10171,6 +10230,20 @@ static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
     state_etag = NULL;
     memset(&meta, 0, sizeof(meta));
     crc = 0xffffffffUL;
+    if (offset == 0UL) {
+      if (type != LC_POUCH_QUERY_INDEX_RECORD_FORMAT ||
+          header_size != LC_POUCH_QUERY_INDEX_HEADER_SIZE ||
+          ns_len != LC_POUCH_QUERY_INDEX_FORMAT_VERSION || key_len != 0UL ||
+          ct_len != 0UL || etag_len != 0UL || body_len != 0UL ||
+          version != 0UL || payload_len != 0UL || expected_crc != 0UL ||
+          record_version != LC_POUCH_QUERY_INDEX_RECORD_VERSION ||
+          flags != 0UL) {
+        break;
+      }
+      offset += LC_POUCH_QUERY_INDEX_HEADER_SIZE;
+      store->replayed_query_index_record_count++;
+      continue;
+    }
     if (header_size != LC_POUCH_QUERY_INDEX_HEADER_SIZE ||
         (record_version != 1UL &&
          record_version != LC_POUCH_QUERY_INDEX_RECORD_VERSION)) {

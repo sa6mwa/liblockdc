@@ -693,9 +693,11 @@ documents. Range-only selectors preserve existing key/cursor ordering by
 checking numeric postings from the key-ordered summary scan rather than using
 value-sorted postings as the primary result order. The client extracts those
 shapes only as candidate hints; final predicate acceptance still runs through
-`liblql`. Mixed equality/range `and` selectors remain conservative: range hints
-can narrow candidates, while equality hints currently remain limited to
-all-equality `and` selectors until mixed-hint intersection is added.
+`liblql`. Mixed equality/range `and` selectors intersect equality posting
+candidates with numeric range postings when every hinted child is supported.
+The `query.index` sidecar starts with a format/version record so incompatible
+posting layouts rebuild from authoritative namespace segments/snapshots instead
+of being trusted.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
