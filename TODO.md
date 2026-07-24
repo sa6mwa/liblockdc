@@ -647,6 +647,25 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Use the benchmark iteration argument as the row-count control so
         local pouch and live Go disk cases can be run at 1k, 100k, or larger
         sizes without changing the benchmark binary.
+      - [ ] Keep expanding the in-project C benchmark matrix as the release-gate
+        candidate surface for liblockdc-local behavior; the Go module is only
+        for opt-in cross-backend e2e comparisons and stress work.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
+  - [ ] Refine pouch e2e coverage around segmented manifest/snapshot
+    lifecycle, manifest repair, background compaction scheduling, marker
+    recovery, search/index rebuild, and large namespace stress scenarios.
+  - [x] Add a separate Go/cgo benchmark module under `benchmark/` for opt-in
+    e2e perf comparison and stress testing outside the liblockdc release gate.
+  - [x] Launch a real latest pinned `pkt.systems/lockd` disk backend from the
+    Go comparison module instead of using in-process lockd internals.
+  - [x] Compare that real lockd disk server against an actual liblockdc
+    `pouch://` client instance with the same full-form LQL selector shape.
+  - [ ] Mirror more of the Go lockd disk benchmark suite shape in the Go/cgo
+    module so pouch and Go disk backend results can be compared case by case.
+  - [ ] Keep pouch timing on the C side and report C-measured operation time
+    through Go benchmarks so cgo bridge overhead is excluded.
 - [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
   introduced.
+  - [ ] Add pouch fuzz targets/corpora for segmented manifest repair, snapshot
+    lifecycle replay, marker recovery, query index/search replay, and strict
+    JSON Pointer LQL selector planning.
