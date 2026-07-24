@@ -419,6 +419,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add storage-owned field-presence candidate planning for `date`
         selectors and date-containing OR groups; final datetime, relative-date,
         and boundary semantics remain owned by `liblql`.
+      - [x] Add storage-owned exclusion for safe `prefix` / `iprefix` and
+        `contains` / `icontains` leaves under recursive `and` composition;
+        candidate scans reject keys with live matching text postings while
+        final predicate acceptance remains owned by `liblql`.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.

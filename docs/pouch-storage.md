@@ -772,6 +772,10 @@ non-string equality exclusions remain final-acceptance-only.
 Date selectors use indexed field-presence postings for their strict JSON
 Pointer field as a candidate superset. Pouch does not duplicate liblql's
 datetime parser or comparison rules; final date acceptance remains in `liblql`.
+Negated `prefix` / `iprefix` and `contains` / `icontains` leaves under
+recursive `and` composition also act as storage-owned exclusions: candidate
+scans reject keys with live matching text postings before final `liblql`
+acceptance.
 Positive `exists` selectors with single-segment wildcard path components, such
 as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
 instead of treating the wildcard as a literal posting field; final acceptance

@@ -16903,10 +16903,14 @@ typedef struct lc_pouch_lql_document_filter {
   size_t document_or_in_term_count;
   lc_pouch_document_prefix_term *document_prefix_terms;
   size_t document_prefix_term_count;
+  lc_pouch_document_prefix_term *document_not_prefix_terms;
+  size_t document_not_prefix_term_count;
   lc_pouch_document_prefix_term *document_or_prefix_terms;
   size_t document_or_prefix_term_count;
   lc_pouch_document_contains_term *document_contains_terms;
   size_t document_contains_term_count;
+  lc_pouch_document_contains_term *document_not_contains_terms;
+  size_t document_not_contains_term_count;
   lc_pouch_document_contains_term *document_or_contains_terms;
   size_t document_or_contains_term_count;
   lc_pouch_document_exists_term *document_exists_terms;
@@ -17100,6 +17104,13 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
                            (char *)filter->document_prefix_terms[index].value);
   }
   lc_free_with_allocator(NULL, filter->document_prefix_terms);
+  for (index = 0U; index < filter->document_not_prefix_term_count; ++index) {
+    lc_free_with_allocator(
+        NULL, (char *)filter->document_not_prefix_terms[index].field);
+    lc_free_with_allocator(
+        NULL, (char *)filter->document_not_prefix_terms[index].value);
+  }
+  lc_free_with_allocator(NULL, filter->document_not_prefix_terms);
   for (index = 0U; index < filter->document_or_prefix_term_count; ++index) {
     lc_free_with_allocator(
         NULL, (char *)filter->document_or_prefix_terms[index].field);
@@ -17114,6 +17125,13 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
         NULL, (char *)filter->document_contains_terms[index].value);
   }
   lc_free_with_allocator(NULL, filter->document_contains_terms);
+  for (index = 0U; index < filter->document_not_contains_term_count; ++index) {
+    lc_free_with_allocator(
+        NULL, (char *)filter->document_not_contains_terms[index].field);
+    lc_free_with_allocator(
+        NULL, (char *)filter->document_not_contains_terms[index].value);
+  }
+  lc_free_with_allocator(NULL, filter->document_not_contains_terms);
   for (index = 0U; index < filter->document_or_contains_term_count; ++index) {
     lc_free_with_allocator(
         NULL, (char *)filter->document_or_contains_terms[index].field);
@@ -17876,6 +17894,101 @@ lc_pouch_lql_ast_not_exists_hint_parse(lc_pouch_lql_document_filter *filter) {
   return 1;
 }
 
+static int lc_pouch_lql_ast_collect_not_text(const lql *runtime,
+                                             lql_selector_node node,
+                                             lc_pouch_lql_ast_or_terms *terms) {
+  lql_error lql_err;
+  size_t child_count;
+  size_t index;
+
+  if (runtime == NULL || terms == NULL || node.kind == LQL_SELECTOR_NODE_OR) {
+    return 1;
+  }
+  if (node.kind == LQL_SELECTOR_NODE_NOT) {
+    lql_selector_node child;
+    lql_selector_string_term term;
+
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_child_count(runtime, node, &child_count,
+                                           &lql_err) != LQL_STATUS_OK ||
+        child_count != 1U) {
+      return 0;
+    }
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_child(runtime, node, 0U, &child, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    if (child.kind != LQL_SELECTOR_NODE_PREFIX &&
+        child.kind != LQL_SELECTOR_NODE_IPREFIX &&
+        child.kind != LQL_SELECTOR_NODE_CONTAINS &&
+        child.kind != LQL_SELECTOR_NODE_ICONTAINS) {
+      return 1;
+    }
+    memset(&term, 0, sizeof(term));
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_string_term(runtime, child, &term, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    return lc_pouch_lql_ast_or_terms_add_string(terms, child.kind, &term);
+  }
+  if (node.kind != LQL_SELECTOR_NODE_AND) {
+    return 1;
+  }
+  lql_error_init(&lql_err);
+  if (runtime->selector_node_child_count(runtime, node, &child_count,
+                                         &lql_err) != LQL_STATUS_OK) {
+    return 0;
+  }
+  for (index = 0U; index < child_count; ++index) {
+    lql_selector_node child;
+
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_child(runtime, node, index, &child, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    if (!lc_pouch_lql_ast_collect_not_text(runtime, child, terms)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_not_text_hint_parse(lc_pouch_lql_document_filter *filter) {
+  lc_pouch_lql_ast_or_terms terms;
+  lql_selector_node root;
+  lql_error lql_err;
+
+  if (filter == NULL || filter->runtime == NULL || filter->selector == NULL ||
+      filter->document_not_prefix_term_count > 0U ||
+      filter->document_not_contains_term_count > 0U) {
+    return 0;
+  }
+  memset(&terms, 0, sizeof(terms));
+  memset(&root, 0, sizeof(root));
+  lql_error_init(&lql_err);
+  if (filter->runtime->selector_root(filter->runtime, filter->selector, &root,
+                                     &lql_err) != LQL_STATUS_OK ||
+      !lc_pouch_lql_ast_collect_not_text(filter->runtime, root, &terms) ||
+      (terms.prefix_count == 0U && terms.contains_count == 0U)) {
+    lc_pouch_lql_ast_or_terms_cleanup(&terms);
+    return 0;
+  }
+  filter->document_not_prefix_terms = terms.prefix_terms;
+  filter->document_not_prefix_term_count = terms.prefix_count;
+  filter->document_not_contains_terms = terms.contains_terms;
+  filter->document_not_contains_term_count = terms.contains_count;
+  terms.prefix_terms = NULL;
+  terms.prefix_count = 0U;
+  terms.contains_terms = NULL;
+  terms.contains_count = 0U;
+  lc_pouch_lql_ast_or_terms_cleanup(&terms);
+  return 1;
+}
+
 static int
 lc_pouch_lql_ast_collect_date_exists(const lql *runtime, lql_selector_node node,
                                      lc_pouch_lql_ast_or_terms *terms) {
@@ -18002,6 +18115,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
                                    &filter->document_not_eq_terms,
                                    &filter->document_not_eq_term_count);
     (void)lc_pouch_lql_ast_date_exists_hint_parse(filter);
+    (void)lc_pouch_lql_ast_not_text_hint_parse(filter);
     (void)lc_pouch_lql_ast_not_exists_hint_parse(filter);
     filter->enabled = 1;
     return LC_OK;
@@ -18158,6 +18272,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
   (void)lc_pouch_lql_ast_date_exists_hint_parse(filter);
   lc_pouch_lql_not_eq_hint_parse(selector_json, &filter->document_not_eq_terms,
                                  &filter->document_not_eq_term_count);
+  (void)lc_pouch_lql_ast_not_text_hint_parse(filter);
   (void)lc_pouch_lql_ast_not_exists_hint_parse(filter);
   filter->enabled = 1;
   return LC_OK;
@@ -18991,10 +19106,16 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   scan_req.document_or_in_term_count = filter.document_or_in_term_count;
   scan_req.document_prefix_terms = filter.document_prefix_terms;
   scan_req.document_prefix_term_count = filter.document_prefix_term_count;
+  scan_req.document_not_prefix_terms = filter.document_not_prefix_terms;
+  scan_req.document_not_prefix_term_count =
+      filter.document_not_prefix_term_count;
   scan_req.document_or_prefix_terms = filter.document_or_prefix_terms;
   scan_req.document_or_prefix_term_count = filter.document_or_prefix_term_count;
   scan_req.document_contains_terms = filter.document_contains_terms;
   scan_req.document_contains_term_count = filter.document_contains_term_count;
+  scan_req.document_not_contains_terms = filter.document_not_contains_terms;
+  scan_req.document_not_contains_term_count =
+      filter.document_not_contains_term_count;
   scan_req.document_or_contains_terms = filter.document_or_contains_terms;
   scan_req.document_or_contains_term_count =
       filter.document_or_contains_term_count;
@@ -19381,10 +19502,16 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   scan_req.document_or_in_term_count = filter.document_or_in_term_count;
   scan_req.document_prefix_terms = filter.document_prefix_terms;
   scan_req.document_prefix_term_count = filter.document_prefix_term_count;
+  scan_req.document_not_prefix_terms = filter.document_not_prefix_terms;
+  scan_req.document_not_prefix_term_count =
+      filter.document_not_prefix_term_count;
   scan_req.document_or_prefix_terms = filter.document_or_prefix_terms;
   scan_req.document_or_prefix_term_count = filter.document_or_prefix_term_count;
   scan_req.document_contains_terms = filter.document_contains_terms;
   scan_req.document_contains_term_count = filter.document_contains_term_count;
+  scan_req.document_not_contains_terms = filter.document_not_contains_terms;
+  scan_req.document_not_contains_term_count =
+      filter.document_not_contains_term_count;
   scan_req.document_or_contains_terms = filter.document_or_contains_terms;
   scan_req.document_or_contains_term_count =
       filter.document_or_contains_term_count;
