@@ -810,7 +810,9 @@ available to the pouch planner.
 The `query.index` sidecar starts with a format/version record so incompatible
 posting layouts rebuild from authoritative namespace segments/snapshots instead
 of being trusted; the text-predicate posting slice increments that format
-version.
+version. A format-triggered rebuild must restore both the ordered query
+summary projection and the field postings used by indexed predicate document
+and key scans.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
