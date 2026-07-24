@@ -400,10 +400,14 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Add liblql-AST equality-only recursive OR extraction using typed
       equality candidate supersets generated from liblql textual equality
       values; final typed exactness remains owned by `liblql`.
+    - [x] Add mixed equality/non-equality liblql-AST recursive OR extraction
+      by unioning equality, membership, ordered numeric, text, and presence
+      postings in storage-owned candidate scans while keeping final predicate
+      acceptance in `liblql`.
     - [ ] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans, including remaining mixed
-      non-equality OR branch planning and broader exclusion planning for safe
-      `not` forms.
+      nested OR branch planning and broader exclusion planning for safe `not`
+      forms.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.

@@ -17393,13 +17393,6 @@ static int lc_pouch_lql_ast_or_node_parse(const lql *runtime,
       return 0;
     }
   }
-  if (terms->eq_count > 0U &&
-      (terms->range_count > 0U || terms->in_count > 0U ||
-       terms->prefix_count > 0U || terms->contains_count > 0U ||
-       terms->exists_count > 0U)) {
-    lc_pouch_lql_ast_or_terms_cleanup(terms);
-    return 0;
-  }
   if (terms->eq_count == 0U && terms->range_count == 0U &&
       terms->in_count == 0U && terms->prefix_count == 0U &&
       terms->contains_count == 0U && terms->exists_count == 0U) {
