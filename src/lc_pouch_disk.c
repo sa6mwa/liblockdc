@@ -5458,6 +5458,9 @@ static int lc_pouch_disk_query_field_or_eq_keys_scan_locked(
   return LC_OK;
 }
 
+static int lc_pouch_disk_query_range_upper_exceeded(
+    const char *value, const lc_pouch_document_range_term *term);
+
 static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     char ***keys_out, size_t *key_count_out, lc_error *error) {
@@ -5468,8 +5471,10 @@ static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
 
   *keys_out = NULL;
   *key_count_out = 0U;
-  if (req == NULL || req->document_or_exists_term_count == 0U ||
-      req->document_or_exists_terms == NULL) {
+  if (req == NULL || ((req->document_or_exists_term_count == 0U ||
+                       req->document_or_exists_terms == NULL) &&
+                      (req->document_or_range_term_count == 0U ||
+                       req->document_or_range_terms == NULL))) {
     return LC_OK;
   }
   keys = NULL;
@@ -5504,6 +5509,53 @@ static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
           store, req, posting, &keys, &key_count, error,
           "failed to allocate pouch or exists query keys",
           "failed to copy pouch or exists query key");
+      if (rc != LC_OK) {
+        return rc;
+      }
+    }
+  }
+  for (term_index = 0U; term_index < req->document_or_range_term_count;
+       ++term_index) {
+    const lc_pouch_document_range_term *term;
+    const char *lower_bound;
+    size_t position;
+    size_t index;
+
+    term = &req->document_or_range_terms[term_index];
+    if (term->field == NULL) {
+      continue;
+    }
+    lower_bound = term->gt != NULL ? term->gt : term->gte;
+    if (lower_bound == NULL) {
+      lower_bound = "n:";
+    }
+    (void)lc_pouch_disk_query_field_find(
+        store, req->namespace_name, term->field, lower_bound, "", &position);
+    for (index = position; index < store->query_field_posting_count; ++index) {
+      lc_pouch_disk_query_field_posting *posting;
+      int cmp;
+
+      posting = &store->query_field_postings[index];
+      cmp = lc_pouch_disk_query_field_compare_values(
+          posting->namespace_name, posting->field, "", "", req->namespace_name,
+          term->field, "", "");
+      if (cmp > 0) {
+        break;
+      }
+      if (cmp < 0 || strncmp(posting->value, "n:", 2U) != 0) {
+        continue;
+      }
+      if (lc_pouch_disk_query_range_upper_exceeded(posting->value, term)) {
+        break;
+      }
+      if (!lc_pouch_disk_query_field_number_matches_range(posting->value,
+                                                          term)) {
+        continue;
+      }
+      rc = lc_pouch_disk_query_field_add_candidate_key(
+          store, req, posting, &keys, &key_count, error,
+          "failed to allocate pouch or exists/range query keys",
+          "failed to copy pouch or exists/range query key");
       if (rc != LC_OK) {
         return rc;
       }

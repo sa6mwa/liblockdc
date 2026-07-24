@@ -334,6 +334,11 @@ Latest release targets confirmed on 2026-07-23:
       that contain at least one positive supported candidate predicate; pouch
       uses the positive predicate as the storage-owned candidate superset and
       leaves the exclusion decision to final `liblql` acceptance.
+    - [x] Add a mixed non-equality OR composition slice for full-form `or`
+      branches that combine path-string `exists` selectors and numeric
+      `range` selectors; indexed scans union presence and ordered numeric
+      postings, de-duplicate keys, and keep final predicate acceptance owned
+      by `liblql`.
     - [ ] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans, including remaining mixed
       non-equality OR branch planning and broader exclusion planning for safe

@@ -588,7 +588,9 @@ field and lowers them to the existing storage-owned `in` candidate path; mixed
 field equality OR branches use a storage-owned branch-union posting path.
 `exists`, prefix/iprefix, contains/icontains, and numeric range OR branches use
 storage-owned branch-union posting paths as well, de-duplicating keys before
-restoring stable cursor ordering. Full-form `and` selectors that combine a
+restoring stable cursor ordering. Mixed OR branches that combine path-string
+`exists` selectors with numeric `range` selectors union the same durable
+presence and ordered numeric postings. Full-form `and` selectors that combine a
 positive supported indexed predicate with a `not` exclusion use the positive
 predicate as the storage-owned candidate superset and leave exclusion semantics
 to final `liblql` acceptance. Other OR branch families and broader safe NOT
