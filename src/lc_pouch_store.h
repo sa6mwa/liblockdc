@@ -287,6 +287,7 @@ typedef struct lc_pouch_disk_open_opts {
   unsigned long background_compaction_min_candidate_files;
   unsigned long background_compaction_min_reclaimable_bytes;
   unsigned long background_compaction_delete_grace_seconds;
+  unsigned long background_compaction_max_io_bytes;
 } lc_pouch_disk_open_opts;
 
 typedef struct lc_pouch_object_info {

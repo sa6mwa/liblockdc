@@ -573,9 +573,10 @@ without entering compaction, so manifest-obsolete segment and snapshot file
 deletes can be retried even when scheduled compaction is disabled. Private disk
 open options can also apply delete grace to obsolete-file cleanup; files whose
 mtime is still inside the grace window stay tracked and are retried by a later
-replay or cleanup tick. Later lifecycle work can layer deadline scheduling and
-I/O throttling.
-reclaim-byte thresholds, and throttling on that explicit store-owned path.
+replay or cleanup tick. Scheduled maintenance can also apply a maximum log-byte
+I/O budget per explicit tick; oversized compaction candidates report
+`io-throttled` without entering compaction. Manual `compact(force|if_needed)` is
+not throttled by scheduled-maintenance budgets.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query
@@ -1438,9 +1439,9 @@ files count only when a later segment exists for the same namespace, so the
 current append tail does not trigger background compaction by itself. It can
 also require a minimum estimated number of reclaimable bytes by comparing
 current log bytes to the compacted live-record estimate. Skipped scheduled ticks
-report `below-candidate-threshold`, `below-reclaimable-threshold`, or
-`deadline-not-reached`; manual compaction remains deterministic and unaffected by
-these scheduling gates.
+report `below-candidate-threshold`, `below-reclaimable-threshold`,
+`deadline-not-reached`, or `io-throttled`; manual compaction remains
+deterministic and unaffected by these scheduling gates.
 
 Compaction flow:
 
@@ -1461,8 +1462,10 @@ Compaction flow:
 If validation detects drift, compaction must abandon the temporary snapshot and
 leave the live store unchanged.
 
-The compactor should support an I/O bytes-per-second limit so it does not
-destroy latency for foreground client work.
+The scheduled compactor supports an I/O budget per explicit maintenance tick so
+large rewrite candidates can be deferred instead of destroying foreground client
+latency. The embedded C backend does not create worker threads or sleep inside a
+hidden background loop.
 
 Additional compaction invariants:
 

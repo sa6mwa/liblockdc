@@ -10838,6 +10838,100 @@ static void test_scheduled_maintenance_honors_min_reclaimable_bytes(
   test_cleanup_root(root);
 }
 
+static void test_scheduled_maintenance_honors_io_throttle(void **state) {
+  char root[256];
+  char payload[4096];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_disk_open_opts generate_opts;
+  lc_pouch_disk_open_opts opts;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts state_opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_maintenance_res maintenance;
+  lc_pouch_compaction_res compacted;
+  lc_error error;
+  off_t before_log_size;
+  size_t index;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "scheduled-maintenance-io-throttle");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&generate_opts, 0, sizeof(generate_opts));
+  memset(&opts, 0, sizeof(opts));
+  memset(&error, 0, sizeof(error));
+  memset(&state_opts, 0, sizeof(state_opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&maintenance, 0, sizeof(maintenance));
+  memset(&compacted, 0, sizeof(compacted));
+  memset(payload, 't', sizeof(payload));
+  payload[sizeof(payload) - 1U] = '\0';
+  store = NULL;
+  source = NULL;
+
+  generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &generate_opts, &store,
+                                       &error);
+  assert_int_equal(rc, LC_OK);
+
+  state_opts.content_type = "application/octet-stream";
+  for (index = 0U; index < 24U; ++index) {
+    source = source_from_text(payload);
+    rc = store->write_state(store, "default", "throttled-key", source,
+                            &state_opts, &put_res, &error);
+    lc_source_close(source);
+    source = NULL;
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+    memset(&put_res, 0, sizeof(put_res));
+  }
+  before_log_size =
+      test_log_size(root) + test_namespace_segments_size(root, "default");
+  assert_true(before_log_size > 1);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  opts.background_compaction = 1;
+  opts.background_compaction_min_log_bytes = 1UL;
+  opts.background_compaction_obsolete_multiplier = 2UL;
+  opts.background_compaction_max_io_bytes =
+      (unsigned long)before_log_size - 1UL;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->maintenance(store, "scheduled", &maintenance, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance.mode, "scheduled");
+  assert_string_equal(maintenance.reason, "io-throttled");
+  assert_int_equal(maintenance.accepted, 1);
+  assert_int_equal(maintenance.compaction_enabled, 1);
+  assert_int_equal(maintenance.compaction.accepted, 0);
+  assert_int_equal(maintenance.compaction.compacted, 0);
+  assert_int_equal(test_log_size(root) +
+                       test_namespace_segments_size(root, "default"),
+                   before_log_size);
+  lc_pouch_maintenance_res_cleanup(&allocator, &maintenance);
+
+  rc = store->compact(store, "force", &compacted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(compacted.mode, "force");
+  assert_int_equal(compacted.accepted, 1);
+  assert_int_equal(compacted.compacted, 1);
+  assert_true(compacted.before_log_bytes == (unsigned long)before_log_size);
+  assert_true(compacted.after_log_bytes < compacted.before_log_bytes);
+  lc_pouch_compaction_res_cleanup(&allocator, &compacted);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_compaction_preserves_promoted_staged_state_link(void **state) {
   char root[256];
   char payload[4096];
@@ -16678,6 +16772,7 @@ int main(void) {
           test_scheduled_maintenance_honors_min_candidate_files),
       cmocka_unit_test(
           test_scheduled_maintenance_honors_min_reclaimable_bytes),
+      cmocka_unit_test(test_scheduled_maintenance_honors_io_throttle),
       cmocka_unit_test(test_compaction_preserves_promoted_staged_state_link),
       cmocka_unit_test(
           test_independent_handle_refreshes_after_segment_compaction),

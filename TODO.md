@@ -558,7 +558,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Materialize live state-link payloads into compacted snapshots under
         the writer lock so old segment/snapshot bodies can be obsoleted without
         dangling linked payload references.
-    - [ ] Add optional background compaction scheduling for pouch, modeled
+    - [x] Add optional background compaction scheduling for pouch, modeled
       after Go lockd disk but scoped to embedded C lifecycle constraints.
       - [x] Add open options for enabling/disabling scheduled compaction and
         configuring the first threshold surface: minimum log bytes and obsolete
@@ -587,7 +587,7 @@ Latest release targets confirmed on 2026-07-23:
         `below-reclaimable-threshold` without entering compaction.
       - [x] Add scheduled not-before deadline gating with observable
         `deadline-not-reached` diagnostics.
-      - [ ] Add optional I/O throttling.
+      - [x] Add optional scheduled-tick I/O throttling.
     - [x] Add Go disk-style marker lifecycle for segmented pouch logstores.
       - [x] Clarify and implement root-level writer-presence markers for
         exclusive writer detection/fencing, separate from namespace logstore

@@ -285,6 +285,7 @@ typedef struct lc_pouch_disk_store {
   unsigned long background_compaction_min_candidate_files;
   unsigned long background_compaction_min_reclaimable_bytes;
   unsigned long background_compaction_delete_grace_seconds;
+  unsigned long background_compaction_max_io_bytes;
   long background_compaction_last_run_unix;
 } lc_pouch_disk_store;
 
@@ -12669,6 +12670,37 @@ static int lc_pouch_disk_maintenance(lc_pouch_store *self, const char *mode,
       return LC_OK;
     }
   }
+  if (store->background_compaction_max_io_bytes > 0UL) {
+    unsigned long before_log_bytes;
+
+    before_log_bytes = 0UL;
+    rc = lc_pouch_disk_lock(store, error);
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+    rc = lc_pouch_disk_force_replay_locked(store, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_disk_total_log_bytes(store, &before_log_bytes, error);
+    }
+    if (lc_pouch_disk_unlock(store, rc == LC_OK ? error : NULL) != LC_OK &&
+        rc == LC_OK) {
+      rc = LC_ERR_TRANSPORT;
+    }
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+    if (before_log_bytes > store->background_compaction_max_io_bytes) {
+      out->reason = lc_pouch_strdup(&store->allocator, "io-throttled");
+      if (out->reason == NULL) {
+        lc_pouch_maintenance_res_cleanup(&store->allocator, out);
+        return lc_pouch_set_nomem(error,
+                                  "failed to copy pouch maintenance reason");
+      }
+      return LC_OK;
+    }
+  }
 
   rc = lc_pouch_disk_compact(self, "if_needed", &out->compaction, error);
   if (rc != LC_OK) {
@@ -20239,6 +20271,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       opts != NULL ? opts->background_compaction_min_reclaimable_bytes : 0UL;
   store->background_compaction_delete_grace_seconds =
       opts != NULL ? opts->background_compaction_delete_grace_seconds : 0UL;
+  store->background_compaction_max_io_bytes =
+      opts != NULL ? opts->background_compaction_max_io_bytes : 0UL;
   store->background_compaction_last_run_unix = 0L;
   store->next_version = 1L;
   store->pub.impl = store;
