@@ -311,9 +311,13 @@ Latest release targets confirmed on 2026-07-23:
       `or` branches whose children are exact equality selectors; the disk
       backend de-duplicates unioned posting keys, restores stable cursor
       ordering, and final acceptance remains owned by `liblql`.
+    - [x] Add storage-owned branch-union candidates for full-form `or`
+      branches whose children are path-string `exists` selectors; indexed
+      scans union presence postings, de-duplicate keys, preserve cursor order,
+      and keep final predicate acceptance owned by `liblql`.
     - [ ] Add recursive boolean composition over supported selector families
-      without devolving to full namespace scans, including non-equality OR
-      branch planning and exclusion planning for safe `not` forms.
+      without devolving to full namespace scans, including mixed non-equality
+      OR branch planning and exclusion planning for safe `not` forms.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.
