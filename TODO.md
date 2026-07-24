@@ -300,9 +300,9 @@ Latest release targets confirmed on 2026-07-23:
       top-level `and` conjunction/intersection forms over supported scalar
       equality postings; final predicate acceptance remains owned by `liblql`.
     - [x] Extend candidate extraction to nested full-form `and` trees for
-      supported range, `in`, prefix/iprefix, contains/icontains, and `exists`
-      terms; typed equality keeps the existing root/top-level `and` extractor
-      until the planner can preserve JSON scalar type information recursively.
+      supported typed equality, range, `in`, prefix/iprefix,
+      contains/icontains, and `exists` terms while preserving equality scalar
+      type encoding before final `liblql` acceptance.
     - [x] Add a first OR composition slice for full-form `or` branches whose
       children are exact equality selectors over the same strict JSON Pointer
       field; the planner maps those to the existing storage-owned `in`
