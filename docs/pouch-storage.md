@@ -585,10 +585,11 @@ live state etag/version check, and then restore stable key/cursor ordering for
 the public result stream. The client planner also recognizes full-form `or`
 selectors whose branches are exact equality predicates over the same strict
 field and lowers them to the existing storage-owned `in` candidate path; mixed
-field equality OR branches use a storage-owned branch-union posting path that
-de-duplicates keys before restoring stable cursor ordering. Other OR branch
-families and safe NOT planning still need planner support before they can avoid
-broader scans safely.
+field equality OR branches use a storage-owned branch-union posting path.
+`exists`, prefix/iprefix, contains/icontains, and numeric range OR branches use
+storage-owned branch-union posting paths as well, de-duplicating keys before
+restoring stable cursor ordering. Other OR branch families and safe NOT planning
+still need planner support before they can avoid broader scans safely.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan

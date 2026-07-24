@@ -121,11 +121,11 @@ typedef struct lc_pouch_namespace_list {
   size_t count;
 } lc_pouch_namespace_list;
 
-typedef int (*lc_pouch_scan_meta_visit_fn)(
-    void *context, const lc_pouch_scan_meta_row *row, lc_error *error);
+typedef int (*lc_pouch_scan_meta_visit_fn)(void *context,
+                                           const lc_pouch_scan_meta_row *row,
+                                           lc_error *error);
 
-typedef int (*lc_pouch_query_index_key_visit_fn)(void *context,
-                                                 const char *key,
+typedef int (*lc_pouch_query_index_key_visit_fn)(void *context, const char *key,
                                                  lc_error *error);
 
 typedef struct lc_pouch_document_eq_term {
@@ -173,6 +173,8 @@ typedef struct lc_pouch_query_index_scan_req {
   size_t document_or_eq_term_count;
   const lc_pouch_document_range_term *document_range_terms;
   size_t document_range_term_count;
+  const lc_pouch_document_range_term *document_or_range_terms;
+  size_t document_or_range_term_count;
   const lc_pouch_document_in_term *document_in_terms;
   size_t document_in_term_count;
   const lc_pouch_document_prefix_term *document_prefix_terms;
@@ -462,8 +464,7 @@ struct lc_pouch_store {
                           const lc_pouch_query_index_scan_req *req,
                           lc_pouch_scan_meta_visit_fn visit,
                           void *visit_context,
-                          lc_pouch_query_index_scan_res *out,
-                          lc_error *error);
+                          lc_pouch_query_index_scan_res *out, lc_error *error);
   int (*query_index_keys_scan)(lc_pouch_store *self,
                                const lc_pouch_query_index_scan_req *req,
                                lc_pouch_query_index_key_visit_fn visit,
@@ -474,8 +475,7 @@ struct lc_pouch_store {
                           const lc_pouch_query_owner_scan_req *req,
                           lc_pouch_scan_meta_visit_fn visit,
                           void *visit_context,
-                          lc_pouch_query_index_scan_res *out,
-                          lc_error *error);
+                          lc_pouch_query_index_scan_res *out, lc_error *error);
   int (*query_owner_keys_scan)(lc_pouch_store *self,
                                const lc_pouch_query_owner_scan_req *req,
                                lc_pouch_query_index_key_visit_fn visit,
@@ -500,8 +500,8 @@ struct lc_pouch_store {
                      const lc_pouch_put_state_opts *opts,
                      lc_pouch_put_state_res *out, lc_error *error);
   int (*remove_state)(lc_pouch_store *self, const char *namespace_name,
-                      const char *key, const char *expected_etag,
-                      int *removed, lc_error *error);
+                      const char *key, const char *expected_etag, int *removed,
+                      lc_error *error);
   int (*stage_state)(lc_pouch_store *self, const char *namespace_name,
                      const char *key, const char *txn_id, lc_source *body,
                      const lc_pouch_put_state_opts *opts,
@@ -536,8 +536,7 @@ struct lc_pouch_store {
                           const lc_pouch_scan_object_keys_req *req,
                           lc_pouch_query_index_key_visit_fn visit,
                           void *visit_context,
-                          lc_pouch_scan_object_keys_res *out,
-                          lc_error *error);
+                          lc_pouch_scan_object_keys_res *out, lc_error *error);
   int (*get_object)(lc_pouch_store *self, const char *namespace_name,
                     const char *key, const lc_pouch_object_selector *selector,
                     lc_source **body, lc_pouch_object_info *out,
@@ -575,8 +574,8 @@ struct lc_pouch_store {
                      const char *queue, lc_pouch_queue_stats *out,
                      lc_error *error);
   int (*queue_wake_status)(lc_pouch_store *self, const char *namespace_name,
-                           const char *queue,
-                           lc_pouch_queue_wake_status *out, lc_error *error);
+                           const char *queue, lc_pouch_queue_wake_status *out,
+                           lc_error *error);
   int (*fsync_stats)(lc_pouch_store *self, lc_pouch_fsync_stats *out,
                      lc_error *error);
   int (*writer_status)(lc_pouch_store *self, lc_pouch_writer_status *out,
@@ -586,8 +585,8 @@ struct lc_pouch_store {
   int (*lock_key_path)(lc_pouch_store *self, const char *namespace_name,
                        const char *key, char **out, lc_error *error);
   int (*try_lock_key)(lc_pouch_store *self, const char *namespace_name,
-                      const char *key, lc_pouch_key_lock **lock,
-                      int *acquired, lc_error *error);
+                      const char *key, lc_pouch_key_lock **lock, int *acquired,
+                      lc_error *error);
   int (*unlock_key)(lc_pouch_store *self, lc_pouch_key_lock *lock,
                     lc_error *error);
   int (*lock_fd_cache_status)(lc_pouch_store *self,
@@ -632,8 +631,8 @@ void lc_pouch_scan_meta_res_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_scan_meta_res *res);
 void lc_pouch_namespace_list_cleanup(const lc_pouch_allocator *allocator,
                                      lc_pouch_namespace_list *list);
-void lc_pouch_query_index_scan_res_cleanup(
-    const lc_pouch_allocator *allocator, lc_pouch_query_index_scan_res *res);
+void lc_pouch_query_index_scan_res_cleanup(const lc_pouch_allocator *allocator,
+                                           lc_pouch_query_index_scan_res *res);
 void lc_pouch_index_flush_res_cleanup(const lc_pouch_allocator *allocator,
                                       lc_pouch_index_flush_res *res);
 void lc_pouch_compaction_res_cleanup(const lc_pouch_allocator *allocator,
@@ -642,14 +641,14 @@ void lc_pouch_maintenance_res_cleanup(const lc_pouch_allocator *allocator,
                                       lc_pouch_maintenance_res *res);
 void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
                                    lc_pouch_query_config *config);
-void lc_pouch_queue_wake_status_cleanup(
-    const lc_pouch_allocator *allocator, lc_pouch_queue_wake_status *status);
+void lc_pouch_queue_wake_status_cleanup(const lc_pouch_allocator *allocator,
+                                        lc_pouch_queue_wake_status *status);
 void lc_pouch_writer_status_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_writer_status *status);
 void lc_pouch_lock_status_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_lock_status *status);
-void lc_pouch_backend_capabilities_cleanup(
-    const lc_pouch_allocator *allocator, lc_pouch_backend_capabilities *caps);
+void lc_pouch_backend_capabilities_cleanup(const lc_pouch_allocator *allocator,
+                                           lc_pouch_backend_capabilities *caps);
 void lc_pouch_staged_state_info_cleanup(const lc_pouch_allocator *allocator,
                                         lc_pouch_staged_state_info *info);
 void lc_pouch_staged_state_list_cleanup(const lc_pouch_allocator *allocator,
@@ -658,8 +657,8 @@ void lc_pouch_object_info_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_object_info *info);
 void lc_pouch_object_list_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_object_list *list);
-void lc_pouch_scan_object_keys_res_cleanup(
-    const lc_pouch_allocator *allocator, lc_pouch_scan_object_keys_res *res);
+void lc_pouch_scan_object_keys_res_cleanup(const lc_pouch_allocator *allocator,
+                                           lc_pouch_scan_object_keys_res *res);
 void lc_pouch_queue_message_info_cleanup(const lc_pouch_allocator *allocator,
                                          lc_pouch_queue_message_info *info);
 void lc_pouch_queue_stats_cleanup(const lc_pouch_allocator *allocator,

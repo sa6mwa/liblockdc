@@ -1030,8 +1030,9 @@ static void child_release_after_delay(const char *endpoint,
   client = NULL;
   rc = try_open_pouch_client(endpoint, &client, &error);
   if (rc != LC_OK) {
-    fprintf(stderr, "child failed to open pouch client: rc=%d code=%d message=%s\n",
-            rc, error.code, error.message != NULL ? error.message : "(null)");
+    fprintf(stderr,
+            "child failed to open pouch client: rc=%d code=%d message=%s\n", rc,
+            error.code, error.message != NULL ? error.message : "(null)");
     lc_error_cleanup(&error);
     test_child_exit(24);
   }
@@ -1886,8 +1887,8 @@ test_pouch_endpoint_blocking_acquire_waits_for_release(void **state) {
   child = fork();
   assert_true(child >= 0);
   if (child == 0) {
-    child_release_after_delay(endpoint, &release_op, first_client, second_client,
-                              first_lease);
+    child_release_after_delay(endpoint, &release_op, first_client,
+                              second_client, first_lease);
   }
 
   acquire.owner = "owner-b";
@@ -6085,8 +6086,7 @@ static void test_pouch_endpoint_scan_query_filters_key_selector(void **state) {
   test_cleanup_root(root);
 }
 
-static void
-test_pouch_endpoint_query_filters_full_form_lql_document_selector(
+static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
     void **state) {
   char root[256];
   char endpoint[320];
@@ -6117,17 +6117,16 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   alpha = pouch_acquire_query_key(client, "alpha", &error);
   pouch_save_query_json(alpha, "{\"value\":\"alpha\",\"n\":1.0}", &error);
   bravo = pouch_acquire_query_key(client, "bravo", &error);
-  pouch_save_query_json(bravo,
-                        "{\"value\":\"beta\",\"kind\":\"selected\",\"n\":2}",
-                        &error);
+  pouch_save_query_json(
+      bravo, "{\"value\":\"beta\",\"kind\":\"selected\",\"n\":2}", &error);
   charlie = pouch_acquire_query_key(client, "charlie", &error);
-  pouch_save_query_json(charlie, "{\"other\":\"alpha\",\"n\":3,"
-                                  "\"box\":{\"leaf\":true}}",
+  pouch_save_query_json(charlie,
+                        "{\"other\":\"alpha\",\"n\":3,"
+                        "\"box\":{\"leaf\":true}}",
                         &error);
   delta = pouch_acquire_query_key(client, "delta", &error);
-  pouch_save_query_json(delta,
-                        "{\"value\":\"beta\",\"kind\":\"other\",\"n\":4}",
-                        &error);
+  pouch_save_query_json(
+      delta, "{\"value\":\"beta\",\"kind\":\"other\",\"n\":4}", &error);
   alpha->close(alpha);
   bravo->close(bravo);
   charlie->close(charlie);
@@ -6217,6 +6216,47 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_null(strstr(text, "{\"key\":\"charlie\""));
   assert_non_null(strstr(text, "{\"key\":\"delta\""));
   assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"or\":[{\"range\":{\"field\":\"/n\",\"lt\":3}},"
+                      "{\"range\":{\"field\":\"/n\",\"gt\":1,\"lt\":4}}]}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_null(strstr(text, "delta"));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json = "{\"or\":[{\"range\":{\"field\":\"/n\",\"lt\":3}},"
+                      "{\"range\":{\"field\":\"/n\",\"gt\":1,\"lt\":4}}]}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_non_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_null(strstr(text, "delta"));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);
@@ -6513,7 +6553,8 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   lc_query_req_init(&req);
-  req.selector_json = "{\"in\":{\"field\":\"/value\",\"any\":[\"alpha\",\"beta\"]}}";
+  req.selector_json =
+      "{\"in\":{\"field\":\"/value\",\"any\":[\"alpha\",\"beta\"]}}";
   req.engine = "scan";
   rc = client->query(client, &req, sink, &res, &error);
   assert_int_equal(rc, LC_OK);
@@ -6533,7 +6574,8 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   lc_query_req_init(&req);
-  req.selector_json = "{\"in\":{\"field\":\"/value\",\"any\":[\"alpha\",\"beta\"]}}";
+  req.selector_json =
+      "{\"in\":{\"field\":\"/value\",\"any\":[\"alpha\",\"beta\"]}}";
   rc = client->query(client, &req, sink, &res, &error);
   assert_int_equal(rc, LC_OK);
   text = memory_sink_text(sink);
@@ -6933,6 +6975,20 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
 
   memset(&capture, 0, sizeof(capture));
   lc_query_req_init(&req);
+  req.selector_json = "{\"or\":[{\"range\":{\"field\":\"/n\",\"lt\":3}},"
+                      "{\"range\":{\"field\":\"/n\",\"gt\":1,\"lt\":4}}]}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(capture.keys[2], "charlie");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&req);
   req.selector_json =
       "{\"or\":[{\"contains\":{\"field\":\"/value\",\"value\":\"et\"}},"
       "{\"icontains\":{\"field\":\"/kind\",\"value\":\"LECT\"}}]}";
@@ -7021,7 +7077,8 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
 
   memset(&capture, 0, sizeof(capture));
   lc_query_req_init(&req);
-  req.selector_json = "{\"in\":{\"field\":\"/value\",\"any\":[\"alpha\",\"beta\"]}}";
+  req.selector_json =
+      "{\"in\":{\"field\":\"/value\",\"any\":[\"alpha\",\"beta\"]}}";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.key_count, 3U);
@@ -7089,9 +7146,8 @@ test_pouch_endpoint_query_filters_full_form_lql_document_selector(
 
   memset(&capture, 0, sizeof(capture));
   lc_query_req_init(&req);
-  req.selector_json =
-      "{\"and\":[{\"exists\":\"/value\"},"
-      "{\"range\":{\"field\":\"/n\",\"gt\":1,\"lt\":4}}]}";
+  req.selector_json = "{\"and\":[{\"exists\":\"/value\"},"
+                      "{\"range\":{\"field\":\"/n\",\"gt\":1,\"lt\":4}}]}";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.key_count, 1U);
