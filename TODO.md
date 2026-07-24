@@ -397,6 +397,9 @@ Latest release targets confirmed on 2026-07-23:
       selectors with multiple supported OR groups by using one OR group as a
       storage-owned positive candidate superset and leaving remaining OR groups
       to final `liblql` acceptance.
+    - [x] Add liblql-AST equality-only recursive OR extraction using typed
+      equality candidate supersets generated from liblql textual equality
+      values; final typed exactness remains owned by `liblql`.
     - [ ] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans, including remaining mixed
       non-equality OR branch planning and broader exclusion planning for safe

@@ -16879,6 +16879,9 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
 }
 
 typedef struct lc_pouch_lql_ast_or_terms {
+  lc_pouch_document_eq_term *eq_terms;
+  size_t eq_count;
+  size_t eq_capacity;
   lc_pouch_document_range_term *range_terms;
   size_t range_count;
   size_t range_capacity;
@@ -16937,6 +16940,22 @@ static char *lc_pouch_lql_ast_string_value_copy(lql_string_view view) {
   return copy;
 }
 
+static char *lc_pouch_lql_ast_cstr_copy(const char *value) {
+  char *copy;
+  size_t len;
+
+  if (value == NULL) {
+    return NULL;
+  }
+  len = strlen(value);
+  copy = (char *)lc_alloc_with_allocator(NULL, len + 1U);
+  if (copy == NULL) {
+    return NULL;
+  }
+  memcpy(copy, value, len + 1U);
+  return copy;
+}
+
 static void
 lc_pouch_lql_ast_or_terms_cleanup(lc_pouch_lql_ast_or_terms *terms) {
   size_t index;
@@ -16944,6 +16963,11 @@ lc_pouch_lql_ast_or_terms_cleanup(lc_pouch_lql_ast_or_terms *terms) {
   if (terms == NULL) {
     return;
   }
+  for (index = 0U; index < terms->eq_count; ++index) {
+    lc_free_with_allocator(NULL, (char *)terms->eq_terms[index].field);
+    lc_free_with_allocator(NULL, (char *)terms->eq_terms[index].value);
+  }
+  lc_free_with_allocator(NULL, terms->eq_terms);
   for (index = 0U; index < terms->range_count; ++index) {
     lc_free_with_allocator(NULL, (char *)terms->range_terms[index].field);
     lc_free_with_allocator(NULL, (char *)terms->range_terms[index].gt);
@@ -17001,6 +17025,82 @@ static int lc_pouch_lql_ast_or_terms_grow(void **items, size_t *capacity,
          (new_capacity - *capacity) * item_size);
   *items = grown;
   *capacity = new_capacity;
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_or_terms_add_eq_encoded(lc_pouch_lql_ast_or_terms *terms,
+                                         lql_string_view field,
+                                         const char *encoded_value) {
+  lc_pouch_document_eq_term *term;
+
+  if (!lc_pouch_lql_ast_view_is_pointer(field) || encoded_value == NULL ||
+      !lc_pouch_lql_ast_or_terms_grow((void **)&terms->eq_terms,
+                                      &terms->eq_capacity, terms->eq_count,
+                                      sizeof(terms->eq_terms[0]))) {
+    return 0;
+  }
+  term = &terms->eq_terms[terms->eq_count];
+  term->field = lc_pouch_lql_ast_view_copy(field);
+  term->value = lc_pouch_lql_ast_cstr_copy(encoded_value);
+  if (term->field == NULL || term->value == NULL) {
+    lc_free_with_allocator(NULL, (char *)term->field);
+    lc_free_with_allocator(NULL, (char *)term->value);
+    memset(term, 0, sizeof(*term));
+    return 0;
+  }
+  terms->eq_count++;
+  return 1;
+}
+
+static int
+lc_pouch_lql_ast_or_terms_add_eq(lc_pouch_lql_ast_or_terms *terms,
+                                 const lql_selector_string_term *source) {
+  char *string_value;
+  char *raw;
+  char *number_value;
+
+  if (source == NULL || !source->value_present ||
+      !lc_pouch_lql_ast_view_is_pointer(source->field) ||
+      !lc_pouch_lql_ast_view_is_cstr(source->value)) {
+    return 0;
+  }
+  string_value = lc_pouch_lql_ast_string_value_copy(source->value);
+  if (string_value == NULL) {
+    return 0;
+  }
+  if (!lc_pouch_lql_ast_or_terms_add_eq_encoded(terms, source->field,
+                                                string_value)) {
+    lc_free_with_allocator(NULL, string_value);
+    return 0;
+  }
+  lc_free_with_allocator(NULL, string_value);
+  if (source->value.len == 4U && memcmp(source->value.data, "true", 4U) == 0) {
+    return lc_pouch_lql_ast_or_terms_add_eq_encoded(terms, source->field,
+                                                    "b:1");
+  }
+  if (source->value.len == 5U && memcmp(source->value.data, "false", 5U) == 0) {
+    return lc_pouch_lql_ast_or_terms_add_eq_encoded(terms, source->field,
+                                                    "b:0");
+  }
+  if (source->value.len == 4U && memcmp(source->value.data, "null", 4U) == 0) {
+    return lc_pouch_lql_ast_or_terms_add_eq_encoded(terms, source->field, "z:");
+  }
+  raw = lc_pouch_lql_ast_view_copy(source->value);
+  if (raw == NULL) {
+    return 0;
+  }
+  number_value = NULL;
+  if (lc_pouch_number_eq_key(raw, source->value.len, &number_value)) {
+    int ok;
+
+    ok = lc_pouch_lql_ast_or_terms_add_eq_encoded(terms, source->field,
+                                                  number_value);
+    lc_free_with_allocator(NULL, number_value);
+    lc_free_with_allocator(NULL, raw);
+    return ok;
+  }
+  lc_free_with_allocator(NULL, raw);
   return 1;
 }
 
@@ -17238,6 +17338,16 @@ static int lc_pouch_lql_ast_or_terms_add_node(lc_pouch_lql_ast_or_terms *terms,
     }
     return lc_pouch_lql_ast_or_terms_add_in(terms, &term, runtime, node);
   }
+  if (node.kind == LQL_SELECTOR_NODE_EQ) {
+    lql_selector_string_term term;
+
+    memset(&term, 0, sizeof(term));
+    if (runtime->selector_node_string_term(runtime, node, &term, &lql_err) !=
+        LQL_STATUS_OK) {
+      return 0;
+    }
+    return lc_pouch_lql_ast_or_terms_add_eq(terms, &term);
+  }
   if (node.kind == LQL_SELECTOR_NODE_PREFIX ||
       node.kind == LQL_SELECTOR_NODE_IPREFIX ||
       node.kind == LQL_SELECTOR_NODE_CONTAINS ||
@@ -17283,9 +17393,16 @@ static int lc_pouch_lql_ast_or_node_parse(const lql *runtime,
       return 0;
     }
   }
-  if (terms->range_count == 0U && terms->in_count == 0U &&
-      terms->prefix_count == 0U && terms->contains_count == 0U &&
-      terms->exists_count == 0U) {
+  if (terms->eq_count > 0U &&
+      (terms->range_count > 0U || terms->in_count > 0U ||
+       terms->prefix_count > 0U || terms->contains_count > 0U ||
+       terms->exists_count > 0U)) {
+    lc_pouch_lql_ast_or_terms_cleanup(terms);
+    return 0;
+  }
+  if (terms->eq_count == 0U && terms->range_count == 0U &&
+      terms->in_count == 0U && terms->prefix_count == 0U &&
+      terms->contains_count == 0U && terms->exists_count == 0U) {
     lc_pouch_lql_ast_or_terms_cleanup(terms);
     return 0;
   }
@@ -17375,6 +17492,8 @@ lc_pouch_lql_ast_or_hint_parse(lc_pouch_lql_document_filter *filter) {
   }
   filter->document_or_range_terms = terms.range_terms;
   filter->document_or_range_term_count = terms.range_count;
+  filter->document_or_eq_terms = terms.eq_terms;
+  filter->document_or_eq_term_count = terms.eq_count;
   filter->document_or_in_terms = terms.in_terms;
   filter->document_or_in_term_count = terms.in_count;
   filter->document_or_prefix_terms = terms.prefix_terms;

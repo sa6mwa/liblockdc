@@ -5945,6 +5945,9 @@ static void test_pouch_endpoint_scan_query_filters_key_selector(void **state) {
   memset(&res, 0, sizeof(res));
   memset(&handler, 0, sizeof(handler));
   memset(&capture, 0, sizeof(capture));
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
   client = open_pouch_client(endpoint);
 
   alpha = pouch_acquire_query_key_for_owner(client, "alpha", "owner-a", &error);
@@ -6112,6 +6115,9 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   memset(&res, 0, sizeof(res));
   memset(&handler, 0, sizeof(handler));
   memset(&capture, 0, sizeof(capture));
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
   client = open_pouch_client(endpoint);
 
   alpha = pouch_acquire_query_key(client, "alpha", &error);
@@ -6176,6 +6182,67 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"and\":[{\"or\":[{\"eq\":{\"field\":\"/value\","
+      "\"value\":\"alpha\"}},{\"eq\":{\"field\":\"/n\",\"value\":4}}]},"
+      "{\"not\":{\"exists\":\"/missing\"}}]}]}";
+  req.engine = "scan";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_non_null(strstr(text, "{\"key\":\"delta\""));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_int_equal(res.index_seq, 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  memset(&res, 0, sizeof(res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"and\":[{\"or\":[{\"eq\":{\"field\":\"/value\","
+      "\"value\":\"alpha\"}},{\"eq\":{\"field\":\"/n\",\"value\":4}}]},"
+      "{\"not\":{\"exists\":\"/missing\"}}]}]}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_non_null(strstr(text, "{\"key\":\"delta\""));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"and\":[{\"or\":[{\"eq\":{\"field\":\"/value\","
+      "\"value\":\"alpha\"}},{\"eq\":{\"field\":\"/n\",\"value\":4}}]},"
+      "{\"not\":{\"exists\":\"/missing\"}}]}]}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "delta");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
 
   sink = NULL;

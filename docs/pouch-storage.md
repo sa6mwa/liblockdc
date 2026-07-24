@@ -755,8 +755,10 @@ child is supported.
 When a recursive `and` composition contains supported `or` groups, pouch can
 extract one positive OR candidate group through the `liblql` selector AST as the
 storage-owned candidate superset. Safe `not` exclusions and remaining OR groups
-stay final `liblql` filters, while root OR groups that mix more than two
-non-equality families can also provide the candidate superset.
+stay final `liblql` filters, while equality-only OR groups use typed equality
+candidate supersets generated from liblql's textual equality view and root OR
+groups that mix more than two non-equality families can also provide the
+candidate superset.
 Selectors that use `liblql` wildcard or recursive path capabilities currently
 force a deterministic full-candidate indexed scan instead of treating wildcard
 paths as literal posting fields; final acceptance still comes from `liblql`.
