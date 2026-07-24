@@ -9983,6 +9983,614 @@ lc_pouch_lql_or_contains_hint_parse(const char *selector_json,
                                               term_count_out);
 }
 
+typedef struct lc_pouch_lql_or_prefix_contains_hint_visit {
+  lc_pouch_lql_prefix_hint_term *prefix_terms;
+  lc_pouch_lql_contains_hint_term *contains_terms;
+  int *child_kinds;
+  size_t child_count;
+  size_t child_capacity;
+  int valid;
+  int root_is_object;
+  size_t root_key_count;
+  int or_array_seen;
+  int key_active;
+  char key[16];
+  size_t key_len;
+  int prefix_field_active;
+  int prefix_value_active;
+  int contains_field_active;
+  int contains_value_active;
+  int number_value_active;
+  size_t active_child_index;
+} lc_pouch_lql_or_prefix_contains_hint_visit;
+
+static int lc_pouch_lql_or_prefix_contains_hint_ensure_child(
+    lc_pouch_lql_or_prefix_contains_hint_visit *visit, size_t child_index) {
+  lc_pouch_lql_prefix_hint_term *prefix_terms;
+  lc_pouch_lql_contains_hint_term *contains_terms;
+  int *child_kinds;
+  size_t new_capacity;
+  size_t index;
+
+  if (visit == NULL) {
+    return 0;
+  }
+  if (child_index < visit->child_count) {
+    return 1;
+  }
+  if (child_index + 1U > visit->child_capacity) {
+    new_capacity = visit->child_capacity == 0U ? 4U : visit->child_capacity;
+    while (new_capacity < child_index + 1U) {
+      if (new_capacity > ((size_t)-1) / 2U) {
+        return 0;
+      }
+      new_capacity *= 2U;
+    }
+    prefix_terms = (lc_pouch_lql_prefix_hint_term *)lc_realloc_with_allocator(
+        NULL, visit->prefix_terms, new_capacity * sizeof(prefix_terms[0]));
+    if (prefix_terms == NULL) {
+      return 0;
+    }
+    visit->prefix_terms = prefix_terms;
+    contains_terms =
+        (lc_pouch_lql_contains_hint_term *)lc_realloc_with_allocator(
+            NULL, visit->contains_terms,
+            new_capacity * sizeof(contains_terms[0]));
+    if (contains_terms == NULL) {
+      return 0;
+    }
+    visit->contains_terms = contains_terms;
+    child_kinds = (int *)lc_realloc_with_allocator(
+        NULL, visit->child_kinds, new_capacity * sizeof(child_kinds[0]));
+    if (child_kinds == NULL) {
+      return 0;
+    }
+    visit->child_kinds = child_kinds;
+    memset(prefix_terms + visit->child_capacity, 0,
+           (new_capacity - visit->child_capacity) * sizeof(prefix_terms[0]));
+    memset(contains_terms + visit->child_capacity, 0,
+           (new_capacity - visit->child_capacity) * sizeof(contains_terms[0]));
+    memset(child_kinds + visit->child_capacity, 0,
+           (new_capacity - visit->child_capacity) * sizeof(child_kinds[0]));
+    visit->child_capacity = new_capacity;
+  }
+  for (index = visit->child_count; index <= child_index; ++index) {
+    memset(&visit->prefix_terms[index], 0, sizeof(visit->prefix_terms[index]));
+    memset(&visit->contains_terms[index], 0,
+           sizeof(visit->contains_terms[index]));
+    visit->child_kinds[index] = 0;
+  }
+  visit->child_count = child_index + 1U;
+  return 1;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_object_begin(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+  size_t child_index;
+  int ignore_case;
+
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (path != NULL && path->segment_count == 0U) {
+    visit->root_is_object = 1;
+  } else if (lc_pouch_lql_or_prefix_hint_path_is_or_child(path, &child_index) ||
+             lc_pouch_lql_or_prefix_hint_path_is_object(path, &child_index,
+                                                        &ignore_case) ||
+             lc_pouch_lql_or_contains_shape_path_is_object(path,
+                                                           &child_index)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    if (lc_pouch_lql_or_prefix_hint_path_is_object(path, &child_index,
+                                                   &ignore_case)) {
+      visit->prefix_terms[child_index].ignore_case = ignore_case;
+    } else if (lc_pouch_lql_or_contains_shape_path_is_object(path,
+                                                             &child_index)) {
+      visit->contains_terms[child_index].ignore_case =
+          lc_pouch_lql_eq_hint_segment_is(path, 2U, "icontains");
+    }
+  } else {
+    visit->valid = 0;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_array_begin(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (lc_pouch_lql_or_prefix_hint_path_is_or_array(path)) {
+    visit->or_array_seen = 1;
+  } else {
+    visit->valid = 0;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_key_begin(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit != NULL) {
+    visit->key_active = 1;
+    visit->key_len = 0U;
+    visit->key[0] = '\0';
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_key_chunk(
+    void *user, const lonejson_value_path *path, const char *data, size_t len,
+    lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+  size_t index;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit == NULL || !visit->key_active) {
+    return LONEJSON_STATUS_OK;
+  }
+  for (index = 0U; index < len; ++index) {
+    if (visit->key_len >= sizeof(visit->key) - 1U) {
+      visit->valid = 0;
+      continue;
+    }
+    visit->key[visit->key_len++] = data[index];
+  }
+  visit->key[visit->key_len] = '\0';
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_key_end(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+  size_t child_index;
+  int ignore_case;
+
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit == NULL || !visit->key_active) {
+    return LONEJSON_STATUS_OK;
+  }
+  visit->key_active = 0;
+  if (path != NULL && path->segment_count == 0U) {
+    visit->root_key_count++;
+    if (strcmp(visit->key, "or") != 0) {
+      visit->valid = 0;
+    }
+  } else if (lc_pouch_lql_or_prefix_hint_path_is_or_child(path, &child_index)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    if (strcmp(visit->key, "prefix") == 0 ||
+        strcmp(visit->key, "iprefix") == 0) {
+      if (visit->child_kinds[child_index] != 0 &&
+          visit->child_kinds[child_index] != 1) {
+        visit->valid = 0;
+        return LONEJSON_STATUS_OK;
+      }
+      visit->child_kinds[child_index] = 1;
+      visit->prefix_terms[child_index].wrapper_key_count++;
+    } else if (strcmp(visit->key, "contains") == 0 ||
+               strcmp(visit->key, "icontains") == 0) {
+      if (visit->child_kinds[child_index] != 0 &&
+          visit->child_kinds[child_index] != 2) {
+        visit->valid = 0;
+        return LONEJSON_STATUS_OK;
+      }
+      visit->child_kinds[child_index] = 2;
+      visit->contains_terms[child_index].wrapper_key_count++;
+    } else {
+      visit->valid = 0;
+    }
+  } else if (lc_pouch_lql_or_prefix_hint_path_is_object(path, &child_index,
+                                                        &ignore_case)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    visit->prefix_terms[child_index].predicate_key_count++;
+    if (strcmp(visit->key, "field") != 0 && strcmp(visit->key, "value") != 0) {
+      visit->valid = 0;
+    }
+  } else if (lc_pouch_lql_or_contains_shape_path_is_object(path,
+                                                           &child_index)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    visit->contains_terms[child_index].predicate_key_count++;
+    if (strcmp(visit->key, "field") != 0 && strcmp(visit->key, "value") != 0) {
+      visit->valid = 0;
+    }
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_string_begin(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+  lc_pouch_lql_prefix_hint_term *term;
+  size_t child_index;
+  int ignore_case;
+
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (lc_pouch_lql_or_prefix_hint_path_is_member(path, "field", &child_index,
+                                                 &ignore_case)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    term = &visit->prefix_terms[child_index];
+    term->ignore_case = ignore_case;
+    term->field_len = 0U;
+    visit->prefix_field_active = 1;
+    visit->active_child_index = child_index;
+  } else if (lc_pouch_lql_or_prefix_hint_path_is_member(
+                 path, "value", &child_index, &ignore_case)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    term = &visit->prefix_terms[child_index];
+    term->ignore_case = ignore_case;
+    term->value_len = 0U;
+    if (term->value != NULL) {
+      term->value[0] = '\0';
+    }
+    visit->prefix_value_active = 1;
+    visit->active_child_index = child_index;
+  } else if (lc_pouch_lql_or_contains_shape_path_is_member(
+                 path, "field", &child_index, &ignore_case)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    term = &visit->contains_terms[child_index];
+    term->ignore_case = ignore_case;
+    term->field_len = 0U;
+    visit->contains_field_active = 1;
+    visit->active_child_index = child_index;
+  } else if (lc_pouch_lql_or_contains_shape_path_is_member(
+                 path, "value", &child_index, &ignore_case)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    term = &visit->contains_terms[child_index];
+    term->ignore_case = ignore_case;
+    term->value_len = 0U;
+    if (term->value != NULL) {
+      term->value[0] = '\0';
+    }
+    visit->contains_value_active = 1;
+    visit->active_child_index = child_index;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_string_chunk(
+    void *user, const lonejson_value_path *path, const char *data, size_t len,
+    lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+  lc_pouch_lql_prefix_hint_term *term;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit == NULL || visit->active_child_index >= visit->child_count) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (visit->prefix_field_active || visit->prefix_value_active ||
+      (visit->number_value_active &&
+       visit->child_kinds[visit->active_child_index] == 1)) {
+    term = &visit->prefix_terms[visit->active_child_index];
+    if (visit->prefix_field_active) {
+      if (!lc_pouch_lql_eq_hint_append(&term->field, &term->field_len,
+                                       &term->field_capacity, data, len)) {
+        return LONEJSON_STATUS_ALLOCATION_FAILED;
+      }
+    } else {
+      if (!lc_pouch_lql_eq_hint_append(&term->value, &term->value_len,
+                                       &term->value_capacity, data, len)) {
+        return LONEJSON_STATUS_ALLOCATION_FAILED;
+      }
+    }
+  } else if (visit->contains_field_active || visit->contains_value_active ||
+             (visit->number_value_active &&
+              visit->child_kinds[visit->active_child_index] == 2)) {
+    term = &visit->contains_terms[visit->active_child_index];
+    if (visit->contains_field_active) {
+      if (!lc_pouch_lql_eq_hint_append(&term->field, &term->field_len,
+                                       &term->field_capacity, data, len)) {
+        return LONEJSON_STATUS_ALLOCATION_FAILED;
+      }
+    } else {
+      if (!lc_pouch_lql_eq_hint_append(&term->value, &term->value_len,
+                                       &term->value_capacity, data, len)) {
+        return LONEJSON_STATUS_ALLOCATION_FAILED;
+      }
+    }
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_string_end(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+  size_t child_index;
+  int ignore_case;
+
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit != NULL &&
+      lc_pouch_lql_or_prefix_hint_path_is_member(path, "field", &child_index,
+                                                 &ignore_case) &&
+      child_index < visit->child_count) {
+    visit->prefix_field_active = 0;
+    visit->prefix_terms[child_index].saw_field =
+        visit->prefix_terms[child_index].field != NULL &&
+        visit->prefix_terms[child_index].field[0] == '/';
+  } else if (visit != NULL &&
+             lc_pouch_lql_or_prefix_hint_path_is_member(
+                 path, "value", &child_index, &ignore_case) &&
+             child_index < visit->child_count) {
+    visit->prefix_value_active = 0;
+    visit->prefix_terms[child_index].saw_value = 1;
+  } else if (visit != NULL &&
+             lc_pouch_lql_or_contains_shape_path_is_member(
+                 path, "field", &child_index, &ignore_case) &&
+             child_index < visit->child_count) {
+    visit->contains_field_active = 0;
+    visit->contains_terms[child_index].saw_field =
+        visit->contains_terms[child_index].field != NULL &&
+        visit->contains_terms[child_index].field[0] == '/';
+  } else if (visit != NULL &&
+             lc_pouch_lql_or_contains_shape_path_is_member(
+                 path, "value", &child_index, &ignore_case) &&
+             child_index < visit->child_count) {
+    visit->contains_value_active = 0;
+    visit->contains_terms[child_index].saw_value = 1;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_number_begin(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+  lc_pouch_lql_prefix_hint_term *term;
+  size_t child_index;
+  int ignore_case;
+
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (lc_pouch_lql_or_prefix_hint_path_is_member(path, "value", &child_index,
+                                                 &ignore_case)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    term = &visit->prefix_terms[child_index];
+    term->ignore_case = ignore_case;
+    term->value_len = 0U;
+    if (term->value != NULL) {
+      term->value[0] = '\0';
+    }
+    visit->child_kinds[child_index] = 1;
+  } else if (lc_pouch_lql_or_contains_shape_path_is_member(
+                 path, "value", &child_index, &ignore_case)) {
+    if (!lc_pouch_lql_or_prefix_contains_hint_ensure_child(visit,
+                                                           child_index)) {
+      return LONEJSON_STATUS_ALLOCATION_FAILED;
+    }
+    term = &visit->contains_terms[child_index];
+    term->ignore_case = ignore_case;
+    term->value_len = 0U;
+    if (term->value != NULL) {
+      term->value[0] = '\0';
+    }
+    visit->child_kinds[child_index] = 2;
+  } else {
+    return LONEJSON_STATUS_OK;
+  }
+  visit->number_value_active = 1;
+  visit->active_child_index = child_index;
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_number_chunk(
+    void *user, const lonejson_value_path *path, const char *data,
+    size_t data_len, lonejson_error *error) {
+  return lc_pouch_lql_or_prefix_contains_hint_string_chunk(user, path, data,
+                                                           data_len, error);
+}
+
+static lonejson_status lc_pouch_lql_or_prefix_contains_hint_number_end(
+    void *user, const lonejson_value_path *path, lonejson_error *error) {
+  lc_pouch_lql_or_prefix_contains_hint_visit *visit;
+  size_t child_index;
+  int ignore_case;
+
+  (void)error;
+  visit = (lc_pouch_lql_or_prefix_contains_hint_visit *)user;
+  if (visit != NULL &&
+      (lc_pouch_lql_or_prefix_hint_path_is_member(path, "value", &child_index,
+                                                  &ignore_case) ||
+       lc_pouch_lql_or_contains_shape_path_is_member(
+           path, "value", &child_index, &ignore_case)) &&
+      child_index < visit->child_count) {
+    visit->number_value_active = 0;
+    if (visit->child_kinds[child_index] == 1) {
+      visit->prefix_terms[child_index].saw_value = 1;
+    } else if (visit->child_kinds[child_index] == 2) {
+      visit->contains_terms[child_index].saw_value = 1;
+    }
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static int lc_pouch_lql_or_prefix_contains_hint_parse(
+    const char *selector_json, lc_pouch_document_prefix_term **prefix_out,
+    size_t *prefix_count_out, lc_pouch_document_contains_term **contains_out,
+    size_t *contains_count_out) {
+  lc_pouch_lql_or_prefix_contains_hint_visit visit;
+  lonejson_path_value_visitor visitor;
+  lonejson_error error;
+  lonejson_status status;
+  lonejson *runtime;
+  lc_pouch_document_prefix_term *prefix_terms;
+  lc_pouch_document_contains_term *contains_terms;
+  size_t prefix_count;
+  size_t contains_count;
+  size_t index;
+
+  if (prefix_out != NULL) {
+    *prefix_out = NULL;
+  }
+  if (prefix_count_out != NULL) {
+    *prefix_count_out = 0U;
+  }
+  if (contains_out != NULL) {
+    *contains_out = NULL;
+  }
+  if (contains_count_out != NULL) {
+    *contains_count_out = 0U;
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL || selector_json == NULL || prefix_out == NULL ||
+      prefix_count_out == NULL || contains_out == NULL ||
+      contains_count_out == NULL) {
+    return 0;
+  }
+  memset(&visit, 0, sizeof(visit));
+  visit.valid = 1;
+  visitor = lonejson_default_path_value_visitor();
+  visitor.object_begin = lc_pouch_lql_or_prefix_contains_hint_object_begin;
+  visitor.array_begin = lc_pouch_lql_or_prefix_contains_hint_array_begin;
+  visitor.object_key_begin = lc_pouch_lql_or_prefix_contains_hint_key_begin;
+  visitor.object_key_chunk = lc_pouch_lql_or_prefix_contains_hint_key_chunk;
+  visitor.object_key_end = lc_pouch_lql_or_prefix_contains_hint_key_end;
+  visitor.string_begin = lc_pouch_lql_or_prefix_contains_hint_string_begin;
+  visitor.string_chunk = lc_pouch_lql_or_prefix_contains_hint_string_chunk;
+  visitor.string_end = lc_pouch_lql_or_prefix_contains_hint_string_end;
+  visitor.number_begin = lc_pouch_lql_or_prefix_contains_hint_number_begin;
+  visitor.number_chunk = lc_pouch_lql_or_prefix_contains_hint_number_chunk;
+  visitor.number_end = lc_pouch_lql_or_prefix_contains_hint_number_end;
+  lonejson_error_init(&error);
+  status = runtime->visit_path_value_cstr(runtime, selector_json, &visitor,
+                                          &visit, &error);
+  if (status != LONEJSON_STATUS_OK || !visit.valid || !visit.root_is_object ||
+      visit.root_key_count != 1U || !visit.or_array_seen ||
+      visit.child_count < 2U) {
+    visit.valid = 0;
+  }
+  prefix_count = 0U;
+  contains_count = 0U;
+  if (visit.valid) {
+    for (index = 0U; index < visit.child_count; ++index) {
+      if (visit.child_kinds[index] == 1) {
+        if (visit.prefix_terms[index].wrapper_key_count != 1U ||
+            visit.prefix_terms[index].predicate_key_count != 2U ||
+            !visit.prefix_terms[index].saw_field ||
+            !visit.prefix_terms[index].saw_value ||
+            visit.prefix_terms[index].field == NULL ||
+            visit.prefix_terms[index].value == NULL) {
+          visit.valid = 0;
+          break;
+        }
+        prefix_count++;
+      } else if (visit.child_kinds[index] == 2) {
+        if (visit.contains_terms[index].wrapper_key_count != 1U ||
+            visit.contains_terms[index].predicate_key_count != 2U ||
+            !visit.contains_terms[index].saw_field ||
+            !visit.contains_terms[index].saw_value ||
+            visit.contains_terms[index].field == NULL ||
+            visit.contains_terms[index].value == NULL) {
+          visit.valid = 0;
+          break;
+        }
+        contains_count++;
+      } else {
+        visit.valid = 0;
+        break;
+      }
+    }
+    if (prefix_count == 0U || contains_count == 0U) {
+      visit.valid = 0;
+    }
+  }
+  if (visit.valid) {
+    prefix_terms = (lc_pouch_document_prefix_term *)lc_calloc_with_allocator(
+        NULL, prefix_count, sizeof(prefix_terms[0]));
+    contains_terms =
+        (lc_pouch_document_contains_term *)lc_calloc_with_allocator(
+            NULL, contains_count, sizeof(contains_terms[0]));
+    if (prefix_terms != NULL && contains_terms != NULL) {
+      prefix_count = 0U;
+      contains_count = 0U;
+      for (index = 0U; index < visit.child_count; ++index) {
+        if (visit.child_kinds[index] == 1) {
+          prefix_terms[prefix_count].field = visit.prefix_terms[index].field;
+          prefix_terms[prefix_count].value = visit.prefix_terms[index].value;
+          prefix_terms[prefix_count].ignore_case =
+              visit.prefix_terms[index].ignore_case;
+          visit.prefix_terms[index].field = NULL;
+          visit.prefix_terms[index].value = NULL;
+          prefix_count++;
+        } else if (visit.child_kinds[index] == 2) {
+          contains_terms[contains_count].field =
+              visit.contains_terms[index].field;
+          contains_terms[contains_count].value =
+              visit.contains_terms[index].value;
+          contains_terms[contains_count].ignore_case =
+              visit.contains_terms[index].ignore_case;
+          visit.contains_terms[index].field = NULL;
+          visit.contains_terms[index].value = NULL;
+          contains_count++;
+        }
+      }
+      *prefix_out = prefix_terms;
+      *prefix_count_out = prefix_count;
+      *contains_out = contains_terms;
+      *contains_count_out = contains_count;
+    } else {
+      lc_free_with_allocator(NULL, prefix_terms);
+      lc_free_with_allocator(NULL, contains_terms);
+    }
+  }
+  for (index = 0U; index < visit.child_count; ++index) {
+    lc_pouch_lql_prefix_hint_raw_term_cleanup(&visit.prefix_terms[index]);
+    lc_pouch_lql_prefix_hint_raw_term_cleanup(&visit.contains_terms[index]);
+  }
+  lc_free_with_allocator(NULL, visit.prefix_terms);
+  lc_free_with_allocator(NULL, visit.contains_terms);
+  lc_free_with_allocator(NULL, visit.child_kinds);
+  return *prefix_out != NULL && *prefix_count_out > 0U &&
+         *contains_out != NULL && *contains_count_out > 0U;
+}
+
 typedef struct lc_pouch_lql_exists_hint_term {
   char *field;
   size_t field_len;
@@ -12483,6 +13091,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
   int has_mixed_or_exists_range;
   int has_mixed_or_exists_prefix;
   int has_mixed_or_exists_contains;
+  int has_mixed_or_prefix_contains;
 
   if (filter == NULL || selector_json == NULL) {
     return LC_ERR_INVALID;
@@ -12554,7 +13163,16 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
         selector_json, &filter->document_prefix_terms,
         &filter->document_prefix_term_count);
   }
-  if (!has_mixed_or_exists_contains &&
+  has_mixed_or_prefix_contains = 0;
+  if (filter->document_or_prefix_term_count == 0U &&
+      filter->document_or_contains_term_count == 0U) {
+    has_mixed_or_prefix_contains = lc_pouch_lql_or_prefix_contains_hint_parse(
+        selector_json, &filter->document_or_prefix_terms,
+        &filter->document_or_prefix_term_count,
+        &filter->document_or_contains_terms,
+        &filter->document_or_contains_term_count);
+  }
+  if (!has_mixed_or_exists_contains && !has_mixed_or_prefix_contains &&
       !lc_pouch_lql_or_contains_hint_parse(
           selector_json, &filter->document_or_contains_terms,
           &filter->document_or_contains_term_count)) {
