@@ -354,6 +354,11 @@ Latest release targets confirmed on 2026-07-23:
       strict JSON Pointer `contains` / `icontains` selectors; indexed scans
       union text postings, de-duplicate keys, and keep final predicate
       acceptance owned by `liblql`.
+    - [x] Add a mixed range/text OR composition slice for full-form `or`
+      branches that combine numeric `range` selectors with strict JSON
+      Pointer `prefix` / `iprefix` selectors; indexed scans union ordered
+      numeric and text postings, de-duplicate keys, and keep final predicate
+      acceptance owned by `liblql`.
     - [ ] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans, including remaining mixed
       non-equality OR branch planning and broader exclusion planning for safe
