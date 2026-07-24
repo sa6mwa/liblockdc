@@ -175,10 +175,14 @@ typedef struct lc_pouch_query_index_scan_req {
   size_t document_or_eq_term_count;
   const lc_pouch_document_range_term *document_range_terms;
   size_t document_range_term_count;
+  const lc_pouch_document_range_term *document_not_range_terms;
+  size_t document_not_range_term_count;
   const lc_pouch_document_range_term *document_or_range_terms;
   size_t document_or_range_term_count;
   const lc_pouch_document_in_term *document_in_terms;
   size_t document_in_term_count;
+  const lc_pouch_document_in_term *document_not_in_terms;
+  size_t document_not_in_term_count;
   const lc_pouch_document_in_term *document_or_in_terms;
   size_t document_or_in_term_count;
   const lc_pouch_document_prefix_term *document_prefix_terms;

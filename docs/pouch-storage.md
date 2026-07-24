@@ -776,6 +776,10 @@ Negated `prefix` / `iprefix` and `contains` / `icontains` leaves under
 recursive `and` composition also act as storage-owned exclusions: candidate
 scans reject keys with live matching text postings before final `liblql`
 acceptance.
+Negated string `in` and numeric `range` leaves under recursive `and`
+composition use the same storage-owned exclusion model, rejecting live
+membership or numeric range posting matches while preserving final predicate
+authority in `liblql`.
 Positive `exists` selectors with single-segment wildcard path components, such
 as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
 instead of treating the wildcard as a literal posting field; final acceptance

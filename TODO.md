@@ -423,6 +423,10 @@ Latest release targets confirmed on 2026-07-23:
         `contains` / `icontains` leaves under recursive `and` composition;
         candidate scans reject keys with live matching text postings while
         final predicate acceptance remains owned by `liblql`.
+      - [x] Add storage-owned exclusion for safe string `in` and numeric
+        `range` leaves under recursive `and` composition; candidate scans
+        reject keys with live membership or numeric range postings while final
+        predicate acceptance remains owned by `liblql`.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.
