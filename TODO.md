@@ -330,10 +330,14 @@ Latest release targets confirmed on 2026-07-23:
       Pointer fields; indexed scans union ordered numeric postings,
       de-duplicate keys, preserve cursor order, and keep final predicate
       acceptance owned by `liblql`.
+    - [x] Cover safe `not` exclusion planning for full-form `and` selectors
+      that contain at least one positive supported candidate predicate; pouch
+      uses the positive predicate as the storage-owned candidate superset and
+      leaves the exclusion decision to final `liblql` acceptance.
     - [ ] Add recursive boolean composition over supported selector families
       without devolving to full namespace scans, including remaining mixed
-      non-equality OR branch planning and exclusion planning for safe `not`
-      forms.
+      non-equality OR branch planning and broader exclusion planning for safe
+      `not` forms.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.

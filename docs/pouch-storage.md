@@ -588,8 +588,11 @@ field and lowers them to the existing storage-owned `in` candidate path; mixed
 field equality OR branches use a storage-owned branch-union posting path.
 `exists`, prefix/iprefix, contains/icontains, and numeric range OR branches use
 storage-owned branch-union posting paths as well, de-duplicating keys before
-restoring stable cursor ordering. Other OR branch families and safe NOT planning
-still need planner support before they can avoid broader scans safely.
+restoring stable cursor ordering. Full-form `and` selectors that combine a
+positive supported indexed predicate with a `not` exclusion use the positive
+predicate as the storage-owned candidate superset and leave exclusion semantics
+to final `liblql` acceptance. Other OR branch families and broader safe NOT
+planning still need planner support before they can avoid broader scans safely.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan
