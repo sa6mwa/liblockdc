@@ -743,10 +743,10 @@ branches lower to `in`, mixed-field equality `or` branches union equality
 postings, and path-string `exists` plus numeric `range`, `prefix` / `iprefix`,
 or `contains` / `icontains` `or` branches, plus mixed `prefix` / `iprefix` and
 `contains` / `icontains` `or` branches, mixed string `in` plus `exists`,
-`prefix` / `iprefix`, or `contains` / `icontains` `or` branches, and mixed
-numeric `range` plus `prefix` / `iprefix` or `contains` / `icontains` `or`
-branches, union presence, membership, ordered numeric, or text postings before
-stable key/cursor ordering is restored.
+numeric `range`, `prefix` / `iprefix`, or `contains` / `icontains` `or`
+branches, and mixed numeric `range` plus `prefix` / `iprefix` or `contains` /
+`icontains` `or` branches, union presence, membership, ordered numeric, or text
+postings before stable key/cursor ordering is restored.
 Mixed
 equality/range/in/prefix/contains/exists `and`
 selectors intersect equality posting candidates with numeric range, string
