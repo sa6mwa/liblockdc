@@ -412,6 +412,10 @@ Latest release targets confirmed on 2026-07-23:
         under recursive `and` composition; candidate scans reject keys with live
         postings for the excluded JSON Pointer field while final predicate
         acceptance remains owned by `liblql`.
+      - [x] Add storage-owned exclusion for safe string-literal `not eq` leaves
+        under recursive `and` composition; candidate scans reject keys with live
+        exact text equality postings for the excluded field/value while typed
+        non-string equality remains final-acceptance-only.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.

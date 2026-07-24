@@ -169,6 +169,8 @@ typedef struct lc_pouch_query_index_scan_req {
   const char *owner;
   const lc_pouch_document_eq_term *document_eq_terms;
   size_t document_eq_term_count;
+  const lc_pouch_document_eq_term *document_not_eq_terms;
+  size_t document_not_eq_term_count;
   const lc_pouch_document_eq_term *document_or_eq_terms;
   size_t document_or_eq_term_count;
   const lc_pouch_document_range_term *document_range_terms;

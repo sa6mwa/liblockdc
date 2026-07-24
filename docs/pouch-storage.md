@@ -762,6 +762,9 @@ presence families can also provide the candidate superset.
 Exact `not exists` leaves under recursive `and` composition are also used as
 storage-owned exclusions: candidate scans reject keys with live postings for the
 excluded JSON Pointer field before final `liblql` acceptance.
+String-literal `not eq` leaves under recursive `and` composition similarly
+exclude keys with live exact text equality postings for that field/value; typed
+non-string equality exclusions remain final-acceptance-only.
 Positive `exists` selectors with single-segment wildcard path components, such
 as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
 instead of treating the wildcard as a literal posting field; final acceptance
