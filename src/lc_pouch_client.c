@@ -17702,9 +17702,21 @@ static int lc_pouch_lql_ast_or_terms_add_node(lc_pouch_lql_ast_or_terms *terms,
   return 0;
 }
 
+static int lc_pouch_lql_ast_or_node_parse_flat(const lql *runtime,
+                                               lql_selector_node or_node,
+                                               lc_pouch_lql_ast_or_terms *terms,
+                                               int reset_terms);
+
 static int lc_pouch_lql_ast_or_node_parse(const lql *runtime,
                                           lql_selector_node or_node,
                                           lc_pouch_lql_ast_or_terms *terms) {
+  return lc_pouch_lql_ast_or_node_parse_flat(runtime, or_node, terms, 1);
+}
+
+static int lc_pouch_lql_ast_or_node_parse_flat(const lql *runtime,
+                                               lql_selector_node or_node,
+                                               lc_pouch_lql_ast_or_terms *terms,
+                                               int reset_terms) {
   lql_error lql_err;
   size_t child_count;
   size_t index;
@@ -17713,7 +17725,9 @@ static int lc_pouch_lql_ast_or_node_parse(const lql *runtime,
       or_node.kind != LQL_SELECTOR_NODE_OR) {
     return 0;
   }
-  memset(terms, 0, sizeof(*terms));
+  if (reset_terms) {
+    memset(terms, 0, sizeof(*terms));
+  }
   lql_error_init(&lql_err);
   if (runtime->selector_node_child_count(runtime, or_node, &child_count,
                                          &lql_err) != LQL_STATUS_OK ||
@@ -17725,16 +17739,34 @@ static int lc_pouch_lql_ast_or_node_parse(const lql *runtime,
 
     lql_error_init(&lql_err);
     if (runtime->selector_node_child(runtime, or_node, index, &child,
-                                     &lql_err) != LQL_STATUS_OK ||
-        !lc_pouch_lql_ast_or_terms_add_node(terms, runtime, child)) {
-      lc_pouch_lql_ast_or_terms_cleanup(terms);
+                                     &lql_err) != LQL_STATUS_OK) {
+      if (reset_terms) {
+        lc_pouch_lql_ast_or_terms_cleanup(terms);
+      }
+      return 0;
+    }
+    if (child.kind == LQL_SELECTOR_NODE_OR) {
+      if (!lc_pouch_lql_ast_or_node_parse_flat(runtime, child, terms, 0)) {
+        if (reset_terms) {
+          lc_pouch_lql_ast_or_terms_cleanup(terms);
+        }
+        return 0;
+      }
+      continue;
+    }
+    if (!lc_pouch_lql_ast_or_terms_add_node(terms, runtime, child)) {
+      if (reset_terms) {
+        lc_pouch_lql_ast_or_terms_cleanup(terms);
+      }
       return 0;
     }
   }
   if (terms->eq_count == 0U && terms->range_count == 0U &&
       terms->in_count == 0U && terms->prefix_count == 0U &&
       terms->contains_count == 0U && terms->exists_count == 0U) {
-    lc_pouch_lql_ast_or_terms_cleanup(terms);
+    if (reset_terms) {
+      lc_pouch_lql_ast_or_terms_cleanup(terms);
+    }
     return 0;
   }
   return 1;

@@ -427,6 +427,9 @@ Latest release targets confirmed on 2026-07-23:
         `range` leaves under recursive `and` composition; candidate scans
         reject keys with live membership or numeric range postings while final
         predicate acceptance remains owned by `liblql`.
+      - [x] Flatten nested `or` nodes whose leaves are already supported
+        selector families into the storage-owned OR candidate union; final
+        predicate acceptance remains owned by `liblql`.
     - [ ] Add wildcard/recursive path expansion support for indexed field
       dictionaries where `liblql` exposes safe planner hints, with bounded
       expansion and deterministic fallback semantics.

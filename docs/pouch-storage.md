@@ -763,6 +763,9 @@ stay final `liblql` filters, while equality-only OR groups use typed equality
 candidate supersets generated from liblql's textual equality view and root OR
 groups that mix equality, membership, numeric range, text prefix/substring, and
 presence families can also provide the candidate superset.
+Nested `or` nodes whose descendants are already-supported selector leaves are
+flattened into the same storage-owned OR candidate union; unsupported nested
+branches remain deterministic fallback rather than risking false negatives.
 Exact `not exists` leaves under recursive `and` composition are also used as
 storage-owned exclusions: candidate scans reject keys with live postings for the
 excluded JSON Pointer field before final `liblql` acceptance.
