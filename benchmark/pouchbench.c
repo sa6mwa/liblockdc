@@ -42,14 +42,10 @@ static lc_source *source_from_text(const char *text, lc_error *error) {
   return source;
 }
 
-static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
-  char endpoint[512];
+static int seed_field_rows(lc_client *client, uint64_t rows, lc_error *error) {
   char key[96];
   char owner[32];
   char json[128];
-  lc_client_config config;
-  const char *endpoints[1];
-  lc_client *client;
   lc_acquire_req acquire;
   lc_update_opts update_opts;
   lc_lease *lease;
@@ -58,19 +54,10 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
   uint64_t i;
   int rc;
 
-  target = rows > 1U ? rows / 2U : 0U;
-  (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s?query_engine=scan",
-                 root);
-  endpoints[0] = endpoint;
-  lc_client_config_init(&config);
-  config.endpoints = endpoints;
-  config.endpoint_count = 1U;
-  config.default_namespace = "bench";
-  client = NULL;
-  rc = lc_client_open(&config, &client, error);
-  if (rc != LC_OK) {
-    return rc;
+  if (client == NULL) {
+    return LC_ERR_INVALID;
   }
+  target = rows > 1U ? rows / 2U : 0U;
   lc_acquire_req_init(&acquire);
   lc_update_opts_init(&update_opts);
   acquire.ttl_seconds = 3600L;
@@ -104,12 +91,10 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
       lease->close(lease);
     }
     if (rc != LC_OK) {
-      client->close(client);
       return rc;
     }
   }
 
-  client->close(client);
   return LC_OK;
 }
 
@@ -241,13 +226,6 @@ static int run_indexed_lql(const char *root, uint64_t iterations,
   out->iterations = iterations;
   out->operations = iterations;
   out->rows = seeded_rows;
-  rc = seed_field_rows(root, seeded_rows, &error);
-  if (rc != LC_OK) {
-    set_error(out, "seed", &error, rc);
-    lc_error_cleanup(&error);
-    return rc;
-  }
-
   (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
@@ -258,6 +236,13 @@ static int run_indexed_lql(const char *root, uint64_t iterations,
   rc = lc_client_open(&config, &client, &error);
   if (rc != LC_OK) {
     set_error(out, "open indexed client", &error, rc);
+    lc_error_cleanup(&error);
+    return rc;
+  }
+  rc = seed_field_rows(client, seeded_rows, &error);
+  if (rc != LC_OK) {
+    set_error(out, "seed", &error, rc);
+    client->close(client);
     lc_error_cleanup(&error);
     return rc;
   }

@@ -3147,6 +3147,93 @@ static void test_state_read_skips_replay_after_same_handle_write(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_query_index_scan_skips_replay_after_same_handle_write(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_document_eq_term term;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  lc_pouch_lock_status before_status;
+  lc_pouch_lock_status after_status;
+  scan_capture rows;
+  lc_error error;
+  unsigned long replay_refreshes;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-no-replay");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&term, 0, sizeof(term));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&before_status, 0, sizeof(before_status));
+  memset(&after_status, 0, sizeof(after_status));
+  memset(&rows, 0, sizeof(rows));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->query_index_scan);
+  assert_non_null(store->lock_status);
+
+  opts.content_type = "application/json";
+  source = source_from_text("{\"bucket\":\"needle\",\"value\":1}");
+  rc = store->write_state(store, "default", "hot", source, &opts, &put_res,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.owner = "owner";
+  meta.state_etag = put_res.new_state_etag;
+  meta.version = put_res.new_version;
+  rc = store->store_meta(store, "default", "hot", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->lock_status(store, &before_status, &error);
+  assert_int_equal(rc, LC_OK);
+  replay_refreshes = before_status.replay_refreshes;
+  lc_pouch_lock_status_cleanup(&allocator, &before_status);
+
+  term.field = "/bucket";
+  term.value = "s:needle";
+  req.namespace_name = "default";
+  req.document_eq_terms = &term;
+  req.document_eq_term_count = 1U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "hot");
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->lock_status(store, &after_status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(after_status.replay_refreshes, replay_refreshes);
+  lc_pouch_lock_status_cleanup(&allocator, &after_status);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_cas_and_remove_semantics(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -16905,6 +16992,8 @@ int main(void) {
       cmocka_unit_test(test_replay_ignores_root_store_log_without_segments),
       cmocka_unit_test(test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
+      cmocka_unit_test(
+          test_query_index_scan_skips_replay_after_same_handle_write),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(
           test_state_write_index_allocation_failure_replays_cleanly),
