@@ -147,6 +147,12 @@ typedef struct lc_pouch_document_in_term {
   size_t value_count;
 } lc_pouch_document_in_term;
 
+typedef struct lc_pouch_document_prefix_term {
+  const char *field;
+  const char *value;
+  int ignore_case;
+} lc_pouch_document_prefix_term;
+
 typedef struct lc_pouch_document_exists_term {
   const char *field;
 } lc_pouch_document_exists_term;
@@ -161,6 +167,8 @@ typedef struct lc_pouch_query_index_scan_req {
   size_t document_range_term_count;
   const lc_pouch_document_in_term *document_in_terms;
   size_t document_in_term_count;
+  const lc_pouch_document_prefix_term *document_prefix_terms;
+  size_t document_prefix_term_count;
   const lc_pouch_document_exists_term *document_exists_terms;
   size_t document_exists_term_count;
   const char *start_after;
