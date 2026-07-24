@@ -414,6 +414,13 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Detect `liblql` wildcard/recursive path capabilities during pouch
         LQL filter initialization and force deterministic full-candidate indexed
         fallback until concrete path expansion can be planned safely.
+      - [x] Add bounded storage-owned expansion for positive single-segment
+        wildcard `exists` path selectors by matching candidate JSON Pointer
+        fields from the indexed posting dictionary and leaving final acceptance
+        to `liblql`.
+      - [ ] Add recursive path expansion once `liblql` exposes or documents
+        safe recursive-path planner semantics that pouch can mirror without
+        false negatives.
     - [ ] Add token/trigram-style candidate structures if pouch needs
       Go-style text filtering performance; keep final contains/full-text
       semantics validated by `liblql`.

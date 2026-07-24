@@ -759,9 +759,12 @@ stay final `liblql` filters, while equality-only OR groups use typed equality
 candidate supersets generated from liblql's textual equality view and root OR
 groups that mix equality, membership, numeric range, text prefix/substring, and
 presence families can also provide the candidate superset.
-Selectors that use `liblql` wildcard or recursive path capabilities currently
-force a deterministic full-candidate indexed scan instead of treating wildcard
-paths as literal posting fields; final acceptance still comes from `liblql`.
+Positive `exists` selectors with single-segment wildcard path components, such
+as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
+instead of treating the wildcard as a literal posting field; final acceptance
+still comes from `liblql`. Recursive path capabilities still force a
+deterministic full-candidate indexed scan until safe recursive expansion
+semantics are available to the pouch planner.
 The `query.index` sidecar starts with a format/version record so incompatible
 posting layouts rebuild from authoritative namespace segments/snapshots instead
 of being trusted; the text-predicate posting slice increments that format

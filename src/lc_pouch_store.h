@@ -191,6 +191,8 @@ typedef struct lc_pouch_query_index_scan_req {
   size_t document_exists_term_count;
   const lc_pouch_document_exists_term *document_or_exists_terms;
   size_t document_or_exists_term_count;
+  const lc_pouch_document_exists_term *document_exists_path_patterns;
+  size_t document_exists_path_pattern_count;
   const char *start_after;
   size_t limit;
 } lc_pouch_query_index_scan_req;
