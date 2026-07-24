@@ -762,9 +762,11 @@ presence families can also provide the candidate superset.
 Positive `exists` selectors with single-segment wildcard path components, such
 as `/box/*`, expand candidates from the indexed JSON Pointer field dictionary
 instead of treating the wildcard as a literal posting field; final acceptance
-still comes from `liblql`. Recursive path capabilities still force a
-deterministic full-candidate indexed scan until safe recursive expansion
-semantics are available to the pouch planner.
+still comes from `liblql`. Exists-only root `or` groups may union those
+single-segment wildcard expansions with exact presence postings before final
+acceptance. Recursive path capabilities still force a deterministic
+full-candidate indexed scan until safe recursive expansion semantics are
+available to the pouch planner.
 The `query.index` sidecar starts with a format/version record so incompatible
 posting layouts rebuild from authoritative namespace segments/snapshots instead
 of being trusted; the text-predicate posting slice increments that format

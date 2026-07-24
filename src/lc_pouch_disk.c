@@ -416,6 +416,8 @@ static int lc_pouch_disk_query_index_keys_scan(
     lc_pouch_store *self, const lc_pouch_query_index_scan_req *req,
     lc_pouch_query_index_key_visit_fn visit, void *visit_context,
     lc_pouch_query_index_scan_res *out, lc_error *error);
+static int lc_pouch_disk_query_path_pattern_matches(const char *pattern,
+                                                    const char *field);
 static int lc_pouch_disk_query_owner_scan(
     lc_pouch_store *self, const lc_pouch_query_owner_scan_req *req,
     lc_pouch_scan_meta_visit_fn visit, void *visit_context,
@@ -5532,6 +5534,48 @@ static int lc_pouch_disk_query_field_collect_or_in_term_keys_locked(
   return LC_OK;
 }
 
+static int lc_pouch_disk_query_field_collect_path_pattern_terms_locked(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const lc_pouch_document_exists_term *terms, size_t term_count,
+    char ***keys_io, size_t *key_count_io, lc_error *error,
+    const char *alloc_message, const char *copy_message) {
+  size_t term_index;
+  int rc;
+
+  if (store == NULL || req == NULL || terms == NULL || term_count == 0U ||
+      keys_io == NULL || key_count_io == NULL) {
+    return LC_OK;
+  }
+  for (term_index = 0U; term_index < term_count; ++term_index) {
+    const lc_pouch_document_exists_term *term;
+    size_t index;
+
+    term = &terms[term_index];
+    if (term->field == NULL) {
+      continue;
+    }
+    for (index = 0U; index < store->query_field_posting_count; ++index) {
+      lc_pouch_disk_query_field_posting *posting;
+
+      posting = &store->query_field_postings[index];
+      if (strcmp(posting->namespace_name, req->namespace_name) != 0) {
+        continue;
+      }
+      if (!lc_pouch_disk_query_path_pattern_matches(term->field,
+                                                    posting->field)) {
+        continue;
+      }
+      rc = lc_pouch_disk_query_field_add_candidate_key(
+          store, req, posting, keys_io, key_count_io, error, alloc_message,
+          copy_message);
+      if (rc != LC_OK) {
+        return rc;
+      }
+    }
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     char ***keys_out, size_t *key_count_out, lc_error *error) {
@@ -5546,6 +5590,8 @@ static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
                        req->document_or_eq_terms == NULL) &&
                       (req->document_or_exists_term_count == 0U ||
                        req->document_or_exists_terms == NULL) &&
+                      (req->document_or_exists_path_pattern_count == 0U ||
+                       req->document_or_exists_path_patterns == NULL) &&
                       (req->document_or_range_term_count == 0U ||
                        req->document_or_range_terms == NULL) &&
                       (req->document_or_in_term_count == 0U ||
@@ -5599,6 +5645,14 @@ static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
         return rc;
       }
     }
+  }
+  rc = lc_pouch_disk_query_field_collect_path_pattern_terms_locked(
+      store, req, req->document_or_exists_path_patterns,
+      req->document_or_exists_path_pattern_count, &keys, &key_count, error,
+      "failed to allocate pouch or exists path-pattern query keys",
+      "failed to copy pouch or exists path-pattern query key");
+  if (rc != LC_OK) {
+    return rc;
   }
   for (term_index = 0U; term_index < req->document_or_range_term_count;
        ++term_index) {
@@ -8401,7 +8455,6 @@ static int lc_pouch_disk_query_field_collect_path_pattern_keys_locked(
     char ***keys_out, size_t *key_count_out, lc_error *error) {
   char **keys;
   size_t key_count;
-  size_t term_index;
   int rc;
 
   *keys_out = NULL;
@@ -8412,34 +8465,13 @@ static int lc_pouch_disk_query_field_collect_path_pattern_keys_locked(
   }
   keys = NULL;
   key_count = 0U;
-  for (term_index = 0U; term_index < req->document_exists_path_pattern_count;
-       ++term_index) {
-    const lc_pouch_document_exists_term *term;
-    size_t index;
-
-    term = &req->document_exists_path_patterns[term_index];
-    if (term->field == NULL) {
-      continue;
-    }
-    for (index = 0U; index < store->query_field_posting_count; ++index) {
-      lc_pouch_disk_query_field_posting *posting;
-
-      posting = &store->query_field_postings[index];
-      if (strcmp(posting->namespace_name, req->namespace_name) != 0) {
-        continue;
-      }
-      if (!lc_pouch_disk_query_path_pattern_matches(term->field,
-                                                    posting->field)) {
-        continue;
-      }
-      rc = lc_pouch_disk_query_field_add_candidate_key(
-          store, req, posting, &keys, &key_count, error,
-          "failed to allocate pouch path-pattern query keys",
-          "failed to copy pouch path-pattern query key");
-      if (rc != LC_OK) {
-        return rc;
-      }
-    }
+  rc = lc_pouch_disk_query_field_collect_path_pattern_terms_locked(
+      store, req, req->document_exists_path_patterns,
+      req->document_exists_path_pattern_count, &keys, &key_count, error,
+      "failed to allocate pouch path-pattern query keys",
+      "failed to copy pouch path-pattern query key");
+  if (rc != LC_OK) {
+    return rc;
   }
   if (key_count > 1U) {
     qsort(keys, key_count, sizeof(keys[0]),
@@ -11199,6 +11231,8 @@ static int lc_pouch_disk_query_index_scan(
       req->document_or_eq_terms[0].value != NULL &&
       (req->document_or_exists_terms == NULL ||
        req->document_or_exists_term_count == 0U) &&
+      (req->document_or_exists_path_patterns == NULL ||
+       req->document_or_exists_path_pattern_count == 0U) &&
       (req->document_or_range_terms == NULL ||
        req->document_or_range_term_count == 0U) &&
       (req->document_or_in_terms == NULL ||
@@ -11217,6 +11251,8 @@ static int lc_pouch_disk_query_index_scan(
       req->document_or_in_terms[0].value_count > 0U &&
       (req->document_or_exists_terms == NULL ||
        req->document_or_exists_term_count == 0U) &&
+      (req->document_or_exists_path_patterns == NULL ||
+       req->document_or_exists_path_pattern_count == 0U) &&
       (req->document_or_range_terms == NULL ||
        req->document_or_range_term_count == 0U) &&
       (req->document_or_prefix_terms == NULL ||
@@ -11226,9 +11262,12 @@ static int lc_pouch_disk_query_index_scan(
     return lc_pouch_disk_query_field_or_contains_scan_locked(
         store, req, visit, visit_context, out, error);
   }
-  if (req->document_or_exists_terms != NULL &&
-      req->document_or_exists_term_count > 0U &&
-      req->document_or_exists_terms[0].field != NULL) {
+  if ((req->document_or_exists_terms != NULL &&
+       req->document_or_exists_term_count > 0U &&
+       req->document_or_exists_terms[0].field != NULL) ||
+      (req->document_or_exists_path_patterns != NULL &&
+       req->document_or_exists_path_pattern_count > 0U &&
+       req->document_or_exists_path_patterns[0].field != NULL)) {
     return lc_pouch_disk_query_field_or_exists_scan_locked(
         store, req, visit, visit_context, out, error);
   }
@@ -11513,6 +11552,8 @@ static int lc_pouch_disk_query_index_keys_scan(
       req->document_or_eq_terms[0].value != NULL &&
       (req->document_or_exists_terms == NULL ||
        req->document_or_exists_term_count == 0U) &&
+      (req->document_or_exists_path_patterns == NULL ||
+       req->document_or_exists_path_pattern_count == 0U) &&
       (req->document_or_range_terms == NULL ||
        req->document_or_range_term_count == 0U) &&
       (req->document_or_in_terms == NULL ||
@@ -11531,6 +11572,8 @@ static int lc_pouch_disk_query_index_keys_scan(
       req->document_or_in_terms[0].value_count > 0U &&
       (req->document_or_exists_terms == NULL ||
        req->document_or_exists_term_count == 0U) &&
+      (req->document_or_exists_path_patterns == NULL ||
+       req->document_or_exists_path_pattern_count == 0U) &&
       (req->document_or_range_terms == NULL ||
        req->document_or_range_term_count == 0U) &&
       (req->document_or_prefix_terms == NULL ||
@@ -11540,9 +11583,12 @@ static int lc_pouch_disk_query_index_keys_scan(
     return lc_pouch_disk_query_field_or_contains_keys_scan_locked(
         store, req, visit, visit_context, out, error);
   }
-  if (req->document_or_exists_terms != NULL &&
-      req->document_or_exists_term_count > 0U &&
-      req->document_or_exists_terms[0].field != NULL) {
+  if ((req->document_or_exists_terms != NULL &&
+       req->document_or_exists_term_count > 0U &&
+       req->document_or_exists_terms[0].field != NULL) ||
+      (req->document_or_exists_path_patterns != NULL &&
+       req->document_or_exists_path_pattern_count > 0U &&
+       req->document_or_exists_path_patterns[0].field != NULL)) {
     return lc_pouch_disk_query_field_or_exists_keys_scan_locked(
         store, req, visit, visit_context, out, error);
   }

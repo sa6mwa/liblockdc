@@ -418,6 +418,9 @@ Latest release targets confirmed on 2026-07-23:
         wildcard `exists` path selectors by matching candidate JSON Pointer
         fields from the indexed posting dictionary and leaving final acceptance
         to `liblql`.
+      - [x] Add storage-owned union expansion for exists-only root `or` groups
+        that combine single-segment wildcard path selectors with exact presence
+        selectors, while keeping final acceptance owned by `liblql`.
       - [ ] Add recursive path expansion once `liblql` exposes or documents
         safe recursive-path planner semantics that pouch can mirror without
         false negatives.

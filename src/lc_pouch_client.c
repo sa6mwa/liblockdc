@@ -16672,6 +16672,8 @@ typedef struct lc_pouch_lql_document_filter {
   size_t document_or_exists_term_count;
   lc_pouch_document_exists_term *document_exists_path_patterns;
   size_t document_exists_path_pattern_count;
+  lc_pouch_document_exists_term *document_or_exists_path_patterns;
+  size_t document_or_exists_path_pattern_count;
   int enabled;
 } lc_pouch_lql_document_filter;
 
@@ -16883,6 +16885,12 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
         NULL, (char *)filter->document_exists_path_patterns[index].field);
   }
   lc_free_with_allocator(NULL, filter->document_exists_path_patterns);
+  for (index = 0U; index < filter->document_or_exists_path_pattern_count;
+       ++index) {
+    lc_free_with_allocator(
+        NULL, (char *)filter->document_or_exists_path_patterns[index].field);
+  }
+  lc_free_with_allocator(NULL, filter->document_or_exists_path_patterns);
   memset(filter, 0, sizeof(*filter));
 }
 
@@ -17548,9 +17556,13 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
                                              &capabilities);
   if (capabilities.wildcard_path || capabilities.recursive_path) {
     if (capabilities.wildcard_path && !capabilities.recursive_path) {
-      lc_pouch_lql_exists_hint_parse_full_form(
-          selector_json, &filter->document_exists_path_patterns,
-          &filter->document_exists_path_pattern_count);
+      if (!lc_pouch_lql_or_exists_hint_parse(
+              selector_json, &filter->document_or_exists_path_patterns,
+              &filter->document_or_exists_path_pattern_count)) {
+        lc_pouch_lql_exists_hint_parse_full_form(
+            selector_json, &filter->document_exists_path_patterns,
+            &filter->document_exists_path_pattern_count);
+      }
     }
     filter->enabled = 1;
     return LC_OK;
@@ -18548,6 +18560,10 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   scan_req.document_exists_path_patterns = filter.document_exists_path_patterns;
   scan_req.document_exists_path_pattern_count =
       filter.document_exists_path_pattern_count;
+  scan_req.document_or_exists_path_patterns =
+      filter.document_or_exists_path_patterns;
+  scan_req.document_or_exists_path_pattern_count =
+      filter.document_or_exists_path_pattern_count;
   visit.scan.client = client;
   visit.scan.dst = dst;
   visit.scan.filter = &filter;
@@ -18929,6 +18945,10 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   scan_req.document_exists_path_patterns = filter.document_exists_path_patterns;
   scan_req.document_exists_path_pattern_count =
       filter.document_exists_path_pattern_count;
+  scan_req.document_or_exists_path_patterns =
+      filter.document_or_exists_path_patterns;
+  scan_req.document_or_exists_path_pattern_count =
+      filter.document_or_exists_path_pattern_count;
   scan_context.handler = handler;
   scan_context.handler_context = context;
   scan_context.filter = &filter;
