@@ -1,6 +1,7 @@
 #include "lc_pouch_index.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -851,6 +852,485 @@ void lc_pouch_index_prepared_term_cache_refresh(
   }
   lc_pouch_index_prepared_term_cache_cleanup(allocator, cache);
   cache->generation = generation;
+}
+
+static int lc_pouch_index_result_plan_has_no_eq_filters(
+    const lc_pouch_query_index_scan_req *req) {
+  return req->document_eq_term_count == 0U &&
+         req->document_not_eq_term_count == 0U &&
+         req->document_or_eq_term_count == 0U;
+}
+
+static int lc_pouch_index_result_plan_has_no_range_filters(
+    const lc_pouch_query_index_scan_req *req) {
+  return req->document_range_term_count == 0U &&
+         req->document_not_range_term_count == 0U &&
+         req->document_or_range_term_count == 0U;
+}
+
+static int lc_pouch_index_result_plan_has_no_in_filters(
+    const lc_pouch_query_index_scan_req *req) {
+  return req->document_in_term_count == 0U &&
+         req->document_not_in_term_count == 0U &&
+         req->document_or_in_term_count == 0U;
+}
+
+static int lc_pouch_index_result_plan_has_no_prefix_filters(
+    const lc_pouch_query_index_scan_req *req) {
+  return req->document_prefix_term_count == 0U &&
+         req->document_not_prefix_term_count == 0U &&
+         req->document_or_prefix_term_count == 0U;
+}
+
+static int lc_pouch_index_result_plan_has_no_contains_filters(
+    const lc_pouch_query_index_scan_req *req) {
+  return req->document_contains_term_count == 0U &&
+         req->document_not_contains_term_count == 0U &&
+         req->document_or_contains_term_count == 0U;
+}
+
+static int lc_pouch_index_result_plan_has_no_exists_filters(
+    const lc_pouch_query_index_scan_req *req) {
+  return req->document_exists_term_count == 0U &&
+         req->document_not_exists_term_count == 0U &&
+         req->document_or_exists_term_count == 0U &&
+         req->document_exists_path_pattern_count == 0U &&
+         req->document_or_exists_path_pattern_count == 0U;
+}
+
+static int lc_pouch_index_result_plan_cacheable_common(
+    const lc_pouch_query_index_scan_req *req) {
+  return req != NULL && req->namespace_name != NULL && req->key == NULL &&
+         req->owner == NULL;
+}
+
+static int lc_pouch_index_result_plan_eq_cacheable(
+    const lc_pouch_query_index_scan_req *req) {
+  return lc_pouch_index_result_plan_cacheable_common(req) &&
+         req->document_eq_terms != NULL && req->document_eq_term_count == 1U &&
+         req->document_eq_terms[0].field != NULL &&
+         req->document_eq_terms[0].value != NULL &&
+         req->document_not_eq_term_count == 0U &&
+         req->document_or_eq_term_count == 0U &&
+         lc_pouch_index_result_plan_has_no_range_filters(req) &&
+         lc_pouch_index_result_plan_has_no_in_filters(req) &&
+         lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
+         lc_pouch_index_result_plan_has_no_contains_filters(req) &&
+         lc_pouch_index_result_plan_has_no_exists_filters(req);
+}
+
+static int lc_pouch_index_result_plan_exists_cacheable(
+    const lc_pouch_query_index_scan_req *req) {
+  return lc_pouch_index_result_plan_cacheable_common(req) &&
+         req->document_exists_terms != NULL &&
+         req->document_exists_term_count == 1U &&
+         req->document_exists_terms[0].field != NULL &&
+         lc_pouch_index_result_plan_has_no_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_no_range_filters(req) &&
+         lc_pouch_index_result_plan_has_no_in_filters(req) &&
+         lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
+         lc_pouch_index_result_plan_has_no_contains_filters(req) &&
+         req->document_not_exists_term_count == 0U &&
+         req->document_or_exists_term_count == 0U &&
+         req->document_exists_path_pattern_count == 0U &&
+         req->document_or_exists_path_pattern_count == 0U;
+}
+
+static int lc_pouch_index_result_plan_in_cacheable(
+    const lc_pouch_query_index_scan_req *req) {
+  return lc_pouch_index_result_plan_cacheable_common(req) &&
+         req->document_in_terms != NULL && req->document_in_term_count == 1U &&
+         req->document_in_terms[0].field != NULL &&
+         req->document_in_terms[0].values != NULL &&
+         req->document_in_terms[0].value_count > 0U &&
+         strchr(req->document_in_terms[0].field, '*') == NULL &&
+         lc_pouch_index_result_plan_has_no_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_no_range_filters(req) &&
+         req->document_not_in_term_count == 0U &&
+         req->document_or_in_term_count == 0U &&
+         lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
+         lc_pouch_index_result_plan_has_no_contains_filters(req) &&
+         lc_pouch_index_result_plan_has_no_exists_filters(req);
+}
+
+static int lc_pouch_index_result_plan_range_cacheable(
+    const lc_pouch_query_index_scan_req *req) {
+  const lc_pouch_document_range_term *term;
+
+  if (!lc_pouch_index_result_plan_cacheable_common(req) ||
+      req->document_range_terms == NULL ||
+      req->document_range_term_count != 1U ||
+      req->document_range_terms[0].field == NULL) {
+    return 0;
+  }
+  term = &req->document_range_terms[0];
+  return (term->gt != NULL || term->gte != NULL || term->lt != NULL ||
+          term->lte != NULL) &&
+         lc_pouch_index_result_plan_has_no_eq_filters(req) &&
+         req->document_not_range_term_count == 0U &&
+         req->document_or_range_term_count == 0U &&
+         lc_pouch_index_result_plan_has_no_in_filters(req) &&
+         lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
+         lc_pouch_index_result_plan_has_no_contains_filters(req) &&
+         lc_pouch_index_result_plan_has_no_exists_filters(req);
+}
+
+static int lc_pouch_index_result_plan_prefix_cacheable(
+    const lc_pouch_query_index_scan_req *req) {
+  return lc_pouch_index_result_plan_cacheable_common(req) &&
+         req->document_prefix_terms != NULL &&
+         req->document_prefix_term_count == 1U &&
+         req->document_prefix_terms[0].field != NULL &&
+         req->document_prefix_terms[0].value != NULL &&
+         lc_pouch_index_result_plan_has_no_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_no_range_filters(req) &&
+         lc_pouch_index_result_plan_has_no_in_filters(req) &&
+         req->document_not_prefix_term_count == 0U &&
+         req->document_or_prefix_term_count == 0U &&
+         lc_pouch_index_result_plan_has_no_contains_filters(req) &&
+         lc_pouch_index_result_plan_has_no_exists_filters(req);
+}
+
+static int lc_pouch_index_result_plan_contains_cacheable(
+    const lc_pouch_query_index_scan_req *req) {
+  return lc_pouch_index_result_plan_cacheable_common(req) &&
+         req->document_contains_terms != NULL &&
+         req->document_contains_term_count == 1U &&
+         req->document_contains_terms[0].field != NULL &&
+         req->document_contains_terms[0].value != NULL &&
+         lc_pouch_index_result_plan_has_no_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_no_range_filters(req) &&
+         lc_pouch_index_result_plan_has_no_in_filters(req) &&
+         lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
+         req->document_not_contains_term_count == 0U &&
+         req->document_or_contains_term_count == 0U &&
+         lc_pouch_index_result_plan_has_no_exists_filters(req);
+}
+
+static char *
+lc_pouch_index_eq_result_plan_key(const lc_pouch_allocator *allocator,
+                                  const lc_pouch_query_index_scan_req *req) {
+  const lc_pouch_document_eq_term *term;
+  size_t namespace_len;
+  size_t field_len;
+  size_t value_len;
+  int written;
+  size_t needed;
+  char *key;
+
+  if (!lc_pouch_index_result_plan_eq_cacheable(req)) {
+    return NULL;
+  }
+  term = &req->document_eq_terms[0];
+  namespace_len = strlen(req->namespace_name);
+  field_len = strlen(term->field);
+  value_len = strlen(term->value);
+  written =
+      snprintf(NULL, 0, "eq:%lu:%s:%lu:%s:%lu:%s", (unsigned long)namespace_len,
+               req->namespace_name, (unsigned long)field_len, term->field,
+               (unsigned long)value_len, term->value);
+  if (written < 0) {
+    return NULL;
+  }
+  needed = (size_t)written + 1U;
+  key = (char *)lc_pouch_alloc(allocator, needed);
+  if (key == NULL) {
+    return NULL;
+  }
+  (void)snprintf(key, needed, "eq:%lu:%s:%lu:%s:%lu:%s",
+                 (unsigned long)namespace_len, req->namespace_name,
+                 (unsigned long)field_len, term->field,
+                 (unsigned long)value_len, term->value);
+  return key;
+}
+
+static char *lc_pouch_index_exists_result_plan_key(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_query_index_scan_req *req) {
+  const lc_pouch_document_exists_term *term;
+  size_t namespace_len;
+  size_t field_len;
+  int written;
+  size_t needed;
+  char *key;
+
+  if (!lc_pouch_index_result_plan_exists_cacheable(req)) {
+    return NULL;
+  }
+  term = &req->document_exists_terms[0];
+  namespace_len = strlen(req->namespace_name);
+  field_len = strlen(term->field);
+  written =
+      snprintf(NULL, 0, "exists:%lu:%s:%lu:%s", (unsigned long)namespace_len,
+               req->namespace_name, (unsigned long)field_len, term->field);
+  if (written < 0) {
+    return NULL;
+  }
+  needed = (size_t)written + 1U;
+  key = (char *)lc_pouch_alloc(allocator, needed);
+  if (key == NULL) {
+    return NULL;
+  }
+  (void)snprintf(key, needed, "exists:%lu:%s:%lu:%s",
+                 (unsigned long)namespace_len, req->namespace_name,
+                 (unsigned long)field_len, term->field);
+  return key;
+}
+
+static int lc_pouch_index_in_value_ptr_compare(const void *left,
+                                               const void *right) {
+  const char *left_value;
+  const char *right_value;
+
+  left_value = *(const char *const *)left;
+  right_value = *(const char *const *)right;
+  return strcmp(left_value, right_value);
+}
+
+static char *
+lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
+                                  const lc_pouch_query_index_scan_req *req) {
+  const lc_pouch_document_in_term *term;
+  const char **values;
+  size_t namespace_len;
+  size_t field_len;
+  size_t value_count;
+  size_t value_index;
+  size_t unique_count;
+  size_t total_len;
+  int written;
+  char *key;
+  char *cursor;
+  size_t offset;
+
+  if (!lc_pouch_index_result_plan_in_cacheable(req)) {
+    return NULL;
+  }
+  term = &req->document_in_terms[0];
+  value_count = 0U;
+  for (value_index = 0U; value_index < term->value_count; ++value_index) {
+    if (term->values[value_index] != NULL) {
+      value_count++;
+    }
+  }
+  if (value_count == 0U || value_count > ((size_t)-1) / sizeof(values[0])) {
+    return NULL;
+  }
+  values =
+      (const char **)lc_pouch_alloc(allocator, value_count * sizeof(values[0]));
+  if (values == NULL) {
+    return NULL;
+  }
+  value_count = 0U;
+  for (value_index = 0U; value_index < term->value_count; ++value_index) {
+    if (term->values[value_index] != NULL) {
+      values[value_count++] = term->values[value_index];
+    }
+  }
+  qsort(values, value_count, sizeof(values[0]),
+        lc_pouch_index_in_value_ptr_compare);
+  unique_count = 0U;
+  for (value_index = 0U; value_index < value_count; ++value_index) {
+    if (unique_count > 0U &&
+        strcmp(values[value_index], values[unique_count - 1U]) == 0) {
+      continue;
+    }
+    values[unique_count++] = values[value_index];
+  }
+  namespace_len = strlen(req->namespace_name);
+  field_len = strlen(term->field);
+  written =
+      snprintf(NULL, 0, "in:%lu:%s:%lu:%s:%lu", (unsigned long)namespace_len,
+               req->namespace_name, (unsigned long)field_len, term->field,
+               (unsigned long)unique_count);
+  if (written < 0) {
+    lc_pouch_free(allocator, values);
+    return NULL;
+  }
+  total_len = (size_t)written;
+  for (value_index = 0U; value_index < unique_count; ++value_index) {
+    size_t value_len;
+
+    value_len = strlen(values[value_index]);
+    written = snprintf(NULL, 0, ":%lu:%s", (unsigned long)value_len,
+                       values[value_index]);
+    if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, values);
+      return NULL;
+    }
+    total_len += (size_t)written;
+  }
+  if (total_len == (size_t)-1) {
+    lc_pouch_free(allocator, values);
+    return NULL;
+  }
+  key = (char *)lc_pouch_alloc(allocator, total_len + 1U);
+  if (key == NULL) {
+    lc_pouch_free(allocator, values);
+    return NULL;
+  }
+  cursor = key;
+  offset = 0U;
+  written = snprintf(cursor, (total_len + 1U) - offset, "in:%lu:%s:%lu:%s:%lu",
+                     (unsigned long)namespace_len, req->namespace_name,
+                     (unsigned long)field_len, term->field,
+                     (unsigned long)unique_count);
+  offset += (size_t)written;
+  cursor = key + offset;
+  for (value_index = 0U; value_index < unique_count; ++value_index) {
+    size_t value_len;
+
+    value_len = strlen(values[value_index]);
+    written = snprintf(cursor, (total_len + 1U) - offset, ":%lu:%s",
+                       (unsigned long)value_len, values[value_index]);
+    offset += (size_t)written;
+    cursor = key + offset;
+  }
+  lc_pouch_free(allocator, values);
+  return key;
+}
+
+static char *
+lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
+                                     const lc_pouch_query_index_scan_req *req) {
+  const lc_pouch_document_range_term *term;
+  const char *gt;
+  const char *gte;
+  const char *lt;
+  const char *lte;
+  size_t namespace_len;
+  size_t field_len;
+  size_t gt_len;
+  size_t gte_len;
+  size_t lt_len;
+  size_t lte_len;
+  int written;
+  size_t needed;
+  char *key;
+
+  if (!lc_pouch_index_result_plan_range_cacheable(req)) {
+    return NULL;
+  }
+  term = &req->document_range_terms[0];
+  gt = term->gt != NULL ? term->gt : "";
+  gte = term->gte != NULL ? term->gte : "";
+  lt = term->lt != NULL ? term->lt : "";
+  lte = term->lte != NULL ? term->lte : "";
+  namespace_len = strlen(req->namespace_name);
+  field_len = strlen(term->field);
+  gt_len = strlen(gt);
+  gte_len = strlen(gte);
+  lt_len = strlen(lt);
+  lte_len = strlen(lte);
+  written = snprintf(NULL, 0,
+                     "range:%lu:%s:%lu:%s:%d:%lu:%s:%d:%lu:%s:%d:%lu:%s:%d:%"
+                     "lu:%s",
+                     (unsigned long)namespace_len, req->namespace_name,
+                     (unsigned long)field_len, term->field,
+                     term->gt != NULL ? 1 : 0, (unsigned long)gt_len, gt,
+                     term->gte != NULL ? 1 : 0, (unsigned long)gte_len, gte,
+                     term->lt != NULL ? 1 : 0, (unsigned long)lt_len, lt,
+                     term->lte != NULL ? 1 : 0, (unsigned long)lte_len, lte);
+  if (written < 0) {
+    return NULL;
+  }
+  needed = (size_t)written + 1U;
+  key = (char *)lc_pouch_alloc(allocator, needed);
+  if (key == NULL) {
+    return NULL;
+  }
+  (void)snprintf(key, needed,
+                 "range:%lu:%s:%lu:%s:%d:%lu:%s:%d:%lu:%s:%d:%lu:%s:%d:%lu:%s",
+                 (unsigned long)namespace_len, req->namespace_name,
+                 (unsigned long)field_len, term->field,
+                 term->gt != NULL ? 1 : 0, (unsigned long)gt_len, gt,
+                 term->gte != NULL ? 1 : 0, (unsigned long)gte_len, gte,
+                 term->lt != NULL ? 1 : 0, (unsigned long)lt_len, lt,
+                 term->lte != NULL ? 1 : 0, (unsigned long)lte_len, lte);
+  return key;
+}
+
+static char *
+lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
+                                    const lc_pouch_query_index_scan_req *req,
+                                    const char *kind, const char *field,
+                                    const char *value, int ignore_case) {
+  size_t namespace_len;
+  size_t field_len;
+  size_t value_len;
+  int written;
+  size_t needed;
+  char *key;
+
+  if (req == NULL || kind == NULL || field == NULL || value == NULL) {
+    return NULL;
+  }
+  namespace_len = strlen(req->namespace_name);
+  field_len = strlen(field);
+  value_len = strlen(value);
+  written = snprintf(NULL, 0, "%s:%lu:%s:%lu:%s:%d:%lu:%s", kind,
+                     (unsigned long)namespace_len, req->namespace_name,
+                     (unsigned long)field_len, field, ignore_case ? 1 : 0,
+                     (unsigned long)value_len, value);
+  if (written < 0) {
+    return NULL;
+  }
+  needed = (size_t)written + 1U;
+  key = (char *)lc_pouch_alloc(allocator, needed);
+  if (key == NULL) {
+    return NULL;
+  }
+  (void)snprintf(key, needed, "%s:%lu:%s:%lu:%s:%d:%lu:%s", kind,
+                 (unsigned long)namespace_len, req->namespace_name,
+                 (unsigned long)field_len, field, ignore_case ? 1 : 0,
+                 (unsigned long)value_len, value);
+  return key;
+}
+
+static char *lc_pouch_index_prefix_result_plan_key(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_query_index_scan_req *req) {
+  const lc_pouch_document_prefix_term *term;
+
+  if (!lc_pouch_index_result_plan_prefix_cacheable(req)) {
+    return NULL;
+  }
+  term = &req->document_prefix_terms[0];
+  return lc_pouch_index_text_result_plan_key(
+      allocator, req, "prefix", term->field, term->value, term->ignore_case);
+}
+
+static char *lc_pouch_index_contains_result_plan_key(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_query_index_scan_req *req) {
+  const lc_pouch_document_contains_term *term;
+
+  if (!lc_pouch_index_result_plan_contains_cacheable(req)) {
+    return NULL;
+  }
+  term = &req->document_contains_terms[0];
+  return lc_pouch_index_text_result_plan_key(
+      allocator, req, "contains", term->field, term->value, term->ignore_case);
+}
+
+char *lc_pouch_index_result_plan_key(const lc_pouch_allocator *allocator,
+                                     const lc_pouch_query_index_scan_req *req,
+                                     lc_pouch_index_result_plan_kind kind) {
+  switch (kind) {
+  case LC_POUCH_INDEX_RESULT_PLAN_EQ:
+    return lc_pouch_index_eq_result_plan_key(allocator, req);
+  case LC_POUCH_INDEX_RESULT_PLAN_EXISTS:
+    return lc_pouch_index_exists_result_plan_key(allocator, req);
+  case LC_POUCH_INDEX_RESULT_PLAN_IN:
+    return lc_pouch_index_in_result_plan_key(allocator, req);
+  case LC_POUCH_INDEX_RESULT_PLAN_RANGE:
+    return lc_pouch_index_range_result_plan_key(allocator, req);
+  case LC_POUCH_INDEX_RESULT_PLAN_PREFIX:
+    return lc_pouch_index_prefix_result_plan_key(allocator, req);
+  case LC_POUCH_INDEX_RESULT_PLAN_CONTAINS:
+    return lc_pouch_index_contains_result_plan_key(allocator, req);
+  }
+  return NULL;
 }
 
 static int lc_pouch_index_result_cache_compare(uint64_t left_generation,

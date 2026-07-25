@@ -21,6 +21,15 @@ typedef enum lc_pouch_index_posting_encoding {
   LC_POUCH_INDEX_POSTING_DENSE = 2
 } lc_pouch_index_posting_encoding;
 
+typedef enum lc_pouch_index_result_plan_kind {
+  LC_POUCH_INDEX_RESULT_PLAN_EQ = 1,
+  LC_POUCH_INDEX_RESULT_PLAN_EXISTS = 2,
+  LC_POUCH_INDEX_RESULT_PLAN_IN = 3,
+  LC_POUCH_INDEX_RESULT_PLAN_RANGE = 4,
+  LC_POUCH_INDEX_RESULT_PLAN_PREFIX = 5,
+  LC_POUCH_INDEX_RESULT_PLAN_CONTAINS = 6
+} lc_pouch_index_result_plan_kind;
+
 typedef struct lc_pouch_index_posting {
   lc_pouch_index_posting_encoding encoding;
   size_t count;
@@ -155,6 +164,9 @@ void lc_pouch_index_prepared_term_cache_refresh(
     lc_pouch_index_prepared_term_cache *cache, uint64_t generation);
 void lc_pouch_index_result_cache_cleanup(const lc_pouch_allocator *allocator,
                                          lc_pouch_index_result_cache *cache);
+char *lc_pouch_index_result_plan_key(const lc_pouch_allocator *allocator,
+                                     const lc_pouch_query_index_scan_req *req,
+                                     lc_pouch_index_result_plan_kind kind);
 int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
                                      const lc_pouch_index_result_cache *cache,
                                      uint64_t generation, const char *plan_key,

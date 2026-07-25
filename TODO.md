@@ -570,6 +570,10 @@ Latest release targets confirmed on 2026-07-23:
         `contains` scans using length-prefixed text plan keys that include the
         case-sensitivity flag; contains coverage includes a post-write
         generation miss.
+      - [x] Move simple result-cache plan key construction into
+        `lc_pouch_index`: equality, exists, `in`, range, prefix, and contains
+        cacheability/normalization now live with the planner cache boundary
+        instead of the disk backend.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

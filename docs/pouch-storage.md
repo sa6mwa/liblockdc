@@ -1339,6 +1339,11 @@ Simple positive `prefix` and `contains` scans use the same result cache. Their
 plan keys include namespace, field, case-sensitivity, and length-prefixed text
 values, so repeated text pages can reuse the matching docID vector until the
 index sequence advances.
+The simple result-cache plan key constructors now live in `lc_pouch_index`.
+That layer owns cacheability and normalization for equality, exists, `in`,
+range, prefix, and contains result reuse; `lc_pouch_disk.c` passes the known
+simple-plan kind and still supplies the current index generation plus storage
+sidecar readers.
 
 The disk bridge also keeps a first prepared-reader cache for exact terms. It is
 keyed by the current index sequence plus a namespace-qualified field/value term,

@@ -355,6 +355,116 @@ static void test_result_cache_keys_by_generation_and_plan(void **state) {
   lc_pouch_index_result_cache_cleanup(NULL, &cache);
 }
 
+static void assert_result_plan_key(const lc_pouch_query_index_scan_req *req,
+                                   lc_pouch_index_result_plan_kind kind,
+                                   const char *expected) {
+  char *key;
+
+  key = lc_pouch_index_result_plan_key(NULL, req, kind);
+  assert_non_null(key);
+  assert_string_equal(key, expected);
+  lc_pouch_free(NULL, key);
+}
+
+static void test_result_plan_keys_are_normalized_by_index(void **state) {
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_document_eq_term eq;
+  lc_pouch_document_exists_term exists;
+  lc_pouch_document_in_term in;
+  lc_pouch_document_range_term range;
+  lc_pouch_document_prefix_term prefix;
+  lc_pouch_document_contains_term contains;
+  const char *in_values[] = {"s:beta", "s:alpha", "s:alpha"};
+
+  (void)state;
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+
+  eq.field = "/value";
+  eq.value = "s:alpha";
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+  assert_result_plan_key(&req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+                         "eq:7:default:6:/value:7:s:alpha");
+
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  exists.field = "/box";
+  req.document_exists_terms = &exists;
+  req.document_exists_term_count = 1U;
+  assert_result_plan_key(&req, LC_POUCH_INDEX_RESULT_PLAN_EXISTS,
+                         "exists:7:default:4:/box");
+
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  in.field = "/value";
+  in.values = in_values;
+  in.value_count = sizeof(in_values) / sizeof(in_values[0]);
+  req.document_in_terms = &in;
+  req.document_in_term_count = 1U;
+  assert_result_plan_key(&req, LC_POUCH_INDEX_RESULT_PLAN_IN,
+                         "in:7:default:6:/value:2:7:s:alpha:6:s:beta");
+
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  range.field = "/n";
+  range.gt = "n:1";
+  range.gte = "n:2";
+  range.lt = "n:3";
+  range.lte = "n:4";
+  req.document_range_terms = &range;
+  req.document_range_term_count = 1U;
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_RANGE,
+      "range:7:default:2:/n:1:3:n:1:1:3:n:2:1:3:n:3:1:3:n:4");
+
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  prefix.field = "/name";
+  prefix.value = "al";
+  prefix.ignore_case = 1;
+  req.document_prefix_terms = &prefix;
+  req.document_prefix_term_count = 1U;
+  assert_result_plan_key(&req, LC_POUCH_INDEX_RESULT_PLAN_PREFIX,
+                         "prefix:7:default:5:/name:1:2:al");
+
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  contains.field = "/name";
+  contains.value = "pha";
+  contains.ignore_case = 0;
+  req.document_contains_terms = &contains;
+  req.document_contains_term_count = 1U;
+  assert_result_plan_key(&req, LC_POUCH_INDEX_RESULT_PLAN_CONTAINS,
+                         "contains:7:default:5:/name:0:3:pha");
+}
+
+static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_document_exists_term exists;
+  lc_pouch_document_in_term not_in;
+  const char *values[] = {"s:beta"};
+
+  (void)state;
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  req.key = "alpha";
+  exists.field = "/value";
+  req.document_exists_terms = &exists;
+  req.document_exists_term_count = 1U;
+  assert_null(lc_pouch_index_result_plan_key(
+      NULL, &req, LC_POUCH_INDEX_RESULT_PLAN_EXISTS));
+
+  req.key = NULL;
+  not_in.field = "/value";
+  not_in.values = values;
+  not_in.value_count = sizeof(values) / sizeof(values[0]);
+  req.document_not_in_terms = &not_in;
+  req.document_not_in_term_count = 1U;
+  assert_null(lc_pouch_index_result_plan_key(
+      NULL, &req, LC_POUCH_INDEX_RESULT_PLAN_EXISTS));
+}
+
 static void test_prepared_term_cache_refreshes_by_generation(void **state) {
   lc_pouch_index_prepared_term_cache cache;
   lc_pouch_index_doc_id_set decoded;
@@ -708,6 +818,8 @@ int main(void) {
       cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
       cmocka_unit_test(test_term_posting_table_replaces_existing_posting),
       cmocka_unit_test(test_result_cache_keys_by_generation_and_plan),
+      cmocka_unit_test(test_result_plan_keys_are_normalized_by_index),
+      cmocka_unit_test(test_result_plan_keys_reject_filtered_compound_views),
       cmocka_unit_test(test_prepared_term_cache_refreshes_by_generation),
       cmocka_unit_test(test_result_cache_replaces_existing_entry),
       cmocka_unit_test(
