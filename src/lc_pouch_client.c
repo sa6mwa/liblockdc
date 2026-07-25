@@ -1446,9 +1446,10 @@ static int lc_pouch_txn_recovery_visit(void *context,
 }
 
 static int lc_pouch_txn_recovery_key_visit(void *context, const char *key,
-                                           lc_error *error) {
+                                           size_t key_len, lc_error *error) {
   lc_pouch_txn_recovery_list *list;
 
+  (void)key_len;
   list = (lc_pouch_txn_recovery_list *)context;
   return lc_pouch_txn_recovery_list_add(list, key, error);
 }
@@ -18933,10 +18934,9 @@ static int lc_pouch_query_keys_scan_visit(void *context,
 }
 
 static int lc_pouch_query_keys_index_visit(void *context, const char *key,
-                                           lc_error *error) {
+                                           size_t key_len, lc_error *error) {
   lc_pouch_query_keys_scan_context *scan;
   lc_pouch_scan_meta_row row;
-  size_t key_len;
 
   scan = (lc_pouch_query_keys_scan_context *)context;
   if (scan == NULL || scan->handler == NULL || key == NULL) {
@@ -18955,7 +18955,6 @@ static int lc_pouch_query_keys_index_visit(void *context, const char *key,
     return lc_pouch_query_keys_callback_failed(
         error, "pouch query_keys begin callback failed");
   }
-  key_len = strlen(key);
   if (scan->handler->chunk != NULL &&
       !scan->handler->chunk(scan->handler_context, key, key_len, error)) {
     return lc_pouch_query_keys_callback_failed(

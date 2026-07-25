@@ -894,10 +894,11 @@ static int bench_query_key_end(void *context, lc_error *error) {
 }
 
 static int bench_key_count_visit(void *context, const char *key,
-                                 lc_error *error) {
+                                 size_t key_len, lc_error *error) {
   bench_scan_count *count;
 
   (void)key;
+  (void)key_len;
   (void)error;
   count = (bench_scan_count *)context;
   count->rows += 1L;

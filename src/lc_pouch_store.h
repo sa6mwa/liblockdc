@@ -127,8 +127,8 @@ typedef int (*lc_pouch_scan_meta_visit_fn)(void *context,
                                            const lc_pouch_scan_meta_row *row,
                                            lc_error *error);
 
-typedef int (*lc_pouch_query_index_key_visit_fn)(void *context, const char *key,
-                                                 lc_error *error);
+typedef int (*lc_pouch_query_index_key_visit_fn)(
+    void *context, const char *key, size_t key_len, lc_error *error);
 
 typedef struct lc_pouch_document_eq_term {
   const char *field;

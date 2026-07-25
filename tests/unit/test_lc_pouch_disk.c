@@ -1718,12 +1718,14 @@ static int capture_scan_row(void *context, const lc_pouch_scan_meta_row *row,
   return LC_OK;
 }
 
-static int capture_query_key(void *context, const char *key, lc_error *error) {
+static int capture_query_key(void *context, const char *key, size_t key_len,
+                             lc_error *error) {
   key_capture *capture;
 
   (void)error;
   capture = (key_capture *)context;
   assert_non_null(key);
+  assert_int_equal(key_len, strlen(key));
   assert_true(capture->count <
               sizeof(capture->keys) / sizeof(capture->keys[0]));
   snprintf(capture->keys[capture->count], sizeof(capture->keys[capture->count]),
