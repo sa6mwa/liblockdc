@@ -1,17 +1,92 @@
-# Pouch Storage Design
+# Pouch Storage Technical Specification
 
 `pouch` is the embedded storage runtime for `liblockdc`. It gives the C client a
 local `lockd`-compatible backend selected by `pouch://` endpoints, without
 requiring a local server process. The storage layer must be usable by the client
 adapter first and remain suitable for a future C server stack.
 
-This document specifies the storage architecture before implementation. It is
-based on the proven shape of the existing server-side disk store: a storage
-backend interface, a disk-log backend, per-namespace append logs, in-memory
-indexes rebuilt from durable records, advisory locks for cross-process writers,
-and compaction snapshots. The C implementation must be idiomatic C89 and must
-not copy runtime assumptions from the original implementation language, such as
-managed allocation, channels, or built-in maps.
+This document is the living technical specification for pouch. It covers the
+basic operating model, design constraints, on-disk layout, replay and
+compaction rules, query/index machinery, failure modes, benchmark expectations,
+and implementation order. It is based on the proven shape of the existing
+server-side disk store: a storage backend interface, a disk-log backend,
+per-namespace append logs, in-memory indexes rebuilt from durable records,
+advisory locks for cross-process writers, and compaction snapshots. The C
+implementation must be idiomatic C89 and must not copy runtime assumptions from
+the original implementation language, such as managed allocation, channels, or
+built-in maps.
+
+## Basics
+
+Pouch is not a cache and not a simplified JSON file store. It is a local
+storage backend that lets the normal `liblockdc` client stack run against a
+filesystem root through a `pouch://` endpoint. Public client behavior should
+look like lockd storage where pouch implements the relevant storage surface:
+leases, metadata, state payloads, objects, attachments, queues, retention,
+transactions, local LQL queries, refresh hints, and compaction-visible lifecycle
+semantics.
+
+The practical model is:
+
+- every public namespace is stored as a pouch namespace under one root;
+- writes append typed records to namespace segment files;
+- committed records update in-memory projections for metadata, state, objects,
+  queue state, staged state, and query indexes;
+- in-memory projections are not authoritative and must be rebuildable from
+  durable segments, snapshots, and manifest records;
+- readers use projections and sidecar indexes for hot paths, then open payload
+  spans only for rows that need full state or object bytes;
+- compaction writes fresh snapshot segments for live records and marks old
+  segments or snapshots obsolete without mutating existing history files;
+- cross-process safety is provided by advisory locks, marker invalidation, and
+  forced refresh paths rather than a hidden server process.
+
+This gives pouch the properties needed for an embedded backend: local process
+latency, crash recovery from append-only records, deterministic replay, bounded
+foreground work where practical, and behavior that can be compared directly to
+the Go lockd disk backend.
+
+## Conceptual Lineage
+
+Pouch is primarily derived from the Go lockd disk backend. The important
+inheritance is the storage contract and durability model, not the Go
+implementation mechanics. Pouch keeps the same broad architecture: append-first
+namespace storage, reconstructed indexes, advisory write exclusion, marker-based
+reader refresh, staged state promotion, durable queue decisions, and
+snapshot-based compaction.
+
+Several older storage and search systems also inform the design:
+
+- Write-ahead logs and log-structured storage: pouch treats append records as
+  the durability boundary and rebuilds derived state by replay. Existing files
+  are not rewritten for foreground updates; compaction creates new history and
+  changes manifest lifecycle state.
+- LSM-style segment/snapshot compaction: immutable sealed segments, live-record
+  snapshots, obsolete-file cleanup, and replay from newest valid lifecycle state
+  follow the same broad idea as log-structured merge systems, adapted to lockd's
+  per-namespace object and coordination semantics.
+- Lucene-style inverted indexes: query performance comes from field postings,
+  term/range candidate sets, stable row ordering, and live/deleted filtering.
+  Pouch does not implement Lucene, but the search shape is similar: use compact
+  postings to find candidate document keys, then validate candidates against the
+  current live projection and final query evaluator.
+- MVCC and CAS storage: metadata/state records carry ETags, versions, and
+  generation checks so stale writers can be rejected and stale postings can be
+  filtered without trusting a single mutable file as the source of truth.
+- Database manifest/journal patterns: the manifest is a lifecycle accelerator
+  and repairable journal, similar in spirit to manifest files in embedded
+  stores. It is not authoritative by itself; segment and snapshot scans can
+  repair missing, legacy, or crash-incomplete manifest state.
+- JSON Pointer and LQL query systems: public document filters are expressed as
+  LQL over strict JSON Pointer paths. Storage-owned indexes may generate
+  candidate supersets for supported path predicates, but final correctness stays
+  with typed metadata checks and `liblql` acceptance when full document
+  semantics are required.
+
+The result should be understood as an embedded lockd disk backend, not as a
+general database. The design borrows proven storage ideas where they fit the
+lockd API, and rejects features that would weaken pouch's primary contract:
+deterministic local lockd-compatible behavior from a filesystem root.
 
 ## Source Design Reading
 
