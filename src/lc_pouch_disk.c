@@ -5123,42 +5123,6 @@ static int lc_pouch_disk_query_field_key_matches_exists(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const char *key);
 
-static int lc_pouch_disk_query_field_candidate_summary(
-    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
-    const lc_pouch_disk_query_field_posting *posting,
-    lc_pouch_disk_query_summary_entry **out) {
-  lc_pouch_disk_query_summary_entry *entry;
-  size_t summary_index;
-
-  if (out != NULL) {
-    *out = NULL;
-  }
-  if (!lc_pouch_disk_query_field_posting_has_live_state(store, posting) ||
-      !lc_pouch_disk_query_field_key_matches_terms(store, req, posting->key) ||
-      !lc_pouch_disk_query_field_key_matches_ranges(store, req, posting->key) ||
-      !lc_pouch_disk_query_field_key_matches_in(store, req, posting->key) ||
-      !lc_pouch_disk_query_field_key_matches_prefix(store, req, posting->key) ||
-      !lc_pouch_disk_query_field_key_matches_contains(store, req,
-                                                      posting->key) ||
-      !lc_pouch_disk_query_field_key_matches_exists(store, req, posting->key) ||
-      !lc_pouch_disk_query_summary_find(store, posting->namespace_name,
-                                        posting->key, &summary_index)) {
-    return 0;
-  }
-  entry = &store->query_summary_entries[summary_index];
-  if (entry->deleted || (entry->has_query_hidden && entry->query_hidden)) {
-    return 0;
-  }
-  if (req->owner != NULL &&
-      (entry->owner == NULL || strcmp(entry->owner, req->owner) != 0)) {
-    return 0;
-  }
-  if (out != NULL) {
-    *out = entry;
-  }
-  return 1;
-}
-
 static int lc_pouch_disk_query_field_number_matches_range(
     const char *value, const lc_pouch_document_range_term *term) {
   int cmp;
@@ -6436,12 +6400,10 @@ static int lc_pouch_disk_query_field_collect_eq_summary_indices_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     size_t **indices_out, size_t *index_count_out, lc_error *error) {
   const lc_pouch_document_eq_term *primary;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_disk_exact_term_doc_id_reader reader;
   size_t *indices;
   size_t index_count;
-  size_t index_capacity;
-  const char *start_key;
-  size_t position;
-  size_t index;
   int rc;
 
   *indices_out = NULL;
@@ -6453,63 +6415,28 @@ static int lc_pouch_disk_query_field_collect_eq_summary_indices_locked(
     return LC_OK;
   }
   primary = &req->document_eq_terms[0];
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
   indices = NULL;
   index_count = 0U;
-  index_capacity = 0U;
-  if (req->key != NULL) {
-    (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
-                                         primary->field, primary->value,
-                                         req->key, &position);
-  } else {
-    start_key = req->start_after != NULL ? req->start_after : "";
-    if (lc_pouch_disk_query_field_find(store, req->namespace_name,
-                                       primary->field, primary->value,
-                                       start_key, &position) &&
-        req->start_after != NULL) {
-      position++;
-    }
+  reader.store = store;
+  reader.req = req;
+  reader.in_from = 0U;
+  reader.alloc_message = "failed to allocate pouch equality query docIDs";
+  rc = lc_pouch_index_collect_eq_term_doc_ids(
+      &store->allocator, primary, lc_pouch_disk_query_read_exact_term_doc_ids,
+      &reader, &doc_ids, error);
+  if (rc != LC_OK) {
+    lc_pouch_index_doc_id_set_cleanup(&store->allocator, &doc_ids);
+    return rc;
   }
-  for (index = position; index < store->query_field_posting_count; ++index) {
-    lc_pouch_disk_query_field_posting *posting;
-    lc_pouch_disk_query_summary_entry *entry;
-    size_t summary_index;
-    int cmp;
-
-    posting = &store->query_field_postings[index];
-    cmp = lc_pouch_disk_query_field_compare_values(
-        posting->namespace_name, posting->field, posting->value, "",
-        req->namespace_name, primary->field, primary->value, "");
-    if (cmp > 0) {
-      break;
-    }
-    if (cmp < 0) {
-      continue;
-    }
-    if (req->key != NULL) {
-      int key_cmp;
-
-      key_cmp = strcmp(posting->key, req->key);
-      if (key_cmp > 0) {
-        break;
-      }
-      if (key_cmp < 0) {
-        continue;
-      }
-    }
-    if (!lc_pouch_disk_query_field_candidate_summary(store, req, posting,
-                                                     &entry)) {
-      continue;
-    }
-    summary_index = (size_t)(entry - store->query_summary_entries);
-    rc = lc_pouch_disk_query_summary_index_array_append(
-        store, &indices, &index_count, &index_capacity, summary_index, error,
-        "failed to allocate pouch equality query row indices");
-    if (rc != LC_OK) {
-      lc_pouch_free(&store->allocator, indices);
-      return rc;
-    }
+  rc = lc_pouch_disk_query_doc_ids_to_summary_indices(
+      store, &doc_ids, &indices, &index_count, error,
+      "failed to allocate pouch equality query row indices");
+  lc_pouch_index_doc_id_set_cleanup(&store->allocator, &doc_ids);
+  if (rc != LC_OK) {
+    return rc;
   }
-  lc_pouch_disk_query_summary_index_array_sort_unique(indices, &index_count);
   *indices_out = indices;
   *index_count_out = index_count;
   return LC_OK;

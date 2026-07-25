@@ -276,6 +276,33 @@ test_collect_in_term_doc_ids_uses_reader_and_deduplicates(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_collect_eq_term_doc_ids_uses_reader_and_deduplicates(void **state) {
+  lc_pouch_document_eq_term term;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {3U, 7U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&term, 0, sizeof(term));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  term.field = "/region";
+  term.value = "s:north";
+  rc = lc_pouch_index_collect_eq_term_doc_ids(
+      NULL, &term, fake_read_exact_doc_ids, &reader, &doc_ids, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 1U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_doc_id_set_sort_unique),
@@ -286,6 +313,8 @@ int main(void) {
       cmocka_unit_test(test_posting_dense_decodes_and_intersects),
       cmocka_unit_test(
           test_collect_in_term_doc_ids_uses_reader_and_deduplicates),
+      cmocka_unit_test(
+          test_collect_eq_term_doc_ids_uses_reader_and_deduplicates),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

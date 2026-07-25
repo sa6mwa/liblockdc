@@ -1288,7 +1288,7 @@ allowed only when they move toward this subsystem boundary or protect behavior
 while the subsystem is introduced.
 
 The first C cutover stage uses a private exact-term docID reader callback:
-`lc_pouch_index` owns primary `in` term union planning, while
+`lc_pouch_index` owns primary equality and `in` term planning, while
 `lc_pouch_disk.c` adapts the current sidecar postings into docID candidates.
 This is a migration bridge toward immutable compiled readers, not the final
 reader-cache architecture.

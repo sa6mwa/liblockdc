@@ -69,6 +69,10 @@ int lc_pouch_index_posting_intersect(const lc_pouch_allocator *allocator,
                                      const lc_pouch_index_posting *posting,
                                      const lc_pouch_index_doc_id_set *filter,
                                      lc_pouch_index_doc_id_set *dst);
+int lc_pouch_index_collect_eq_term_doc_ids(
+    const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
 int lc_pouch_index_collect_in_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_in_term *term,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
