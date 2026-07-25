@@ -1317,6 +1317,10 @@ length-prefixed field-presence plan key.
 Simple non-wildcard positive `in` scans also use the result cache; their plan
 key sorts and deduplicates typed values before key construction, so duplicate
 or reordered value lists reuse the same cached docID vector.
+Simple positive numeric `range` scans use a bound-aware generation-keyed cache
+with explicit `gt`/`gte`/`lt`/`lte` presence bits and length-prefixed typed
+bound values. This keeps open, closed, and absent bounds distinct while still
+reusing the full matching docID vector across repeated range pages.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,

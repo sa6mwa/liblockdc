@@ -6442,6 +6442,22 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  write_query_range_number_state(&allocator, store, "k105", "{\"score\":10.5}",
+                                 &error);
+  memset(&keys, 0, sizeof(keys));
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 6U);
+  assert_string_equal(keys.keys[0], "k08");
+  assert_string_equal(keys.keys[1], "k085");
+  assert_string_equal(keys.keys[2], "k09");
+  assert_string_equal(keys.keys[3], "k10");
+  assert_string_equal(keys.keys[4], "k105");
+  assert_string_equal(keys.keys[5], "k11");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   memset(&keys, 0, sizeof(keys));
   range.gte = NULL;
   range.lte = "n:+:9:0";
