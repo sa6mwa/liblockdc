@@ -832,6 +832,178 @@ int lc_pouch_index_term_posting_table_decode(
                                        &table->entries[position].posting, dst);
 }
 
+static int lc_pouch_index_result_cache_compare(uint64_t left_generation,
+                                               const char *left_plan_key,
+                                               uint64_t right_generation,
+                                               const char *right_plan_key) {
+  int cmp;
+
+  if (left_generation < right_generation) {
+    return -1;
+  }
+  if (left_generation > right_generation) {
+    return 1;
+  }
+  cmp = strcmp(left_plan_key, right_plan_key);
+  if (cmp < 0) {
+    return -1;
+  }
+  if (cmp > 0) {
+    return 1;
+  }
+  return 0;
+}
+
+static int lc_pouch_index_result_cache_find_position(
+    const lc_pouch_index_result_cache *cache, uint64_t generation,
+    const char *plan_key, size_t *position_out) {
+  size_t low;
+  size_t high;
+
+  if (position_out != NULL) {
+    *position_out = 0U;
+  }
+  if (cache == NULL || plan_key == NULL) {
+    return 0;
+  }
+  low = 0U;
+  high = cache->count;
+  while (low < high) {
+    size_t mid;
+    int cmp;
+
+    mid = low + ((high - low) / 2U);
+    cmp = lc_pouch_index_result_cache_compare(cache->entries[mid].generation,
+                                              cache->entries[mid].plan_key,
+                                              generation, plan_key);
+    if (cmp < 0) {
+      low = mid + 1U;
+    } else {
+      high = mid;
+    }
+  }
+  if (position_out != NULL) {
+    *position_out = low;
+  }
+  return low < cache->count &&
+         lc_pouch_index_result_cache_compare(cache->entries[low].generation,
+                                             cache->entries[low].plan_key,
+                                             generation, plan_key) == 0;
+}
+
+static int
+lc_pouch_index_result_cache_reserve(const lc_pouch_allocator *allocator,
+                                    lc_pouch_index_result_cache *cache,
+                                    size_t needed) {
+  size_t new_capacity;
+  lc_pouch_index_result_cache_entry *grown;
+
+  if (cache == NULL) {
+    return 0;
+  }
+  if (needed <= cache->capacity) {
+    return 1;
+  }
+  new_capacity = cache->capacity == 0U ? 16U : cache->capacity;
+  while (new_capacity < needed) {
+    if (new_capacity > ((size_t)-1) / 2U) {
+      return 0;
+    }
+    new_capacity *= 2U;
+  }
+  if (new_capacity > ((size_t)-1) / sizeof(cache->entries[0])) {
+    return 0;
+  }
+  grown = (lc_pouch_index_result_cache_entry *)lc_pouch_realloc(
+      allocator, cache->entries, new_capacity * sizeof(cache->entries[0]));
+  if (grown == NULL) {
+    return 0;
+  }
+  cache->entries = grown;
+  cache->capacity = new_capacity;
+  return 1;
+}
+
+void lc_pouch_index_result_cache_cleanup(const lc_pouch_allocator *allocator,
+                                         lc_pouch_index_result_cache *cache) {
+  size_t index;
+
+  if (cache == NULL) {
+    return;
+  }
+  for (index = 0U; index < cache->count; ++index) {
+    lc_pouch_free(allocator, cache->entries[index].plan_key);
+    lc_pouch_index_doc_id_set_cleanup(allocator,
+                                      &cache->entries[index].doc_ids);
+  }
+  lc_pouch_free(allocator, cache->entries);
+  memset(cache, 0, sizeof(*cache));
+}
+
+int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
+                                     const lc_pouch_index_result_cache *cache,
+                                     uint64_t generation, const char *plan_key,
+                                     lc_pouch_index_doc_id_set *dst) {
+  size_t position;
+
+  if (dst == NULL) {
+    return 0;
+  }
+  dst->count = 0U;
+  if (!lc_pouch_index_result_cache_find_position(cache, generation, plan_key,
+                                                 &position)) {
+    return 0;
+  }
+  return lc_pouch_index_doc_id_set_clone(allocator, dst,
+                                         &cache->entries[position].doc_ids);
+}
+
+int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
+                                    lc_pouch_index_result_cache *cache,
+                                    uint64_t generation, const char *plan_key,
+                                    const lc_pouch_index_doc_id_set *doc_ids) {
+  lc_pouch_index_doc_id_set copy;
+  char *plan_key_copy;
+  size_t position;
+
+  if (cache == NULL || plan_key == NULL || doc_ids == NULL) {
+    return 0;
+  }
+  memset(&copy, 0, sizeof(copy));
+  if (!lc_pouch_index_doc_id_set_clone(allocator, &copy, doc_ids) ||
+      !lc_pouch_index_doc_id_set_sort_unique(&copy)) {
+    lc_pouch_index_doc_id_set_cleanup(allocator, &copy);
+    return 0;
+  }
+  if (lc_pouch_index_result_cache_find_position(cache, generation, plan_key,
+                                                &position)) {
+    lc_pouch_index_doc_id_set_cleanup(allocator,
+                                      &cache->entries[position].doc_ids);
+    cache->entries[position].doc_ids = copy;
+    return 1;
+  }
+  plan_key_copy = lc_pouch_strdup(allocator, plan_key);
+  if (plan_key_copy == NULL) {
+    lc_pouch_index_doc_id_set_cleanup(allocator, &copy);
+    return 0;
+  }
+  if (!lc_pouch_index_result_cache_reserve(allocator, cache,
+                                           cache->count + 1U)) {
+    lc_pouch_free(allocator, plan_key_copy);
+    lc_pouch_index_doc_id_set_cleanup(allocator, &copy);
+    return 0;
+  }
+  if (position < cache->count) {
+    memmove(&cache->entries[position + 1U], &cache->entries[position],
+            (cache->count - position) * sizeof(cache->entries[0]));
+  }
+  cache->entries[position].generation = generation;
+  cache->entries[position].plan_key = plan_key_copy;
+  cache->entries[position].doc_ids = copy;
+  cache->count++;
+  return 1;
+}
+
 int lc_pouch_index_collect_eq_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,

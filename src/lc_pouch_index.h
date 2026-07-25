@@ -55,6 +55,18 @@ typedef struct lc_pouch_index_term_posting_table {
   size_t capacity;
 } lc_pouch_index_term_posting_table;
 
+typedef struct lc_pouch_index_result_cache_entry {
+  uint64_t generation;
+  char *plan_key;
+  lc_pouch_index_doc_id_set doc_ids;
+} lc_pouch_index_result_cache_entry;
+
+typedef struct lc_pouch_index_result_cache {
+  lc_pouch_index_result_cache_entry *entries;
+  size_t count;
+  size_t capacity;
+} lc_pouch_index_result_cache;
+
 typedef int (*lc_pouch_index_exact_term_doc_ids_fn)(
     void *context, const char *field, const char *value,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
@@ -123,6 +135,16 @@ int lc_pouch_index_term_posting_table_decode(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_term_posting_table *table,
     lc_pouch_index_term_id term_id, lc_pouch_index_doc_id_set *dst);
+void lc_pouch_index_result_cache_cleanup(const lc_pouch_allocator *allocator,
+                                         lc_pouch_index_result_cache *cache);
+int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
+                                     const lc_pouch_index_result_cache *cache,
+                                     uint64_t generation, const char *plan_key,
+                                     lc_pouch_index_doc_id_set *dst);
+int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
+                                    lc_pouch_index_result_cache *cache,
+                                    uint64_t generation, const char *plan_key,
+                                    const lc_pouch_index_doc_id_set *doc_ids);
 int lc_pouch_index_collect_eq_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,

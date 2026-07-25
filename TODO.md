@@ -510,6 +510,10 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Add sorted matched-key result caching keyed by index generation plus
       normalized selector plan, so multi-page queries reuse the full matching
       key vector instead of recomputing candidates for every page.
+      - [x] Add the internal generation + normalized-plan result cache
+        primitive in `lc_pouch_index`; it stores sorted docID vectors and
+        misses across generation changes. Disk query plans still need to
+        provide stable normalized plan keys and use it.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

@@ -325,6 +325,71 @@ static void test_term_posting_table_replaces_existing_posting(void **state) {
   lc_pouch_index_term_posting_table_cleanup(NULL, &table);
 }
 
+static void test_result_cache_keys_by_generation_and_plan(void **state) {
+  lc_pouch_index_result_cache cache;
+  lc_pouch_index_doc_id_set source;
+  lc_pouch_index_doc_id_set found;
+  lc_pouch_index_doc_id source_values[] = {8U, 2U, 8U, 5U};
+  lc_pouch_index_doc_id expected[] = {2U, 5U, 8U};
+
+  (void)state;
+  memset(&cache, 0, sizeof(cache));
+  memset(&source, 0, sizeof(source));
+  memset(&found, 0, sizeof(found));
+  assert_true(
+      set_from_values(&source, source_values,
+                      sizeof(source_values) / sizeof(source_values[0])));
+
+  assert_true(lc_pouch_index_result_cache_put(NULL, &cache, 11U,
+                                              "eq:/region=s:north", &source));
+  assert_true(lc_pouch_index_result_cache_find(NULL, &cache, 11U,
+                                               "eq:/region=s:north", &found));
+  assert_doc_ids(&found, expected, sizeof(expected) / sizeof(expected[0]));
+  assert_false(lc_pouch_index_result_cache_find(NULL, &cache, 12U,
+                                                "eq:/region=s:north", &found));
+  assert_false(lc_pouch_index_result_cache_find(NULL, &cache, 11U,
+                                                "eq:/region=s:south", &found));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &found);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &source);
+  lc_pouch_index_result_cache_cleanup(NULL, &cache);
+}
+
+static void test_result_cache_replaces_existing_entry(void **state) {
+  lc_pouch_index_result_cache cache;
+  lc_pouch_index_doc_id_set first;
+  lc_pouch_index_doc_id_set second;
+  lc_pouch_index_doc_id_set found;
+  lc_pouch_index_doc_id first_values[] = {1U, 4U};
+  lc_pouch_index_doc_id second_values[] = {9U, 3U, 3U};
+  lc_pouch_index_doc_id expected[] = {3U, 9U};
+
+  (void)state;
+  memset(&cache, 0, sizeof(cache));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&found, 0, sizeof(found));
+  assert_true(set_from_values(&first, first_values,
+                              sizeof(first_values) / sizeof(first_values[0])));
+  assert_true(
+      set_from_values(&second, second_values,
+                      sizeof(second_values) / sizeof(second_values[0])));
+
+  assert_true(lc_pouch_index_result_cache_put(NULL, &cache, 4U, "exists:/tags",
+                                              &first));
+  assert_true(lc_pouch_index_result_cache_put(NULL, &cache, 4U, "exists:/tags",
+                                              &second));
+  assert_int_equal(cache.count, 1U);
+  assert_true(lc_pouch_index_result_cache_find(NULL, &cache, 4U, "exists:/tags",
+                                               &found));
+  assert_doc_ids(&found, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &found);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &second);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &first);
+  lc_pouch_index_result_cache_cleanup(NULL, &cache);
+}
+
 typedef struct fake_exact_reader {
   size_t calls;
 } fake_exact_reader;
@@ -513,6 +578,8 @@ int main(void) {
       cmocka_unit_test(test_term_table_interns_sorted_terms_with_stable_ids),
       cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
       cmocka_unit_test(test_term_posting_table_replaces_existing_posting),
+      cmocka_unit_test(test_result_cache_keys_by_generation_and_plan),
+      cmocka_unit_test(test_result_cache_replaces_existing_entry),
       cmocka_unit_test(
           test_collect_in_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(

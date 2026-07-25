@@ -1305,6 +1305,9 @@ secondary-predicate checks.
 Positive `exists` plans use the same bridge for field-presence postings:
 filtered sidecar candidates are compiled into adaptive docID postings per
 request, then decoded through the index layer.
+The index layer also owns the first result-cache primitive: a generation plus
+normalized-plan key maps to a sorted docID vector. Disk plans still need to
+produce stable plan keys and install this cache at the prepared-reader level.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
