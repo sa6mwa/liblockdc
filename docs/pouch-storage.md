@@ -1330,12 +1330,14 @@ adapter still chooses a selective trigram candidate when possible and performs
 final substring validation against text postings, but the accepted summary
 docIDs are compiled into adaptive postings before pagination.
 The index layer also owns the first result-cache primitive: a generation plus
-normalized-plan key maps to a sorted docID vector. Disk plans still need to
-produce stable plan keys and install this cache at the prepared-reader level.
+normalized-plan key maps to a sorted docID vector. The simple result-cache plan
+key constructors now live in `lc_pouch_index`, and disk supplies only the known
+simple-plan kind, current index generation, and storage sidecar readers.
 The first disk use is deliberately narrow: simple primary equality scans cache
 docIDs by the current index sequence and a length-prefixed equality plan key,
-then apply pagination after cached candidate reuse. Updates advance the index
-sequence, so stale equality results miss the cache.
+then ask the index layer to page the cached docIDs over the document table
+before disk converts the selected page back to summary entries. Updates advance
+the index sequence, so stale equality results miss the cache.
 Simple positive `exists` scans use the same generation-keyed cache with a
 length-prefixed field-presence plan key.
 Simple non-wildcard positive `in` scans also use the result cache; their plan
@@ -1349,11 +1351,12 @@ Simple positive `prefix` and `contains` scans use the same result cache. Their
 plan keys include namespace, field, case-sensitivity, and length-prefixed text
 values, so repeated text pages can reuse the matching docID vector until the
 index sequence advances.
-The simple result-cache plan key constructors now live in `lc_pouch_index`.
 That layer owns cacheability and normalization for equality, exists, `in`,
-range, prefix, and contains result reuse; `lc_pouch_disk.c` passes the known
-simple-plan kind and still supplies the current index generation plus storage
-sidecar readers.
+range, prefix, and contains result reuse. Equality also uses the first
+index-owned result page primitive, so page-N equality scans translate only the
+requested page of docIDs through disk summaries. Other simple predicate scans
+still reuse the full matching docID vector before disk-side cursor/limit
+handling.
 
 The disk bridge also keeps a first prepared-reader cache for exact terms. It is
 keyed by the current index sequence plus a namespace-qualified field/value term,

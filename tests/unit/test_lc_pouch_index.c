@@ -583,6 +583,117 @@ static void test_result_cache_replaces_existing_entry(void **state) {
   lc_pouch_index_result_cache_cleanup(NULL, &cache);
 }
 
+static void
+test_result_page_doc_ids_applies_namespace_cursor_and_limit(void **state) {
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_doc_id_set matches;
+  lc_pouch_index_result_page page;
+  lc_pouch_index_doc_id id_alpha;
+  lc_pouch_index_doc_id id_bravo;
+  lc_pouch_index_doc_id id_charlie;
+  lc_pouch_index_doc_id id_other;
+  lc_pouch_index_doc_id expected[] = {1U};
+  int invalid_doc_id;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&matches, 0, sizeof(matches));
+  memset(&page, 0, sizeof(page));
+
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &id_alpha));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "bravo", &id_bravo));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "charlie", &id_charlie));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "other",
+                                                   "alpha", &id_other));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &matches, id_other));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &matches, id_charlie));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &matches, id_alpha));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &matches, id_bravo));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&matches));
+
+  invalid_doc_id = 1;
+  assert_true(lc_pouch_index_result_page_doc_ids(
+      NULL, &table, &matches, "default", "alpha", 1U, &page, &invalid_doc_id));
+  assert_false(invalid_doc_id);
+  assert_doc_ids(&page.doc_ids, expected,
+                 sizeof(expected) / sizeof(expected[0]));
+  assert_true(page.truncated);
+  assert_string_equal(page.next_start_after, "bravo");
+
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &matches);
+  lc_pouch_index_doc_table_cleanup(NULL, &table);
+}
+
+static void
+test_result_page_doc_ids_does_not_truncate_at_exact_end(void **state) {
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_doc_id_set matches;
+  lc_pouch_index_result_page page;
+  lc_pouch_index_doc_id id_alpha;
+  lc_pouch_index_doc_id id_bravo;
+  lc_pouch_index_doc_id expected[] = {0U, 1U};
+  int invalid_doc_id;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&matches, 0, sizeof(matches));
+  memset(&page, 0, sizeof(page));
+
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &id_alpha));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "bravo", &id_bravo));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &matches, id_alpha));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &matches, id_bravo));
+
+  invalid_doc_id = 1;
+  assert_true(lc_pouch_index_result_page_doc_ids(
+      NULL, &table, &matches, "default", NULL, 2U, &page, &invalid_doc_id));
+  assert_false(invalid_doc_id);
+  assert_doc_ids(&page.doc_ids, expected,
+                 sizeof(expected) / sizeof(expected[0]));
+  assert_false(page.truncated);
+  assert_null(page.next_start_after);
+
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &matches);
+  lc_pouch_index_doc_table_cleanup(NULL, &table);
+}
+
+static void
+test_result_page_doc_ids_rejects_missing_doc_table_id(void **state) {
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_doc_id_set matches;
+  lc_pouch_index_result_page page;
+  lc_pouch_index_doc_id id_alpha;
+  int invalid_doc_id;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&matches, 0, sizeof(matches));
+  memset(&page, 0, sizeof(page));
+
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &id_alpha));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &matches, id_alpha));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &matches, 99U));
+
+  invalid_doc_id = 0;
+  assert_false(lc_pouch_index_result_page_doc_ids(
+      NULL, &table, &matches, "default", NULL, 0U, &page, &invalid_doc_id));
+  assert_true(invalid_doc_id);
+  assert_int_equal(page.doc_ids.count, 0U);
+  assert_null(page.next_start_after);
+
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &matches);
+  lc_pouch_index_doc_table_cleanup(NULL, &table);
+}
+
 typedef struct fake_exact_reader {
   size_t calls;
 } fake_exact_reader;
@@ -872,6 +983,10 @@ int main(void) {
       cmocka_unit_test(test_result_plan_keys_reject_filtered_compound_views),
       cmocka_unit_test(test_prepared_term_cache_refreshes_by_generation),
       cmocka_unit_test(test_result_cache_replaces_existing_entry),
+      cmocka_unit_test(
+          test_result_page_doc_ids_applies_namespace_cursor_and_limit),
+      cmocka_unit_test(test_result_page_doc_ids_does_not_truncate_at_exact_end),
+      cmocka_unit_test(test_result_page_doc_ids_rejects_missing_doc_table_id),
       cmocka_unit_test(
           test_collect_in_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(

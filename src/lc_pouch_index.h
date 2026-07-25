@@ -94,6 +94,12 @@ typedef struct lc_pouch_index_result_cache {
   size_t capacity;
 } lc_pouch_index_result_cache;
 
+typedef struct lc_pouch_index_result_page {
+  lc_pouch_index_doc_id_set doc_ids;
+  char *next_start_after;
+  int truncated;
+} lc_pouch_index_result_page;
+
 typedef int (*lc_pouch_index_exact_term_doc_ids_fn)(
     void *context, const char *field, const char *value,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
@@ -190,6 +196,14 @@ void lc_pouch_index_prepared_term_cache_refresh(
     lc_pouch_index_prepared_term_cache *cache, uint64_t generation);
 void lc_pouch_index_result_cache_cleanup(const lc_pouch_allocator *allocator,
                                          lc_pouch_index_result_cache *cache);
+void lc_pouch_index_result_page_cleanup(const lc_pouch_allocator *allocator,
+                                        lc_pouch_index_result_page *page);
+int lc_pouch_index_result_page_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_doc_table *doc_table,
+    const lc_pouch_index_doc_id_set *doc_ids, const char *namespace_name,
+    const char *start_after, size_t limit, lc_pouch_index_result_page *page,
+    int *invalid_doc_id_out);
 char *lc_pouch_index_result_plan_key(const lc_pouch_allocator *allocator,
                                      const lc_pouch_query_index_scan_req *req,
                                      lc_pouch_index_result_plan_kind kind);

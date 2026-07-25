@@ -1626,6 +1626,73 @@ void lc_pouch_index_result_cache_cleanup(const lc_pouch_allocator *allocator,
   memset(cache, 0, sizeof(*cache));
 }
 
+void lc_pouch_index_result_page_cleanup(const lc_pouch_allocator *allocator,
+                                        lc_pouch_index_result_page *page) {
+  if (page == NULL) {
+    return;
+  }
+  lc_pouch_index_doc_id_set_cleanup(allocator, &page->doc_ids);
+  lc_pouch_free(allocator, page->next_start_after);
+  memset(page, 0, sizeof(*page));
+}
+
+int lc_pouch_index_result_page_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_doc_table *doc_table,
+    const lc_pouch_index_doc_id_set *doc_ids, const char *namespace_name,
+    const char *start_after, size_t limit, lc_pouch_index_result_page *page,
+    int *invalid_doc_id_out) {
+  size_t index;
+
+  if (page == NULL) {
+    return 0;
+  }
+  memset(page, 0, sizeof(*page));
+  if (invalid_doc_id_out != NULL) {
+    *invalid_doc_id_out = 0;
+  }
+  if (doc_table == NULL || doc_ids == NULL || namespace_name == NULL) {
+    return 1;
+  }
+  for (index = 0U; index < doc_ids->count; ++index) {
+    const char *doc_namespace;
+    const char *key;
+
+    if (!lc_pouch_index_doc_table_lookup(doc_table, doc_ids->items[index],
+                                         &doc_namespace, &key)) {
+      if (invalid_doc_id_out != NULL) {
+        *invalid_doc_id_out = 1;
+      }
+      lc_pouch_index_result_page_cleanup(allocator, page);
+      return 0;
+    }
+    if (strcmp(doc_namespace, namespace_name) != 0) {
+      continue;
+    }
+    if (start_after != NULL && strcmp(key, start_after) <= 0) {
+      continue;
+    }
+    if (limit > 0U && page->doc_ids.count == limit) {
+      page->next_start_after = lc_pouch_strdup(
+          allocator,
+          doc_table->entries[page->doc_ids.items[page->doc_ids.count - 1U]]
+              .key);
+      if (page->next_start_after == NULL) {
+        lc_pouch_index_result_page_cleanup(allocator, page);
+        return 0;
+      }
+      page->truncated = 1;
+      return 1;
+    }
+    if (!lc_pouch_index_doc_id_set_append(allocator, &page->doc_ids,
+                                          doc_ids->items[index])) {
+      lc_pouch_index_result_page_cleanup(allocator, page);
+      return 0;
+    }
+  }
+  return 1;
+}
+
 int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
                                      const lc_pouch_index_result_cache *cache,
                                      uint64_t generation, const char *plan_key,

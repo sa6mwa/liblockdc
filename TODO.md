@@ -583,6 +583,11 @@ Latest release targets confirmed on 2026-07-23:
         `lc_pouch_index`: equality, exists, `in`, range, prefix, and contains
         cacheability/normalization now live with the planner cache boundary
         instead of the disk backend.
+      - [x] Add index-owned docID result paging over the document table and
+        route the equality document/key scans through it, so cached equality
+        result pages translate only the selected page of docIDs back through
+        disk summaries instead of translating the full match vector before
+        cursor/limit handling.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.
