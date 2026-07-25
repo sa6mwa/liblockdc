@@ -469,8 +469,13 @@ Latest release targets confirmed on 2026-07-23:
       merge-based union/intersection/subtraction.
       - [x] Add the first private document table primitive in
         `lc_pouch_index`: namespace/key pairs are sorted into dense docIDs with
-        forward and reverse lookup coverage. Disk query execution still needs
-        to replace summary-array-position docIDs with this immutable table.
+        forward and reverse lookup coverage. Persisted immutable segment doc
+        tables are still pending.
+      - [x] Wire the disk query bridge through the index document table for
+        field-predicate candidate docIDs: summary refresh populates
+        namespace/key docIDs, candidate readers append table docIDs, and result
+        conversion resolves docIDs back through table lookup before summary
+        access.
       - [x] Add private C docID set primitives and wire exact primary `in`
         candidate collection through docID accumulation while preserving
         secondary-filter and `liblql` predicate authority.

@@ -6138,10 +6138,10 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
                         "\"box\":{\"leaf\":true},\"tags\":[\"ops\"]}",
                         &error);
   delta = pouch_acquire_query_key(client, "delta", &error);
-  pouch_save_query_json(
-      delta, "{\"value\":\"beta\",\"kind\":\"other\",\"n\":4,"
-             "\"tags\":[\"planning\"]}",
-      &error);
+  pouch_save_query_json(delta,
+                        "{\"value\":\"beta\",\"kind\":\"other\",\"n\":4,"
+                        "\"tags\":[\"planning\"]}",
+                        &error);
   alpha->close(alpha);
   bravo->close(bravo);
   charlie->close(charlie);
@@ -8834,8 +8834,8 @@ test_pouch_endpoint_index_query_excludes_typed_not_eq_candidates(void **state) {
   test_cleanup_root(root);
 }
 
-static void
-test_pouch_endpoint_index_contains_filters_trigram_false_positive(void **state) {
+static void test_pouch_endpoint_index_contains_filters_trigram_false_positive(
+    void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -8887,8 +8887,7 @@ test_pouch_endpoint_index_contains_filters_trigram_false_positive(void **state) 
   test_cleanup_root(root);
 }
 
-static void
-test_pouch_endpoint_scan_query_escapes_row_metadata(void **state) {
+static void test_pouch_endpoint_scan_query_escapes_row_metadata(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -9091,8 +9090,8 @@ test_pouch_endpoint_index_query_skips_removed_candidates(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_pouch_endpoint_index_range_query_preserves_numeric_order(
-    void **state) {
+static void
+test_pouch_endpoint_index_range_query_preserves_numeric_order(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -9147,8 +9146,7 @@ static void test_pouch_endpoint_index_range_query_preserves_numeric_order(
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   lc_query_req_init(&req);
-  req.selector_json =
-      "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
+  req.selector_json = "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
   rc = client->query(client, &req, sink, &res, &error);
   assert_int_equal(rc, LC_OK);
   text = memory_sink_text(sink);
@@ -9167,8 +9165,7 @@ static void test_pouch_endpoint_index_range_query_preserves_numeric_order(
   memset(&capture, 0, sizeof(capture));
   memset(&res, 0, sizeof(res));
   lc_query_req_init(&req);
-  req.selector_json =
-      "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
+  req.selector_json = "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.key_count, 4U);
@@ -9197,8 +9194,7 @@ static void test_pouch_endpoint_index_range_query_preserves_numeric_order(
   memset(&capture, 0, sizeof(capture));
   memset(&res, 0, sizeof(res));
   lc_query_req_init(&req);
-  req.selector_json =
-      "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
+  req.selector_json = "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
   req.engine = "scan";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
@@ -9553,6 +9549,55 @@ static void test_pouch_endpoint_default_index_query_keys_pages(void **state) {
   assert_string_equal(res.return_mode, "keys");
   assert_string_equal(res.correlation_id, "pouch-query-keys");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&res);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_pouch_endpoint_index_eq_doc_table_orders_keys(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-eq-doc-table-order");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo, "{\"value\":\"match\"}", &error);
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha, "{\"value\":\"match\"}", &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{\"eq\":{\"field\":\"/value\",\"value\":\"match\"}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_true(res.index_seq > 0UL);
 
   lc_query_res_cleanup(&res);
@@ -12196,8 +12241,7 @@ int main(void) {
           test_pouch_endpoint_index_query_excludes_typed_not_eq_candidates),
       cmocka_unit_test(
           test_pouch_endpoint_index_contains_filters_trigram_false_positive),
-      cmocka_unit_test(
-          test_pouch_endpoint_scan_query_escapes_row_metadata),
+      cmocka_unit_test(test_pouch_endpoint_scan_query_escapes_row_metadata),
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_streams_documents),
       cmocka_unit_test(
@@ -12207,6 +12251,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_waits_for_refresh),
       cmocka_unit_test(test_pouch_endpoint_default_index_query_keys_pages),
+      cmocka_unit_test(test_pouch_endpoint_index_eq_doc_table_orders_keys),
       cmocka_unit_test(
           test_pouch_endpoint_index_query_keys_filters_owner_selector),
       cmocka_unit_test(

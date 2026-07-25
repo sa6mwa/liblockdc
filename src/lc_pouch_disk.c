@@ -253,6 +253,7 @@ typedef struct lc_pouch_disk_store {
   lc_pouch_disk_query_summary_entry *query_summary_entries;
   size_t query_summary_entry_count;
   size_t query_summary_entry_capacity;
+  lc_pouch_index_doc_table query_doc_table;
   size_t *query_owner_indices;
   size_t query_owner_index_count;
   size_t query_owner_index_capacity;
@@ -6111,6 +6112,7 @@ static int lc_pouch_disk_query_field_add_candidate_doc_id_from(
     int require_summary_match, int require_positive_terms_summary_match,
     lc_error *error, const char *alloc_message) {
   lc_pouch_disk_query_summary_entry *entry;
+  lc_pouch_index_doc_id doc_id;
   size_t summary_index;
 
   if (store == NULL || req == NULL || posting == NULL || doc_ids == NULL) {
@@ -6148,9 +6150,13 @@ static int lc_pouch_disk_query_field_add_candidate_doc_id_from(
        (entry->owner == NULL || strcmp(entry->owner, req->owner) != 0))) {
     return LC_OK;
   }
-  if (summary_index > (size_t)UINT32_MAX ||
-      !lc_pouch_index_doc_id_set_append(&store->allocator, doc_ids,
-                                        (lc_pouch_index_doc_id)summary_index)) {
+  if (!lc_pouch_index_doc_table_find(&store->query_doc_table,
+                                     posting->namespace_name, posting->key,
+                                     &doc_id)) {
+    return lc_pouch_set_invalid(error,
+                                "pouch query doc table is missing summary key");
+  }
+  if (!lc_pouch_index_doc_id_set_append(&store->allocator, doc_ids, doc_id)) {
     return lc_pouch_set_nomem(error, alloc_message);
   }
   return LC_OK;
@@ -6905,7 +6911,10 @@ static int lc_pouch_disk_query_doc_ids_to_summary_indices(
     size_t **indices_out, size_t *index_count_out, lc_error *error,
     const char *alloc_message) {
   size_t *indices;
+  const char *namespace_name;
+  const char *key;
   size_t index;
+  size_t summary_index;
 
   *indices_out = NULL;
   *index_count_out = 0U;
@@ -6924,7 +6933,16 @@ static int lc_pouch_disk_query_doc_ids_to_summary_indices(
     return lc_pouch_set_nomem(error, alloc_message);
   }
   for (index = 0U; index < doc_ids->count; ++index) {
-    indices[index] = (size_t)doc_ids->items[index];
+    if (!lc_pouch_index_doc_table_lookup(&store->query_doc_table,
+                                         doc_ids->items[index], &namespace_name,
+                                         &key) ||
+        !lc_pouch_disk_query_summary_find(store, namespace_name, key,
+                                          &summary_index)) {
+      lc_pouch_free(&store->allocator, indices);
+      return lc_pouch_set_invalid(
+          error, "pouch query doc table references missing summary key");
+    }
+    indices[index] = summary_index;
   }
   *indices_out = indices;
   *index_count_out = doc_ids->count;
@@ -11193,6 +11211,12 @@ static int lc_pouch_disk_query_summary_upsert(
     return lc_pouch_disk_query_owner_index_insert(store, position);
   }
 
+  if (!lc_pouch_index_doc_table_find_or_add(&store->allocator,
+                                            &store->query_doc_table,
+                                            namespace_name, key, NULL)) {
+    lc_pouch_disk_query_summary_entry_cleanup(store, &staged);
+    return 0;
+  }
   if (position < store->query_summary_entry_count) {
     memmove(store->query_summary_entries + position + 1U,
             store->query_summary_entries + position,
@@ -12279,6 +12303,7 @@ static void lc_pouch_disk_reset_indexes(lc_pouch_disk_store *store) {
         store, &store->query_summary_entries[index]);
   }
   store->query_summary_entry_count = 0U;
+  lc_pouch_index_doc_table_cleanup(&store->allocator, &store->query_doc_table);
   store->query_owner_index_count = 0U;
   for (index = 0U; index < store->query_field_posting_count; ++index) {
     lc_pouch_disk_query_field_posting_cleanup(
@@ -22451,6 +22476,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->meta_entries);
   lc_pouch_free(&allocator, store->query_meta_indices);
   lc_pouch_free(&allocator, store->query_summary_entries);
+  lc_pouch_index_doc_table_cleanup(&allocator, &store->query_doc_table);
   lc_pouch_free(&allocator, store->query_owner_indices);
   lc_pouch_free(&allocator, store->query_field_postings);
   lc_pouch_index_prepared_term_cache_cleanup(

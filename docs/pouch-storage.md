@@ -1294,9 +1294,14 @@ current sidecar postings into docID candidates. This is a migration bridge
 toward immutable compiled readers, not the final reader-cache architecture.
 The index layer now has the first private document table primitive:
 namespace/key pairs are sorted into dense docIDs with forward and reverse
-lookup. Current disk query execution still treats summary-entry positions as
-bridge docIDs; the document table is the cutover target for immutable compiled
+lookup. The document table is the cutover target for immutable compiled
 generation readers.
+The disk bridge now maintains that document table alongside query summaries
+and routes field-predicate candidate docIDs through it before converting
+results back to summary entries. The table is still rebuilt from current
+summary refresh state rather than persisted as an immutable compiled segment,
+but the query path no longer depends on direct summary-array-position casts for
+field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
 `(field,value)` pairs are interned into stable term IDs with sorted lookup so
 compiled readers can stop carrying raw string scans through the planner.
