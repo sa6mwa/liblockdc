@@ -1312,6 +1312,8 @@ The first disk use is deliberately narrow: simple primary equality scans cache
 docIDs by the current index sequence and a length-prefixed equality plan key,
 then apply pagination after cached candidate reuse. Updates advance the index
 sequence, so stale equality results miss the cache.
+Simple positive `exists` scans use the same generation-keyed cache with a
+length-prefixed field-presence plan key.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,

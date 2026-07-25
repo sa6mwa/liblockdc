@@ -3268,6 +3268,106 @@ test_query_index_scan_skips_replay_after_same_handle_write(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_query_index_exists_result_cache_misses_after_generation_change(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res first;
+  lc_pouch_put_state_res second;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_document_exists_term exists;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-exists-cache");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&exists, 0, sizeof(exists));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "application/json";
+  source = source_from_text("{\"tag\":\"yes\",\"value\":1}");
+  rc = store->write_state(store, "default", "alpha", source, &opts, &first,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.owner = "owner";
+  meta.state_etag = first.new_state_etag;
+  meta.version = first.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  exists.field = "/tag";
+  req.namespace_name = "default";
+  req.document_exists_terms = &exists;
+  req.document_exists_term_count = 1U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&rows, 0, sizeof(rows));
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  source = source_from_text("{\"tag\":\"yes\",\"value\":2}");
+  rc = store->write_state(store, "default", "bravo", source, &opts, &second,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.state_etag = second.new_state_etag;
+  meta.version = second.new_version;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  memset(&rows, 0, sizeof(rows));
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 2U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_string_equal(rows.keys[1], "bravo");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &second);
+  lc_pouch_put_state_res_cleanup(&allocator, &first);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_cas_and_remove_semantics(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -17595,6 +17695,8 @@ int main(void) {
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
       cmocka_unit_test(
           test_query_index_scan_skips_replay_after_same_handle_write),
+      cmocka_unit_test(
+          test_query_index_exists_result_cache_misses_after_generation_change),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_state_lookup_index_orders_updates_and_replays),
       cmocka_unit_test(

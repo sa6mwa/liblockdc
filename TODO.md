@@ -518,6 +518,9 @@ Latest release targets confirmed on 2026-07-23:
         the current index sequence plus a length-prefixed normalized equality
         plan key, with tests covering repeated hits and post-write generation
         misses. Broader selector normalization is still pending.
+      - [x] Wire the same result cache into simple positive `exists` scans
+        using a length-prefixed normalized field-presence plan key, with
+        repeated-hit and post-write generation-miss coverage.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.
