@@ -6242,6 +6242,83 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_query_index_in_deduplicates_duplicate_values(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  const char *values[3];
+  lc_pouch_document_in_term in_term;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-in-duplicate-values");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&in_term, 0, sizeof(in_term));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  write_query_range_number_state(&allocator, store, "both",
+                                 "{\"tags\":[\"planning\",\"finance\"]}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "finance",
+                                 "{\"tags\":[\"finance\"]}", &error);
+  write_query_range_number_state(&allocator, store, "ops",
+                                 "{\"tags\":[\"ops\"]}", &error);
+  write_query_range_number_state(&allocator, store, "planning",
+                                 "{\"tags\":[\"planning\"]}", &error);
+
+  values[0] = "s:planning";
+  values[1] = "s:finance";
+  values[2] = "s:planning";
+  in_term.field = "/tags/0";
+  in_term.values = values;
+  in_term.value_count = 3U;
+  req.namespace_name = "default";
+  req.limit = 8U;
+  req.document_in_terms = &in_term;
+  req.document_in_term_count = 1U;
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 3U);
+  assert_string_equal(keys.keys[0], "both");
+  assert_string_equal(keys.keys[1], "finance");
+  assert_string_equal(keys.keys[2], "planning");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 3U);
+  assert_string_equal(rows.keys[0], "both");
+  assert_string_equal(rows.keys[1], "finance");
+  assert_string_equal(rows.keys[2], "planning");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void
 test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   char root[256];
@@ -17277,6 +17354,7 @@ int main(void) {
       cmocka_unit_test(test_query_index_range_scans_field_posting_candidates),
       cmocka_unit_test(
           test_query_index_range_uses_numeric_order_for_multidigit_values),
+      cmocka_unit_test(test_query_index_in_deduplicates_duplicate_values),
       cmocka_unit_test(
           test_query_index_contains_uses_trigram_posting_candidates),
       cmocka_unit_test(
