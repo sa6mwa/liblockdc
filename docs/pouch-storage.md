@@ -1302,6 +1302,9 @@ The current disk adapter now builds that exact-term table per request from
 filtered sidecar candidates, so equality and `in` plans can use compiled
 postings without bypassing existing live-state, owner, hidden, generation, or
 secondary-predicate checks.
+Positive `exists` plans use the same bridge for field-presence postings:
+filtered sidecar candidates are compiled into adaptive docID postings per
+request, then decoded through the index layer.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
