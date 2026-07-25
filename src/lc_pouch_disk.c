@@ -5738,18 +5738,14 @@ static int lc_pouch_disk_key_snapshot_from_summary_indices(
     size_t count, lc_pouch_disk_key_snapshot *snapshot, lc_error *error,
     const char *alloc_message, const char *copy_message) {
   char *cursor;
+  size_t entry_size;
   size_t index;
+  size_t allocation_size;
   size_t total_size;
 
   memset(snapshot, 0, sizeof(*snapshot));
   if (count == 0U) {
     return LC_OK;
-  }
-
-  snapshot->entries = (lc_pouch_disk_key_snapshot_entry *)lc_pouch_calloc(
-      &store->allocator, count, sizeof(snapshot->entries[0]));
-  if (snapshot->entries == NULL) {
-    return lc_pouch_set_nomem(error, alloc_message);
   }
 
   total_size = 0U;
@@ -5763,25 +5759,33 @@ static int lc_pouch_disk_key_snapshot_from_summary_indices(
       lc_pouch_disk_key_snapshot_cleanup(store, snapshot);
       return lc_pouch_set_nomem(error, copy_message);
     }
-    snapshot->entries[index].key_len = key_size - 1U;
     total_size += key_size;
   }
 
-  snapshot->buffer = (char *)lc_pouch_alloc(&store->allocator, total_size);
-  if (snapshot->buffer == NULL) {
-    lc_pouch_disk_key_snapshot_cleanup(store, snapshot);
+  if (count > ((size_t)-1) / sizeof(snapshot->entries[0])) {
     return lc_pouch_set_nomem(error, copy_message);
   }
+  entry_size = count * sizeof(snapshot->entries[0]);
+  if (((size_t)-1) - entry_size < total_size) {
+    return lc_pouch_set_nomem(error, copy_message);
+  }
+  allocation_size = entry_size + total_size;
+  snapshot->entries = (lc_pouch_disk_key_snapshot_entry *)lc_pouch_alloc(
+      &store->allocator, allocation_size);
+  if (snapshot->entries == NULL) {
+    return lc_pouch_set_nomem(error, alloc_message);
+  }
 
-  cursor = snapshot->buffer;
+  cursor = ((char *)snapshot->entries) + entry_size;
   for (index = 0U; index < count; ++index) {
     const char *key;
     size_t key_size;
 
     key = store->query_summary_entries[indices[start_index + index]].key;
-    key_size = snapshot->entries[index].key_len + 1U;
+    key_size = strlen(key) + 1U;
     memcpy(cursor, key, key_size);
     snapshot->entries[index].key = cursor;
+    snapshot->entries[index].key_len = key_size - 1U;
     cursor += key_size;
   }
   snapshot->count = count;
