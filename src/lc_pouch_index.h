@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 typedef uint32_t lc_pouch_index_doc_id;
+typedef uint32_t lc_pouch_index_term_id;
 
 typedef struct lc_pouch_index_doc_id_set {
   lc_pouch_index_doc_id *items;
@@ -29,6 +30,19 @@ typedef struct lc_pouch_index_posting {
   uint64_t *dense;
   size_t dense_word_count;
 } lc_pouch_index_posting;
+
+typedef struct lc_pouch_index_term_entry {
+  char *field;
+  char *value;
+  lc_pouch_index_term_id id;
+} lc_pouch_index_term_entry;
+
+typedef struct lc_pouch_index_term_table {
+  lc_pouch_index_term_entry *entries;
+  size_t count;
+  size_t capacity;
+  lc_pouch_index_term_id next_id;
+} lc_pouch_index_term_table;
 
 typedef int (*lc_pouch_index_exact_term_doc_ids_fn)(
     void *context, const char *field, const char *value,
@@ -75,6 +89,15 @@ int lc_pouch_index_posting_intersect(const lc_pouch_allocator *allocator,
                                      const lc_pouch_index_posting *posting,
                                      const lc_pouch_index_doc_id_set *filter,
                                      lc_pouch_index_doc_id_set *dst);
+void lc_pouch_index_term_table_cleanup(const lc_pouch_allocator *allocator,
+                                       lc_pouch_index_term_table *table);
+int lc_pouch_index_term_table_find(const lc_pouch_index_term_table *table,
+                                   const char *field, const char *value,
+                                   lc_pouch_index_term_id *id_out);
+int lc_pouch_index_term_table_find_or_add(const lc_pouch_allocator *allocator,
+                                          lc_pouch_index_term_table *table,
+                                          const char *field, const char *value,
+                                          lc_pouch_index_term_id *id_out);
 int lc_pouch_index_collect_eq_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,

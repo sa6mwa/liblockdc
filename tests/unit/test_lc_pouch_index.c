@@ -216,6 +216,43 @@ static void test_posting_dense_decodes_and_intersects(void **state) {
   lc_pouch_index_posting_cleanup(NULL, &posting);
 }
 
+static void test_term_table_interns_sorted_terms_with_stable_ids(void **state) {
+  lc_pouch_index_term_table table;
+  lc_pouch_index_term_id first_id;
+  lc_pouch_index_term_id second_id;
+  lc_pouch_index_term_id duplicate_id;
+  lc_pouch_index_term_id found_id;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+
+  assert_true(lc_pouch_index_term_table_find_or_add(NULL, &table, "/region",
+                                                    "s:north", &first_id));
+  assert_true(lc_pouch_index_term_table_find_or_add(NULL, &table, "/kind",
+                                                    "s:invoice", &second_id));
+  assert_true(lc_pouch_index_term_table_find_or_add(NULL, &table, "/region",
+                                                    "s:north", &duplicate_id));
+
+  assert_int_equal(first_id, 0U);
+  assert_int_equal(second_id, 1U);
+  assert_int_equal(duplicate_id, first_id);
+  assert_int_equal(table.count, 2U);
+  assert_string_equal(table.entries[0].field, "/kind");
+  assert_string_equal(table.entries[0].value, "s:invoice");
+  assert_int_equal(table.entries[0].id, second_id);
+  assert_string_equal(table.entries[1].field, "/region");
+  assert_string_equal(table.entries[1].value, "s:north");
+  assert_int_equal(table.entries[1].id, first_id);
+
+  assert_true(
+      lc_pouch_index_term_table_find(&table, "/region", "s:north", &found_id));
+  assert_int_equal(found_id, first_id);
+  assert_false(
+      lc_pouch_index_term_table_find(&table, "/region", "s:south", NULL));
+
+  lc_pouch_index_term_table_cleanup(NULL, &table);
+}
+
 typedef struct fake_exact_reader {
   size_t calls;
 } fake_exact_reader;
@@ -401,6 +438,7 @@ int main(void) {
       cmocka_unit_test(test_posting_sparse_decodes_sorted_unique_doc_ids),
       cmocka_unit_test(test_posting_sparse_handles_max_doc_id),
       cmocka_unit_test(test_posting_dense_decodes_and_intersects),
+      cmocka_unit_test(test_term_table_interns_sorted_terms_with_stable_ids),
       cmocka_unit_test(
           test_collect_in_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(

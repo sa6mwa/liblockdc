@@ -1292,6 +1292,9 @@ docID reader callbacks: `lc_pouch_index` owns primary equality, `in`, exact
 `exists`, and numeric range planning, while `lc_pouch_disk.c` adapts the
 current sidecar postings into docID candidates. This is a migration bridge
 toward immutable compiled readers, not the final reader-cache architecture.
+The same internal layer now owns the initial term dictionary primitive:
+`(field,value)` pairs are interned into stable term IDs with sorted lookup so
+compiled readers can stop carrying raw string scans through the planner.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,

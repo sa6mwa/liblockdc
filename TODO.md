@@ -489,6 +489,10 @@ Latest release targets confirmed on 2026-07-23:
       range term tables, and text/trigram term tables so equality, range,
       `in`, prefix, contains, and exists can evaluate without repeated string
       scans.
+      - [x] Add the first private term dictionary primitive in
+        `lc_pouch_index`: `(field,value)` terms are interned into stable term
+        IDs with sorted lookup and duplicate preservation coverage. Disk
+        readers still need to build and consume compiled dictionaries.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
