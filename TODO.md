@@ -514,6 +514,10 @@ Latest release targets confirmed on 2026-07-23:
         primitive in `lc_pouch_index`; it stores sorted docID vectors and
         misses across generation changes. Disk query plans still need to
         provide stable normalized plan keys and use it.
+      - [x] Wire the result cache into simple primary equality scans using
+        the current index sequence plus a length-prefixed normalized equality
+        plan key, with tests covering repeated hits and post-write generation
+        misses. Broader selector normalization is still pending.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

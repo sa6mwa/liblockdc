@@ -3158,6 +3158,7 @@ test_query_index_scan_skips_replay_after_same_handle_write(void **state) {
   lc_source *source;
   lc_pouch_put_state_opts opts;
   lc_pouch_put_state_res put_res;
+  lc_pouch_put_state_res put_res_warm;
   lc_pouch_meta meta;
   lc_pouch_store_meta_res meta_res;
   lc_pouch_document_eq_term term;
@@ -3177,6 +3178,7 @@ test_query_index_scan_skips_replay_after_same_handle_write(void **state) {
   memset(&error, 0, sizeof(error));
   memset(&opts, 0, sizeof(opts));
   memset(&put_res, 0, sizeof(put_res));
+  memset(&put_res_warm, 0, sizeof(put_res_warm));
   memset(&meta, 0, sizeof(meta));
   memset(&meta_res, 0, sizeof(meta_res));
   memset(&term, 0, sizeof(term));
@@ -3204,6 +3206,7 @@ test_query_index_scan_skips_replay_after_same_handle_write(void **state) {
   rc = store->store_meta(store, "default", "hot", &meta, NULL, &meta_res,
                          &error);
   assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
 
   rc = store->lock_status(store, &before_status, &error);
   assert_int_equal(rc, LC_OK);
@@ -3223,13 +3226,42 @@ test_query_index_scan_skips_replay_after_same_handle_write(void **state) {
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  memset(&rows, 0, sizeof(rows));
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "hot");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   rc = store->lock_status(store, &after_status, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(after_status.replay_refreshes, replay_refreshes);
   lc_pouch_lock_status_cleanup(&allocator, &after_status);
 
-  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  source = source_from_text("{\"bucket\":\"needle\",\"value\":2}");
+  rc = store->write_state(store, "default", "warm", source, &opts,
+                          &put_res_warm, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.state_etag = put_res_warm.new_state_etag;
+  meta.version = put_res_warm.new_version;
+  rc = store->store_meta(store, "default", "warm", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  memset(&rows, 0, sizeof(rows));
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 2U);
+  assert_string_equal(rows.keys[0], "hot");
+  assert_string_equal(rows.keys[1], "warm");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res_warm);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -6714,7 +6746,7 @@ static void test_query_index_summary_scan_applies_negative_terms(void **state) {
   lc_pouch_put_state_res state_charlie;
   lc_pouch_meta meta;
   lc_pouch_store_meta_res stored;
-  lc_pouch_document_eq_term not_eq;
+  lc_pouch_document_eq_term not_eq ;
   lc_pouch_document_exists_term not_exists;
   lc_pouch_query_index_scan_req req;
   lc_pouch_query_index_scan_res scan;
@@ -6796,7 +6828,7 @@ static void test_query_index_summary_scan_applies_negative_terms(void **state) {
   not_eq.value = "s:block";
   not_exists.field = "/blocked";
   req.namespace_name = "default";
-  req.document_not_eq_terms = &not_eq;
+  req.document_not_eq_terms = &not_eq ;
   req.document_not_eq_term_count = 1U;
   req.document_not_exists_terms = &not_exists;
   req.document_not_exists_term_count = 1U;
