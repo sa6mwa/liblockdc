@@ -11897,11 +11897,6 @@ lc_pouch_disk_scan_meta(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_disk_force_replay_locked(store, error);
-  if (rc != LC_OK) {
-    lc_pouch_disk_unlock(store, error);
-    return rc;
-  }
 
   if (req->key != NULL) {
     if (req->start_after != NULL && strcmp(req->start_after, req->key) >= 0) {
@@ -12101,11 +12096,6 @@ static int lc_pouch_disk_scan_meta_keys(lc_pouch_store *self,
 
   rc = lc_pouch_disk_lock(store, error);
   if (rc != LC_OK) {
-    return rc;
-  }
-  rc = lc_pouch_disk_force_replay_locked(store, error);
-  if (rc != LC_OK) {
-    lc_pouch_disk_unlock(store, error);
     return rc;
   }
 

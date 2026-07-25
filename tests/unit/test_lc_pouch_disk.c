@@ -5077,7 +5077,8 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_metadata_scan_forces_full_log_replay(void **state) {
+static void test_metadata_scan_skips_replay_after_same_handle_write(
+    void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -5086,12 +5087,15 @@ static void test_metadata_scan_forces_full_log_replay(void **state) {
   lc_pouch_store_meta_res stored;
   lc_pouch_scan_meta_req req;
   lc_pouch_scan_meta_res scan;
+  lc_pouch_lock_status before_status;
+  lc_pouch_lock_status after_status;
   scan_capture capture;
   lc_error error;
+  unsigned long replay_refreshes;
   int rc;
 
   (void)state;
-  test_root_path(root, sizeof(root), "meta-scan-full-replay");
+  test_root_path(root, sizeof(root), "meta-scan-no-replay");
   test_cleanup_root(root);
   test_allocator_init(&allocator, &tracked);
   memset(&error, 0, sizeof(error));
@@ -5099,11 +5103,14 @@ static void test_metadata_scan_forces_full_log_replay(void **state) {
   memset(&stored, 0, sizeof(stored));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
+  memset(&before_status, 0, sizeof(before_status));
+  memset(&after_status, 0, sizeof(after_status));
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
+  assert_non_null(store->lock_status);
 
   meta.owner = "owner";
   meta.lease_id = "lease";
@@ -5114,21 +5121,23 @@ static void test_metadata_scan_forces_full_log_replay(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
-  req.namespace_name = "default";
-  tracked.fail_malloc_size = strlen("default") + 1U;
-  rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
-  assert_int_equal(rc, LC_ERR_NOMEM);
-  assert_string_equal(error.message, "failed to decode pouch replay key");
-  tracked.fail_malloc_size = 0U;
-  lc_error_cleanup(&error);
+  rc = store->lock_status(store, &before_status, &error);
+  assert_int_equal(rc, LC_OK);
+  replay_refreshes = before_status.replay_refreshes;
+  lc_pouch_lock_status_cleanup(&allocator, &before_status);
 
-  memset(&capture, 0, sizeof(capture));
+  req.namespace_name = "default";
   rc = store->scan_meta(store, &req, capture_scan_row, &capture, &scan, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 1U);
   assert_string_equal(capture.keys[0], "alpha");
   assert_int_equal(capture.versions[0], 1L);
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
+
+  rc = store->lock_status(store, &after_status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(after_status.replay_refreshes, replay_refreshes);
+  lc_pouch_lock_status_cleanup(&allocator, &after_status);
 
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
@@ -17437,7 +17446,7 @@ int main(void) {
       cmocka_unit_test(test_replay_stops_at_corrupt_queue_record),
       cmocka_unit_test(test_metadata_roundtrip_cas_delete_and_reopen),
       cmocka_unit_test(test_metadata_scan_orders_paginates_and_replays),
-      cmocka_unit_test(test_metadata_scan_forces_full_log_replay),
+      cmocka_unit_test(test_metadata_scan_skips_replay_after_same_handle_write),
       cmocka_unit_test(test_metadata_key_scan_orders_paginates_and_replays),
       cmocka_unit_test(test_metadata_scan_can_exclude_removed_state),
       cmocka_unit_test(test_metadata_scan_paginates_across_removed_state),

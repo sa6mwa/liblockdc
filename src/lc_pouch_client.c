@@ -17061,6 +17061,13 @@ typedef struct lc_pouch_lql_memory_reader {
   int newline_emitted;
 } lc_pouch_lql_memory_reader;
 
+typedef struct lc_pouch_lql_source_reader {
+  lc_source *source;
+  lc_error *source_error;
+  int append_newline;
+  int newline_emitted;
+} lc_pouch_lql_source_reader;
+
 typedef struct lc_pouch_lql_decision_capture {
   int matched;
   size_t calls;
@@ -17090,6 +17097,38 @@ static lql_status lc_pouch_lql_read_memory(void *user, unsigned char *buffer,
     take = 1U;
   }
   *out_len = take;
+  return LQL_STATUS_OK;
+}
+
+static lql_status lc_pouch_lql_read_source(void *user, unsigned char *buffer,
+                                           size_t capacity, size_t *out_len,
+                                           lql_error *error) {
+  lc_pouch_lql_source_reader *reader;
+  size_t got;
+
+  (void)error;
+  reader = (lc_pouch_lql_source_reader *)user;
+  if (reader == NULL || reader->source == NULL || buffer == NULL ||
+      out_len == NULL) {
+    return LQL_STATUS_INVALID_ARGUMENT;
+  }
+  got = reader->source->read(reader->source, buffer, capacity,
+                             reader->source_error);
+  if (got > 0U) {
+    *out_len = got;
+    return LQL_STATUS_OK;
+  }
+  if (reader->source_error != NULL && reader->source_error->code != LC_OK) {
+    *out_len = 0U;
+    return LQL_STATUS_IO_ERROR;
+  }
+  if (capacity > 0U && reader->append_newline && !reader->newline_emitted) {
+    buffer[0] = '\n';
+    reader->newline_emitted = 1;
+    *out_len = 1U;
+    return LQL_STATUS_OK;
+  }
+  *out_len = 0U;
   return LQL_STATUS_OK;
 }
 
@@ -18753,6 +18792,77 @@ static int lc_pouch_lql_document_filter_match_bytes(
 
 static int lc_pouch_lql_document_filter_match(
     lc_client_handle *client, lc_pouch_lql_document_filter *filter,
+    lc_source *body, int *matched, lc_error *error);
+
+static int lc_pouch_lql_document_filter_match_source(
+    lc_client_handle *client, lc_pouch_lql_document_filter *filter,
+    lc_source *body, int *matched, lc_error *error) {
+  lc_pouch_lql_source_reader reader;
+  lc_pouch_lql_decision_capture decision;
+  lql_stream_request request;
+  lql_stream_result result;
+  lql_error lql_err;
+  lql_status status;
+  int rc;
+
+  if (matched != NULL) {
+    *matched = 0;
+  }
+  if (filter == NULL || !filter->enabled) {
+    if (matched != NULL) {
+      *matched = 1;
+    }
+    return LC_OK;
+  }
+  if (body == NULL || matched == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch LQL document filter requires source and "
+                        "matched output",
+                        NULL, NULL, NULL);
+  }
+
+  memset(&reader, 0, sizeof(reader));
+  reader.source = body;
+  reader.source_error = error;
+  reader.append_newline = 1;
+  memset(&decision, 0, sizeof(decision));
+  memset(&request, 0, sizeof(request));
+  request.reader = lc_pouch_lql_read_source;
+  request.reader_user = &reader;
+  request.selector = filter->selector;
+  request.on_decision = lc_pouch_lql_capture_decision;
+  request.decision_user = &decision;
+  memset(&result, 0, sizeof(result));
+  lql_error_init(&lql_err);
+  status = filter->runtime->stream_apply(filter->runtime, &request, &result,
+                                         &lql_err);
+  if (status == LQL_STATUS_UNSUPPORTED) {
+    if (body->reset == NULL) {
+      return lc_pouch_lql_set_error(error, status, &lql_err,
+                                    "failed to evaluate pouch LQL selector");
+    }
+    rc = body->reset(body, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    return lc_pouch_lql_document_filter_match(client, filter, body, matched,
+                                              error);
+  }
+  if (status != LQL_STATUS_OK) {
+    return lc_pouch_lql_set_error(error, status, &lql_err,
+                                  "failed to evaluate pouch LQL selector");
+  }
+  if (result.records_seen != 1U || decision.calls != 1U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch LQL document filter expected one JSON record",
+                        NULL, NULL, NULL);
+  }
+  *matched = decision.matched;
+  return LC_OK;
+}
+
+static int lc_pouch_lql_document_filter_match(
+    lc_client_handle *client, lc_pouch_lql_document_filter *filter,
     lc_source *body, int *matched, lc_error *error) {
   unsigned char *payload;
   size_t payload_len;
@@ -18890,8 +19000,8 @@ static int lc_pouch_query_keys_scan_visit(void *context,
                  lc_pouch_content_type_is_json(state.content_type);
     matched = 0;
     if (embed_json) {
-      rc = lc_pouch_lql_document_filter_match(scan->client, scan->filter, body,
-                                              &matched, error);
+      rc = lc_pouch_lql_document_filter_match_source(
+          scan->client, scan->filter, body, &matched, error);
     }
     if (body != NULL) {
       body->close(body);
@@ -19840,7 +19950,7 @@ static int lc_pouch_client_query_keys_scan(lc_client_handle *client,
   scan_context.namespace_name = namespace_name;
   scan_context.output_limit = (size_t)req->limit;
 
-  if (client->pouch_store->scan_meta_keys != NULL) {
+  if (!filter.enabled && client->pouch_store->scan_meta_keys != NULL) {
     rc = client->pouch_store->scan_meta_keys(client->pouch_store, &scan_req,
                                              lc_pouch_query_keys_index_visit,
                                              &scan_context, &scan_res, error);
