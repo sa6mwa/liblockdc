@@ -8,6 +8,7 @@ typedef struct lockdc_pouch_bench_result {
   uint64_t operations;
   uint64_t rows;
   uint64_t bytes;
+  uint64_t pages;
   uint64_t c_elapsed_ns;
   uint64_t index_seq;
   char error[256];

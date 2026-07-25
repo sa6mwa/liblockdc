@@ -12,6 +12,7 @@ type pouchResult struct {
 	operations uint64
 	rows       uint64
 	bytes      uint64
+	pages      uint64
 	elapsedNS  uint64
 	indexSeq   uint64
 	err        string
@@ -98,6 +99,7 @@ func convertPouchResult(res C.lockdc_pouch_bench_result) pouchResult {
 		operations: uint64(res.operations),
 		rows:       uint64(res.rows),
 		bytes:      uint64(res.bytes),
+		pages:      uint64(res.pages),
 		elapsedNS:  uint64(res.c_elapsed_ns),
 		indexSeq:   uint64(res.index_seq),
 		err:        C.GoString(&res.error[0]),

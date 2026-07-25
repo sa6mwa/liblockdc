@@ -552,6 +552,7 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
       free(cursor);
       cursor = next_cursor;
       page_count++;
+      out->pages++;
       if (rc == LC_OK && cursor != NULL &&
           page_count > (seeded_rows / BENCHMARK_QUERY_PAGE_LIMIT) + 2U) {
         (void)snprintf(out->error, sizeof(out->error),

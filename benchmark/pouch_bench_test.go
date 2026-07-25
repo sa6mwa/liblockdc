@@ -149,6 +149,9 @@ func reportCResult(b *testing.B, res pouchResult) {
 	if res.bytes != 0 {
 		b.ReportMetric(float64(res.bytes)/float64(ops), "stream-bytes/op")
 	}
+	if res.pages != 0 {
+		b.ReportMetric(float64(res.pages)/float64(ops), "query-pages/op")
+	}
 }
 
 func seedRows() int {
@@ -576,6 +579,7 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 	expectedRows := scenario.expected(seededRows)
 
 	b.ResetTimer()
+	totalPages := 0
 	for i := 0; i < b.N; i++ {
 		cursor := ""
 		rows := 0
@@ -626,6 +630,7 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 				b.Fatalf("close query response: %v", err)
 			}
 			pages++
+			totalPages++
 			if cursor == "" {
 				break
 			}
@@ -643,6 +648,9 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 	b.StopTimer()
 	b.ReportMetric(float64(seededRows), "seeded-rows")
 	b.ReportMetric(float64(expectedRows), "matched-rows")
+	if b.N > 0 {
+		b.ReportMetric(float64(totalPages)/float64(b.N), "query-pages/op")
+	}
 }
 
 func BenchmarkPouchCIndexedLQLKeys10k(b *testing.B) {
