@@ -1335,6 +1335,10 @@ Simple positive numeric `range` scans use a bound-aware generation-keyed cache
 with explicit `gt`/`gte`/`lt`/`lte` presence bits and length-prefixed typed
 bound values. This keeps open, closed, and absent bounds distinct while still
 reusing the full matching docID vector across repeated range pages.
+Simple positive `prefix` and `contains` scans use the same result cache. Their
+plan keys include namespace, field, case-sensitivity, and length-prefixed text
+values, so repeated text pages can reuse the matching docID vector until the
+index sequence advances.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,

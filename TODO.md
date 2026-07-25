@@ -539,6 +539,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Wire the result cache into simple positive numeric `range` scans
         using a length-prefixed bound-aware plan key, with post-write
         generation-miss coverage.
+      - [x] Wire the result cache into simple positive `prefix` and
+        `contains` scans using length-prefixed text plan keys that include the
+        case-sensitivity flag; contains coverage includes a post-write
+        generation miss.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

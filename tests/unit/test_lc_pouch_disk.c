@@ -6739,6 +6739,7 @@ test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   lc_pouch_put_state_res state_alpha;
   lc_pouch_put_state_res state_bravo;
   lc_pouch_put_state_res state_charlie;
+  lc_pouch_put_state_res state_delta;
   lc_pouch_meta meta;
   lc_pouch_store_meta_res stored;
   lc_pouch_document_contains_term contains;
@@ -6758,6 +6759,7 @@ test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   memset(&state_alpha, 0, sizeof(state_alpha));
   memset(&state_bravo, 0, sizeof(state_bravo));
   memset(&state_charlie, 0, sizeof(state_charlie));
+  memset(&state_delta, 0, sizeof(state_delta));
   memset(&meta, 0, sizeof(meta));
   memset(&stored, 0, sizeof(stored));
   memset(&contains, 0, sizeof(contains));
@@ -6834,6 +6836,32 @@ test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  source = source_from_text("{\"body\":\"zzABCzz\"}");
+  rc = store->write_state(store, "default", "delta", source, &put_opts,
+                          &state_delta, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  meta.lease_id = "lease-delta";
+  meta.state_etag = state_delta.new_state_etag;
+  meta.version = state_delta.new_version;
+  meta.fencing_token = state_delta.new_version;
+  rc = store->store_meta(store, "default", "delta", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  memset(&keys, 0, sizeof(keys));
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_string_equal(keys.keys[1], "delta");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   memset(&rows, 0, sizeof(rows));
   contains.ignore_case = 0;
   req.document_contains_terms = NULL;
@@ -6843,8 +6871,9 @@ test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
                                &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(rows.count, 1U);
+  assert_int_equal(rows.count, 2U);
   assert_string_equal(rows.keys[0], "alpha");
+  assert_string_equal(rows.keys[1], "delta");
   assert_false(scan.truncated);
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
@@ -6854,12 +6883,14 @@ test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(keys.count, 2U);
+  assert_int_equal(keys.count, 3U);
   assert_string_equal(keys.keys[0], "alpha");
   assert_string_equal(keys.keys[1], "bravo");
+  assert_string_equal(keys.keys[2], "delta");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  lc_pouch_put_state_res_cleanup(&allocator, &state_delta);
   lc_pouch_put_state_res_cleanup(&allocator, &state_charlie);
   lc_pouch_put_state_res_cleanup(&allocator, &state_bravo);
   lc_pouch_put_state_res_cleanup(&allocator, &state_alpha);
