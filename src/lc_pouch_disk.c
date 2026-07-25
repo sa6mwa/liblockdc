@@ -4876,15 +4876,15 @@ static int lc_pouch_disk_query_field_key_matches_not_eq(
   return 1;
 }
 
-static int lc_pouch_disk_query_field_key_matches_terms(
+static int lc_pouch_disk_query_field_key_matches_terms_from(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
-    const char *key) {
+    const char *key, size_t first_term) {
   size_t index;
 
   if (req == NULL || key == NULL) {
     return 1;
   }
-  for (index = 1U; index < req->document_eq_term_count; ++index) {
+  for (index = first_term; index < req->document_eq_term_count; ++index) {
     const lc_pouch_document_eq_term *term;
     lc_pouch_disk_query_field_posting *posting;
     size_t position;
@@ -4901,6 +4901,12 @@ static int lc_pouch_disk_query_field_key_matches_terms(
     }
   }
   return lc_pouch_disk_query_field_key_matches_not_eq(store, req, key);
+}
+
+static int lc_pouch_disk_query_field_key_matches_terms(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const char *key) {
+  return lc_pouch_disk_query_field_key_matches_terms_from(store, req, key, 1U);
 }
 
 static int lc_pouch_disk_query_field_key_matches_ranges_from(
@@ -6477,8 +6483,8 @@ static int lc_pouch_disk_query_field_collect_range_keys_locked(
     if (!lc_pouch_disk_query_field_number_matches_range(posting->value,
                                                         primary) ||
         !lc_pouch_disk_query_field_posting_has_live_state(store, posting) ||
-        !lc_pouch_disk_query_field_key_matches_terms(store, req,
-                                                     posting->key) ||
+        !lc_pouch_disk_query_field_key_matches_terms_from(store, req,
+                                                          posting->key, 0U) ||
         !lc_pouch_disk_query_field_key_matches_ranges_from(store, req,
                                                            posting->key, 1U) ||
         !lc_pouch_disk_query_field_key_matches_in(store, req, posting->key) ||
@@ -11719,6 +11725,15 @@ static int lc_pouch_disk_query_index_scan(
     lc_pouch_disk_unlock(store, error);
     return rc;
   }
+  if (req->document_range_terms != NULL &&
+      req->document_range_term_count > 0U &&
+      req->document_range_terms[0].field != NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_range_scan_locked(
+        store, req, visit, visit_context, out, error);
+  }
   if (req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
       req->document_eq_terms[0].field != NULL &&
       req->document_eq_terms[0].value != NULL) {
@@ -12019,6 +12034,15 @@ static int lc_pouch_disk_query_index_keys_scan(
   if (rc != LC_OK) {
     lc_pouch_disk_unlock(store, error);
     return rc;
+  }
+  if (req->document_range_terms != NULL &&
+      req->document_range_term_count > 0U &&
+      req->document_range_terms[0].field != NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_range_keys_scan_locked(
+        store, req, visit, visit_context, out, error);
   }
   if (req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
       req->document_eq_terms[0].field != NULL &&

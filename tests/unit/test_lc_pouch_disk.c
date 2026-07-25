@@ -6095,6 +6095,32 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   memset(&keys, 0, sizeof(keys));
+  memset(&rows, 0, sizeof(rows));
+  eq.field = "/kind";
+  eq.value = "s:include";
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 2U);
+  assert_string_equal(rows.keys[0], "mid");
+  assert_string_equal(rows.keys[1], "omega");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "mid");
+  assert_string_equal(keys.keys[1], "omega");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
   eq.field = "/kind";
   eq.value = "s:missing";
   req.document_eq_terms = &eq;
