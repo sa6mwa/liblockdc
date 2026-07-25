@@ -493,6 +493,10 @@ Latest release targets confirmed on 2026-07-23:
         `lc_pouch_index`: `(field,value)` terms are interned into stable term
         IDs with sorted lookup and duplicate preservation coverage. Disk
         readers still need to build and consume compiled dictionaries.
+      - [x] Add the first term-ID posting table primitive in `lc_pouch_index`:
+        exact terms now map to adaptive sparse/dense docID postings with
+        binary lookup, missing-term, and replacement coverage. Disk readers
+        still need to compile sidecar postings into this table.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.

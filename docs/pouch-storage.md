@@ -1295,6 +1295,9 @@ toward immutable compiled readers, not the final reader-cache architecture.
 The same internal layer now owns the initial term dictionary primitive:
 `(field,value)` pairs are interned into stable term IDs with sorted lookup so
 compiled readers can stop carrying raw string scans through the planner.
+Exact-term postings can also be stored by term ID as adaptive sparse/dense
+docID postings, giving the compiled reader a direct lookup target for equality
+and `in` plans before the disk adapter is fully cut over.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,

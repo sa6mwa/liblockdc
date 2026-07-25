@@ -695,6 +695,137 @@ int lc_pouch_index_term_table_find_or_add(const lc_pouch_allocator *allocator,
   return 1;
 }
 
+static int lc_pouch_index_term_posting_table_find_position(
+    const lc_pouch_index_term_posting_table *table,
+    lc_pouch_index_term_id term_id, size_t *position_out) {
+  size_t low;
+  size_t high;
+
+  if (position_out != NULL) {
+    *position_out = 0U;
+  }
+  if (table == NULL) {
+    return 0;
+  }
+  low = 0U;
+  high = table->count;
+  while (low < high) {
+    size_t mid;
+
+    mid = low + ((high - low) / 2U);
+    if (table->entries[mid].term_id < term_id) {
+      low = mid + 1U;
+    } else {
+      high = mid;
+    }
+  }
+  if (position_out != NULL) {
+    *position_out = low;
+  }
+  return low < table->count && table->entries[low].term_id == term_id;
+}
+
+static int lc_pouch_index_term_posting_table_reserve(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_term_posting_table *table, size_t needed) {
+  size_t new_capacity;
+  lc_pouch_index_term_posting_entry *grown;
+
+  if (table == NULL) {
+    return 0;
+  }
+  if (needed <= table->capacity) {
+    return 1;
+  }
+  new_capacity = table->capacity == 0U ? 16U : table->capacity;
+  while (new_capacity < needed) {
+    if (new_capacity > ((size_t)-1) / 2U) {
+      return 0;
+    }
+    new_capacity *= 2U;
+  }
+  if (new_capacity > ((size_t)-1) / sizeof(table->entries[0])) {
+    return 0;
+  }
+  grown = (lc_pouch_index_term_posting_entry *)lc_pouch_realloc(
+      allocator, table->entries, new_capacity * sizeof(table->entries[0]));
+  if (grown == NULL) {
+    return 0;
+  }
+  table->entries = grown;
+  table->capacity = new_capacity;
+  return 1;
+}
+
+void lc_pouch_index_term_posting_table_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_term_posting_table *table) {
+  size_t index;
+
+  if (table == NULL) {
+    return;
+  }
+  for (index = 0U; index < table->count; ++index) {
+    lc_pouch_index_posting_cleanup(allocator, &table->entries[index].posting);
+  }
+  lc_pouch_free(allocator, table->entries);
+  memset(table, 0, sizeof(*table));
+}
+
+int lc_pouch_index_term_posting_table_put(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_term_posting_table *table, lc_pouch_index_term_id term_id,
+    const lc_pouch_index_doc_id *ids, size_t count) {
+  lc_pouch_index_posting posting;
+  size_t position;
+
+  if (table == NULL || (ids == NULL && count > 0U)) {
+    return 0;
+  }
+  memset(&posting, 0, sizeof(posting));
+  if (!lc_pouch_index_posting_build(allocator, &posting, ids, count)) {
+    return 0;
+  }
+  if (lc_pouch_index_term_posting_table_find_position(table, term_id,
+                                                      &position)) {
+    lc_pouch_index_posting_cleanup(allocator,
+                                   &table->entries[position].posting);
+    table->entries[position].posting = posting;
+    return 1;
+  }
+  if (!lc_pouch_index_term_posting_table_reserve(allocator, table,
+                                                 table->count + 1U)) {
+    lc_pouch_index_posting_cleanup(allocator, &posting);
+    return 0;
+  }
+  if (position < table->count) {
+    memmove(&table->entries[position + 1U], &table->entries[position],
+            (table->count - position) * sizeof(table->entries[0]));
+  }
+  table->entries[position].term_id = term_id;
+  table->entries[position].posting = posting;
+  table->count++;
+  return 1;
+}
+
+int lc_pouch_index_term_posting_table_decode(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_term_posting_table *table,
+    lc_pouch_index_term_id term_id, lc_pouch_index_doc_id_set *dst) {
+  size_t position;
+
+  if (dst == NULL) {
+    return 0;
+  }
+  dst->count = 0U;
+  if (!lc_pouch_index_term_posting_table_find_position(table, term_id,
+                                                       &position)) {
+    return 1;
+  }
+  return lc_pouch_index_posting_decode(allocator,
+                                       &table->entries[position].posting, dst);
+}
+
 int lc_pouch_index_collect_eq_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,

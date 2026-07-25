@@ -253,6 +253,76 @@ static void test_term_table_interns_sorted_terms_with_stable_ids(void **state) {
   lc_pouch_index_term_table_cleanup(NULL, &table);
 }
 
+static void test_term_posting_table_decodes_by_term_id(void **state) {
+  lc_pouch_index_term_posting_table table;
+  lc_pouch_index_doc_id_set decoded;
+  lc_pouch_index_doc_id first_ids[] = {9U, 3U, 3U, 7U};
+  lc_pouch_index_doc_id second_ids[128];
+  lc_pouch_index_doc_id first_expected[] = {3U, 7U, 9U};
+  size_t index;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&decoded, 0, sizeof(decoded));
+  for (index = 0U; index < sizeof(second_ids) / sizeof(second_ids[0]);
+       ++index) {
+    second_ids[index] = (lc_pouch_index_doc_id)index;
+  }
+
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &table, 42U, first_ids, sizeof(first_ids) / sizeof(first_ids[0])));
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &table, 7U, second_ids,
+      sizeof(second_ids) / sizeof(second_ids[0])));
+
+  assert_int_equal(table.count, 2U);
+  assert_int_equal(table.entries[0].term_id, 7U);
+  assert_int_equal(table.entries[0].posting.encoding,
+                   LC_POUCH_INDEX_POSTING_DENSE);
+  assert_int_equal(table.entries[1].term_id, 42U);
+  assert_int_equal(table.entries[1].posting.encoding,
+                   LC_POUCH_INDEX_POSTING_SPARSE);
+
+  assert_true(
+      lc_pouch_index_term_posting_table_decode(NULL, &table, 42U, &decoded));
+  assert_doc_ids(&decoded, first_expected,
+                 sizeof(first_expected) / sizeof(first_expected[0]));
+
+  assert_true(
+      lc_pouch_index_term_posting_table_decode(NULL, &table, 99U, &decoded));
+  assert_doc_ids(&decoded, NULL, 0U);
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &decoded);
+  lc_pouch_index_term_posting_table_cleanup(NULL, &table);
+}
+
+static void test_term_posting_table_replaces_existing_posting(void **state) {
+  lc_pouch_index_term_posting_table table;
+  lc_pouch_index_doc_id_set decoded;
+  lc_pouch_index_doc_id initial_ids[] = {1U, 4U, 8U};
+  lc_pouch_index_doc_id replacement_ids[] = {2U, 4U, 4U};
+  lc_pouch_index_doc_id expected[] = {2U, 4U};
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&decoded, 0, sizeof(decoded));
+
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &table, 3U, initial_ids,
+      sizeof(initial_ids) / sizeof(initial_ids[0])));
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &table, 3U, replacement_ids,
+      sizeof(replacement_ids) / sizeof(replacement_ids[0])));
+  assert_int_equal(table.count, 1U);
+
+  assert_true(
+      lc_pouch_index_term_posting_table_decode(NULL, &table, 3U, &decoded));
+  assert_doc_ids(&decoded, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &decoded);
+  lc_pouch_index_term_posting_table_cleanup(NULL, &table);
+}
+
 typedef struct fake_exact_reader {
   size_t calls;
 } fake_exact_reader;
@@ -439,6 +509,8 @@ int main(void) {
       cmocka_unit_test(test_posting_sparse_handles_max_doc_id),
       cmocka_unit_test(test_posting_dense_decodes_and_intersects),
       cmocka_unit_test(test_term_table_interns_sorted_terms_with_stable_ids),
+      cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
+      cmocka_unit_test(test_term_posting_table_replaces_existing_posting),
       cmocka_unit_test(
           test_collect_in_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
