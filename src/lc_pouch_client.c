@@ -19017,15 +19017,13 @@ static int lc_pouch_lonejson_error(lc_error *error, lonejson_status status,
                       NULL, NULL, NULL);
 }
 
-static int lc_pouch_query_write_row_prefix(lc_sink *dst, const char *key,
-                                           const lc_pouch_state_info *state,
-                                           lc_error *error) {
+static int lc_pouch_query_serialize_row_prefix(
+    const char *key, const lc_pouch_state_info *state,
+    lonejson_owned_buffer *owned, size_t *prefix_len, lc_error *error) {
   lc_pouch_query_row_meta_json row;
   lonejson *runtime;
   lonejson_error lj_error;
-  lonejson_owned_buffer owned;
   lonejson_status status;
-  int rc;
 
   runtime = lc_thread_lonejson_runtime();
   if (runtime == NULL) {
@@ -19038,27 +19036,104 @@ static int lc_pouch_query_write_row_prefix(lc_sink *dst, const char *key,
   row.content_type = (char *)(state != NULL ? state->content_type : NULL);
   row.etag = (char *)(state != NULL ? state->etag : NULL);
   row.version = state != NULL ? (lonejson_int64)state->version : 0;
-  owned = lonejson_default_owned_buffer();
+  *owned = lonejson_default_owned_buffer();
   lonejson_error_init(&lj_error);
   status = runtime->serialize_owned(runtime, &lc_pouch_query_row_meta_map, &row,
-                                    &owned, &lj_error);
+                                    owned, &lj_error);
   if (status != LONEJSON_STATUS_OK) {
-    lonejson_owned_buffer_free(&owned);
+    lonejson_owned_buffer_free(owned);
     return lc_pouch_lonejson_error(error, status, &lj_error,
                                    "failed to serialize pouch query row");
   }
-  if (owned.len == 0U || owned.data[owned.len - 1U] != '}') {
-    lonejson_owned_buffer_free(&owned);
+  if (owned->len == 0U || owned->data[owned->len - 1U] != '}') {
+    lonejson_owned_buffer_free(owned);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query row serializer returned invalid JSON",
                         NULL, NULL, NULL);
   }
-  rc = lc_pouch_sink_write_all(dst, owned.data, owned.len - 1U, error);
+  *prefix_len = owned->len - 1U;
+  return LC_OK;
+}
+
+static int lc_pouch_query_write_row_prefix(lc_sink *dst, const char *key,
+                                           const lc_pouch_state_info *state,
+                                           lc_error *error) {
+  lonejson_owned_buffer owned;
+  size_t prefix_len;
+  int rc;
+
+  rc = lc_pouch_query_serialize_row_prefix(key, state, &owned, &prefix_len,
+                                           error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_sink_write_all(dst, owned.data, prefix_len, error);
   lonejson_owned_buffer_free(&owned);
   if (rc != LC_OK) {
     return rc;
   }
   return lc_pouch_sink_write_cstr(dst, ",\"document\":", error);
+}
+
+static int lc_pouch_query_try_write_small_json_row(
+    lc_pouch_query_scan_context *scan, const char *key,
+    const lc_pouch_state_info *state, lc_source *body, int *handled,
+    lc_error *error) {
+  static const char document_field[] = ",\"document\":";
+  unsigned char row_buffer[8192];
+  lonejson_owned_buffer owned;
+  size_t prefix_len;
+  size_t body_len;
+  size_t total_len;
+  size_t offset;
+  int rc;
+
+  if (handled != NULL) {
+    *handled = 0;
+  }
+  if (scan == NULL || key == NULL || state == NULL || body == NULL ||
+      handled == NULL || state->bytes < 0L) {
+    return LC_OK;
+  }
+  body_len = (size_t)state->bytes;
+  rc = lc_pouch_query_serialize_row_prefix(key, state, &owned, &prefix_len,
+                                           error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  total_len = prefix_len + (sizeof(document_field) - 1U) + body_len + 2U;
+  if (total_len > sizeof(row_buffer)) {
+    lonejson_owned_buffer_free(&owned);
+    return LC_OK;
+  }
+  memcpy(row_buffer, owned.data, prefix_len);
+  lonejson_owned_buffer_free(&owned);
+  offset = prefix_len;
+  memcpy(row_buffer + offset, document_field, sizeof(document_field) - 1U);
+  offset += sizeof(document_field) - 1U;
+  while (offset < total_len - 2U) {
+    size_t got;
+
+    got = body->read(body, row_buffer + offset, total_len - 2U - offset, error);
+    if (got == 0U) {
+      if (error != NULL && error->code != LC_OK) {
+        return error->code;
+      }
+      break;
+    }
+    offset += got;
+  }
+  if (offset != total_len - 2U) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "pouch query row body ended early", NULL, NULL, NULL);
+  }
+  row_buffer[offset++] = '}';
+  row_buffer[offset++] = '\n';
+  rc = lc_pouch_sink_write_all(scan->dst, row_buffer, offset, error);
+  if (rc == LC_OK) {
+    *handled = 1;
+  }
+  return rc;
 }
 
 static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
@@ -19168,6 +19243,23 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
       scan->emitted_count++;
     }
     return rc;
+  }
+
+  if (embed_json) {
+    int handled;
+
+    handled = 0;
+    rc = lc_pouch_query_try_write_small_json_row(scan, row->key, state_view,
+                                                 body, &handled, error);
+    if (rc != LC_OK || handled) {
+      if (body != NULL && !borrowed_body) {
+        body->close(body);
+      }
+      if (!borrowed_body) {
+        lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      }
+      return rc;
+    }
   }
 
   rc = lc_pouch_query_write_row_prefix(scan->dst, row->key, state_view, error);
