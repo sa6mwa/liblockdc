@@ -8835,6 +8835,59 @@ test_pouch_endpoint_index_query_excludes_typed_not_eq_candidates(void **state) {
 }
 
 static void
+test_pouch_endpoint_index_contains_filters_trigram_false_positive(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *match;
+  lc_lease *false_positive;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-contains-trigram-filter");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  client = open_pouch_client(endpoint);
+
+  match = pouch_acquire_query_key(client, "match", &error);
+  pouch_save_query_json(match, "{\"value\":\"alphabet soup\"}", &error);
+  false_positive = pouch_acquire_query_key(client, "false-positive", &error);
+  pouch_save_query_json(
+      false_positive,
+      "{\"value\":\"alp lph pha hab abe bet without contiguous word\"}",
+      &error);
+  match->close(match);
+  false_positive->close(false_positive);
+
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"contains\":{\"field\":\"/value\",\"value\":\"alphabet\"}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "match");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson(void **state) {
   char root[256];
   char endpoint[320];
@@ -12141,6 +12194,8 @@ int main(void) {
           test_pouch_endpoint_index_range_query_preserves_numeric_order),
       cmocka_unit_test(
           test_pouch_endpoint_index_query_excludes_typed_not_eq_candidates),
+      cmocka_unit_test(
+          test_pouch_endpoint_index_contains_filters_trigram_false_positive),
       cmocka_unit_test(
           test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson),
       cmocka_unit_test(
