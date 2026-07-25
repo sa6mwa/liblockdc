@@ -18736,6 +18736,575 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
   return LC_OK;
 }
 
+static int lc_pouch_lonejson_error(lc_error *error, lonejson_status status,
+                                   const lonejson_error *lj_error,
+                                   const char *message);
+
+typedef struct lc_pouch_lql_fast_match_visit {
+  lc_client_handle *client;
+  const lc_pouch_lql_document_filter *filter;
+  char *field;
+  size_t field_len;
+  size_t field_capacity;
+  char *value;
+  size_t value_len;
+  size_t value_capacity;
+  int number_active;
+  int failed;
+  uint64_t eq_bits;
+  uint64_t range_bits;
+  uint64_t in_bits;
+  uint64_t exists_bits;
+  int or_matched;
+} lc_pouch_lql_fast_match_visit;
+
+static int lc_pouch_lql_fast_bit_capacity(size_t count) {
+  return count <= 63U;
+}
+
+static int lc_pouch_lql_fast_filter_applicable(
+    const lc_pouch_lql_document_filter *filter) {
+  size_t and_count;
+  size_t or_count;
+
+  if (filter == NULL || !filter->enabled || !filter->index_covers_selector) {
+    return 0;
+  }
+  if (filter->document_not_eq_term_count > 0U ||
+      filter->document_not_range_term_count > 0U ||
+      filter->document_not_in_term_count > 0U ||
+      filter->document_prefix_term_count > 0U ||
+      filter->document_not_prefix_term_count > 0U ||
+      filter->document_or_prefix_term_count > 0U ||
+      filter->document_contains_term_count > 0U ||
+      filter->document_not_contains_term_count > 0U ||
+      filter->document_or_contains_term_count > 0U ||
+      filter->document_not_exists_term_count > 0U ||
+      filter->document_exists_path_pattern_count > 0U ||
+      filter->document_or_exists_path_pattern_count > 0U) {
+    return 0;
+  }
+  if (!lc_pouch_lql_fast_bit_capacity(filter->document_eq_term_count) ||
+      !lc_pouch_lql_fast_bit_capacity(filter->document_range_term_count) ||
+      !lc_pouch_lql_fast_bit_capacity(filter->document_in_term_count) ||
+      !lc_pouch_lql_fast_bit_capacity(filter->document_exists_term_count)) {
+    return 0;
+  }
+  and_count = filter->document_eq_term_count +
+              filter->document_range_term_count +
+              filter->document_in_term_count +
+              filter->document_exists_term_count;
+  or_count = filter->document_or_eq_term_count +
+             filter->document_or_range_term_count +
+             filter->document_or_in_term_count +
+             filter->document_or_exists_term_count;
+  return and_count + or_count > 0U;
+}
+
+static int lc_pouch_lql_fast_append(lc_pouch_lql_fast_match_visit *visit,
+                                    char **buffer, size_t *length,
+                                    size_t *capacity, const char *data,
+                                    size_t data_len) {
+  char *grown;
+  size_t new_capacity;
+
+  if (data_len == 0U) {
+    return 1;
+  }
+  if (*length > ((size_t)-1) - data_len - 1U) {
+    return 0;
+  }
+  if (*length + data_len + 1U > *capacity) {
+    new_capacity = *capacity == 0U ? 64U : *capacity;
+    while (new_capacity < *length + data_len + 1U) {
+      if (new_capacity > ((size_t)-1) / 2U) {
+        return 0;
+      }
+      new_capacity *= 2U;
+    }
+    grown = (char *)lc_client_realloc(visit->client, *buffer, new_capacity);
+    if (grown == NULL) {
+      return 0;
+    }
+    *buffer = grown;
+    *capacity = new_capacity;
+  }
+  memcpy(*buffer + *length, data, data_len);
+  *length += data_len;
+  (*buffer)[*length] = '\0';
+  return 1;
+}
+
+static int lc_pouch_lql_fast_set_path(lc_pouch_lql_fast_match_visit *visit,
+                                      const lonejson_value_path *path) {
+  size_t index;
+
+  visit->field_len = 0U;
+  if (visit->field != NULL) {
+    visit->field[0] = '\0';
+  }
+  if (path == NULL || path->segment_count == 0U) {
+    return 0;
+  }
+  for (index = 0U; index < path->segment_count; ++index) {
+    const lonejson_path_segment *segment;
+    size_t pos;
+
+    segment = &path->segments[index];
+    if (!lc_pouch_lql_fast_append(visit, &visit->field, &visit->field_len,
+                                  &visit->field_capacity, "/", 1U)) {
+      return 0;
+    }
+    for (pos = 0U; pos < segment->len; ++pos) {
+      char ch;
+
+      ch = segment->data[pos];
+      if (ch == '~') {
+        if (!lc_pouch_lql_fast_append(visit, &visit->field, &visit->field_len,
+                                      &visit->field_capacity, "~0", 2U)) {
+          return 0;
+        }
+      } else if (ch == '/') {
+        if (!lc_pouch_lql_fast_append(visit, &visit->field, &visit->field_len,
+                                      &visit->field_capacity, "~1", 2U)) {
+          return 0;
+        }
+      } else if (!lc_pouch_lql_fast_append(
+                     visit, &visit->field, &visit->field_len,
+                     &visit->field_capacity, &ch, 1U)) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_lql_fast_field_matches(const char *term_field,
+                                           const char *field) {
+  size_t term_len;
+
+  if (term_field == NULL || field == NULL) {
+    return 0;
+  }
+  if (strcmp(term_field, field) == 0) {
+    return 1;
+  }
+  term_len = strlen(term_field);
+  if (term_len >= 2U && term_field[term_len - 2U] == '/' &&
+      term_field[term_len - 1U] == '*') {
+    size_t prefix_len;
+    const char *rest;
+
+    prefix_len = term_len - 1U;
+    if (strncmp(term_field, field, prefix_len) != 0) {
+      return 0;
+    }
+    rest = field + prefix_len;
+    return rest[0] != '\0' && strchr(rest, '/') == NULL;
+  }
+  return 0;
+}
+
+static int lc_pouch_lql_fast_range_matches(
+    const char *value, const lc_pouch_document_range_term *term) {
+  int cmp;
+
+  if (value == NULL || term == NULL || strncmp(value, "n:", 2U) != 0) {
+    return 0;
+  }
+  if (term->gt != NULL) {
+    if (!lc_pouch_number_eq_key_compare(value, term->gt, &cmp) || cmp <= 0) {
+      return 0;
+    }
+  }
+  if (term->gte != NULL) {
+    if (!lc_pouch_number_eq_key_compare(value, term->gte, &cmp) || cmp < 0) {
+      return 0;
+    }
+  }
+  if (term->lt != NULL) {
+    if (!lc_pouch_number_eq_key_compare(value, term->lt, &cmp) || cmp >= 0) {
+      return 0;
+    }
+  }
+  if (term->lte != NULL) {
+    if (!lc_pouch_number_eq_key_compare(value, term->lte, &cmp) || cmp > 0) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int
+lc_pouch_lql_fast_in_value_matches(const lc_pouch_document_in_term *term,
+                                   const char *value) {
+  size_t index;
+
+  if (term == NULL || value == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < term->value_count; ++index) {
+    if (term->values[index] != NULL && strcmp(term->values[index], value) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void lc_pouch_lql_fast_emit(lc_pouch_lql_fast_match_visit *visit,
+                                   const char *field, const char *value) {
+  const lc_pouch_lql_document_filter *filter;
+  size_t index;
+
+  if (visit == NULL || field == NULL || value == NULL) {
+    return;
+  }
+  filter = visit->filter;
+  for (index = 0U; index < filter->document_eq_term_count; ++index) {
+    const lc_pouch_document_eq_term *term;
+
+    term = &filter->document_eq_terms[index];
+    if (lc_pouch_lql_fast_field_matches(term->field, field) &&
+        term->value != NULL && strcmp(term->value, value) == 0) {
+      visit->eq_bits |= UINT64_C(1) << index;
+    }
+  }
+  for (index = 0U; index < filter->document_range_term_count; ++index) {
+    const lc_pouch_document_range_term *term;
+
+    term = &filter->document_range_terms[index];
+    if (lc_pouch_lql_fast_field_matches(term->field, field) &&
+        lc_pouch_lql_fast_range_matches(value, term)) {
+      visit->range_bits |= UINT64_C(1) << index;
+    }
+  }
+  for (index = 0U; index < filter->document_in_term_count; ++index) {
+    const lc_pouch_document_in_term *term;
+
+    term = &filter->document_in_terms[index];
+    if (lc_pouch_lql_fast_field_matches(term->field, field) &&
+        lc_pouch_lql_fast_in_value_matches(term, value)) {
+      visit->in_bits |= UINT64_C(1) << index;
+    }
+  }
+  for (index = 0U; index < filter->document_exists_term_count; ++index) {
+    const lc_pouch_document_exists_term *term;
+
+    term = &filter->document_exists_terms[index];
+    if (lc_pouch_lql_fast_field_matches(term->field, field)) {
+      visit->exists_bits |= UINT64_C(1) << index;
+    }
+  }
+  for (index = 0U; index < filter->document_or_eq_term_count; ++index) {
+    const lc_pouch_document_eq_term *term;
+
+    term = &filter->document_or_eq_terms[index];
+    if (lc_pouch_lql_fast_field_matches(term->field, field) &&
+        term->value != NULL && strcmp(term->value, value) == 0) {
+      visit->or_matched = 1;
+    }
+  }
+  for (index = 0U; index < filter->document_or_range_term_count; ++index) {
+    const lc_pouch_document_range_term *term;
+
+    term = &filter->document_or_range_terms[index];
+    if (lc_pouch_lql_fast_field_matches(term->field, field) &&
+        lc_pouch_lql_fast_range_matches(value, term)) {
+      visit->or_matched = 1;
+    }
+  }
+  for (index = 0U; index < filter->document_or_in_term_count; ++index) {
+    const lc_pouch_document_in_term *term;
+
+    term = &filter->document_or_in_terms[index];
+    if (lc_pouch_lql_fast_field_matches(term->field, field) &&
+        lc_pouch_lql_fast_in_value_matches(term, value)) {
+      visit->or_matched = 1;
+    }
+  }
+  for (index = 0U; index < filter->document_or_exists_term_count; ++index) {
+    const lc_pouch_document_exists_term *term;
+
+    term = &filter->document_or_exists_terms[index];
+    if (lc_pouch_lql_fast_field_matches(term->field, field)) {
+      visit->or_matched = 1;
+    }
+  }
+}
+
+static lonejson_status
+lc_pouch_lql_fast_string_begin(void *user, const lonejson_value_path *path,
+                               lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  visit->value_len = 0U;
+  if (visit->value != NULL) {
+    visit->value[0] = '\0';
+  }
+  if (!lc_pouch_lql_fast_set_path(visit, path) ||
+      !lc_pouch_lql_fast_append(visit, &visit->value, &visit->value_len,
+                                &visit->value_capacity, "s:", 2U)) {
+    visit->failed = 1;
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_string_chunk(void *user, const lonejson_value_path *path,
+                               const char *data, size_t len,
+                               lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (!lc_pouch_lql_fast_append(visit, &visit->value, &visit->value_len,
+                                &visit->value_capacity, data, len)) {
+    visit->failed = 1;
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_string_end(void *user, const lonejson_value_path *path,
+                             lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL || visit->field == NULL || visit->value == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  lc_pouch_lql_fast_emit(visit, visit->field, visit->value);
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_number_begin(void *user, const lonejson_value_path *path,
+                               lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  visit->value_len = 0U;
+  if (visit->value != NULL) {
+    visit->value[0] = '\0';
+  }
+  visit->number_active = 0;
+  if (!lc_pouch_lql_fast_set_path(visit, path)) {
+    return LONEJSON_STATUS_OK;
+  }
+  visit->number_active = 1;
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_number_chunk(void *user, const lonejson_value_path *path,
+                               const char *data, size_t len,
+                               lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (!visit->number_active) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (!lc_pouch_lql_fast_append(visit, &visit->value, &visit->value_len,
+                                &visit->value_capacity, data, len)) {
+    visit->failed = 1;
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_number_end(void *user, const lonejson_value_path *path,
+                             lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+  char *encoded;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (!visit->number_active || visit->field == NULL || visit->value == NULL) {
+    return LONEJSON_STATUS_OK;
+  }
+  visit->number_active = 0;
+  encoded = NULL;
+  if (lc_pouch_number_eq_key(visit->value, visit->value_len, &encoded)) {
+    lc_pouch_lql_fast_emit(visit, visit->field, encoded);
+    lc_free_with_allocator(NULL, encoded);
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_bool_value(void *user, const lonejson_value_path *path,
+                             int value, lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (lc_pouch_lql_fast_set_path(visit, path)) {
+    lc_pouch_lql_fast_emit(visit, visit->field, value ? "b:1" : "b:0");
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_null_value(void *user, const lonejson_value_path *path,
+                             lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (lc_pouch_lql_fast_set_path(visit, path)) {
+    lc_pouch_lql_fast_emit(visit, visit->field, "z:");
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_container_begin(void *user, const lonejson_value_path *path,
+                                  lonejson_error *error, const char *encoded) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (lc_pouch_lql_fast_set_path(visit, path)) {
+    lc_pouch_lql_fast_emit(visit, visit->field, encoded);
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_object_begin(void *user, const lonejson_value_path *path,
+                               lonejson_error *error) {
+  return lc_pouch_lql_fast_container_begin(user, path, error, "o:");
+}
+
+static lonejson_status
+lc_pouch_lql_fast_array_begin(void *user, const lonejson_value_path *path,
+                              lonejson_error *error) {
+  return lc_pouch_lql_fast_container_begin(user, path, error, "a:");
+}
+
+static uint64_t lc_pouch_lql_fast_all_bits(size_t count) {
+  return count == 0U ? 0U : ((UINT64_C(1) << count) - UINT64_C(1));
+}
+
+static int lc_pouch_lql_document_filter_match_fast_bytes(
+    lc_client_handle *client, lc_pouch_lql_document_filter *filter,
+    const unsigned char *payload, size_t payload_len, int *matched,
+    int *handled, lc_error *error) {
+  lc_pouch_lql_fast_match_visit visit;
+  lonejson_path_value_visitor visitor;
+  lonejson_error lj_error;
+  lonejson_status status;
+  lonejson *runtime;
+  uint64_t expected;
+  int or_required;
+
+  if (handled != NULL) {
+    *handled = 0;
+  }
+  if (matched != NULL) {
+    *matched = 0;
+  }
+  if (handled == NULL || matched == NULL ||
+      !lc_pouch_lql_fast_filter_applicable(filter)) {
+    return LC_OK;
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query JSON runtime", NULL,
+                        NULL, NULL);
+  }
+  *handled = 1;
+  memset(&visit, 0, sizeof(visit));
+  visit.client = client;
+  visit.filter = filter;
+  visitor = lonejson_default_path_value_visitor();
+  visitor.object_begin = lc_pouch_lql_fast_object_begin;
+  visitor.array_begin = lc_pouch_lql_fast_array_begin;
+  visitor.string_begin = lc_pouch_lql_fast_string_begin;
+  visitor.string_chunk = lc_pouch_lql_fast_string_chunk;
+  visitor.string_end = lc_pouch_lql_fast_string_end;
+  visitor.number_begin = lc_pouch_lql_fast_number_begin;
+  visitor.number_chunk = lc_pouch_lql_fast_number_chunk;
+  visitor.number_end = lc_pouch_lql_fast_number_end;
+  visitor.boolean_value = lc_pouch_lql_fast_bool_value;
+  visitor.null_value = lc_pouch_lql_fast_null_value;
+  lonejson_error_init(&lj_error);
+  status = runtime->visit_path_value_buffer(runtime, payload, payload_len,
+                                            &visitor, &visit, &lj_error);
+  lc_client_free(client, visit.field);
+  lc_client_free(client, visit.value);
+  if (visit.failed) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to evaluate pouch LQL selector", NULL, NULL,
+                        NULL);
+  }
+  if (status != LONEJSON_STATUS_OK) {
+    return lc_pouch_lonejson_error(error, status, &lj_error,
+                                   "failed to evaluate pouch LQL selector");
+  }
+  expected = lc_pouch_lql_fast_all_bits(filter->document_eq_term_count);
+  if ((visit.eq_bits & expected) != expected) {
+    return LC_OK;
+  }
+  expected = lc_pouch_lql_fast_all_bits(filter->document_range_term_count);
+  if ((visit.range_bits & expected) != expected) {
+    return LC_OK;
+  }
+  expected = lc_pouch_lql_fast_all_bits(filter->document_in_term_count);
+  if ((visit.in_bits & expected) != expected) {
+    return LC_OK;
+  }
+  expected = lc_pouch_lql_fast_all_bits(filter->document_exists_term_count);
+  if ((visit.exists_bits & expected) != expected) {
+    return LC_OK;
+  }
+  or_required = filter->document_or_eq_term_count +
+                filter->document_or_range_term_count +
+                filter->document_or_in_term_count +
+                filter->document_or_exists_term_count >
+                0U;
+  *matched = !or_required || visit.or_matched;
+  return LC_OK;
+}
+
 static int lc_pouch_lql_document_filter_match_bytes(
     lc_client_handle *client, lc_pouch_lql_document_filter *filter,
     const unsigned char *payload, size_t payload_len, int *matched,
@@ -18746,6 +19315,8 @@ static int lc_pouch_lql_document_filter_match_bytes(
   lql_stream_result result;
   lql_error lql_err;
   lql_status status;
+  int handled;
+  int rc;
 
   if (matched != NULL) {
     *matched = 0;
@@ -18762,6 +19333,13 @@ static int lc_pouch_lql_document_filter_match_bytes(
                         "pouch LQL document filter requires client, payload, "
                         "and matched output",
                         NULL, NULL, NULL);
+  }
+
+  handled = 0;
+  rc = lc_pouch_lql_document_filter_match_fast_bytes(
+      client, filter, payload, payload_len, matched, &handled, error);
+  if (rc != LC_OK || handled) {
+    return rc;
   }
 
   memset(&reader, 0, sizeof(reader));
