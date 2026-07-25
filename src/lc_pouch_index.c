@@ -608,3 +608,26 @@ int lc_pouch_index_collect_exists_term_doc_ids(
   (void)error;
   return LC_OK;
 }
+
+int lc_pouch_index_collect_range_term_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_range_term *term,
+    lc_pouch_index_range_term_doc_ids_fn read_range, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  int rc;
+
+  if (term == NULL || term->field == NULL || read_range == NULL ||
+      doc_ids == NULL) {
+    return LC_OK;
+  }
+  rc = read_range(read_context, term, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!lc_pouch_index_doc_id_set_sort_unique(doc_ids)) {
+    return LC_ERR_NOMEM;
+  }
+  (void)allocator;
+  (void)error;
+  return LC_OK;
+}

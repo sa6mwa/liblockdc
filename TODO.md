@@ -460,9 +460,10 @@ Latest release targets confirmed on 2026-07-23:
       an internal C index layer with explicit reader, writer, planner, posting,
       visibility, and result-cache boundaries.
       - [x] Introduce the first private reader/planner boundary in
-        `lc_pouch_index`: exact-term docID reader callbacks let the index layer
-        own primary equality, `in` union, and exact `exists` planning while the
-        disk backend adapts the current sidecar postings.
+        `lc_pouch_index`: exact-term, field-presence, and range docID reader
+        callbacks let the index layer own primary equality, `in` union, exact
+        `exists`, and numeric range planning while the disk backend adapts the
+        current sidecar postings.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
@@ -475,6 +476,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Route exact positive `exists` candidate collection through a
         field-presence docID reader callback while preserving the existing
         posting-summary freshness check in the disk adapter.
+      - [x] Route primary numeric range candidate collection through a range
+        docID reader callback and remove the obsolete disk-local equality-span
+        range optimization helpers.
     - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
       delta-varint docID streams and dense bitsets selected by posting
       density/encoded size.
