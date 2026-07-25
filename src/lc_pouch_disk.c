@@ -7441,17 +7441,16 @@ static int lc_pouch_disk_query_field_range_scan_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     lc_pouch_scan_meta_visit_fn visit, void *visit_context,
     lc_pouch_query_index_scan_res *out, lc_error *error) {
-  lc_pouch_disk_scan_meta_copy *rows;
+  lc_pouch_disk_scan_meta_batch batch;
   size_t *indices;
   size_t index_count;
   size_t start_index;
   size_t visit_count;
   size_t index;
   size_t row_index;
-  size_t state_position;
   int rc;
 
-  rows = NULL;
+  memset(&batch, 0, sizeof(batch));
   indices = NULL;
   index_count = 0U;
   rc = lc_pouch_disk_query_field_collect_range_summary_indices_locked(
@@ -7477,49 +7476,19 @@ static int lc_pouch_disk_query_field_range_scan_locked(
     visit_count++;
   }
 
-  if (visit_count > 0U) {
-    rows = (lc_pouch_disk_scan_meta_copy *)lc_pouch_calloc(
-        &store->allocator, visit_count, sizeof(rows[0]));
-    if (rows == NULL) {
-      lc_pouch_free(&store->allocator, indices);
-      lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error,
-                                "failed to allocate pouch range query rows");
-    }
-  }
-  row_index = 0U;
-  state_position = 0U;
-  for (index = start_index; index < index_count && row_index < visit_count;
-       ++index) {
-    lc_pouch_disk_query_summary_entry *entry;
-    const lc_pouch_disk_state_entry *state_entry;
-
-    entry = &store->query_summary_entries[indices[index]];
-    state_entry = lc_pouch_disk_find_entry_from_state_index(
-        store, entry->namespace_name, entry->key, &state_position);
-    if (!lc_pouch_disk_copy_summary_state_for_scan(store, &rows[row_index],
-                                                  entry, state_entry)) {
-      size_t cleanup_index;
-
-      for (cleanup_index = 0U; cleanup_index < row_index; ++cleanup_index) {
-        lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator,
-                                             &rows[cleanup_index]);
-      }
-      lc_pouch_free(&store->allocator, rows);
-      lc_pouch_free(&store->allocator, indices);
-      lc_pouch_disk_unlock(store, error);
-      return lc_pouch_set_nomem(error, "failed to copy pouch range query row");
-    }
-    row_index++;
+  rc = lc_pouch_disk_scan_meta_batch_from_summary_indices(
+      store, indices, start_index, visit_count, &batch, error,
+      "failed to allocate pouch range query rows");
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, indices);
+    lc_pouch_disk_unlock(store, error);
+    return rc;
   }
   if (out->truncated && visit_count > 0U) {
-    out->next_start_after =
-        lc_pouch_strdup(&store->allocator, rows[visit_count - 1U].key);
+    out->next_start_after = lc_pouch_strdup(
+        &store->allocator, batch.rows[visit_count - 1U].key);
     if (out->next_start_after == NULL) {
-      for (index = 0U; index < visit_count; ++index) {
-        lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
-      }
-      lc_pouch_free(&store->allocator, rows);
+      lc_pouch_disk_scan_meta_batch_cleanup(store, &batch);
       lc_pouch_free(&store->allocator, indices);
       lc_pouch_disk_unlock(store, error);
       return lc_pouch_set_nomem(error,
@@ -7531,32 +7500,23 @@ static int lc_pouch_disk_query_field_range_scan_locked(
 
   rc = lc_pouch_disk_unlock(store, error);
   if (rc != LC_OK) {
-    for (index = 0U; index < visit_count; ++index) {
-      lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
-    }
-    lc_pouch_free(&store->allocator, rows);
+    lc_pouch_disk_scan_meta_batch_cleanup(store, &batch);
     lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
     return rc;
   }
 
   for (row_index = 0U; row_index < visit_count; ++row_index) {
-    rc = lc_pouch_disk_visit_scan_meta_copy(store, &rows[row_index], visit,
-                                            visit_context, error);
+    rc = lc_pouch_disk_visit_scan_meta_copy(
+        store, &batch.rows[row_index], visit, visit_context, error);
     if (rc != LC_OK) {
-      for (index = 0U; index < visit_count; ++index) {
-        lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
-      }
-      lc_pouch_free(&store->allocator, rows);
+      lc_pouch_disk_scan_meta_batch_cleanup(store, &batch);
       lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
       return rc;
     }
     out->visited++;
   }
 
-  for (index = 0U; index < visit_count; ++index) {
-    lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
-  }
-  lc_pouch_free(&store->allocator, rows);
+  lc_pouch_disk_scan_meta_batch_cleanup(store, &batch);
   return LC_OK;
 }
 
