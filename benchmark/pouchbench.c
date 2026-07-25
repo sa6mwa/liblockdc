@@ -3,8 +3,11 @@
 #include "lc/lc.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#define BENCHMARK_QUERY_PAGE_LIMIT 1000U
 
 typedef struct key_count {
   uint64_t rows;
@@ -22,6 +25,22 @@ static uint64_t now_ns(void) {
     return 0U;
   }
   return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
+
+static char *bench_strdup(const char *value) {
+  char *copy;
+  size_t len;
+
+  if (value == NULL) {
+    return NULL;
+  }
+  len = strlen(value) + 1U;
+  copy = (char *)malloc(len);
+  if (copy == NULL) {
+    return NULL;
+  }
+  memcpy(copy, value, len);
+  return copy;
 }
 
 static void set_error(lockdc_pouch_bench_result *out, const char *where,
@@ -477,41 +496,77 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
 
   start = now_ns();
   for (i = 0U; i < iterations; ++i) {
-    lc_query_req_init(&req);
-    memset(&res, 0, sizeof(res));
-    req.selector_json = selector;
-    req.engine = engine;
-    req.limit = (long)seeded_rows;
-    if (keys_only) {
-      memset(&handler, 0, sizeof(handler));
-      memset(&keys, 0, sizeof(keys));
-      handler.begin = key_begin;
-      handler.chunk = key_chunk;
-      handler.end = key_end;
-      rc = client->query_keys(client, &req, &handler, &keys, &res, &error);
-      out->bytes += keys.bytes;
-      if (rc == LC_OK && keys.rows != expected_rows) {
-        (void)snprintf(out->error, sizeof(out->error),
-                       "query keys matched %llu rows, expected %llu",
-                       (unsigned long long)keys.rows,
-                       (unsigned long long)expected_rows);
+    char *cursor;
+    uint64_t page_count;
+
+    cursor = NULL;
+    page_count = 0U;
+    memset(&keys, 0, sizeof(keys));
+    do {
+      char *next_cursor;
+
+      lc_query_req_init(&req);
+      memset(&res, 0, sizeof(res));
+      req.selector_json = selector;
+      req.engine = engine;
+      req.limit = (long)BENCHMARK_QUERY_PAGE_LIMIT;
+      req.cursor = cursor;
+      if (keys_only) {
+        key_count page_keys;
+
+        memset(&handler, 0, sizeof(handler));
+        memset(&page_keys, 0, sizeof(page_keys));
+        handler.begin = key_begin;
+        handler.chunk = key_chunk;
+        handler.end = key_end;
+        rc = client->query_keys(client, &req, &handler, &page_keys, &res,
+                                &error);
+        keys.rows += page_keys.rows;
+        keys.bytes += page_keys.bytes;
+        out->bytes += page_keys.bytes;
+      } else {
+        sink = NULL;
+        rc = lc_sink_to_file("/dev/null", &sink, &error);
+        if (rc == LC_OK) {
+          rc = client->query(client, &req, sink, &res, &error);
+          lc_sink_close(sink);
+        }
+      }
+      if (strcmp(engine, "index") == 0 && rc == LC_OK &&
+          res.index_seq == 0UL) {
         rc = LC_ERR_PROTOCOL;
       }
-    } else {
-      sink = NULL;
-      rc = lc_sink_to_file("/dev/null", &sink, &error);
-      if (rc == LC_OK) {
-        rc = client->query(client, &req, sink, &res, &error);
-        lc_sink_close(sink);
+      if (res.index_seq > out->index_seq) {
+        out->index_seq = res.index_seq;
       }
-    }
-    if (strcmp(engine, "index") == 0 && rc == LC_OK && res.index_seq == 0UL) {
+      next_cursor = NULL;
+      if (rc == LC_OK && res.cursor != NULL && res.cursor[0] != '\0') {
+        next_cursor = bench_strdup(res.cursor);
+        if (next_cursor == NULL) {
+          (void)snprintf(out->error, sizeof(out->error),
+                         "failed to copy query pagination cursor");
+          rc = LC_ERR_NOMEM;
+        }
+      }
+      lc_query_res_cleanup(&res);
+      free(cursor);
+      cursor = next_cursor;
+      page_count++;
+      if (rc == LC_OK && cursor != NULL &&
+          page_count > (seeded_rows / BENCHMARK_QUERY_PAGE_LIMIT) + 2U) {
+        (void)snprintf(out->error, sizeof(out->error),
+                       "query pagination exceeded expected page count");
+        rc = LC_ERR_PROTOCOL;
+      }
+    } while (rc == LC_OK && cursor != NULL);
+    free(cursor);
+    if (keys_only && rc == LC_OK && keys.rows != expected_rows) {
+      (void)snprintf(out->error, sizeof(out->error),
+                     "query keys matched %llu rows, expected %llu",
+                     (unsigned long long)keys.rows,
+                     (unsigned long long)expected_rows);
       rc = LC_ERR_PROTOCOL;
     }
-    if (res.index_seq > out->index_seq) {
-      out->index_seq = res.index_seq;
-    }
-    lc_query_res_cleanup(&res);
     if (rc != LC_OK) {
       if (out->error[0] == '\0') {
         set_error(out, keys_only ? "query keys" : "query rows", &error, rc);

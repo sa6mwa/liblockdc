@@ -21,6 +21,7 @@ import (
 
 const seededRows10k = 10000
 const benchmarkNamespace = "bench"
+const benchmarkQueryPageLimit = 1000
 
 type queryScenario struct {
 	name     string
@@ -576,49 +577,67 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		resp, err := cli.Query(ctx,
-			lockdclient.WithQueryNamespace(benchmarkNamespace),
-			lockdclient.WithQuery(scenario.lockdLQL(seededRows)),
-			lockdclient.WithQueryLimit(seededRows),
-			lockdclient.WithQueryEngine(engine),
-			lockdclient.WithQueryRefreshWaitFor(),
-			lockdclient.WithQueryReturn(returnMode),
-		)
-		if err != nil {
-			b.Fatalf("query: %v", err)
-		}
+		cursor := ""
 		rows := 0
-		if keysOnly {
-			rows = len(resp.Keys())
-		} else {
-			err = resp.ForEach(func(row lockdclient.QueryRow) error {
-				rows++
-				reader, err := row.DocumentReader()
-				if err != nil {
-					return err
-				}
-				_, copyErr := io.Copy(io.Discard, reader)
-				closeErr := reader.Close()
-				if copyErr != nil {
-					return copyErr
-				}
-				return closeErr
-			})
+		pages := 0
+		maxIndexSeq := uint64(0)
+		for {
+			opts := []lockdclient.QueryOption{
+				lockdclient.WithQueryNamespace(benchmarkNamespace),
+				lockdclient.WithQuery(scenario.lockdLQL(seededRows)),
+				lockdclient.WithQueryLimit(benchmarkQueryPageLimit),
+				lockdclient.WithQueryEngine(engine),
+				lockdclient.WithQueryRefreshWaitFor(),
+				lockdclient.WithQueryReturn(returnMode),
+			}
+			if cursor != "" {
+				opts = append(opts, lockdclient.WithQueryCursor(cursor))
+			}
+			resp, err := cli.Query(ctx, opts...)
 			if err != nil {
-				_ = resp.Close()
-				b.Fatalf("drain query documents: %v", err)
+				b.Fatalf("query: %v", err)
+			}
+			if keysOnly {
+				rows += len(resp.Keys())
+			} else {
+				err = resp.ForEach(func(row lockdclient.QueryRow) error {
+					rows++
+					reader, err := row.DocumentReader()
+					if err != nil {
+						return err
+					}
+					_, copyErr := io.Copy(io.Discard, reader)
+					closeErr := reader.Close()
+					if copyErr != nil {
+						return copyErr
+					}
+					return closeErr
+				})
+				if err != nil {
+					_ = resp.Close()
+					b.Fatalf("drain query documents: %v", err)
+				}
+			}
+			if resp.IndexSeq > maxIndexSeq {
+				maxIndexSeq = resp.IndexSeq
+			}
+			cursor = resp.Cursor
+			if err := resp.Close(); err != nil {
+				b.Fatalf("close query response: %v", err)
+			}
+			pages++
+			if cursor == "" {
+				break
+			}
+			if pages > seededRows/benchmarkQueryPageLimit+2 {
+				b.Fatalf("query pagination exceeded expected page count")
 			}
 		}
 		if rows != expectedRows {
-			_ = resp.Close()
 			b.Fatalf("query matched %d rows, expected %d", rows, expectedRows)
 		}
-		if engine == "index" && resp.IndexSeq == 0 {
-			_ = resp.Close()
+		if engine == "index" && maxIndexSeq == 0 {
 			b.Fatalf("query did not report index sequence")
-		}
-		if err := resp.Close(); err != nil {
-			b.Fatalf("close query response: %v", err)
 		}
 	}
 	b.StopTimer()
