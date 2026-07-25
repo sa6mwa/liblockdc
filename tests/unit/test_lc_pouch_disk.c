@@ -5952,6 +5952,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   lc_pouch_put_state_opts put_opts;
   lc_pouch_put_state_res state_low;
   lc_pouch_put_state_res state_mid;
+  lc_pouch_put_state_res state_mid_excluded;
   lc_pouch_put_state_res state_more;
   lc_pouch_put_state_res state_high;
   lc_pouch_put_state_res state_removed;
@@ -5975,6 +5976,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   memset(&put_opts, 0, sizeof(put_opts));
   memset(&state_low, 0, sizeof(state_low));
   memset(&state_mid, 0, sizeof(state_mid));
+  memset(&state_mid_excluded, 0, sizeof(state_mid_excluded));
   memset(&state_more, 0, sizeof(state_more));
   memset(&state_high, 0, sizeof(state_high));
   memset(&state_removed, 0, sizeof(state_removed));
@@ -6140,6 +6142,40 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  source = source_from_text("{\"score\":3,\"kind\":\"exclude\"}");
+  rc = store->write_state(store, "default", "mid", source, &put_opts,
+                          &state_mid_excluded, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  meta.lease_id = "lease-mid-excluded";
+  meta.state_etag = state_mid_excluded.new_state_etag;
+  meta.version = state_mid_excluded.new_version;
+  meta.fencing_token = state_mid_excluded.new_version;
+  rc = store->store_meta(store, "default", "mid", &meta, NULL, &stored,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &stored);
+
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_int_equal(rows.body_count, 1U);
+  assert_string_equal(rows.keys[0], "omega");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "omega");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   memset(&keys, 0, sizeof(keys));
   eq.field = "/kind";
   eq.value = "s:missing";
@@ -6155,6 +6191,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   lc_pouch_put_state_res_cleanup(&allocator, &state_removed);
   lc_pouch_put_state_res_cleanup(&allocator, &state_high);
   lc_pouch_put_state_res_cleanup(&allocator, &state_more);
+  lc_pouch_put_state_res_cleanup(&allocator, &state_mid_excluded);
   lc_pouch_put_state_res_cleanup(&allocator, &state_mid);
   lc_pouch_put_state_res_cleanup(&allocator, &state_low);
   rc = store->close(store, &error);
