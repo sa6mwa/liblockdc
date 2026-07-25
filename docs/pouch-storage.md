@@ -933,6 +933,12 @@ When a selector has no positive storage-owned candidate term, the ordered
 summary scan still applies indexed negative equality and field-presence
 exclusions before returning document rows or keys, so negative-only predicates
 do not silently become match-all scans.
+Paginated indexed range collection may apply `start_after` while collecting
+posting candidates, before summary lookup and final predicate checks, because
+keys less than or equal to the cursor cannot be returned by the current page.
+The final sorted-summary pagination step still runs after candidate collection;
+early cursor filtering is only a safe work reducer for candidates that are
+provably outside the requested page.
 Positive `exists` selectors with path wildcards expand candidates from the
 indexed JSON Pointer field dictionary instead of treating wildcards as literal
 posting fields; final acceptance still comes from `liblql`. A single-segment
@@ -2010,6 +2016,14 @@ disk e2e endpoint and bundle defaults, and are excluded from `all` unless
 `LOCKDC_BENCH_LIVE=1` is set. This keeps default benchmark runs local while
 making pouch-versus-Go disk query comparisons reproducible against the same
 public client surface.
+The separate Go module under `benchmark/` is the broader pouch-versus-Go disk
+comparison suite. It starts the current `pkt.systems/lockd` disk backend,
+exercises equivalent public LQL scenarios against that server and an actual
+liblockdc pouch instance, and reports matched rows, page counts, stream bytes,
+and C-side pouch timings. This suite is intentionally outside the liblockdc
+release gate: it is a performance and stress-test tool for iterative tuning,
+including short iteration runs and larger multi-page datasets that expose
+cursor, segment, and index behavior.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local
 benchmarks rather than performance gates; the larger matrix above remains the

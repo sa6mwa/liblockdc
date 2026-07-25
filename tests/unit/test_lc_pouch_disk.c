@@ -6262,10 +6262,16 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
+  write_query_range_number_state(&allocator, store, "k01", "{\"score\":1e0}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "k02",
+                                 "{\"score\":2.25}", &error);
   write_query_range_number_state(&allocator, store, "k07", "{\"score\":7}",
                                  &error);
   write_query_range_number_state(&allocator, store, "k08", "{\"score\":8}",
                                  &error);
+  write_query_range_number_state(&allocator, store, "k085",
+                                 "{\"score\":8.5}", &error);
   write_query_range_number_state(&allocator, store, "k09", "{\"score\":9}",
                                  &error);
   write_query_range_number_state(&allocator, store, "k10", "{\"score\":10}",
@@ -6274,6 +6280,8 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
                                  &error);
   write_query_range_number_state(&allocator, store, "k12", "{\"score\":12}",
                                  &error);
+  write_query_range_number_state(&allocator, store, "kneg",
+                                 "{\"score\":-1.5}", &error);
 
   range.field = "/score";
   range.gte = "n:+:8:0";
@@ -6285,11 +6293,12 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
   rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
                                &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(rows.count, 4U);
+  assert_int_equal(rows.count, 5U);
   assert_string_equal(rows.keys[0], "k08");
-  assert_string_equal(rows.keys[1], "k09");
-  assert_string_equal(rows.keys[2], "k10");
-  assert_string_equal(rows.keys[3], "k11");
+  assert_string_equal(rows.keys[1], "k085");
+  assert_string_equal(rows.keys[2], "k09");
+  assert_string_equal(rows.keys[3], "k10");
+  assert_string_equal(rows.keys[4], "k11");
   assert_false(scan.truncated);
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
@@ -6298,11 +6307,12 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(keys.count, 4U);
+  assert_int_equal(keys.count, 5U);
   assert_string_equal(keys.keys[0], "k08");
-  assert_string_equal(keys.keys[1], "k09");
-  assert_string_equal(keys.keys[2], "k10");
-  assert_string_equal(keys.keys[3], "k11");
+  assert_string_equal(keys.keys[1], "k085");
+  assert_string_equal(keys.keys[2], "k09");
+  assert_string_equal(keys.keys[3], "k10");
+  assert_string_equal(keys.keys[4], "k11");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
@@ -6312,10 +6322,27 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(keys.count, 3U);
-  assert_string_equal(keys.keys[0], "k07");
-  assert_string_equal(keys.keys[1], "k08");
-  assert_string_equal(keys.keys[2], "k09");
+  assert_int_equal(keys.count, 7U);
+  assert_string_equal(keys.keys[0], "k01");
+  assert_string_equal(keys.keys[1], "k02");
+  assert_string_equal(keys.keys[2], "k07");
+  assert_string_equal(keys.keys[3], "k08");
+  assert_string_equal(keys.keys[4], "k085");
+  assert_string_equal(keys.keys[5], "k09");
+  assert_string_equal(keys.keys[6], "kneg");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  range.gt = "n:-:2:0";
+  range.lte = NULL;
+  range.lt = "n:+:2:0";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "k01");
+  assert_string_equal(keys.keys[1], "kneg");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 

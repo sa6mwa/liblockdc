@@ -7416,6 +7416,10 @@ static int lc_pouch_disk_query_field_collect_range_summary_indices_locked(
     if (req->key != NULL && strcmp(posting->key, req->key) != 0) {
       continue;
     }
+    if (req->start_after != NULL &&
+        strcmp(posting->key, req->start_after) <= 0) {
+      continue;
+    }
     if (!lc_pouch_disk_query_field_number_matches_range(posting->value,
                                                         primary)) {
       continue;
@@ -7520,6 +7524,10 @@ static int lc_pouch_disk_query_field_collect_or_range_summary_indices_locked(
       if (cmp < 0) {
         continue;
       }
+      if (req->start_after != NULL &&
+          strcmp(posting->key, req->start_after) <= 0) {
+        continue;
+      }
       rc = lc_pouch_disk_query_field_add_candidate_summary_index(
           store, req, posting, &indices, &index_count, &index_capacity, error,
           "failed to allocate pouch or range query row indices");
@@ -7553,6 +7561,10 @@ static int lc_pouch_disk_query_field_collect_or_range_summary_indices_locked(
         break;
       }
       if (cmp < 0 || strncmp(posting->value, "n:", 2U) != 0) {
+        continue;
+      }
+      if (req->start_after != NULL &&
+          strcmp(posting->key, req->start_after) <= 0) {
         continue;
       }
       if (!lc_pouch_disk_query_field_number_matches_range(posting->value,
