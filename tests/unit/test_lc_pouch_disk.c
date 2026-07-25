@@ -1681,6 +1681,7 @@ typedef struct scan_capture {
   long versions[8];
   long updated_at_unix[8];
   int query_hidden[8];
+  size_t body_count;
   size_t count;
 } scan_capture;
 
@@ -1706,6 +1707,9 @@ static int capture_scan_row(void *context, const lc_pouch_scan_meta_row *row,
   if (row->meta->owner != NULL) {
     snprintf(capture->owners[capture->count],
              sizeof(capture->owners[capture->count]), "%s", row->meta->owner);
+  }
+  if (row->body != NULL && row->state != NULL) {
+    capture->body_count++;
   }
   capture->versions[capture->count] = row->meta->version;
   capture->updated_at_unix[capture->count] = row->meta->updated_at_unix;
@@ -6066,6 +6070,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
                                &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(rows.count, 1U);
+  assert_int_equal(rows.body_count, 1U);
   assert_string_equal(rows.keys[0], "mid");
   assert_true(scan.truncated);
   assert_string_equal(scan.next_start_after, "mid");
@@ -6079,6 +6084,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
                                &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(rows.count, 1U);
+  assert_int_equal(rows.body_count, 1U);
   assert_string_equal(rows.keys[0], "omega");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
@@ -6105,6 +6111,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
                                &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(rows.count, 2U);
+  assert_int_equal(rows.body_count, 2U);
   assert_string_equal(rows.keys[0], "mid");
   assert_string_equal(rows.keys[1], "omega");
   assert_false(scan.truncated);

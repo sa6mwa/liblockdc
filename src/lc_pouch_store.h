@@ -108,6 +108,8 @@ typedef struct lc_pouch_scan_meta_row {
   const char *key;
   const char *etag;
   const lc_pouch_meta *meta;
+  const lc_pouch_state_info *state;
+  lc_source *body;
 } lc_pouch_scan_meta_row;
 
 typedef struct lc_pouch_scan_meta_res {

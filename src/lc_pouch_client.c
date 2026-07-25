@@ -19066,26 +19066,38 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
                                          const lc_pouch_scan_meta_row *row,
                                          lc_error *error) {
   lc_pouch_state_info state;
+  const lc_pouch_state_info *state_view;
   lc_source *body;
   unsigned char *payload;
   size_t payload_len;
+  int borrowed_body;
   int embed_json;
   int emit;
   int matched;
   int rc;
 
   memset(&state, 0, sizeof(state));
+  state_view = NULL;
   body = NULL;
   payload = NULL;
   payload_len = 0U;
-  rc = scan->client->pouch_store->read_state(scan->client->pouch_store,
-                                             namespace_name, row->key, &body,
-                                             &state, error);
-  if (rc != LC_OK) {
-    return rc;
+  borrowed_body = 0;
+  if (row->body != NULL && row->state != NULL) {
+    body = row->body;
+    state_view = row->state;
+    borrowed_body = 1;
+    rc = LC_OK;
+  } else {
+    rc = scan->client->pouch_store->read_state(scan->client->pouch_store,
+                                               namespace_name, row->key, &body,
+                                               &state, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    state_view = &state;
   }
-  embed_json = body != NULL && !state.no_content &&
-               lc_pouch_content_type_is_json(state.content_type);
+  embed_json = body != NULL && !state_view->no_content &&
+               lc_pouch_content_type_is_json(state_view->content_type);
   if (scan->filter != NULL && scan->filter->enabled) {
     matched = 0;
     if (embed_json) {
@@ -19098,38 +19110,47 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
     }
     if (rc != LC_OK) {
       lc_client_free(scan->client, payload);
-      if (body != NULL) {
+      if (body != NULL && !borrowed_body) {
         body->close(body);
       }
-      lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      if (!borrowed_body) {
+        lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      }
       return rc;
     }
     if (!matched) {
       lc_client_free(scan->client, payload);
-      if (body != NULL) {
+      if (body != NULL && !borrowed_body) {
         body->close(body);
       }
-      lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      if (!borrowed_body) {
+        lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      }
       return LC_OK;
     }
     rc = lc_pouch_query_scan_prepare_emit(scan, row->key, &emit, error);
     if (rc != LC_OK) {
       lc_client_free(scan->client, payload);
-      if (body != NULL) {
+      if (body != NULL && !borrowed_body) {
         body->close(body);
       }
-      lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      if (!borrowed_body) {
+        lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      }
       return rc;
     }
     if (!emit) {
       lc_client_free(scan->client, payload);
-      if (body != NULL) {
+      if (body != NULL && !borrowed_body) {
         body->close(body);
       }
-      lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      if (!borrowed_body) {
+        lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+      }
       return LC_OK;
     }
-    rc = lc_pouch_query_write_row_prefix(scan->dst, row->key, &state, error);
+    rc = lc_pouch_query_write_row_prefix(scan->dst, row->key, state_view,
+                                         error);
     if (rc == LC_OK) {
       rc = lc_pouch_sink_write_all(scan->dst, payload, payload_len, error);
     }
@@ -19137,17 +19158,19 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
       rc = lc_pouch_sink_write_cstr(scan->dst, "}\n", error);
     }
     lc_client_free(scan->client, payload);
-    if (body != NULL) {
+    if (body != NULL && !borrowed_body) {
       body->close(body);
     }
-    lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+    if (!borrowed_body) {
+      lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+    }
     if (rc == LC_OK) {
       scan->emitted_count++;
     }
     return rc;
   }
 
-  rc = lc_pouch_query_write_row_prefix(scan->dst, row->key, &state, error);
+  rc = lc_pouch_query_write_row_prefix(scan->dst, row->key, state_view, error);
   if (rc == LC_OK && embed_json) {
     rc = lc_pouch_copy_source_to_sink(body, scan->dst, error);
   } else if (rc == LC_OK) {
@@ -19156,10 +19179,12 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
   if (rc == LC_OK) {
     rc = lc_pouch_sink_write_cstr(scan->dst, "}\n", error);
   }
-  if (body != NULL) {
+  if (body != NULL && !borrowed_body) {
     body->close(body);
   }
-  lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+  if (!borrowed_body) {
+    lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+  }
   return rc;
 }
 
