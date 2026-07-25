@@ -28,6 +28,10 @@ type pouchResult struct {
 	err                 string
 }
 
+type pouchEnv struct {
+	ptr *C.lockdc_pouch_bench_env
+}
+
 func runPouchIndexedLQLDocuments(root string, iterations int, seededRows int) (int, pouchResult) {
 	cRoot := C.CString(root)
 	defer C.free(unsafe.Pointer(cRoot))
@@ -85,6 +89,52 @@ func runPouchLQLScenarioKeys(root string, scenario string, engine string, iterat
 	defer C.free(unsafe.Pointer(cEngine))
 	var res C.lockdc_pouch_bench_result
 	rc := C.lockdc_pouch_bench_lql_scenario_keys(cRoot, cScenario, cEngine, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
+	return int(rc), convertPouchResult(res)
+}
+
+func openPouchLQLEnv(root string, seededRows int) (int, *pouchEnv, pouchResult) {
+	cRoot := C.CString(root)
+	defer C.free(unsafe.Pointer(cRoot))
+	var env *C.lockdc_pouch_bench_env
+	var res C.lockdc_pouch_bench_result
+	rc := C.lockdc_pouch_bench_open_lql_env(cRoot, C.uint64_t(seededRows), &env, &res)
+	if rc != 0 {
+		return int(rc), nil, convertPouchResult(res)
+	}
+	return 0, &pouchEnv{ptr: env}, convertPouchResult(res)
+}
+
+func closePouchLQLEnv(env *pouchEnv) {
+	if env == nil || env.ptr == nil {
+		return
+	}
+	C.lockdc_pouch_bench_env_close(env.ptr)
+	env.ptr = nil
+}
+
+func runPouchLQLEnvScenarioDocuments(env *pouchEnv, scenario string, engine string, iterations int) (int, pouchResult) {
+	if env == nil || env.ptr == nil {
+		return -1, pouchResult{err: "pouch benchmark env is closed"}
+	}
+	cScenario := C.CString(scenario)
+	defer C.free(unsafe.Pointer(cScenario))
+	cEngine := C.CString(engine)
+	defer C.free(unsafe.Pointer(cEngine))
+	var res C.lockdc_pouch_bench_result
+	rc := C.lockdc_pouch_bench_lql_env_scenario_documents(env.ptr, cScenario, cEngine, C.uint64_t(iterations), &res)
+	return int(rc), convertPouchResult(res)
+}
+
+func runPouchLQLEnvScenarioKeys(env *pouchEnv, scenario string, engine string, iterations int) (int, pouchResult) {
+	if env == nil || env.ptr == nil {
+		return -1, pouchResult{err: "pouch benchmark env is closed"}
+	}
+	cScenario := C.CString(scenario)
+	defer C.free(unsafe.Pointer(cScenario))
+	cEngine := C.CString(engine)
+	defer C.free(unsafe.Pointer(cEngine))
+	var res C.lockdc_pouch_bench_result
+	rc := C.lockdc_pouch_bench_lql_env_scenario_keys(env.ptr, cScenario, cEngine, C.uint64_t(iterations), &res)
 	return int(rc), convertPouchResult(res)
 }
 

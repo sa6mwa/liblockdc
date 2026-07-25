@@ -32,6 +32,12 @@ Medium comparison suite, capped by Go's test timeout at 3 minutes:
 make benchmark-pouch-go-medium
 ```
 
+Bounded 4096-document acceptance matrix, also capped at 3 minutes:
+
+```sh
+make benchmark-pouch-go-acceptance
+```
+
 Useful overrides:
 
 ```sh
@@ -54,13 +60,17 @@ value for build/smoke validation and a larger value for stress/perf runs.
 
 The medium LQL cases compare explicit `index` and `scan` engines over each
 configured dataset size for document-return and key-return queries. They reuse
-seeded lockd disk state within each document-count/engine/return-mode group so
-the 3-minute profile spends its budget on query behavior instead of repeated
-setup.
+seeded pouch and lockd disk state within each document-count/return-mode group.
+Pouch keeps a live C benchmark environment open for those sub-benchmarks so the
+reported `c-ns/op` measures query behavior on a ready instance instead of
+reopening the store for every scenario.
 The default dataset sizes are `64,1024`; `POUCH_GO_MEDIUM_SCALE_ROWS` and
 `POUCH_GO_MEDIUM_SCALE_SCENARIOS` can widen the matrix for dedicated perf runs.
 The default scenario list is a representative bounded subset; pass the full
 scenario list explicitly when doing exhaustive perf characterization.
+`benchmark-pouch-go-acceptance` pins the scale suite to 4096 documents and the
+`EqSparse`, `RangeHalf`, and `InTags` scenarios across document-return,
+key-return, indexed, and scan engines.
 
 - `BenchmarkPouchCMediumLQLDocuments`
 - `BenchmarkPouchCMediumLQLKeys`

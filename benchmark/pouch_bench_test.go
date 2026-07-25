@@ -276,15 +276,44 @@ func runPouchScenarioBenchmarksFor(b *testing.B, rows int, engine string, scenar
 	}
 }
 
+func runPouchScenarioBenchmarksForEnv(b *testing.B, env *pouchEnv, rows int, engine string, scenarios []queryScenario, keysOnly bool) {
+	b.Helper()
+	for _, scenario := range scenarios {
+		scenario := scenario
+		b.Run(scenario.name, func(b *testing.B) {
+			b.ResetTimer()
+			var rc int
+			var res pouchResult
+			if keysOnly {
+				rc, res = runPouchLQLEnvScenarioKeys(env, scenario.name, engine, b.N)
+			} else {
+				rc, res = runPouchLQLEnvScenarioDocuments(env, scenario.name, engine, b.N)
+			}
+			b.StopTimer()
+			if rc != 0 {
+				b.Fatalf("%s", res.err)
+			}
+			reportCResult(b, res)
+			b.ReportMetric(float64(scenario.expected(rows)), "matched-documents")
+		})
+	}
+}
+
 func runPouchScaleBenchmarks(b *testing.B, keysOnly bool) {
 	b.Helper()
 	for _, rows := range scaleRows() {
 		rows := rows
 		b.Run(fmt.Sprintf("Docs%d", rows), func(b *testing.B) {
+			root := b.TempDir()
+			rc, env, res := openPouchLQLEnv(root, rows)
+			if rc != 0 {
+				b.Fatalf("%s", res.err)
+			}
+			b.Cleanup(func() { closePouchLQLEnv(env) })
 			for _, engine := range []string{"index", "scan"} {
 				engine := engine
 				b.Run(engine, func(b *testing.B) {
-					runPouchScenarioBenchmarksFor(b, rows, engine, scaleScenarios(), keysOnly)
+					runPouchScenarioBenchmarksForEnv(b, env, rows, engine, scaleScenarios(), keysOnly)
 				})
 			}
 		})
@@ -576,11 +605,11 @@ func runLockdScaleBenchmarks(b *testing.B, keysOnly bool) {
 	for _, rows := range scaleRows() {
 		rows := rows
 		b.Run(fmt.Sprintf("Docs%d", rows), func(b *testing.B) {
+			env := startLockdDiskBenchmarkEnv(b)
+			seedLockdRows(b, env.client, rows)
 			for _, engine := range []string{"index", "scan"} {
 				engine := engine
 				b.Run(engine, func(b *testing.B) {
-					env := startLockdDiskBenchmarkEnv(b)
-					seedLockdRows(b, env.client, rows)
 					for _, scenario := range scaleScenarios() {
 						scenario := scenario
 						b.Run(scenario.name, func(b *testing.B) {

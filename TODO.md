@@ -633,9 +633,18 @@ Latest release targets confirmed on 2026-07-23:
         docID candidate helper path; focused 4096 indexed `RangeHalf` now
         measures about 22.6 ms for pouch document results vs 65.9 ms for Go
         disk, and about 5.37 ms for pouch key results vs 48.9 ms for Go disk.
-      - [ ] Replace the current broad 4096/full-scenario run with a bounded
+      - [x] Replace the current broad 4096/full-scenario run with a bounded
         acceptance matrix that completes inside the intended 3-minute envelope
         while still covering the slow/representative indexed and scan cases.
+        - [x] Add and verify `make benchmark-pouch-go-acceptance`, a 4096-doc
+          matrix over document/key returns, indexed/scan engines, and
+          `EqSparse`, `RangeHalf`, and `InTags`; medium/acceptance pouch and
+          lockd disk harnesses should seed once per document-count/return-mode
+          group so the run measures query behavior instead of repeated setup.
+          Verified on 2026-07-26: the target completed in 2m14s. Pouch indexed
+          document-return cases measured about 0.84 ms (`EqSparse`), 24.6 ms
+          (`RangeHalf`), and 18.6 ms (`InTags`); key-return cases measured
+          about 0.83 ms, 6.34 ms, and 4.49 ms respectively.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
