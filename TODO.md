@@ -474,6 +474,10 @@ Latest release targets confirmed on 2026-07-23:
         orchestration through the same index-owned cached docID page helper;
         the disk bridge now only adapts sidecar range/presence readers and
         translates selected docID pages to summaries for these predicates.
+      - [x] Route simple positive `prefix` and `contains` result-cache/page
+        orchestration through the same index-owned cached docID page helper;
+        the disk bridge now only adapts sidecar text/trigram readers and
+        translates selected docID pages to summaries for these predicates.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
