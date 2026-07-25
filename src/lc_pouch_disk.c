@@ -5789,6 +5789,26 @@ static size_t lc_pouch_disk_query_key_array_sort_unique(
   return write_index;
 }
 
+static size_t lc_pouch_disk_query_key_ref_array_sort_unique(char **keys,
+                                                            size_t key_count) {
+  size_t read_index;
+  size_t write_index;
+
+  if (keys == NULL || key_count <= 1U) {
+    return key_count;
+  }
+  qsort(keys, key_count, sizeof(keys[0]), lc_pouch_disk_namespace_ptr_compare);
+  write_index = 1U;
+  for (read_index = 1U; read_index < key_count; ++read_index) {
+    if (strcmp(keys[write_index - 1U], keys[read_index]) == 0) {
+      continue;
+    }
+    keys[write_index] = keys[read_index];
+    write_index++;
+  }
+  return write_index;
+}
+
 static int lc_pouch_disk_query_key_array_contains_sorted(char **keys,
                                                          size_t key_count,
                                                          const char *key) {
@@ -5815,45 +5835,6 @@ static int lc_pouch_disk_query_key_array_contains_sorted(char **keys,
     }
   }
   return 0;
-}
-
-static int lc_pouch_disk_query_key_array_append(
-    lc_pouch_disk_store *store, char ***keys_io, size_t *key_count_io,
-    size_t *key_capacity_io, const char *key, lc_error *error,
-    const char *alloc_message, const char *copy_message) {
-  char **grown;
-  char **keys;
-  size_t key_count;
-  size_t key_capacity;
-  size_t new_capacity;
-
-  if (store == NULL || keys_io == NULL || key_count_io == NULL ||
-      key_capacity_io == NULL || key == NULL) {
-    return LC_OK;
-  }
-  keys = *keys_io;
-  key_count = *key_count_io;
-  key_capacity = *key_capacity_io;
-  if (key_count == key_capacity) {
-    new_capacity = key_capacity == 0U ? 64U : key_capacity * 2U;
-    grown = (char **)lc_pouch_realloc(&store->allocator, keys,
-                                      new_capacity * sizeof(keys[0]));
-    if (grown == NULL) {
-      return lc_pouch_set_nomem(error, alloc_message);
-    }
-    memset(grown + key_capacity, 0,
-           (new_capacity - key_capacity) * sizeof(grown[0]));
-    keys = grown;
-    key_capacity = new_capacity;
-    *keys_io = keys;
-    *key_capacity_io = key_capacity;
-  }
-  keys[key_count] = lc_pouch_strdup(&store->allocator, key);
-  if (keys[key_count] == NULL) {
-    return lc_pouch_set_nomem(error, copy_message);
-  }
-  *key_count_io = key_count + 1U;
-  return LC_OK;
 }
 
 static int lc_pouch_disk_query_summary_index_compare(const void *left,
@@ -9363,7 +9344,7 @@ static int lc_pouch_disk_query_field_choose_contains_gram_locked(
 }
 
 static int
-lc_pouch_disk_query_field_collect_contains_gram_candidates_locked(
+lc_pouch_disk_query_field_collect_contains_gram_candidate_refs_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const lc_pouch_document_contains_term *primary, const char *gram,
     char ***keys_out, size_t *key_count_out, lc_error *error) {
@@ -9372,7 +9353,6 @@ lc_pouch_disk_query_field_collect_contains_gram_candidates_locked(
   size_t key_capacity;
   size_t position;
   size_t index;
-  int rc;
 
   *keys_out = NULL;
   *key_count_out = 0U;
@@ -9399,17 +9379,26 @@ lc_pouch_disk_query_field_collect_contains_gram_candidates_locked(
         !lc_pouch_disk_query_field_posting_has_live_state(store, posting)) {
       continue;
     }
-    rc = lc_pouch_disk_query_key_array_append(
-        store, &keys, &key_count, &key_capacity, posting->key, error,
-        "failed to allocate pouch contains trigram candidate keys",
-        "failed to copy pouch contains trigram candidate key");
-    if (rc != LC_OK) {
-      lc_pouch_disk_query_key_array_cleanup(store, keys, key_count);
-      return rc;
+    if (key_count == key_capacity) {
+      char **grown;
+      size_t new_capacity;
+
+      new_capacity = key_capacity == 0U ? 64U : key_capacity * 2U;
+      grown = (char **)lc_pouch_realloc(&store->allocator, keys,
+                                        new_capacity * sizeof(keys[0]));
+      if (grown == NULL) {
+        lc_pouch_free(&store->allocator, keys);
+        return lc_pouch_set_nomem(
+            error,
+            "failed to allocate pouch contains trigram candidate key refs");
+      }
+      keys = grown;
+      key_capacity = new_capacity;
     }
+    keys[key_count] = posting->key;
+    key_count++;
   }
-  key_count =
-      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
+  key_count = lc_pouch_disk_query_key_ref_array_sort_unique(keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -9529,15 +9518,14 @@ static int lc_pouch_disk_query_field_collect_contains_summary_indices_locked(
   candidate_keys = NULL;
   candidate_key_count = 0U;
   if (has_gram) {
-    rc = lc_pouch_disk_query_field_collect_contains_gram_candidates_locked(
+    rc = lc_pouch_disk_query_field_collect_contains_gram_candidate_refs_locked(
         store, req, primary, gram, &candidate_keys, &candidate_key_count,
         error);
     if (rc != LC_OK) {
       return rc;
     }
     if (candidate_key_count == 0U) {
-      lc_pouch_disk_query_key_array_cleanup(store, candidate_keys,
-                                           candidate_key_count);
+      lc_pouch_free(&store->allocator, candidate_keys);
       return LC_OK;
     }
   }
@@ -9568,14 +9556,12 @@ static int lc_pouch_disk_query_field_collect_contains_summary_indices_locked(
         store, req, posting, &indices, &index_count, &index_capacity, 1U,
         error, "failed to allocate pouch contains query row indices");
     if (rc != LC_OK) {
-      lc_pouch_disk_query_key_array_cleanup(store, candidate_keys,
-                                           candidate_key_count);
+      lc_pouch_free(&store->allocator, candidate_keys);
       lc_pouch_free(&store->allocator, indices);
       return rc;
     }
   }
-  lc_pouch_disk_query_key_array_cleanup(store, candidate_keys,
-                                       candidate_key_count);
+  lc_pouch_free(&store->allocator, candidate_keys);
   lc_pouch_disk_query_summary_index_array_sort_unique(indices, &index_count);
   *indices_out = indices;
   *index_count_out = index_count;
