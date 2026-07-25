@@ -1347,11 +1347,14 @@ plans. Simple positive `exists` scans use the same prepared-reader pattern with
 namespace-qualified field-presence terms. Simple positive numeric `range` scans
 also use prepared postings keyed by namespace-qualified field plus normalized
 range bounds. Simple positive `prefix` scans use prepared postings keyed by
-namespace-qualified field plus the case-sensitivity flag and text prefix. These
-caches are intentionally narrower than the final design: compound, negative,
-owner-filtered, key-filtered, contains, and secondary-filtered range/prefix
-selectors still use request-local compiled postings until their candidate sets
-can be cached without baking request-specific filters into the prepared view.
+namespace-qualified field plus the case-sensitivity flag and text prefix.
+Simple positive `contains` scans use prepared postings keyed by the same
+namespace-qualified field and substring key after trigram narrowing and final
+substring validation. These caches are intentionally narrower than the final
+design: compound, negative, owner-filtered, key-filtered, and
+secondary-filtered range/prefix/contains selectors still use request-local
+compiled postings until their candidate sets can be cached without baking
+request-specific filters into the prepared view.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
