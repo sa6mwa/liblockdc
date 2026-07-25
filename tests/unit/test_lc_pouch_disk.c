@@ -877,13 +877,11 @@ static size_t count_query_index_field_values_with_prefix(const char *root,
       assert_true(prefix_len <= sizeof(value_prefix));
       assert_true(lseek(fd, (off_t)(ns_len + key_len + field_len), SEEK_CUR) >=
                   0);
-      assert_int_equal(read(fd, value_prefix, prefix_len),
-                       (ssize_t)prefix_len);
+      assert_int_equal(read(fd, value_prefix, prefix_len), (ssize_t)prefix_len);
       if (memcmp(value_prefix, prefix, prefix_len) == 0) {
         count++;
       }
-      assert_true(lseek(fd,
-                        (off_t)(value_len - prefix_len + state_etag_len),
+      assert_true(lseek(fd, (off_t)(value_len - prefix_len + state_etag_len),
                         SEEK_CUR) >= 0);
     } else {
       assert_true(lseek(fd, (off_t)payload_len, SEEK_CUR) >= 0);
@@ -1393,13 +1391,11 @@ static void set_query_index_format_version(const char *root,
   assert_int_equal(test_get_u32(header + 8),
                    TEST_POUCH_QUERY_INDEX_RECORD_FORMAT);
   test_put_u32(header + TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET, version);
-  assert_int_equal(lseek(fd, TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET,
-                         SEEK_SET),
-                   TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET);
-  assert_int_equal(write(fd,
-                         header + TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET,
-                         4U),
-                   4);
+  assert_int_equal(
+      lseek(fd, TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET, SEEK_SET),
+      TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET);
+  assert_int_equal(
+      write(fd, header + TEST_POUCH_QUERY_INDEX_FORMAT_VERSION_OFFSET, 4U), 4);
   assert_int_equal(fsync(fd), 0);
   assert_int_equal(close(fd), 0);
 }
@@ -2820,8 +2816,8 @@ static void test_replay_cleans_obsolete_snapshot_files(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_maintenance_cleanup_cleans_obsolete_snapshot_files(
-    void **state) {
+static void
+test_maintenance_cleanup_cleans_obsolete_snapshot_files(void **state) {
   char root[256];
   char segment_path[512];
   char active_snapshot_path[512];
@@ -2861,8 +2857,8 @@ static void test_maintenance_cleanup_cleans_obsolete_snapshot_files(
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("active-snapshot-body");
-  rc = store->write_state(store, "default", "snap-key", source, &opts,
-                          &put_res, &error);
+  rc = store->write_state(store, "default", "snap-key", source, &opts, &put_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
 
@@ -2916,8 +2912,8 @@ static void test_maintenance_cleanup_cleans_obsolete_snapshot_files(
   test_cleanup_root(root);
 }
 
-static void test_maintenance_cleanup_honors_obsolete_delete_grace(
-    void **state) {
+static void
+test_maintenance_cleanup_honors_obsolete_delete_grace(void **state) {
   char root[256];
   char segment_path[512];
   char active_snapshot_path[512];
@@ -2955,8 +2951,8 @@ static void test_maintenance_cleanup_honors_obsolete_delete_grace(
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("active-snapshot-body");
-  rc = store->write_state(store, "default", "snap-key", source, &opts,
-                          &put_res, &error);
+  rc = store->write_state(store, "default", "snap-key", source, &opts, &put_res,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   rc = store->close(store, &error);
@@ -3153,8 +3149,8 @@ static void test_state_read_skips_replay_after_same_handle_write(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_scan_skips_replay_after_same_handle_write(
-    void **state) {
+static void
+test_query_index_scan_skips_replay_after_same_handle_write(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -3449,14 +3445,14 @@ static void test_state_lookup_index_orders_updates_and_replays(void **state) {
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("beta");
-  rc = store->write_state(store, "default", "beta", source, NULL, &beta,
-                          &error);
+  rc =
+      store->write_state(store, "default", "beta", source, NULL, &beta, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("beta-updated");
-  rc = store->write_state(store, "default", "beta", source, NULL,
-                          &beta_update, &error);
+  rc = store->write_state(store, "default", "beta", source, NULL, &beta_update,
+                          &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   rc = store->remove_state(store, "default", "gamma", gamma.new_state_etag,
@@ -5077,8 +5073,8 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_metadata_scan_skips_replay_after_same_handle_write(
-    void **state) {
+static void
+test_metadata_scan_skips_replay_after_same_handle_write(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -5943,7 +5939,8 @@ test_query_index_scan_orders_paginates_and_reports_seq(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_range_scans_field_posting_candidates(void **state) {
+static void
+test_query_index_range_scans_field_posting_candidates(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -6033,8 +6030,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   meta.state_etag = state_low.new_state_etag;
   meta.version = state_low.new_version;
   meta.fencing_token = state_low.new_version;
-  rc = store->store_meta(store, "default", "low", &meta, NULL, &stored,
-                         &error);
+  rc = store->store_meta(store, "default", "low", &meta, NULL, &stored, &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
@@ -6042,8 +6038,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   meta.state_etag = state_mid.new_state_etag;
   meta.version = state_mid.new_version;
   meta.fencing_token = state_mid.new_version;
-  rc = store->store_meta(store, "default", "mid", &meta, NULL, &stored,
-                         &error);
+  rc = store->store_meta(store, "default", "mid", &meta, NULL, &stored, &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
@@ -6060,8 +6055,8 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   meta.state_etag = state_high.new_state_etag;
   meta.version = state_high.new_version;
   meta.fencing_token = state_high.new_version;
-  rc = store->store_meta(store, "default", "high", &meta, NULL, &stored,
-                         &error);
+  rc =
+      store->store_meta(store, "default", "high", &meta, NULL, &stored, &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
@@ -6152,8 +6147,7 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   meta.state_etag = state_mid_excluded.new_state_etag;
   meta.version = state_mid_excluded.new_version;
   meta.fencing_token = state_mid_excluded.new_version;
-  rc = store->store_meta(store, "default", "mid", &meta, NULL, &stored,
-                         &error);
+  rc = store->store_meta(store, "default", "mid", &meta, NULL, &stored, &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_store_meta_res_cleanup(&allocator, &stored);
 
@@ -6264,14 +6258,14 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
 
   write_query_range_number_state(&allocator, store, "k01", "{\"score\":1e0}",
                                  &error);
-  write_query_range_number_state(&allocator, store, "k02",
-                                 "{\"score\":2.25}", &error);
+  write_query_range_number_state(&allocator, store, "k02", "{\"score\":2.25}",
+                                 &error);
   write_query_range_number_state(&allocator, store, "k07", "{\"score\":7}",
                                  &error);
   write_query_range_number_state(&allocator, store, "k08", "{\"score\":8}",
                                  &error);
-  write_query_range_number_state(&allocator, store, "k085",
-                                 "{\"score\":8.5}", &error);
+  write_query_range_number_state(&allocator, store, "k085", "{\"score\":8.5}",
+                                 &error);
   write_query_range_number_state(&allocator, store, "k09", "{\"score\":9}",
                                  &error);
   write_query_range_number_state(&allocator, store, "k10", "{\"score\":10}",
@@ -6280,8 +6274,8 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
                                  &error);
   write_query_range_number_state(&allocator, store, "k12", "{\"score\":12}",
                                  &error);
-  write_query_range_number_state(&allocator, store, "kneg",
-                                 "{\"score\":-1.5}", &error);
+  write_query_range_number_state(&allocator, store, "kneg", "{\"score\":-1.5}",
+                                 &error);
 
   range.field = "/score";
   range.gte = "n:+:8:0";
@@ -6477,6 +6471,88 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   assert_string_equal(rows.keys[1], "finance");
   assert_string_equal(rows.keys[2], "planning");
   assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void test_query_index_in_docid_path_applies_secondary_in(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  const char *region_values[2];
+  const char *tag_values[1];
+  lc_pouch_document_in_term in_terms[2];
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-in-docid-secondary");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(in_terms, 0, sizeof(in_terms));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  write_query_range_number_state(&allocator, store, "east-finance",
+                                 "{\"region\":\"east\",\"tags\":[\"finance\"]}",
+                                 &error);
+  write_query_range_number_state(
+      &allocator, store, "north-planning",
+      "{\"region\":\"north\",\"tags\":[\"planning\"]}", &error);
+  write_query_range_number_state(&allocator, store, "south-ops",
+                                 "{\"region\":\"south\",\"tags\":[\"ops\"]}",
+                                 &error);
+  write_query_range_number_state(
+      &allocator, store, "west-planning",
+      "{\"region\":\"west\",\"tags\":[\"planning\"]}", &error);
+
+  region_values[0] = "s:north";
+  region_values[1] = "s:south";
+  tag_values[0] = "s:planning";
+  in_terms[0].field = "/region";
+  in_terms[0].values = region_values;
+  in_terms[0].value_count = 2U;
+  in_terms[1].field = "/tags/0";
+  in_terms[1].values = tag_values;
+  in_terms[1].value_count = 1U;
+  req.namespace_name = "default";
+  req.owner = "range-owner";
+  req.limit = 8U;
+  req.document_in_terms = in_terms;
+  req.document_in_term_count = 2U;
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "north-planning");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "north-planning");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   rc = store->close(store, &error);
@@ -9013,8 +9089,8 @@ static void test_query_index_rebuilds_future_format_version(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_query_index_rebuilds_legacy_sidecar_without_format(
-    void **state) {
+static void
+test_query_index_rebuilds_legacy_sidecar_without_format(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -11188,8 +11264,8 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   test_cleanup_root(root);
 }
 
-static void test_scheduled_maintenance_reports_compaction_diagnostics(
-    void **state) {
+static void
+test_scheduled_maintenance_reports_compaction_diagnostics(void **state) {
   char root[256];
   char payload[4096];
   lc_pouch_allocator allocator;
@@ -11299,8 +11375,8 @@ static void test_scheduled_maintenance_reports_compaction_diagnostics(
   test_cleanup_root(root);
 }
 
-static void test_scheduled_maintenance_honors_not_before_deadline(
-    void **state) {
+static void
+test_scheduled_maintenance_honors_not_before_deadline(void **state) {
   char root[256];
   char payload[4096];
   lc_pouch_allocator allocator;
@@ -11418,8 +11494,8 @@ static void test_scheduled_maintenance_honors_not_before_deadline(
   test_cleanup_root(root);
 }
 
-static void test_scheduled_maintenance_honors_min_candidate_files(
-    void **state) {
+static void
+test_scheduled_maintenance_honors_min_candidate_files(void **state) {
   char root[256];
   char payload[4096];
   lc_pouch_allocator allocator;
@@ -11538,8 +11614,8 @@ static void test_scheduled_maintenance_honors_min_candidate_files(
   test_cleanup_root(root);
 }
 
-static void test_scheduled_maintenance_honors_min_reclaimable_bytes(
-    void **state) {
+static void
+test_scheduled_maintenance_honors_min_reclaimable_bytes(void **state) {
   char root[256];
   char payload[4096];
   lc_pouch_allocator allocator;
@@ -14611,8 +14687,7 @@ static void test_query_config_rejects_invalid_options(void **state) {
   rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
-  assert_string_equal(error.message,
-                      "pouch disk single_writer must be 0 or 1");
+  assert_string_equal(error.message, "pouch disk single_writer must be 0 or 1");
   lc_error_cleanup(&error);
 
   memset(&error, 0, sizeof(error));
@@ -17228,8 +17303,7 @@ test_marker_snapshot_skips_unchanged_independent_refresh(void **state) {
   test_cleanup_root(root);
 }
 
-static void
-test_marker_dir_mtime_fast_path_stats_known_markers(void **state) {
+static void test_marker_dir_mtime_fast_path_stats_known_markers(void **state) {
   char root[256];
   char markers_path[512];
   struct stat marker_dir_stat;
@@ -17350,16 +17424,16 @@ test_single_writer_mode_skips_peer_refresh_after_sync(void **state) {
   rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("single-writer-v1");
-  rc = writer->write_state(writer, "default", "single-writer-key", source,
-                           NULL, &put_res, &error);
+  rc = writer->write_state(writer, "default", "single-writer-key", source, NULL,
+                           &put_res, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
   memset(&put_res, 0, sizeof(put_res));
 
   opts.single_writer = 1;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &reader,
-                                       &error);
+  rc =
+      lc_pouch_disk_open_with_options(root, &allocator, &opts, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = reader->read_state(reader, "default", "single-writer-key", &body,
@@ -17375,8 +17449,8 @@ test_single_writer_mode_skips_peer_refresh_after_sync(void **state) {
   memset(&state_info, 0, sizeof(state_info));
 
   source = source_from_text("single-writer-v2");
-  rc = writer->write_state(writer, "default", "single-writer-key", source,
-                           NULL, &put_res, &error);
+  rc = writer->write_state(writer, "default", "single-writer-key", source, NULL,
+                           &put_res, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   lc_pouch_put_state_res_cleanup(&allocator, &put_res);
@@ -17483,8 +17557,7 @@ int main(void) {
       cmocka_unit_test(test_replay_installed_snapshot_without_segment_tail),
       cmocka_unit_test(test_replay_cleans_obsolete_snapshot_files),
       cmocka_unit_test(test_maintenance_cleanup_cleans_obsolete_snapshot_files),
-      cmocka_unit_test(
-          test_maintenance_cleanup_honors_obsolete_delete_grace),
+      cmocka_unit_test(test_maintenance_cleanup_honors_obsolete_delete_grace),
       cmocka_unit_test(test_replay_ignores_root_store_log_without_segments),
       cmocka_unit_test(test_state_put_propagates_source_failure_before_append),
       cmocka_unit_test(test_state_read_skips_replay_after_same_handle_write),
@@ -17521,10 +17594,10 @@ int main(void) {
       cmocka_unit_test(
           test_query_index_range_uses_numeric_order_for_multidigit_values),
       cmocka_unit_test(test_query_index_in_deduplicates_duplicate_values),
+      cmocka_unit_test(test_query_index_in_docid_path_applies_secondary_in),
       cmocka_unit_test(
           test_query_index_contains_uses_trigram_posting_candidates),
-      cmocka_unit_test(
-          test_query_index_summary_scan_applies_negative_terms),
+      cmocka_unit_test(test_query_index_summary_scan_applies_negative_terms),
       cmocka_unit_test(
           test_query_index_path_pattern_scan_intersects_positive_terms),
       cmocka_unit_test(test_query_index_keys_scan_avoids_metadata_row_copies),
@@ -17550,8 +17623,7 @@ int main(void) {
       cmocka_unit_test(test_query_index_keys_recreates_missing_sidecar),
       cmocka_unit_test(test_query_index_keys_rebuilds_future_sidecar_version),
       cmocka_unit_test(test_query_index_rebuilds_future_format_version),
-      cmocka_unit_test(
-          test_query_index_rebuilds_legacy_sidecar_without_format),
+      cmocka_unit_test(test_query_index_rebuilds_legacy_sidecar_without_format),
       cmocka_unit_test(test_query_index_keys_truncates_partial_sidecar_field),
       cmocka_unit_test(test_scan_meta_ignores_corrupt_query_sidecar),
       cmocka_unit_test(test_query_index_sidecar_compacts_with_segments),
@@ -17579,12 +17651,9 @@ int main(void) {
       cmocka_unit_test(test_compaction_if_needed_skip_and_allocator_failure),
       cmocka_unit_test(
           test_scheduled_maintenance_reports_compaction_diagnostics),
-      cmocka_unit_test(
-          test_scheduled_maintenance_honors_not_before_deadline),
-      cmocka_unit_test(
-          test_scheduled_maintenance_honors_min_candidate_files),
-      cmocka_unit_test(
-          test_scheduled_maintenance_honors_min_reclaimable_bytes),
+      cmocka_unit_test(test_scheduled_maintenance_honors_not_before_deadline),
+      cmocka_unit_test(test_scheduled_maintenance_honors_min_candidate_files),
+      cmocka_unit_test(test_scheduled_maintenance_honors_min_reclaimable_bytes),
       cmocka_unit_test(test_scheduled_maintenance_honors_io_throttle),
       cmocka_unit_test(test_compaction_preserves_promoted_staged_state_link),
       cmocka_unit_test(
@@ -17652,8 +17721,7 @@ int main(void) {
           test_logstore_writer_marker_updates_after_namespace_commit),
       cmocka_unit_test(
           test_marker_snapshot_skips_unchanged_independent_refresh),
-      cmocka_unit_test(
-          test_marker_dir_mtime_fast_path_stats_known_markers),
+      cmocka_unit_test(test_marker_dir_mtime_fast_path_stats_known_markers),
       cmocka_unit_test(test_single_writer_mode_skips_peer_refresh_after_sync),
       cmocka_unit_test(
           test_writer_marker_touch_failure_does_not_rollback_commit),

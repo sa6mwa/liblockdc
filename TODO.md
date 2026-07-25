@@ -462,9 +462,15 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
+      - [x] Add private C docID set primitives and wire exact primary `in`
+        candidate collection through docID accumulation while preserving
+        secondary-filter and `liblql` predicate authority.
     - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
       delta-varint docID streams and dense bitsets selected by posting
       density/encoded size.
+      - [x] Add private sparse delta-varint and dense bitset posting primitives
+        with decode/intersect unit coverage; query execution still needs to
+        use persisted compiled postings instead of the current sidecar rows.
     - [ ] Add compiled field dictionaries with term IDs, doc tables, numeric
       range term tables, and text/trigram term tables so equality, range,
       `in`, prefix, contains, and exists can evaluate without repeated string
