@@ -18,7 +18,7 @@ type pouchResult struct {
 	err        string
 }
 
-func runPouchIndexedLQLRows(root string, iterations int, seededRows int) (int, pouchResult) {
+func runPouchIndexedLQLDocuments(root string, iterations int, seededRows int) (int, pouchResult) {
 	cRoot := C.CString(root)
 	defer C.free(unsafe.Pointer(cRoot))
 	var res C.lockdc_pouch_bench_result
@@ -34,7 +34,7 @@ func runPouchIndexedLQLKeys(root string, iterations int, seededRows int) (int, p
 	return int(rc), convertPouchResult(res)
 }
 
-func runPouchIndexedLQLScenarioRows(root string, scenario string, iterations int, seededRows int) (int, pouchResult) {
+func runPouchIndexedLQLScenarioDocuments(root string, scenario string, iterations int, seededRows int) (int, pouchResult) {
 	cRoot := C.CString(root)
 	defer C.free(unsafe.Pointer(cRoot))
 	cScenario := C.CString(scenario)
@@ -54,7 +54,7 @@ func runPouchIndexedLQLScenarioKeys(root string, scenario string, iterations int
 	return int(rc), convertPouchResult(res)
 }
 
-func runPouchLQLScenarioRows(root string, scenario string, engine string, iterations int, seededRows int) (int, pouchResult) {
+func runPouchLQLScenarioDocuments(root string, scenario string, engine string, iterations int, seededRows int) (int, pouchResult) {
 	cRoot := C.CString(root)
 	defer C.free(unsafe.Pointer(cRoot))
 	cScenario := C.CString(scenario)

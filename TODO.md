@@ -453,6 +453,42 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Persist an index-format/version contract for pouch postings so
       incompatible sidecars rebuild from namespace segments/snapshots instead
       of being trusted.
+  - [ ] Redesign pouch indexed query execution for Go lockd disk-style
+    performance parity instead of continuing monolithic disk-store posting
+    tweaks.
+    - [ ] Split the pouch search/index subsystem out of `lc_pouch_disk.c` into
+      an internal C index layer with explicit reader, writer, planner, posting,
+      visibility, and result-cache boundaries.
+    - [ ] Replace repeated key-string posting algebra with stable per-index
+      integer document IDs, sorted docID sets, pooled scratch buffers, and
+      merge-based union/intersection/subtraction.
+    - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
+      delta-varint docID streams and dense bitsets selected by posting
+      density/encoded size.
+    - [ ] Add compiled field dictionaries with term IDs, doc tables, numeric
+      range term tables, and text/trigram term tables so equality, range,
+      `in`, prefix, contains, and exists can evaluate without repeated string
+      scans.
+    - [ ] Add prepared-reader caching keyed by the immutable pouch index
+      generation/manifest identity so repeated queries do not rebuild the same
+      compiled index view.
+    - [ ] Add sorted matched-key result caching keyed by index generation plus
+      normalized selector plan, so multi-page queries reuse the full matching
+      key vector instead of recomputing candidates for every page.
+    - [ ] Preserve final `liblql` predicate authority by treating indexed
+      docID sets as candidate supersets whenever the planner cannot prove exact
+      acceptance.
+    - [ ] Rename or clearly alias benchmark labels from `Rows` to
+      `Documents`/`DocumentResults`, because pouch and lockd are document
+      stores; `Rows` currently means streamed document-result items, not
+      relational rows.
+    - [ ] Update pouch-vs-Go benchmarks to expose cache-warm page 1/page N
+      behavior, matched-key vector reuse, candidate docID counts, and document
+      streaming/materialization cost separately.
+    - [ ] Re-run the expanded 4096+ row benchmark matrix and use it as the
+      acceptance gate for the redesigned index path, with pouch expected to
+      beat or match Go disk on key-only and document-result scenarios unless
+      an explicit design tradeoff is documented.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

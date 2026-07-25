@@ -38,7 +38,7 @@ Useful overrides:
 make benchmark-pouch-go POUCH_GO_BENCH='IndexedLQL' POUCH_GO_BENCHTIME=10s POUCH_GO_SEED_ROWS=100000
 make benchmark-pouch-go-medium POUCH_GO_MEDIUM_SCALE_ROWS=64,1024,10000
 make benchmark-pouch-go-medium POUCH_GO_MEDIUM_SCALE_SCENARIOS=EqSparse,InTags,OrSparseOrFlag
-make benchmark-pouch-go POUCH_GO_BENCH='PouchCMediumLQLKeys/Rows1024/index/RangeHalf' POUCH_GO_MEDIUM_SCALE_ROWS=1024 POUCH_GO_MEDIUM_SCALE_SCENARIOS=RangeHalf
+make benchmark-pouch-go POUCH_GO_BENCH='PouchCMediumLQLKeys/Docs1024/index/RangeHalf' POUCH_GO_MEDIUM_SCALE_ROWS=1024 POUCH_GO_MEDIUM_SCALE_SCENARIOS=RangeHalf
 ```
 
 The query cases seed a local `pouch://` namespace, then run full-form LQL
@@ -47,9 +47,9 @@ cases seed a real lockd disk server with the same document shape and equivalent
 public LQL selector. `POUCH_GO_SEED_ROWS` defaults to `10000`; use a smaller
 value for build/smoke validation and a larger value for stress/perf runs.
 
-- `BenchmarkPouchCIndexedLQLRows10k`
+- `BenchmarkPouchCIndexedLQLDocuments10k`
 - `BenchmarkPouchCIndexedLQLKeys10k`
-- `BenchmarkLockdDiskIndexedLQLRows10k`
+- `BenchmarkLockdDiskIndexedLQLDocuments10k`
 - `BenchmarkLockdDiskIndexedLQLKeys10k`
 
 The medium LQL cases compare explicit `index` and `scan` engines over each
@@ -61,9 +61,9 @@ The default dataset sizes are `64,1024`; `POUCH_GO_MEDIUM_SCALE_ROWS` and
 The default scenario list is a representative bounded subset; pass the full
 scenario list explicitly when doing exhaustive perf characterization.
 
-- `BenchmarkPouchCMediumLQLRows`
+- `BenchmarkPouchCMediumLQLDocuments`
 - `BenchmarkPouchCMediumLQLKeys`
-- `BenchmarkLockdDiskMediumLQLRows`
+- `BenchmarkLockdDiskMediumLQLDocuments`
 - `BenchmarkLockdDiskMediumLQLKeys`
 
 The indexed LQL cases run the same scenario matrix for document-return and

@@ -1256,6 +1256,37 @@ durable performance artifacts. They may be rebuilt after corruption or version
 upgrade, yet normal indexed query execution must use them rather than falling
 back to a full log scan.
 
+The high-performance query path should be an index subsystem, not a collection
+of ad hoc posting scans embedded in the disk backend. The Go lockd disk backend
+is fast largely because it compiles immutable index segments into docID-oriented
+readers, evaluates selectors with sorted integer set algebra, caches prepared
+readers by manifest identity, and caches sorted matched keys by manifest plus
+selector plan. Pouch must converge on the same design shape in C:
+
+- each index generation owns a stable document table mapping lexical keys to
+  dense integer document IDs;
+- field dictionaries map JSON Pointer fields to field IDs and term dictionaries
+  map encoded values/text grams/range values to term IDs;
+- postings are stored and evaluated as docID sets, not repeated key strings;
+- sparse postings use delta-varint docID streams, while dense postings use
+  bitsets when density and encoded size justify it;
+- equality, membership, prefix, contains/trigram, exists, numeric range, and
+  date-presence candidates all resolve to docID sets before final pagination;
+- selector planning performs merge-based union, intersection, and subtraction
+  over sorted docID sets with allocator-owned scratch buffers;
+- the final sorted key vector is produced once by walking the lexical doc table
+  with a presence bitset, then reused for pagination;
+- document-result queries stream or batch only the visible page's documents,
+  while key-only queries stop after key emission;
+- prepared readers and sorted matched-key vectors are cached behind immutable
+  index generation/manifest identities and invalidated by index sequence
+  changes.
+
+The current pouch posting arrays are acceptable functional scaffolding but not
+the long-term performance architecture. Incremental hot-loop optimizations are
+allowed only when they move toward this subsystem boundary or protect behavior
+while the subsystem is introduced.
+
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
 field postings, stable ordering, limits, and cursors. That same boundary also

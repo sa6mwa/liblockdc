@@ -240,14 +240,14 @@ func runPouchScenarioBenchmarksFor(b *testing.B, rows int, engine string, scenar
 			if keysOnly {
 				rc, res = runPouchLQLScenarioKeys(root, scenario.name, engine, b.N, rows)
 			} else {
-				rc, res = runPouchLQLScenarioRows(root, scenario.name, engine, b.N, rows)
+				rc, res = runPouchLQLScenarioDocuments(root, scenario.name, engine, b.N, rows)
 			}
 			b.StopTimer()
 			if rc != 0 {
 				b.Fatalf("%s", res.err)
 			}
 			reportCResult(b, res)
-			b.ReportMetric(float64(scenario.expected(rows)), "matched-rows")
+			b.ReportMetric(float64(scenario.expected(rows)), "matched-documents")
 		})
 	}
 }
@@ -256,7 +256,7 @@ func runPouchScaleBenchmarks(b *testing.B, keysOnly bool) {
 	b.Helper()
 	for _, rows := range scaleRows() {
 		rows := rows
-		b.Run(fmt.Sprintf("Rows%d", rows), func(b *testing.B) {
+		b.Run(fmt.Sprintf("Docs%d", rows), func(b *testing.B) {
 			for _, engine := range []string{"index", "scan"} {
 				engine := engine
 				b.Run(engine, func(b *testing.B) {
@@ -267,7 +267,7 @@ func runPouchScaleBenchmarks(b *testing.B, keysOnly bool) {
 	}
 }
 
-func BenchmarkPouchCIndexedLQLRows10k(b *testing.B) {
+func BenchmarkPouchCIndexedLQLDocuments10k(b *testing.B) {
 	rows := seedRows()
 	runPouchScenarioBenchmarks(b, rows, false)
 }
@@ -294,7 +294,7 @@ func BenchmarkPouchCFastStateRead(b *testing.B) {
 	reportCResult(b, res)
 }
 
-func BenchmarkLockdDiskIndexedLQLRows10k(b *testing.B) {
+func BenchmarkLockdDiskIndexedLQLDocuments10k(b *testing.B) {
 	rows := seedRows()
 	runLockdScenarioBenchmarks(b, rows, false)
 }
@@ -551,7 +551,7 @@ func runLockdScaleBenchmarks(b *testing.B, keysOnly bool) {
 	b.Helper()
 	for _, rows := range scaleRows() {
 		rows := rows
-		b.Run(fmt.Sprintf("Rows%d", rows), func(b *testing.B) {
+		b.Run(fmt.Sprintf("Docs%d", rows), func(b *testing.B) {
 			for _, engine := range []string{"index", "scan"} {
 				engine := engine
 				b.Run(engine, func(b *testing.B) {
@@ -639,7 +639,8 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 			}
 		}
 		if rows != expectedRows {
-			b.Fatalf("query matched %d rows, expected %d", rows, expectedRows)
+			b.Fatalf("query matched %d documents, expected %d", rows,
+				expectedRows)
 		}
 		if engine == "index" && maxIndexSeq == 0 {
 			b.Fatalf("query did not report index sequence")
@@ -647,7 +648,7 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(seededRows), "seeded-rows")
-	b.ReportMetric(float64(expectedRows), "matched-rows")
+	b.ReportMetric(float64(expectedRows), "matched-documents")
 	if b.N > 0 {
 		b.ReportMetric(float64(totalPages)/float64(b.N), "query-pages/op")
 	}
@@ -658,7 +659,7 @@ func BenchmarkPouchCIndexedLQLKeys10k(b *testing.B) {
 	runPouchScenarioBenchmarks(b, rows, true)
 }
 
-func BenchmarkPouchCFastIndexedLQLRows(b *testing.B) {
+func BenchmarkPouchCFastIndexedLQLDocuments(b *testing.B) {
 	rows := seedRows()
 	runPouchScenarioBenchmarks(b, rows, false)
 }
@@ -668,7 +669,7 @@ func BenchmarkPouchCFastIndexedLQLKeys(b *testing.B) {
 	runPouchScenarioBenchmarks(b, rows, true)
 }
 
-func BenchmarkLockdDiskFastIndexedLQLRows(b *testing.B) {
+func BenchmarkLockdDiskFastIndexedLQLDocuments(b *testing.B) {
 	rows := seedRows()
 	runLockdScenarioBenchmarks(b, rows, false)
 }
@@ -678,7 +679,7 @@ func BenchmarkLockdDiskFastIndexedLQLKeys(b *testing.B) {
 	runLockdScenarioBenchmarks(b, rows, true)
 }
 
-func BenchmarkPouchCMediumLQLRows(b *testing.B) {
+func BenchmarkPouchCMediumLQLDocuments(b *testing.B) {
 	runPouchScaleBenchmarks(b, false)
 }
 
@@ -686,7 +687,7 @@ func BenchmarkPouchCMediumLQLKeys(b *testing.B) {
 	runPouchScaleBenchmarks(b, true)
 }
 
-func BenchmarkLockdDiskMediumLQLRows(b *testing.B) {
+func BenchmarkLockdDiskMediumLQLDocuments(b *testing.B) {
 	runLockdScaleBenchmarks(b, false)
 }
 
