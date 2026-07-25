@@ -497,6 +497,10 @@ Latest release targets confirmed on 2026-07-23:
         exact terms now map to adaptive sparse/dense docID postings with
         binary lookup, missing-term, and replacement coverage. Disk readers
         still need to compile sidecar postings into this table.
+      - [x] Compile filtered exact sidecar candidates into a per-request
+        term-ID posting table for equality and `in` docID readers, preserving
+        existing live-state and secondary predicate guards while exercising
+        adaptive postings in the disk query path.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.

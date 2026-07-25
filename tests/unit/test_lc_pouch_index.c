@@ -275,6 +275,8 @@ static void test_term_posting_table_decodes_by_term_id(void **state) {
       NULL, &table, 7U, second_ids,
       sizeof(second_ids) / sizeof(second_ids[0])));
 
+  assert_true(lc_pouch_index_term_posting_table_contains(&table, 42U));
+  assert_false(lc_pouch_index_term_posting_table_contains(&table, 99U));
   assert_int_equal(table.count, 2U);
   assert_int_equal(table.entries[0].term_id, 7U);
   assert_int_equal(table.entries[0].posting.encoding,

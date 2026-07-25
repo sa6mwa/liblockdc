@@ -1298,6 +1298,10 @@ compiled readers can stop carrying raw string scans through the planner.
 Exact-term postings can also be stored by term ID as adaptive sparse/dense
 docID postings, giving the compiled reader a direct lookup target for equality
 and `in` plans before the disk adapter is fully cut over.
+The current disk adapter now builds that exact-term table per request from
+filtered sidecar candidates, so equality and `in` plans can use compiled
+postings without bypassing existing live-state, owner, hidden, generation, or
+secondary-predicate checks.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,

@@ -116,6 +116,9 @@ int lc_pouch_index_term_posting_table_put(
     const lc_pouch_allocator *allocator,
     lc_pouch_index_term_posting_table *table, lc_pouch_index_term_id term_id,
     const lc_pouch_index_doc_id *ids, size_t count);
+int lc_pouch_index_term_posting_table_contains(
+    const lc_pouch_index_term_posting_table *table,
+    lc_pouch_index_term_id term_id);
 int lc_pouch_index_term_posting_table_decode(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_term_posting_table *table,

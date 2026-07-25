@@ -808,6 +808,12 @@ int lc_pouch_index_term_posting_table_put(
   return 1;
 }
 
+int lc_pouch_index_term_posting_table_contains(
+    const lc_pouch_index_term_posting_table *table,
+    lc_pouch_index_term_id term_id) {
+  return lc_pouch_index_term_posting_table_find_position(table, term_id, NULL);
+}
+
 int lc_pouch_index_term_posting_table_decode(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_term_posting_table *table,
