@@ -524,6 +524,10 @@ Latest release targets confirmed on 2026-07-23:
         namespace-qualified adaptive exact postings across compatible query
         shapes, with tests covering namespace separation and generation miss
         after writes.
+      - [x] Extend the generation-scoped prepared bridge cache to simple
+        positive `exists` plans: namespace-qualified field-presence postings
+        are reused across compatible exists scans, with namespace separation
+        and post-write generation miss coverage.
     - [ ] Add sorted matched-key result caching keyed by index generation plus
       normalized selector plan, so multi-page queries reuse the full matching
       key vector instead of recomputing candidates for every page.
