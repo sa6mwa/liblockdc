@@ -1123,3 +1123,26 @@ int lc_pouch_index_collect_prefix_term_doc_ids(
   (void)error;
   return LC_OK;
 }
+
+int lc_pouch_index_collect_contains_term_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_contains_term *term,
+    lc_pouch_index_contains_term_doc_ids_fn read_contains, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  int rc;
+
+  if (term == NULL || term->field == NULL || term->value == NULL ||
+      read_contains == NULL || doc_ids == NULL) {
+    return LC_OK;
+  }
+  rc = read_contains(read_context, term, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!lc_pouch_index_doc_id_set_sort_unique(doc_ids)) {
+    return LC_ERR_NOMEM;
+  }
+  (void)allocator;
+  (void)error;
+  return LC_OK;
+}
