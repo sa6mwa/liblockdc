@@ -5588,6 +5588,9 @@ static int lc_pouch_disk_query_field_text_contains(const char *encoded,
   if (needle_len == 0U) {
     return 1;
   }
+  if (!ignore_case) {
+    return strstr(text, needle) != NULL;
+  }
   for (pos = 0U; text[pos] != '\0'; ++pos) {
     for (index = 0U; index < needle_len; ++index) {
       unsigned char left;
