@@ -9019,6 +9019,131 @@ test_pouch_endpoint_index_query_skips_removed_candidates(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_index_range_query_preserves_numeric_order(
+    void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *k07;
+  lc_lease *k08;
+  lc_lease *k09;
+  lc_lease *k10;
+  lc_lease *k11;
+  lc_lease *k12;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_sink *sink;
+  lc_error error;
+  char *text;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-range-numeric-order");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  client = open_pouch_client(endpoint);
+
+  k07 = pouch_acquire_query_key(client, "k07", &error);
+  pouch_save_query_json(k07, "{\"score\":7}", &error);
+  k08 = pouch_acquire_query_key(client, "k08", &error);
+  pouch_save_query_json(k08, "{\"score\":8}", &error);
+  k09 = pouch_acquire_query_key(client, "k09", &error);
+  pouch_save_query_json(k09, "{\"score\":9}", &error);
+  k10 = pouch_acquire_query_key(client, "k10", &error);
+  pouch_save_query_json(k10, "{\"score\":10}", &error);
+  k11 = pouch_acquire_query_key(client, "k11", &error);
+  pouch_save_query_json(k11, "{\"score\":11}", &error);
+  k12 = pouch_acquire_query_key(client, "k12", &error);
+  pouch_save_query_json(k12, "{\"score\":12}", &error);
+  k07->close(k07);
+  k08->close(k08);
+  k09->close(k09);
+  k10->close(k10);
+  k11->close(k11);
+  k12->close(k12);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_null(strstr(text, "{\"key\":\"k07\""));
+  assert_non_null(strstr(text, "{\"key\":\"k08\""));
+  assert_non_null(strstr(text, "{\"key\":\"k09\""));
+  assert_non_null(strstr(text, "{\"key\":\"k10\""));
+  assert_non_null(strstr(text, "{\"key\":\"k11\""));
+  assert_null(strstr(text, "{\"key\":\"k12\""));
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 4U);
+  assert_string_equal(capture.keys[0], "k08");
+  assert_string_equal(capture.keys[1], "k09");
+  assert_string_equal(capture.keys[2], "k10");
+  assert_string_equal(capture.keys[3], "k11");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  lc_query_req_init(&req);
+  req.selector_json = "{\"range\":{\"field\":\"/score\",\"lte\":9}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "k07");
+  assert_string_equal(capture.keys[1], "k08");
+  assert_string_equal(capture.keys[2], "k09");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
+  req.engine = "scan";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 4U);
+  assert_string_equal(capture.keys[0], "k08");
+  assert_string_equal(capture.keys[1], "k09");
+  assert_string_equal(capture.keys[2], "k10");
+  assert_string_equal(capture.keys[3], "k11");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":6}");
+  assert_int_equal(res.index_seq, 0UL);
+  lc_query_res_cleanup(&res);
+
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void
 test_pouch_endpoint_index_query_filters_owner_selector(void **state) {
   char root[256];
@@ -11993,6 +12118,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_scan_query_filters_key_selector),
       cmocka_unit_test(
           test_pouch_endpoint_query_filters_full_form_lql_document_selector),
+      cmocka_unit_test(
+          test_pouch_endpoint_index_range_query_preserves_numeric_order),
       cmocka_unit_test(
           test_pouch_endpoint_index_query_excludes_typed_not_eq_candidates),
       cmocka_unit_test(

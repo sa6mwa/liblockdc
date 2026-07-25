@@ -58,9 +58,8 @@ seeded lockd disk state within each row-count/engine/return-mode group so the
 3-minute profile spends its budget on query behavior instead of repeated setup.
 The default dataset sizes are `64,1024`; `POUCH_GO_MEDIUM_SCALE_ROWS` and
 `POUCH_GO_MEDIUM_SCALE_SCENARIOS` can widen the matrix for dedicated perf runs.
-The default medium scenario set currently excludes `RangeHalf` because the
-1024-row indexed pouch key path exposes a known correctness bug; include it
-explicitly when reproducing that issue.
+The default scenario list is a representative bounded subset; pass the full
+scenario list explicitly when doing exhaustive perf characterization.
 
 - `BenchmarkPouchCMediumLQLRows`
 - `BenchmarkPouchCMediumLQLKeys`

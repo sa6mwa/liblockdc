@@ -5993,6 +5993,131 @@ static void test_query_index_range_scans_field_posting_candidates(void **state) 
   test_cleanup_root(root);
 }
 
+static void write_query_range_number_state(lc_pouch_allocator *allocator,
+                                           lc_pouch_store *store,
+                                           const char *key, const char *json,
+                                           lc_error *error) {
+  lc_source *source;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res state;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res stored;
+  int rc;
+
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&state, 0, sizeof(state));
+  memset(&meta, 0, sizeof(meta));
+  memset(&stored, 0, sizeof(stored));
+  put_opts.content_type = "application/json";
+  source = source_from_text(json);
+  rc = store->write_state(store, "default", key, source, &put_opts, &state,
+                          error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  meta.owner = "range-owner";
+  meta.lease_id = "range-lease";
+  meta.state_etag = state.new_state_etag;
+  meta.version = state.new_version;
+  meta.fencing_token = state.new_version;
+  rc = store->store_meta(store, "default", key, &meta, NULL, &stored, error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(allocator, &stored);
+  lc_pouch_put_state_res_cleanup(allocator, &state);
+}
+
+static void
+test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_document_range_term range;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-range-numeric-order");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&range, 0, sizeof(range));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  write_query_range_number_state(&allocator, store, "k07", "{\"score\":7}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "k08", "{\"score\":8}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "k09", "{\"score\":9}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "k10", "{\"score\":10}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "k11", "{\"score\":11}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "k12", "{\"score\":12}",
+                                 &error);
+
+  range.field = "/score";
+  range.gte = "n:+:8:0";
+  range.lte = "n:+:11:0";
+  req.namespace_name = "default";
+  req.limit = 8U;
+  req.document_range_terms = &range;
+  req.document_range_term_count = 1U;
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 4U);
+  assert_string_equal(rows.keys[0], "k08");
+  assert_string_equal(rows.keys[1], "k09");
+  assert_string_equal(rows.keys[2], "k10");
+  assert_string_equal(rows.keys[3], "k11");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 4U);
+  assert_string_equal(keys.keys[0], "k08");
+  assert_string_equal(keys.keys[1], "k09");
+  assert_string_equal(keys.keys[2], "k10");
+  assert_string_equal(keys.keys[3], "k11");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  range.gte = NULL;
+  range.lte = "n:+:9:0";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 3U);
+  assert_string_equal(keys.keys[0], "k07");
+  assert_string_equal(keys.keys[1], "k08");
+  assert_string_equal(keys.keys[2], "k09");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void
 test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   char root[256];
@@ -17021,6 +17146,8 @@ int main(void) {
       cmocka_unit_test(test_metadata_scan_paginates_across_removed_state),
       cmocka_unit_test(test_query_index_scan_orders_paginates_and_reports_seq),
       cmocka_unit_test(test_query_index_range_scans_field_posting_candidates),
+      cmocka_unit_test(
+          test_query_index_range_uses_numeric_order_for_multidigit_values),
       cmocka_unit_test(
           test_query_index_contains_uses_trigram_posting_candidates),
       cmocka_unit_test(
