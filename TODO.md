@@ -504,6 +504,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Compile filtered field-presence sidecar candidates into a
         per-request posting table for positive `exists` docID readers, keeping
         the current posting-summary freshness and secondary predicate guards.
+      - [x] Compile filtered numeric sidecar candidates into a per-request
+        posting table for positive `range` docID readers, so range planning
+        also exercises adaptive sparse/dense postings before decoding through
+        the index layer.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.

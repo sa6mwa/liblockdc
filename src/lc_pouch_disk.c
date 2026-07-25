@@ -6151,6 +6151,8 @@ typedef struct lc_pouch_disk_exact_term_doc_id_reader {
   lc_pouch_index_term_posting_table exact_postings;
   lc_pouch_index_term_table exists_terms;
   lc_pouch_index_term_posting_table exists_postings;
+  lc_pouch_index_term_table range_terms;
+  lc_pouch_index_term_posting_table range_postings;
   size_t in_from;
   int require_summary_match;
   int require_positive_terms_summary_match;
@@ -6170,6 +6172,10 @@ static void lc_pouch_disk_exact_term_doc_id_reader_cleanup(
                                             &reader->exists_postings);
   lc_pouch_index_term_table_cleanup(&reader->store->allocator,
                                     &reader->exists_terms);
+  lc_pouch_index_term_posting_table_cleanup(&reader->store->allocator,
+                                            &reader->range_postings);
+  lc_pouch_index_term_table_cleanup(&reader->store->allocator,
+                                    &reader->range_terms);
 }
 
 static int lc_pouch_disk_query_compile_exact_term_doc_ids(
@@ -6357,19 +6363,67 @@ lc_pouch_disk_query_read_exists_term_doc_ids(void *context, const char *field,
   return LC_OK;
 }
 
-static int lc_pouch_disk_query_read_range_term_doc_ids(
-    void *context, const lc_pouch_document_range_term *term,
-    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
-  lc_pouch_disk_exact_term_doc_id_reader *reader;
+static char *
+lc_pouch_disk_query_range_term_key(lc_pouch_disk_store *store,
+                                   const lc_pouch_document_range_term *term) {
+  const char *gt;
+  const char *gte;
+  const char *lt;
+  const char *lte;
+  size_t gt_len;
+  size_t gte_len;
+  size_t lt_len;
+  size_t lte_len;
+  int written;
+  size_t needed;
+  char *key;
+
+  if (store == NULL || term == NULL) {
+    return NULL;
+  }
+  gt = term->gt != NULL ? term->gt : "";
+  gte = term->gte != NULL ? term->gte : "";
+  lt = term->lt != NULL ? term->lt : "";
+  lte = term->lte != NULL ? term->lte : "";
+  gt_len = strlen(gt);
+  gte_len = strlen(gte);
+  lt_len = strlen(lt);
+  lte_len = strlen(lte);
+  written = snprintf(NULL, 0, "%d:%lu:%s:%d:%lu:%s:%d:%lu:%s:%d:%lu:%s",
+                     term->gt != NULL ? 1 : 0, (unsigned long)gt_len, gt,
+                     term->gte != NULL ? 1 : 0, (unsigned long)gte_len, gte,
+                     term->lt != NULL ? 1 : 0, (unsigned long)lt_len, lt,
+                     term->lte != NULL ? 1 : 0, (unsigned long)lte_len, lte);
+  if (written < 0) {
+    return NULL;
+  }
+  needed = (size_t)written + 1U;
+  key = (char *)lc_pouch_alloc(&store->allocator, needed);
+  if (key == NULL) {
+    return NULL;
+  }
+  (void)snprintf(key, needed, "%d:%lu:%s:%d:%lu:%s:%d:%lu:%s:%d:%lu:%s",
+                 term->gt != NULL ? 1 : 0, (unsigned long)gt_len, gt,
+                 term->gte != NULL ? 1 : 0, (unsigned long)gte_len, gte,
+                 term->lt != NULL ? 1 : 0, (unsigned long)lt_len, lt,
+                 term->lte != NULL ? 1 : 0, (unsigned long)lte_len, lte);
+  return key;
+}
+
+static int lc_pouch_disk_query_compile_range_term_doc_ids(
+    lc_pouch_disk_exact_term_doc_id_reader *reader,
+    const lc_pouch_document_range_term *term, lc_pouch_index_term_id term_id,
+    lc_error *error) {
+  lc_pouch_index_doc_id_set compiled;
   size_t position;
   size_t index;
   int rc;
 
-  reader = (lc_pouch_disk_exact_term_doc_id_reader *)context;
   if (reader == NULL || reader->store == NULL || reader->req == NULL ||
-      term == NULL || term->field == NULL || doc_ids == NULL) {
+      term == NULL || term->field == NULL) {
     return LC_OK;
   }
+  memset(&compiled, 0, sizeof(compiled));
   (void)lc_pouch_disk_query_field_find(reader->store,
                                        reader->req->namespace_name, term->field,
                                        "", "", &position);
@@ -6390,14 +6444,75 @@ static int lc_pouch_disk_query_read_range_term_doc_ids(
       continue;
     }
     rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
-        reader->store, reader->req, posting, doc_ids, reader->in_from,
+        reader->store, reader->req, posting, &compiled, reader->in_from,
         reader->require_summary_match,
         reader->require_positive_terms_summary_match, error,
         reader->alloc_message);
     if (rc != LC_OK) {
+      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &compiled);
       return rc;
     }
   }
+  if (!lc_pouch_index_doc_id_set_sort_unique(&compiled) ||
+      !lc_pouch_index_term_posting_table_put(&reader->store->allocator,
+                                             &reader->range_postings, term_id,
+                                             compiled.items, compiled.count)) {
+    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &compiled);
+    return lc_pouch_set_nomem(error, reader->alloc_message);
+  }
+  lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &compiled);
+  return LC_OK;
+}
+
+static int lc_pouch_disk_query_read_range_term_doc_ids(
+    void *context, const lc_pouch_document_range_term *term,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  lc_pouch_disk_exact_term_doc_id_reader *reader;
+  lc_pouch_index_doc_id_set decoded;
+  lc_pouch_index_term_id term_id;
+  char *range_key;
+  size_t index;
+  int rc;
+
+  reader = (lc_pouch_disk_exact_term_doc_id_reader *)context;
+  if (reader == NULL || reader->store == NULL || reader->req == NULL ||
+      term == NULL || term->field == NULL || doc_ids == NULL) {
+    return LC_OK;
+  }
+  range_key = lc_pouch_disk_query_range_term_key(reader->store, term);
+  if (range_key == NULL) {
+    return lc_pouch_set_nomem(error, reader->alloc_message);
+  }
+  if (!lc_pouch_index_term_table_find_or_add(&reader->store->allocator,
+                                             &reader->range_terms, term->field,
+                                             range_key, &term_id)) {
+    lc_pouch_free(&reader->store->allocator, range_key);
+    return lc_pouch_set_nomem(error, reader->alloc_message);
+  }
+  lc_pouch_free(&reader->store->allocator, range_key);
+  if (!lc_pouch_index_term_posting_table_contains(&reader->range_postings,
+                                                  term_id)) {
+    rc = lc_pouch_disk_query_compile_range_term_doc_ids(reader, term, term_id,
+                                                        error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  memset(&decoded, 0, sizeof(decoded));
+  if (!lc_pouch_index_term_posting_table_decode(&reader->store->allocator,
+                                                &reader->range_postings,
+                                                term_id, &decoded)) {
+    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+    return lc_pouch_set_nomem(error, reader->alloc_message);
+  }
+  for (index = 0U; index < decoded.count; ++index) {
+    if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
+                                          decoded.items[index])) {
+      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+      return lc_pouch_set_nomem(error, reader->alloc_message);
+    }
+  }
+  lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
   return LC_OK;
 }
 

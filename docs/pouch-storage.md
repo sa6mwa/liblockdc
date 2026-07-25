@@ -1305,6 +1305,11 @@ secondary-predicate checks.
 Positive `exists` plans use the same bridge for field-presence postings:
 filtered sidecar candidates are compiled into adaptive docID postings per
 request, then decoded through the index layer.
+Positive numeric `range` plans also compile filtered sidecar candidates into
+adaptive docID postings per request before decoding through the index layer.
+The range term dictionary key records bound presence separately from bound
+values so open, closed, and absent bounds stay distinct inside the compiled
+reader bridge.
 The index layer also owns the first result-cache primitive: a generation plus
 normalized-plan key maps to a sorted docID vector. Disk plans still need to
 produce stable plan keys and install this cache at the prepared-reader level.
