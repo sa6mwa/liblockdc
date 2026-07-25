@@ -5945,6 +5945,45 @@ static int lc_pouch_disk_query_field_add_candidate_key(
   return LC_OK;
 }
 
+static int lc_pouch_disk_query_field_add_candidate_summary_index(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const lc_pouch_disk_query_field_posting *posting, size_t **indices_io,
+    size_t *index_count_io, size_t *index_capacity_io, lc_error *error,
+    const char *alloc_message) {
+  lc_pouch_disk_query_summary_entry *entry;
+  size_t summary_index;
+
+  if (store == NULL || req == NULL || posting == NULL || indices_io == NULL ||
+      index_count_io == NULL || index_capacity_io == NULL) {
+    return LC_OK;
+  }
+  if (req->key != NULL && strcmp(posting->key, req->key) != 0) {
+    return LC_OK;
+  }
+  if (!lc_pouch_disk_query_field_posting_has_live_state(store, posting) ||
+      !lc_pouch_disk_query_field_key_matches_terms(store, req, posting->key) ||
+      !lc_pouch_disk_query_field_key_matches_ranges(store, req, posting->key) ||
+      !lc_pouch_disk_query_field_key_matches_in(store, req, posting->key) ||
+      !lc_pouch_disk_query_field_key_matches_prefix(store, req, posting->key) ||
+      !lc_pouch_disk_query_field_key_matches_contains(store, req,
+                                                      posting->key) ||
+      !lc_pouch_disk_query_field_key_matches_exists(store, req, posting->key) ||
+      !lc_pouch_disk_query_summary_find(store, posting->namespace_name,
+                                        posting->key, &summary_index)) {
+    return LC_OK;
+  }
+  entry = &store->query_summary_entries[summary_index];
+  if (entry->deleted ||
+      (entry->has_query_hidden && entry->query_hidden) ||
+      (req->owner != NULL &&
+       (entry->owner == NULL || strcmp(entry->owner, req->owner) != 0))) {
+    return LC_OK;
+  }
+  return lc_pouch_disk_query_summary_index_array_append(
+      store, indices_io, index_count_io, index_capacity_io, summary_index,
+      error, alloc_message);
+}
+
 static int lc_pouch_disk_query_field_collect_or_eq_terms_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     char ***keys_io, size_t *key_count_io, lc_error *error,
@@ -6310,6 +6349,120 @@ static int lc_pouch_disk_query_field_collect_path_pattern_terms_locked(
   return LC_OK;
 }
 
+static int lc_pouch_disk_query_field_or_eq_exists_summary_supported(
+    const lc_pouch_query_index_scan_req *req) {
+  if (req == NULL ||
+      ((req->document_or_eq_term_count == 0U ||
+        req->document_or_eq_terms == NULL) &&
+       (req->document_or_exists_term_count == 0U ||
+        req->document_or_exists_terms == NULL))) {
+    return 0;
+  }
+  return (req->document_or_exists_path_pattern_count == 0U ||
+          req->document_or_exists_path_patterns == NULL) &&
+         (req->document_or_range_term_count == 0U ||
+          req->document_or_range_terms == NULL) &&
+         (req->document_or_in_term_count == 0U ||
+          req->document_or_in_terms == NULL) &&
+         (req->document_or_prefix_term_count == 0U ||
+          req->document_or_prefix_terms == NULL) &&
+         (req->document_or_contains_term_count == 0U ||
+          req->document_or_contains_terms == NULL);
+}
+
+static int lc_pouch_disk_query_field_collect_or_eq_exists_summary_indices_locked(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    size_t **indices_out, size_t *index_count_out, lc_error *error) {
+  size_t *indices;
+  size_t index_count;
+  size_t index_capacity;
+  size_t term_index;
+  int rc;
+
+  *indices_out = NULL;
+  *index_count_out = 0U;
+  if (!lc_pouch_disk_query_field_or_eq_exists_summary_supported(req)) {
+    return LC_OK;
+  }
+  indices = NULL;
+  index_count = 0U;
+  index_capacity = 0U;
+  for (term_index = 0U; term_index < req->document_or_eq_term_count;
+       ++term_index) {
+    const lc_pouch_document_eq_term *term;
+    size_t position;
+    size_t index;
+
+    term = &req->document_or_eq_terms[term_index];
+    if (term->field == NULL || term->value == NULL) {
+      continue;
+    }
+    (void)lc_pouch_disk_query_field_find(
+        store, req->namespace_name, term->field, term->value, "", &position);
+    for (index = position; index < store->query_field_posting_count; ++index) {
+      lc_pouch_disk_query_field_posting *posting;
+      int cmp;
+
+      posting = &store->query_field_postings[index];
+      cmp = lc_pouch_disk_query_field_compare_values(
+          posting->namespace_name, posting->field, posting->value, "",
+          req->namespace_name, term->field, term->value, "");
+      if (cmp > 0) {
+        break;
+      }
+      if (cmp < 0) {
+        continue;
+      }
+      rc = lc_pouch_disk_query_field_add_candidate_summary_index(
+          store, req, posting, &indices, &index_count, &index_capacity, error,
+          "failed to allocate pouch or equality/exists query row indices");
+      if (rc != LC_OK) {
+        lc_pouch_free(&store->allocator, indices);
+        return rc;
+      }
+    }
+  }
+  for (term_index = 0U; term_index < req->document_or_exists_term_count;
+       ++term_index) {
+    const lc_pouch_document_exists_term *term;
+    size_t position;
+    size_t index;
+
+    term = &req->document_or_exists_terms[term_index];
+    if (term->field == NULL) {
+      continue;
+    }
+    (void)lc_pouch_disk_query_field_find(store, req->namespace_name,
+                                         term->field, "", "", &position);
+    for (index = position; index < store->query_field_posting_count; ++index) {
+      lc_pouch_disk_query_field_posting *posting;
+      int cmp;
+
+      posting = &store->query_field_postings[index];
+      cmp = lc_pouch_disk_query_field_compare_values(
+          posting->namespace_name, posting->field, "", "", req->namespace_name,
+          term->field, "", "");
+      if (cmp > 0) {
+        break;
+      }
+      if (cmp < 0) {
+        continue;
+      }
+      rc = lc_pouch_disk_query_field_add_candidate_summary_index(
+          store, req, posting, &indices, &index_count, &index_capacity, error,
+          "failed to allocate pouch or equality/exists query row indices");
+      if (rc != LC_OK) {
+        lc_pouch_free(&store->allocator, indices);
+        return rc;
+      }
+    }
+  }
+  lc_pouch_disk_query_summary_index_array_sort_unique(indices, &index_count);
+  *indices_out = indices;
+  *index_count_out = index_count;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     char ***keys_out, size_t *key_count_out, lc_error *error) {
@@ -6510,6 +6663,118 @@ static int lc_pouch_disk_query_field_or_exists_scan_locked(
   rows = NULL;
   keys = NULL;
   key_count = 0U;
+  if (lc_pouch_disk_query_field_or_eq_exists_summary_supported(req)) {
+    size_t *indices;
+    size_t index_count;
+    size_t state_position;
+
+    indices = NULL;
+    index_count = 0U;
+    rc = lc_pouch_disk_query_field_collect_or_eq_exists_summary_indices_locked(
+        store, req, &indices, &index_count, error);
+    if (rc != LC_OK) {
+      lc_pouch_disk_unlock(store, error);
+      return rc;
+    }
+    start_index = 0U;
+    if (req->start_after != NULL) {
+      while (start_index < index_count &&
+             strcmp(store->query_summary_entries[indices[start_index]].key,
+                    req->start_after) <= 0) {
+        start_index++;
+      }
+    }
+    visit_count = 0U;
+    for (index = start_index; index < index_count; ++index) {
+      if (req->limit > 0U && visit_count == req->limit) {
+        out->truncated = 1;
+        break;
+      }
+      visit_count++;
+    }
+    if (visit_count > 0U) {
+      rows = (lc_pouch_disk_scan_meta_copy *)lc_pouch_calloc(
+          &store->allocator, visit_count, sizeof(rows[0]));
+      if (rows == NULL) {
+        lc_pouch_free(&store->allocator, indices);
+        lc_pouch_disk_unlock(store, error);
+        return lc_pouch_set_nomem(
+            error, "failed to allocate pouch or exists query rows");
+      }
+    }
+    row_index = 0U;
+    state_position = 0U;
+    for (index = start_index; index < index_count && row_index < visit_count;
+         ++index) {
+      lc_pouch_disk_query_summary_entry *entry;
+      const lc_pouch_disk_state_entry *state_entry;
+
+      entry = &store->query_summary_entries[indices[index]];
+      state_entry = lc_pouch_disk_find_entry_from_state_index(
+          store, entry->namespace_name, entry->key, &state_position);
+      if (!lc_pouch_disk_copy_summary_state_for_scan(store, &rows[row_index],
+                                                    entry, state_entry)) {
+        size_t cleanup_index;
+
+        for (cleanup_index = 0U; cleanup_index < row_index; ++cleanup_index) {
+          lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator,
+                                               &rows[cleanup_index]);
+        }
+        lc_pouch_free(&store->allocator, rows);
+        lc_pouch_free(&store->allocator, indices);
+        lc_pouch_disk_unlock(store, error);
+        return lc_pouch_set_nomem(error,
+                                  "failed to copy pouch or exists query row");
+      }
+      row_index++;
+    }
+    if (out->truncated && visit_count > 0U) {
+      out->next_start_after =
+          lc_pouch_strdup(&store->allocator, rows[visit_count - 1U].key);
+      if (out->next_start_after == NULL) {
+        for (index = 0U; index < visit_count; ++index) {
+          lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
+        }
+        lc_pouch_free(&store->allocator, rows);
+        lc_pouch_free(&store->allocator, indices);
+        lc_pouch_disk_unlock(store, error);
+        return lc_pouch_set_nomem(
+            error, "failed to allocate pouch or exists query cursor");
+      }
+    }
+    out->index_seq = lc_pouch_disk_index_sequence(store);
+    lc_pouch_free(&store->allocator, indices);
+
+    rc = lc_pouch_disk_unlock(store, error);
+    if (rc != LC_OK) {
+      for (index = 0U; index < visit_count; ++index) {
+        lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
+      }
+      lc_pouch_free(&store->allocator, rows);
+      lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+
+    for (row_index = 0U; row_index < visit_count; ++row_index) {
+      rc = lc_pouch_disk_visit_scan_meta_copy(store, &rows[row_index], visit,
+                                              visit_context, error);
+      if (rc != LC_OK) {
+        for (index = 0U; index < visit_count; ++index) {
+          lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
+        }
+        lc_pouch_free(&store->allocator, rows);
+        lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
+        return rc;
+      }
+      out->visited++;
+    }
+
+    for (index = 0U; index < visit_count; ++index) {
+      lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
+    }
+    lc_pouch_free(&store->allocator, rows);
+    return LC_OK;
+  }
   rc = lc_pouch_disk_query_field_collect_or_exists_keys_locked(
       store, req, &keys, &key_count, error);
   if (rc != LC_OK) {
@@ -6629,6 +6894,90 @@ static int lc_pouch_disk_query_field_or_exists_keys_scan_locked(
 
   keys = NULL;
   key_count = 0U;
+  if (lc_pouch_disk_query_field_or_eq_exists_summary_supported(req)) {
+    size_t *indices;
+    size_t index_count;
+
+    indices = NULL;
+    index_count = 0U;
+    rc = lc_pouch_disk_query_field_collect_or_eq_exists_summary_indices_locked(
+        store, req, &indices, &index_count, error);
+    if (rc != LC_OK) {
+      lc_pouch_disk_unlock(store, error);
+      return rc;
+    }
+    start_index = 0U;
+    if (req->start_after != NULL) {
+      while (start_index < index_count &&
+             strcmp(store->query_summary_entries[indices[start_index]].key,
+                    req->start_after) <= 0) {
+        start_index++;
+      }
+    }
+    visit_count = 0U;
+    for (index = start_index; index < index_count; ++index) {
+      if (req->limit > 0U && visit_count == req->limit) {
+        out->truncated = 1;
+        break;
+      }
+      visit_count++;
+    }
+    if (out->truncated && visit_count > 0U) {
+      out->next_start_after = lc_pouch_strdup(
+          &store->allocator,
+          store->query_summary_entries[indices[start_index + visit_count - 1U]]
+              .key);
+      if (out->next_start_after == NULL) {
+        lc_pouch_free(&store->allocator, indices);
+        lc_pouch_disk_unlock(store, error);
+        return lc_pouch_set_nomem(
+            error, "failed to allocate pouch or exists query cursor");
+      }
+    }
+    if (visit_count > 0U) {
+      keys = (char **)lc_pouch_calloc(&store->allocator, visit_count,
+                                      sizeof(keys[0]));
+      if (keys == NULL) {
+        lc_pouch_free(&store->allocator, indices);
+        lc_pouch_disk_unlock(store, error);
+        return lc_pouch_set_nomem(
+            error, "failed to allocate pouch or exists query keys");
+      }
+    }
+    for (index = 0U; index < visit_count; ++index) {
+      keys[index] = lc_pouch_strdup(
+          &store->allocator,
+          store->query_summary_entries[indices[start_index + index]].key);
+      if (keys[index] == NULL) {
+        lc_pouch_disk_query_key_array_cleanup(store, keys, index);
+        lc_pouch_free(&store->allocator, indices);
+        lc_pouch_disk_unlock(store, error);
+        return lc_pouch_set_nomem(error,
+                                  "failed to copy pouch or exists query key");
+      }
+    }
+    out->index_seq = lc_pouch_disk_index_sequence(store);
+    lc_pouch_free(&store->allocator, indices);
+
+    rc = lc_pouch_disk_unlock(store, error);
+    if (rc != LC_OK) {
+      lc_pouch_disk_query_key_array_cleanup(store, keys, visit_count);
+      lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
+      return rc;
+    }
+
+    for (index = 0U; index < visit_count; ++index) {
+      rc = visit(visit_context, keys[index], error);
+      if (rc != LC_OK) {
+        lc_pouch_disk_query_key_array_cleanup(store, keys, visit_count);
+        lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
+        return rc;
+      }
+      out->visited++;
+    }
+    lc_pouch_disk_query_key_array_cleanup(store, keys, visit_count);
+    return LC_OK;
+  }
   rc = lc_pouch_disk_query_field_collect_or_exists_keys_locked(
       store, req, &keys, &key_count, error);
   if (rc != LC_OK) {
@@ -7521,6 +7870,7 @@ static int lc_pouch_disk_query_field_exists_keys_scan_locked(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     lc_pouch_query_index_key_visit_fn visit, void *visit_context,
     lc_pouch_query_index_scan_res *out, lc_error *error) {
+  char **keys;
   size_t *indices;
   size_t index_count;
   size_t start_index;
@@ -7528,6 +7878,7 @@ static int lc_pouch_disk_query_field_exists_keys_scan_locked(
   size_t index;
   int rc;
 
+  keys = NULL;
   indices = NULL;
   index_count = 0U;
   rc = lc_pouch_disk_query_field_collect_exists_summary_indices_locked(
@@ -7564,26 +7915,48 @@ static int lc_pouch_disk_query_field_exists_keys_scan_locked(
                                 "failed to allocate pouch exists query cursor");
     }
   }
+  if (visit_count > 0U) {
+    keys = (char **)lc_pouch_calloc(&store->allocator, visit_count,
+                                    sizeof(keys[0]));
+    if (keys == NULL) {
+      lc_pouch_free(&store->allocator, indices);
+      lc_pouch_disk_unlock(store, error);
+      return lc_pouch_set_nomem(error,
+                                "failed to allocate pouch exists query keys");
+    }
+  }
+  for (index = 0U; index < visit_count; ++index) {
+    keys[index] = lc_pouch_strdup(
+        &store->allocator,
+        store->query_summary_entries[indices[start_index + index]].key);
+    if (keys[index] == NULL) {
+      lc_pouch_disk_query_key_array_cleanup(store, keys, index);
+      lc_pouch_free(&store->allocator, indices);
+      lc_pouch_disk_unlock(store, error);
+      return lc_pouch_set_nomem(error,
+                                "failed to copy pouch exists query key");
+    }
+  }
   out->index_seq = lc_pouch_disk_index_sequence(store);
+  lc_pouch_free(&store->allocator, indices);
 
   rc = lc_pouch_disk_unlock(store, error);
   if (rc != LC_OK) {
-    lc_pouch_free(&store->allocator, indices);
+    lc_pouch_disk_query_key_array_cleanup(store, keys, visit_count);
     lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
     return rc;
   }
 
-  for (index = start_index; index < start_index + visit_count; ++index) {
-    rc = visit(visit_context,
-               store->query_summary_entries[indices[index]].key, error);
+  for (index = 0U; index < visit_count; ++index) {
+    rc = visit(visit_context, keys[index], error);
     if (rc != LC_OK) {
-      lc_pouch_free(&store->allocator, indices);
+      lc_pouch_disk_query_key_array_cleanup(store, keys, visit_count);
       lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
       return rc;
     }
     out->visited++;
   }
-  lc_pouch_free(&store->allocator, indices);
+  lc_pouch_disk_query_key_array_cleanup(store, keys, visit_count);
   return LC_OK;
 }
 
