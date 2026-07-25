@@ -76,6 +76,9 @@ typedef int (*lc_pouch_index_exists_term_doc_ids_fn)(
 typedef int (*lc_pouch_index_range_term_doc_ids_fn)(
     void *context, const lc_pouch_document_range_term *term,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
+typedef int (*lc_pouch_index_prefix_term_doc_ids_fn)(
+    void *context, const lc_pouch_document_prefix_term *term,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
 
 void lc_pouch_index_doc_id_set_cleanup(const lc_pouch_allocator *allocator,
                                        lc_pouch_index_doc_id_set *set);
@@ -162,6 +165,11 @@ int lc_pouch_index_collect_range_term_doc_ids(
     const lc_pouch_allocator *allocator,
     const lc_pouch_document_range_term *term,
     lc_pouch_index_range_term_doc_ids_fn read_range, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
+int lc_pouch_index_collect_prefix_term_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_prefix_term *term,
+    lc_pouch_index_prefix_term_doc_ids_fn read_prefix, void *read_context,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
 
 #endif

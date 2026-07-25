@@ -508,6 +508,10 @@ Latest release targets confirmed on 2026-07-23:
         posting table for positive `range` docID readers, so range planning
         also exercises adaptive sparse/dense postings before decoding through
         the index layer.
+      - [x] Route primary positive `prefix` candidate collection through a
+        prefix docID reader callback and compile filtered text sidecar
+        candidates into adaptive postings before converting back to summary
+        keys.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.

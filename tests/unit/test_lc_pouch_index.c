@@ -453,6 +453,26 @@ static int fake_read_range_doc_ids(void *context,
   return LC_OK;
 }
 
+static int fake_read_prefix_doc_ids(void *context,
+                                    const lc_pouch_document_prefix_term *term,
+                                    lc_pouch_index_doc_id_set *doc_ids,
+                                    lc_error *error) {
+  fake_exact_reader *reader;
+
+  (void)error;
+  reader = (fake_exact_reader *)context;
+  assert_non_null(reader);
+  assert_non_null(term);
+  assert_string_equal(term->field, "/owner");
+  assert_string_equal(term->value, "bench-");
+  assert_true(term->ignore_case);
+  reader->calls++;
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 13U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 4U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 13U));
+  return LC_OK;
+}
+
 static void
 test_collect_in_term_doc_ids_uses_reader_and_deduplicates(void **state) {
   const char *values[3];
@@ -567,6 +587,34 @@ test_collect_range_term_doc_ids_uses_reader_and_deduplicates(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_collect_prefix_term_doc_ids_uses_reader_and_deduplicates(void **state) {
+  lc_pouch_document_prefix_term term;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {4U, 13U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&term, 0, sizeof(term));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  term.field = "/owner";
+  term.value = "bench-";
+  term.ignore_case = 1;
+  rc = lc_pouch_index_collect_prefix_term_doc_ids(
+      NULL, &term, fake_read_prefix_doc_ids, &reader, &doc_ids, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 1U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_doc_id_set_sort_unique),
@@ -588,6 +636,8 @@ int main(void) {
           test_collect_exists_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
           test_collect_range_term_doc_ids_uses_reader_and_deduplicates),
+      cmocka_unit_test(
+          test_collect_prefix_term_doc_ids_uses_reader_and_deduplicates),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

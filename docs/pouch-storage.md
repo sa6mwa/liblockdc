@@ -1310,6 +1310,11 @@ adaptive docID postings per request before decoding through the index layer.
 The range term dictionary key records bound presence separately from bound
 values so open, closed, and absent bounds stay distinct inside the compiled
 reader bridge.
+Primary positive `prefix` plans now use the same reader/planner bridge: the
+disk adapter filters text sidecar postings with visibility and secondary
+predicate checks, compiles the matching summary docIDs into adaptive postings,
+then converts decoded docIDs back to ordered summary keys for the existing
+prefix scan and key-scan surfaces.
 The index layer also owns the first result-cache primitive: a generation plus
 normalized-plan key maps to a sorted docID vector. Disk plans still need to
 produce stable plan keys and install this cache at the prepared-reader level.
