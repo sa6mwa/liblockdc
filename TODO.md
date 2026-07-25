@@ -605,6 +605,10 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.
+      - [x] Add residual-filter pagination coverage for indexed date selectors:
+        field-presence candidates include invalid, old, and accepted date
+        documents, but both `query_keys` and document `query` emit and cursor
+        only rows accepted by `liblql`.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not

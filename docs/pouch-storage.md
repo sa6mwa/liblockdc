@@ -921,6 +921,9 @@ selector semantics still remain final `liblql` acceptance.
 Date selectors use indexed field-presence postings for their strict JSON
 Pointer field as a candidate superset. Pouch does not duplicate liblql's
 datetime parser or comparison rules; final date acceptance remains in `liblql`.
+When date selectors are paginated, cursors advance on accepted rows, not merely
+on presence candidates, so invalid or out-of-range date candidates cannot
+truncate a page or become the public cursor.
 Negated `prefix` / `iprefix` and `contains` / `icontains` leaves under
 recursive `and` composition also act as storage-owned exclusions: candidate
 scans reject keys with live matching text postings before final `liblql`
