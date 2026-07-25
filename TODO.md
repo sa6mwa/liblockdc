@@ -459,6 +459,10 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Split the pouch search/index subsystem out of `lc_pouch_disk.c` into
       an internal C index layer with explicit reader, writer, planner, posting,
       visibility, and result-cache boundaries.
+      - [x] Introduce the first private reader/planner boundary in
+        `lc_pouch_index`: exact-term docID reader callbacks let the index layer
+        own primary `in` union planning while the disk backend adapts the
+        current sidecar postings.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.

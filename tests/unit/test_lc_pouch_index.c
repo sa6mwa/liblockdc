@@ -216,6 +216,66 @@ static void test_posting_dense_decodes_and_intersects(void **state) {
   lc_pouch_index_posting_cleanup(NULL, &posting);
 }
 
+typedef struct fake_exact_reader {
+  size_t calls;
+} fake_exact_reader;
+
+static int fake_read_exact_doc_ids(void *context, const char *field,
+                                   const char *value,
+                                   lc_pouch_index_doc_id_set *doc_ids,
+                                   lc_error *error) {
+  fake_exact_reader *reader;
+
+  (void)error;
+  reader = (fake_exact_reader *)context;
+  assert_non_null(reader);
+  assert_string_equal(field, "/region");
+  reader->calls++;
+  if (strcmp(value, "s:north") == 0) {
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 7U));
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 3U));
+  } else if (strcmp(value, "s:south") == 0) {
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 3U));
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 9U));
+  } else {
+    fail_msg("unexpected exact term value: %s", value);
+  }
+  return LC_OK;
+}
+
+static void
+test_collect_in_term_doc_ids_uses_reader_and_deduplicates(void **state) {
+  const char *values[3];
+  lc_pouch_document_in_term term;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {3U, 7U, 9U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&term, 0, sizeof(term));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  values[0] = "s:north";
+  values[1] = NULL;
+  values[2] = "s:south";
+  term.field = "/region";
+  term.values = values;
+  term.value_count = 3U;
+
+  rc = lc_pouch_index_collect_in_term_doc_ids(
+      NULL, &term, fake_read_exact_doc_ids, &reader, &doc_ids, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 2U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_doc_id_set_sort_unique),
@@ -224,6 +284,8 @@ int main(void) {
       cmocka_unit_test(test_posting_sparse_decodes_sorted_unique_doc_ids),
       cmocka_unit_test(test_posting_sparse_handles_max_doc_id),
       cmocka_unit_test(test_posting_dense_decodes_and_intersects),
+      cmocka_unit_test(
+          test_collect_in_term_doc_ids_uses_reader_and_deduplicates),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

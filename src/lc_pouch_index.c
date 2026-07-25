@@ -534,3 +534,32 @@ int lc_pouch_index_posting_intersect(const lc_pouch_allocator *allocator,
   lc_pouch_index_doc_id_set_cleanup(allocator, &decoded);
   return ok;
 }
+
+int lc_pouch_index_collect_in_term_doc_ids(
+    const lc_pouch_allocator *allocator, const lc_pouch_document_in_term *term,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  size_t value_index;
+  int rc;
+
+  if (term == NULL || term->field == NULL || term->values == NULL ||
+      term->value_count == 0U || read_exact == NULL || doc_ids == NULL) {
+    return LC_OK;
+  }
+  for (value_index = 0U; value_index < term->value_count; ++value_index) {
+    if (term->values[value_index] == NULL) {
+      continue;
+    }
+    rc = read_exact(read_context, term->field, term->values[value_index],
+                    doc_ids, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  if (!lc_pouch_index_doc_id_set_sort_unique(doc_ids)) {
+    return LC_ERR_NOMEM;
+  }
+  (void)allocator;
+  (void)error;
+  return LC_OK;
+}
