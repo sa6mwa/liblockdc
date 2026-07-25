@@ -592,6 +592,9 @@ Latest release targets confirmed on 2026-07-23:
         index-owned docID result paging bridge, sharing invalid-docID detection
         and avoiding full cached-match summary translation before cursor/limit
         handling.
+      - [x] Route simple positive numeric `range` document/key scans through
+        index-owned docID result paging, so cached range result pages translate
+        only selected docIDs back through disk summaries before streaming.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

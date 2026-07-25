@@ -9180,6 +9180,34 @@ test_pouch_endpoint_index_range_query_preserves_numeric_order(void **state) {
   memset(&capture, 0, sizeof(capture));
   memset(&res, 0, sizeof(res));
   lc_query_req_init(&req);
+  req.selector_json = "{\"range\":{\"field\":\"/score\",\"gte\":8,\"lte\":11}}";
+  req.limit = 2L;
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "k08");
+  assert_string_equal(capture.keys[1], "k09");
+  assert_string_equal(res.cursor, "k09");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  req.cursor = "k09";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "k10");
+  assert_string_equal(capture.keys[1], "k11");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  lc_query_req_init(&req);
   req.selector_json = "{\"range\":{\"field\":\"/score\",\"lte\":9}}";
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
