@@ -1340,6 +1340,14 @@ plan keys include namespace, field, case-sensitivity, and length-prefixed text
 values, so repeated text pages can reuse the matching docID vector until the
 index sequence advances.
 
+The disk bridge also keeps a first prepared-reader cache for exact terms. It is
+keyed by the current index sequence plus a namespace-qualified field/value term,
+and stores adaptive docID postings for simple equality and non-wildcard `in`
+plans. The cache is intentionally narrower than the final design: compound,
+negative, owner-filtered, key-filtered, range, prefix, and contains selectors
+still use request-local compiled postings until their candidate sets can be
+cached without baking request-specific filters into the prepared view.
+
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
 field postings, stable ordering, limits, and cursors. That same boundary also

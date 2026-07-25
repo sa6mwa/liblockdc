@@ -519,6 +519,11 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
+      - [x] Add the first generation-scoped prepared exact-term cache in the
+        disk bridge: simple equality and non-wildcard `in` plans can reuse
+        namespace-qualified adaptive exact postings across compatible query
+        shapes, with tests covering namespace separation and generation miss
+        after writes.
     - [ ] Add sorted matched-key result caching keyed by index generation plus
       normalized selector plan, so multi-page queries reuse the full matching
       key vector instead of recomputing candidates for every page.
