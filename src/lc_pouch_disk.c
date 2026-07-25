@@ -10602,6 +10602,36 @@ lc_pouch_disk_copy_meta_for_scan(lc_pouch_disk_store *store,
   return 1;
 }
 
+static int lc_pouch_disk_copy_meta_state_for_scan(
+    lc_pouch_disk_store *store, lc_pouch_disk_scan_meta_copy *dst,
+    const lc_pouch_disk_meta_entry *src,
+    const lc_pouch_disk_state_entry *state_entry) {
+  if (!lc_pouch_disk_copy_meta_for_scan(store, dst, src)) {
+    return 0;
+  }
+  if (state_entry == NULL || state_entry->deleted ||
+      state_entry->etag == NULL) {
+    return 1;
+  }
+  dst->state.content_type =
+      lc_pouch_strdup(&store->allocator, state_entry->content_type);
+  dst->state.etag = lc_pouch_strdup(&store->allocator, state_entry->etag);
+  dst->body_path =
+      lc_pouch_strdup(&store->allocator, state_entry->body_path != NULL
+                                             ? state_entry->body_path
+                                             : store->log_path);
+  if ((state_entry->content_type != NULL && dst->state.content_type == NULL) ||
+      dst->state.etag == NULL || dst->body_path == NULL) {
+    lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, dst);
+    return 0;
+  }
+  dst->state.version = state_entry->version;
+  dst->state.bytes = (long)state_entry->body_length;
+  dst->body_offset = state_entry->body_offset;
+  dst->body_length = state_entry->body_length;
+  return 1;
+}
+
 static int lc_pouch_disk_copy_summary_state_for_scan(
     lc_pouch_disk_store *store, lc_pouch_disk_scan_meta_copy *dst,
     const lc_pouch_disk_query_summary_entry *src,
@@ -12007,7 +12037,24 @@ lc_pouch_disk_scan_meta(lc_pouch_store *self, const lc_pouch_scan_meta_req *req,
                                strcmp(entry->meta.owner, req->owner) != 0)) {
       continue;
     }
-    if (!lc_pouch_disk_copy_meta_for_scan(store, &rows[row_index], entry)) {
+    if (req->exclude_deleted_state) {
+      int state_index;
+
+      state_index = lc_pouch_disk_find_entry(store, entry->namespace_name,
+                                             entry->key);
+      if (!lc_pouch_disk_copy_meta_state_for_scan(
+              store, &rows[row_index], entry,
+              state_index >= 0 ? &store->state_entries[state_index] : NULL)) {
+        for (index = 0U; index < row_index; ++index) {
+          lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
+        }
+        lc_pouch_free(&store->allocator, rows);
+        lc_pouch_disk_unlock(store, error);
+        return lc_pouch_set_nomem(error,
+                                  "failed to copy pouch metadata scan row");
+      }
+    } else if (!lc_pouch_disk_copy_meta_for_scan(store, &rows[row_index],
+                                                 entry)) {
       for (index = 0U; index < row_index; ++index) {
         lc_pouch_disk_scan_meta_copy_cleanup(&store->allocator, &rows[index]);
       }

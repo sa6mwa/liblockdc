@@ -5367,6 +5367,7 @@ static void test_metadata_scan_can_exclude_removed_state(void **state) {
   assert_int_equal(scan_rows.count, 2U);
   assert_string_equal(scan_rows.keys[0], "alpha");
   assert_string_equal(scan_rows.keys[1], "removed");
+  assert_int_equal(scan_rows.body_count, 0U);
   assert_false(scan.truncated);
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
 
@@ -5377,6 +5378,7 @@ static void test_metadata_scan_can_exclude_removed_state(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(scan_rows.count, 1U);
   assert_string_equal(scan_rows.keys[0], "alpha");
+  assert_int_equal(scan_rows.body_count, 1U);
   assert_false(scan.truncated);
   lc_pouch_scan_meta_res_cleanup(&allocator, &scan);
 

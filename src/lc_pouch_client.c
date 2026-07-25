@@ -18978,7 +18978,9 @@ static int lc_pouch_query_keys_scan_visit(void *context,
                                           lc_error *error) {
   lc_pouch_query_keys_scan_context *scan;
   lc_pouch_state_info state;
+  const lc_pouch_state_info *state_view;
   lc_source *body;
+  int borrowed_body;
   int embed_json;
   int emit;
   int matched;
@@ -18995,24 +18997,36 @@ static int lc_pouch_query_keys_scan_visit(void *context,
   }
   if (scan->filter != NULL && scan->filter->enabled) {
     memset(&state, 0, sizeof(state));
+    state_view = NULL;
     body = NULL;
-    rc = scan->client->pouch_store->read_state(scan->client->pouch_store,
-                                               scan->namespace_name, row->key,
-                                               &body, &state, error);
-    if (rc != LC_OK) {
-      return rc;
+    borrowed_body = 0;
+    if (row->body != NULL && row->state != NULL) {
+      body = row->body;
+      state_view = row->state;
+      borrowed_body = 1;
+      rc = LC_OK;
+    } else {
+      rc = scan->client->pouch_store->read_state(scan->client->pouch_store,
+                                                 scan->namespace_name, row->key,
+                                                 &body, &state, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      state_view = &state;
     }
-    embed_json = body != NULL && !state.no_content &&
-                 lc_pouch_content_type_is_json(state.content_type);
+    embed_json = body != NULL && !state_view->no_content &&
+                 lc_pouch_content_type_is_json(state_view->content_type);
     matched = 0;
     if (embed_json) {
       rc = lc_pouch_lql_document_filter_match_source(
           scan->client, scan->filter, body, &matched, error);
     }
-    if (body != NULL) {
+    if (body != NULL && !borrowed_body) {
       body->close(body);
     }
-    lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+    if (!borrowed_body) {
+      lc_pouch_state_info_cleanup(&scan->client->pouch_allocator, &state);
+    }
     if (rc != LC_OK) {
       return rc;
     }
