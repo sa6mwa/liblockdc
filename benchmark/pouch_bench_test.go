@@ -66,6 +66,15 @@ var queryScenarios = []queryScenario{
 		},
 	},
 	{
+		name: "InRegionSingle",
+		lockdLQL: func(rows int) string {
+			return "in{field=/region,any=us}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%3 == 0 })
+		},
+	},
+	{
 		name: "InTags",
 		lockdLQL: func(rows int) string {
 			return "in{field=/tags[],any=planning|finance}"

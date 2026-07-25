@@ -50,6 +50,7 @@ key-return queries:
 - `EqDense`: half the namespace matches equality.
 - `RangeHalf`: half the namespace matches a numeric lower bound.
 - `InRegion`: scalar membership over `/region`.
+- `InRegionSingle`: scalar membership over `/region` with one string value.
 - `InTags`: explicit array-member membership over `/tags[]`.
 - `ExistsFlag`: sparse field existence.
 - `PrefixOwner`: sparse string prefix.
