@@ -9344,9 +9344,7 @@ static size_t lc_pouch_disk_query_field_count_gram_candidates_locked(
     if (cmp < 0) {
       continue;
     }
-    if (lc_pouch_disk_query_field_posting_has_live_state(store, posting)) {
-      count++;
-    }
+    count++;
   }
   return count;
 }
