@@ -1323,12 +1323,12 @@ reader bridge.
 Primary positive `prefix` plans now use the same reader/planner bridge: the
 disk adapter filters text sidecar postings with visibility and secondary
 predicate checks, compiles the matching summary docIDs into adaptive postings,
-then converts decoded docIDs back to ordered summary keys for the existing
-prefix scan and key-scan surfaces.
+then asks the index layer to page the decoded docIDs over the document table
+before converting only the selected page back to disk summaries.
 Primary positive `contains` plans also use a docID reader bridge. The disk
 adapter still chooses a selective trigram candidate when possible and performs
 final substring validation against text postings, but the accepted summary
-docIDs are compiled into adaptive postings before pagination.
+docIDs are compiled into adaptive postings before index-owned page selection.
 The index layer also owns the first result-cache primitive: a generation plus
 normalized-plan key maps to a sorted docID vector. The simple result-cache plan
 key constructors now live in `lc_pouch_index`, and disk supplies only the known
@@ -1354,11 +1354,12 @@ values, so repeated text pages can reuse the matching docID vector until the
 index sequence advances.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,
-simple positive numeric `range`, and simple non-wildcard positive `in` now use
-the index-owned result page primitive, so page-N scans translate only the
-requested page of docIDs through disk summaries. Wildcard `in` and the
-remaining simple predicate scans still reuse or build the full matching vector
-before disk-side cursor/limit handling.
+simple positive numeric `range`, simple non-wildcard positive `in`, simple
+positive `prefix`, and simple positive `contains` now use the index-owned
+result page primitive, so page-N scans translate only the requested page of
+docIDs through disk summaries. Wildcard `in` and broader OR/path-pattern
+predicate scans still reuse or build the full matching vector before disk-side
+cursor/limit handling.
 
 The disk bridge also keeps a first prepared-reader cache for exact terms. It is
 keyed by the current index sequence plus a namespace-qualified field/value term,
