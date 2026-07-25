@@ -17028,23 +17028,6 @@ typedef struct lc_pouch_query_scan_context {
   char *cursor;
 } lc_pouch_query_scan_context;
 
-typedef struct lc_pouch_query_row_meta_json {
-  char *key;
-  char *content_type;
-  char *etag;
-  lonejson_int64 version;
-} lc_pouch_query_row_meta_json;
-
-static const lonejson_field lc_pouch_query_row_meta_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_pouch_query_row_meta_json, key, "key"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_pouch_query_row_meta_json, content_type,
-                                "content_type"),
-    LONEJSON_FIELD_STRING_ALLOC(lc_pouch_query_row_meta_json, etag, "etag"),
-    LONEJSON_FIELD_I64(lc_pouch_query_row_meta_json, version, "version")};
-
-LONEJSON_MAP_DEFINE(lc_pouch_query_row_meta_map, lc_pouch_query_row_meta_json,
-                    lc_pouch_query_row_meta_fields);
-
 static int lc_pouch_query_keys_callback_failed(lc_error *error,
                                                const char *fallback) {
   if (error != NULL && error->code != LC_OK) {
@@ -19739,62 +19722,357 @@ static int lc_pouch_lonejson_error(lc_error *error, lonejson_status status,
                       NULL, NULL, NULL);
 }
 
-static int lc_pouch_query_serialize_row_prefix(
-    const char *key, const lc_pouch_state_info *state,
-    lonejson_owned_buffer *owned, size_t *prefix_len, lc_error *error) {
-  lc_pouch_query_row_meta_json row;
-  lonejson *runtime;
-  lonejson_error lj_error;
-  lonejson_status status;
+static size_t lc_pouch_query_json_escaped_len(const char *value,
+                                              int *overflow) {
+  size_t length;
+  const unsigned char *cursor;
 
-  runtime = lc_thread_lonejson_runtime();
-  if (runtime == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query JSON runtime", NULL,
+  if (value == NULL) {
+    return 4U;
+  }
+  length = 2U;
+  cursor = (const unsigned char *)value;
+  while (*cursor != '\0') {
+    size_t add;
+
+    if (*cursor == '"' || *cursor == '\\' || *cursor == '\b' ||
+        *cursor == '\f' || *cursor == '\n' || *cursor == '\r' ||
+        *cursor == '\t') {
+      add = 2U;
+    } else if (*cursor < 0x20U) {
+      add = 6U;
+    } else {
+      add = 1U;
+    }
+    if (length > ((size_t)-1) - add) {
+      if (overflow != NULL) {
+        *overflow = 1;
+      }
+      return 0U;
+    }
+    length += add;
+    ++cursor;
+  }
+  return length;
+}
+
+static int lc_pouch_query_size_add(size_t *total, size_t add) {
+  if (total == NULL || *total > ((size_t)-1) - add) {
+    return 0;
+  }
+  *total += add;
+  return 1;
+}
+
+static void lc_pouch_query_json_append_value(char *dst, size_t *offset,
+                                             const char *value) {
+  static const char hex[] = "0123456789abcdef";
+  const unsigned char *cursor;
+  size_t pos;
+
+  pos = *offset;
+  if (value == NULL) {
+    memcpy(dst + pos, "null", 4U);
+    *offset = pos + 4U;
+    return;
+  }
+  dst[pos++] = '"';
+  cursor = (const unsigned char *)value;
+  while (*cursor != '\0') {
+    unsigned char ch;
+
+    ch = *cursor++;
+    switch (ch) {
+    case '"':
+      dst[pos++] = '\\';
+      dst[pos++] = '"';
+      break;
+    case '\\':
+      dst[pos++] = '\\';
+      dst[pos++] = '\\';
+      break;
+    case '\b':
+      dst[pos++] = '\\';
+      dst[pos++] = 'b';
+      break;
+    case '\f':
+      dst[pos++] = '\\';
+      dst[pos++] = 'f';
+      break;
+    case '\n':
+      dst[pos++] = '\\';
+      dst[pos++] = 'n';
+      break;
+    case '\r':
+      dst[pos++] = '\\';
+      dst[pos++] = 'r';
+      break;
+    case '\t':
+      dst[pos++] = '\\';
+      dst[pos++] = 't';
+      break;
+    default:
+      if (ch < 0x20U) {
+        dst[pos++] = '\\';
+        dst[pos++] = 'u';
+        dst[pos++] = '0';
+        dst[pos++] = '0';
+        dst[pos++] = hex[(ch >> 4) & 0x0FU];
+        dst[pos++] = hex[ch & 0x0FU];
+      } else {
+        dst[pos++] = (char)ch;
+      }
+      break;
+    }
+  }
+  dst[pos++] = '"';
+  *offset = pos;
+}
+
+static int lc_pouch_query_row_prefix_len(const char *key,
+                                         const lc_pouch_state_info *state,
+                                         char *version_text,
+                                         size_t version_capacity,
+                                         size_t *prefix_len,
+                                         lc_error *error) {
+  static const char key_field[] = "{\"key\":";
+  static const char content_type_field[] = ",\"content_type\":";
+  static const char etag_field[] = ",\"etag\":";
+  static const char version_field[] = ",\"version\":";
+  const char *content_type;
+  const char *etag;
+  size_t key_len;
+  size_t content_type_len;
+  size_t etag_len;
+  size_t total;
+  size_t version_len;
+  int overflow;
+  int written;
+
+  if (key == NULL || version_text == NULL || version_capacity == 0U ||
+      prefix_len == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query row prefix requires key and output", NULL,
                         NULL, NULL);
   }
-  memset(&row, 0, sizeof(row));
-  row.key = (char *)key;
-  row.content_type = (char *)(state != NULL ? state->content_type : NULL);
-  row.etag = (char *)(state != NULL ? state->etag : NULL);
-  row.version = state != NULL ? (lonejson_int64)state->version : 0;
-  *owned = lonejson_default_owned_buffer();
-  lonejson_error_init(&lj_error);
-  status = runtime->serialize_owned(runtime, &lc_pouch_query_row_meta_map, &row,
-                                    owned, &lj_error);
-  if (status != LONEJSON_STATUS_OK) {
-    lonejson_owned_buffer_free(owned);
-    return lc_pouch_lonejson_error(error, status, &lj_error,
-                                   "failed to serialize pouch query row");
-  }
-  if (owned->len == 0U || owned->data[owned->len - 1U] != '}') {
-    lonejson_owned_buffer_free(owned);
+  content_type = state != NULL ? state->content_type : NULL;
+  etag = state != NULL ? state->etag : NULL;
+  written =
+      snprintf(version_text, version_capacity, "%ld", state != NULL
+                                                         ? state->version
+                                                         : 0L);
+  if (written < 0 || (size_t)written >= version_capacity) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query row serializer returned invalid JSON",
-                        NULL, NULL, NULL);
+                        "failed to format pouch query row version", NULL, NULL,
+                        NULL);
   }
-  *prefix_len = owned->len - 1U;
+  version_len = (size_t)written;
+  overflow = 0;
+  key_len = lc_pouch_query_json_escaped_len(key, &overflow);
+  content_type_len = lc_pouch_query_json_escaped_len(content_type, &overflow);
+  etag_len = lc_pouch_query_json_escaped_len(etag, &overflow);
+  if (overflow) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query row metadata is too large", NULL, NULL,
+                        NULL);
+  }
+  total = 0U;
+  if (!lc_pouch_query_size_add(&total, sizeof(key_field) - 1U) ||
+      !lc_pouch_query_size_add(&total, key_len) ||
+      !lc_pouch_query_size_add(&total, sizeof(content_type_field) - 1U) ||
+      !lc_pouch_query_size_add(&total, content_type_len) ||
+      !lc_pouch_query_size_add(&total, sizeof(etag_field) - 1U) ||
+      !lc_pouch_query_size_add(&total, etag_len) ||
+      !lc_pouch_query_size_add(&total, sizeof(version_field) - 1U) ||
+      !lc_pouch_query_size_add(&total, version_len)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query row metadata is too large", NULL, NULL,
+                        NULL);
+  }
+  *prefix_len = total;
   return LC_OK;
+}
+
+static int lc_pouch_query_format_row_prefix(char *dst, size_t capacity,
+                                            const char *key,
+                                            const lc_pouch_state_info *state,
+                                            size_t *prefix_len,
+                                            lc_error *error) {
+  static const char key_field[] = "{\"key\":";
+  static const char content_type_field[] = ",\"content_type\":";
+  static const char etag_field[] = ",\"etag\":";
+  static const char version_field[] = ",\"version\":";
+  char version_text[64];
+  const char *content_type;
+  const char *etag;
+  size_t offset;
+  int rc;
+
+  rc = lc_pouch_query_row_prefix_len(key, state, version_text,
+                                     sizeof(version_text), prefix_len, error);
+  if (rc != LC_OK || *prefix_len > capacity) {
+    return rc;
+  }
+  content_type = state != NULL ? state->content_type : NULL;
+  etag = state != NULL ? state->etag : NULL;
+  offset = 0U;
+  memcpy(dst + offset, key_field, sizeof(key_field) - 1U);
+  offset += sizeof(key_field) - 1U;
+  lc_pouch_query_json_append_value(dst, &offset, key);
+  memcpy(dst + offset, content_type_field, sizeof(content_type_field) - 1U);
+  offset += sizeof(content_type_field) - 1U;
+  lc_pouch_query_json_append_value(dst, &offset, content_type);
+  memcpy(dst + offset, etag_field, sizeof(etag_field) - 1U);
+  offset += sizeof(etag_field) - 1U;
+  lc_pouch_query_json_append_value(dst, &offset, etag);
+  memcpy(dst + offset, version_field, sizeof(version_field) - 1U);
+  offset += sizeof(version_field) - 1U;
+  memcpy(dst + offset, version_text, strlen(version_text));
+  offset += strlen(version_text);
+  *prefix_len = offset;
+  return LC_OK;
+}
+
+static int lc_pouch_query_sink_write_json_value(lc_sink *dst,
+                                                const char *value,
+                                                lc_error *error) {
+  char escape[7];
+  const unsigned char *cursor;
+
+  if (value == NULL) {
+    return lc_pouch_sink_write_all(dst, "null", 4U, error);
+  }
+  if (lc_pouch_sink_write_all(dst, "\"", 1U, error) != LC_OK) {
+    return error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+  }
+  cursor = (const unsigned char *)value;
+  while (*cursor != '\0') {
+    static const char hex[] = "0123456789abcdef";
+    unsigned char ch;
+    const char *two;
+
+    ch = *cursor++;
+    two = NULL;
+    switch (ch) {
+    case '"':
+      two = "\\\"";
+      break;
+    case '\\':
+      two = "\\\\";
+      break;
+    case '\b':
+      two = "\\b";
+      break;
+    case '\f':
+      two = "\\f";
+      break;
+    case '\n':
+      two = "\\n";
+      break;
+    case '\r':
+      two = "\\r";
+      break;
+    case '\t':
+      two = "\\t";
+      break;
+    default:
+      break;
+    }
+    if (two != NULL) {
+      if (lc_pouch_sink_write_all(dst, two, 2U, error) != LC_OK) {
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_TRANSPORT;
+      }
+    } else if (ch < 0x20U) {
+      escape[0] = '\\';
+      escape[1] = 'u';
+      escape[2] = '0';
+      escape[3] = '0';
+      escape[4] = hex[(ch >> 4) & 0x0FU];
+      escape[5] = hex[ch & 0x0FU];
+      escape[6] = '\0';
+      if (lc_pouch_sink_write_all(dst, escape, 6U, error) != LC_OK) {
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_TRANSPORT;
+      }
+    } else if (lc_pouch_sink_write_all(dst, &ch, 1U, error) != LC_OK) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_TRANSPORT;
+    }
+  }
+  return lc_pouch_sink_write_all(dst, "\"", 1U, error);
 }
 
 static int lc_pouch_query_write_row_prefix(lc_sink *dst, const char *key,
                                            const lc_pouch_state_info *state,
                                            lc_error *error) {
-  lonejson_owned_buffer owned;
+  static const char key_field[] = "{\"key\":";
+  static const char content_type_field[] = ",\"content_type\":";
+  static const char etag_field[] = ",\"etag\":";
+  static const char version_field[] = ",\"version\":";
+  static const char document_field[] = ",\"document\":";
+  char prefix[512];
+  char version_text[64];
+  const char *content_type;
+  const char *etag;
   size_t prefix_len;
+  int written;
   int rc;
 
-  rc = lc_pouch_query_serialize_row_prefix(key, state, &owned, &prefix_len,
-                                           error);
+  rc = lc_pouch_query_format_row_prefix(prefix, sizeof(prefix), key, state,
+                                        &prefix_len, error);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_sink_write_all(dst, owned.data, prefix_len, error);
-  lonejson_owned_buffer_free(&owned);
-  if (rc != LC_OK) {
-    return rc;
+  if (prefix_len <= sizeof(prefix)) {
+    rc = lc_pouch_sink_write_all(dst, prefix, prefix_len, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    return lc_pouch_sink_write_all(dst, document_field,
+                                   sizeof(document_field) - 1U, error);
   }
-  return lc_pouch_sink_write_cstr(dst, ",\"document\":", error);
+  content_type = state != NULL ? state->content_type : NULL;
+  etag = state != NULL ? state->etag : NULL;
+  written = snprintf(version_text, sizeof(version_text), "%ld",
+                     state != NULL ? state->version : 0L);
+  if (written < 0 || (size_t)written >= sizeof(version_text)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to format pouch query row version", NULL, NULL,
+                        NULL);
+  }
+  rc = lc_pouch_sink_write_all(dst, key_field, sizeof(key_field) - 1U, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_sink_write_json_value(dst, key, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_sink_write_all(dst, content_type_field,
+                                 sizeof(content_type_field) - 1U, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_sink_write_json_value(dst, content_type, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_sink_write_all(dst, etag_field, sizeof(etag_field) - 1U,
+                                 error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_sink_write_json_value(dst, etag, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_sink_write_all(dst, version_field,
+                                 sizeof(version_field) - 1U, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_sink_write_all(dst, version_text, strlen(version_text),
+                                 error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_sink_write_all(dst, document_field,
+                                 sizeof(document_field) - 1U, error);
+  }
+  return rc;
 }
 
 static int lc_pouch_query_try_write_small_json_row(
@@ -19803,7 +20081,6 @@ static int lc_pouch_query_try_write_small_json_row(
     lc_error *error) {
   static const char document_field[] = ",\"document\":";
   unsigned char row_buffer[8192];
-  lonejson_owned_buffer owned;
   size_t prefix_len;
   size_t body_len;
   size_t total_len;
@@ -19818,18 +20095,23 @@ static int lc_pouch_query_try_write_small_json_row(
     return LC_OK;
   }
   body_len = (size_t)state->bytes;
-  rc = lc_pouch_query_serialize_row_prefix(key, state, &owned, &prefix_len,
-                                           error);
+  rc = lc_pouch_query_format_row_prefix((char *)row_buffer, sizeof(row_buffer),
+                                        key, state, &prefix_len, error);
   if (rc != LC_OK) {
     return rc;
   }
-  total_len = prefix_len + (sizeof(document_field) - 1U) + body_len + 2U;
-  if (total_len > sizeof(row_buffer)) {
-    lonejson_owned_buffer_free(&owned);
+  if (prefix_len > sizeof(row_buffer)) {
     return LC_OK;
   }
-  memcpy(row_buffer, owned.data, prefix_len);
-  lonejson_owned_buffer_free(&owned);
+  total_len = prefix_len;
+  if (!lc_pouch_query_size_add(&total_len, sizeof(document_field) - 1U) ||
+      !lc_pouch_query_size_add(&total_len, body_len) ||
+      !lc_pouch_query_size_add(&total_len, 2U)) {
+    return LC_OK;
+  }
+  if (total_len > sizeof(row_buffer)) {
+    return LC_OK;
+  }
   offset = prefix_len;
   memcpy(row_buffer + offset, document_field, sizeof(document_field) - 1U);
   offset += sizeof(document_field) - 1U;

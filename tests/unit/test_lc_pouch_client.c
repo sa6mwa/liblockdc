@@ -8888,7 +8888,7 @@ test_pouch_endpoint_index_contains_filters_trigram_false_positive(void **state) 
 }
 
 static void
-test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson(void **state) {
+test_pouch_endpoint_scan_query_escapes_row_metadata(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -12197,7 +12197,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_endpoint_index_contains_filters_trigram_false_positive),
       cmocka_unit_test(
-          test_pouch_endpoint_scan_query_serializes_metadata_with_lonejson),
+          test_pouch_endpoint_scan_query_escapes_row_metadata),
       cmocka_unit_test(
           test_pouch_endpoint_default_index_query_streams_documents),
       cmocka_unit_test(
