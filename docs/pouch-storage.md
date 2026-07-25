@@ -1314,6 +1314,9 @@ then apply pagination after cached candidate reuse. Updates advance the index
 sequence, so stale equality results miss the cache.
 Simple positive `exists` scans use the same generation-keyed cache with a
 length-prefixed field-presence plan key.
+Simple non-wildcard positive `in` scans also use the result cache; their plan
+key sorts and deduplicates typed values before key construction, so duplicate
+or reordered value lists reuse the same cached docID vector.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,

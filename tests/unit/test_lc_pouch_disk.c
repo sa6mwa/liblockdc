@@ -6549,6 +6549,21 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  write_query_range_number_state(&allocator, store, "zeta",
+                                 "{\"tags\":[\"finance\"]}", &error);
+
+  memset(&keys, 0, sizeof(keys));
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 4U);
+  assert_string_equal(keys.keys[0], "both");
+  assert_string_equal(keys.keys[1], "finance");
+  assert_string_equal(keys.keys[2], "planning");
+  assert_string_equal(keys.keys[3], "zeta");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   memset(&keys, 0, sizeof(keys));
   memset(&rows, 0, sizeof(rows));
   in_term.field = "/tags/*";
@@ -6556,10 +6571,11 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(keys.count, 3U);
+  assert_int_equal(keys.count, 4U);
   assert_string_equal(keys.keys[0], "both");
   assert_string_equal(keys.keys[1], "finance");
   assert_string_equal(keys.keys[2], "planning");
+  assert_string_equal(keys.keys[3], "zeta");
   assert_false(scan.truncated);
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
@@ -6567,10 +6583,11 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
                                &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(rows.count, 3U);
+  assert_int_equal(rows.count, 4U);
   assert_string_equal(rows.keys[0], "both");
   assert_string_equal(rows.keys[1], "finance");
   assert_string_equal(rows.keys[2], "planning");
+  assert_string_equal(rows.keys[3], "zeta");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
@@ -6587,10 +6604,11 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
                                     &scan, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(keys.count, 3U);
+  assert_int_equal(keys.count, 4U);
   assert_string_equal(keys.keys[0], "both");
   assert_string_equal(keys.keys[1], "finance");
   assert_string_equal(keys.keys[2], "planning");
+  assert_string_equal(keys.keys[3], "zeta");
   assert_false(scan.truncated);
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
@@ -6598,10 +6616,11 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
                                &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(rows.count, 3U);
+  assert_int_equal(rows.count, 4U);
   assert_string_equal(rows.keys[0], "both");
   assert_string_equal(rows.keys[1], "finance");
   assert_string_equal(rows.keys[2], "planning");
+  assert_string_equal(rows.keys[3], "zeta");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
