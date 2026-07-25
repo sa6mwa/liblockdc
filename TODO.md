@@ -588,6 +588,10 @@ Latest release targets confirmed on 2026-07-23:
         result pages translate only the selected page of docIDs back through
         disk summaries instead of translating the full match vector before
         cursor/limit handling.
+      - [x] Route simple positive `exists` document/key scans through the same
+        index-owned docID result paging bridge, sharing invalid-docID detection
+        and avoiding full cached-match summary translation before cursor/limit
+        handling.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

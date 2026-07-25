@@ -1333,11 +1333,11 @@ The index layer also owns the first result-cache primitive: a generation plus
 normalized-plan key maps to a sorted docID vector. The simple result-cache plan
 key constructors now live in `lc_pouch_index`, and disk supplies only the known
 simple-plan kind, current index generation, and storage sidecar readers.
-The first disk use is deliberately narrow: simple primary equality scans cache
-docIDs by the current index sequence and a length-prefixed equality plan key,
-then ask the index layer to page the cached docIDs over the document table
-before disk converts the selected page back to summary entries. Updates advance
-the index sequence, so stale equality results miss the cache.
+The first disk use is deliberately narrow: simple primary equality and positive
+`exists` scans cache docIDs by the current index sequence and a length-prefixed
+plan key, then ask the index layer to page the cached docIDs over the document
+table before disk converts the selected page back to summary entries. Updates
+advance the index sequence, so stale cached results miss the cache.
 Simple positive `exists` scans use the same generation-keyed cache with a
 length-prefixed field-presence plan key.
 Simple non-wildcard positive `in` scans also use the result cache; their plan
@@ -1353,10 +1353,10 @@ values, so repeated text pages can reuse the matching docID vector until the
 index sequence advances.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality also uses the first
-index-owned result page primitive, so page-N equality scans translate only the
-requested page of docIDs through disk summaries. Other simple predicate scans
-still reuse the full matching docID vector before disk-side cursor/limit
-handling.
+index-owned result page primitive, and simple positive `exists` uses the same
+bridge, so page-N scans translate only the requested page of docIDs through disk
+summaries. Other simple predicate scans still reuse the full matching docID
+vector before disk-side cursor/limit handling.
 
 The disk bridge also keeps a first prepared-reader cache for exact terms. It is
 keyed by the current index sequence plus a namespace-qualified field/value term,
