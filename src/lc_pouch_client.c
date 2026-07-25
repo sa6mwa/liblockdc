@@ -16966,6 +16966,7 @@ typedef struct lc_pouch_query_keys_scan_context {
   size_t output_limit;
   size_t emitted_count;
   int has_more;
+  const char *last_emitted_key;
   char *cursor;
 } lc_pouch_query_keys_scan_context;
 
@@ -17023,6 +17024,7 @@ typedef struct lc_pouch_query_scan_context {
   size_t output_limit;
   size_t emitted_count;
   int has_more;
+  const char *last_emitted_key;
   char *cursor;
 } lc_pouch_query_scan_context;
 
@@ -18913,13 +18915,15 @@ static int lc_pouch_query_scan_prepare_emit(lc_pouch_query_scan_context *scan,
   }
   if (scan->output_limit > 0U && scan->emitted_count >= scan->output_limit) {
     scan->has_more = 1;
+    if (scan->cursor == NULL && scan->last_emitted_key != NULL) {
+      if (lc_pouch_query_cursor_prepare(&scan->cursor, scan->last_emitted_key,
+                                        error) != LC_OK) {
+        return LC_ERR_NOMEM;
+      }
+    }
     return LC_OK;
   }
-  if (scan->output_limit > 0U) {
-    if (lc_pouch_query_cursor_prepare(&scan->cursor, key, error) != LC_OK) {
-      return LC_ERR_NOMEM;
-    }
-  }
+  scan->last_emitted_key = key;
   *emit = 1;
   return LC_OK;
 }
@@ -18938,13 +18942,15 @@ lc_pouch_query_keys_prepare_emit(lc_pouch_query_keys_scan_context *scan,
   }
   if (scan->output_limit > 0U && scan->emitted_count >= scan->output_limit) {
     scan->has_more = 1;
+    if (scan->cursor == NULL && scan->last_emitted_key != NULL) {
+      if (lc_pouch_query_cursor_prepare(&scan->cursor, scan->last_emitted_key,
+                                        error) != LC_OK) {
+        return LC_ERR_NOMEM;
+      }
+    }
     return LC_OK;
   }
-  if (scan->output_limit > 0U) {
-    if (lc_pouch_query_cursor_prepare(&scan->cursor, key, error) != LC_OK) {
-      return LC_ERR_NOMEM;
-    }
-  }
+  scan->last_emitted_key = key;
   *emit = 1;
   return LC_OK;
 }
