@@ -2150,7 +2150,10 @@ comparison suite. It starts the current `pkt.systems/lockd` disk backend,
 exercises equivalent public LQL scenarios against that server and an actual
 liblockdc pouch instance, and reports matched documents, page counts, stream
 bytes, first-page and later-page latency, pouch query candidate metadata, and
-C-side pouch timings. This suite is intentionally outside the
+C-side pouch timings. Pouch results also report private result-cache entry,
+hit, miss, and put counters so repeated-page and repeated-query runs can show
+when the sorted matched-key vector is reused instead of rebuilt. This suite is
+intentionally outside the
 liblockdc release gate: it is a performance and stress-test tool for iterative
 tuning, including short iteration runs and larger multi-page datasets that expose
 cursor, segment, and index behavior.

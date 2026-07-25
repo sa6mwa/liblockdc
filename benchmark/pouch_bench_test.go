@@ -164,6 +164,18 @@ func reportCResult(b *testing.B, res pouchResult) {
 		b.ReportMetric(float64(res.queryCandidates)/float64(res.queryCandidatePages), "query-candidates/page")
 		b.ReportMetric(float64(res.queryCandidates)/float64(ops), "query-candidates/op")
 	}
+	if res.resultCacheEntries != 0 {
+		b.ReportMetric(float64(res.resultCacheEntries), "result-cache-entries")
+	}
+	if res.resultCacheHits != 0 {
+		b.ReportMetric(float64(res.resultCacheHits)/float64(ops), "result-cache-hits/op")
+	}
+	if res.resultCacheMisses != 0 {
+		b.ReportMetric(float64(res.resultCacheMisses)/float64(ops), "result-cache-misses/op")
+	}
+	if res.resultCachePuts != 0 {
+		b.ReportMetric(float64(res.resultCachePuts)/float64(ops), "result-cache-puts/op")
+	}
 }
 
 func seedRows() int {

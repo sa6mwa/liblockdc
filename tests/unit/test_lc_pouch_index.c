@@ -391,13 +391,20 @@ static void test_result_cache_keys_by_generation_and_plan(void **state) {
 
   assert_true(lc_pouch_index_result_cache_put(NULL, &cache, 11U,
                                               "eq:/region=s:north", &source));
+  assert_int_equal(cache.puts, 1U);
+  assert_int_equal(cache.hits, 0U);
+  assert_int_equal(cache.misses, 0U);
   assert_true(lc_pouch_index_result_cache_find(NULL, &cache, 11U,
                                                "eq:/region=s:north", &found));
   assert_doc_ids(&found, expected, sizeof(expected) / sizeof(expected[0]));
+  assert_int_equal(cache.hits, 1U);
+  assert_int_equal(cache.misses, 0U);
   assert_false(lc_pouch_index_result_cache_find(NULL, &cache, 12U,
                                                 "eq:/region=s:north", &found));
   assert_false(lc_pouch_index_result_cache_find(NULL, &cache, 11U,
                                                 "eq:/region=s:south", &found));
+  assert_int_equal(cache.hits, 1U);
+  assert_int_equal(cache.misses, 2U);
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &found);
   lc_pouch_index_doc_id_set_cleanup(NULL, &source);
@@ -573,6 +580,8 @@ static void test_result_cache_replaces_existing_entry(void **state) {
   assert_true(lc_pouch_index_result_cache_put(NULL, &cache, 4U, "exists:/tags",
                                               &second));
   assert_int_equal(cache.count, 1U);
+  assert_int_equal(cache.puts, 2U);
+  assert_int_equal(cache.replacements, 1U);
   assert_true(lc_pouch_index_result_cache_find(NULL, &cache, 4U, "exists:/tags",
                                                &found));
   assert_doc_ids(&found, expected, sizeof(expected) / sizeof(expected[0]));

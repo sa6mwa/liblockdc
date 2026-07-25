@@ -619,7 +619,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Report pouch C-side first-page and later-page latency, query
         candidate metadata, page counts, and streamed bytes; report equivalent
         lockd disk first-page and later-page latency from the Go client path.
-      - [ ] Add a direct matched-key vector reuse/cache-hit metric once the
+      - [x] Add a direct matched-key vector reuse/cache-hit metric once the
         pouch result cache exposes observable counters.
     - [ ] Re-run the expanded 4096+ document benchmark matrix and use it as the
       acceptance gate for the redesigned index path, with pouch expected to

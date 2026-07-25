@@ -15,6 +15,10 @@ typedef struct lockdc_pouch_bench_result {
   uint64_t next_page_count;
   uint64_t query_candidates;
   uint64_t query_candidate_pages;
+  uint64_t result_cache_entries;
+  uint64_t result_cache_hits;
+  uint64_t result_cache_misses;
+  uint64_t result_cache_puts;
   uint64_t c_elapsed_ns;
   uint64_t index_seq;
   char error[256];

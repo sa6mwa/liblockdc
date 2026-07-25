@@ -92,6 +92,10 @@ typedef struct lc_pouch_index_result_cache {
   lc_pouch_index_result_cache_entry *entries;
   size_t count;
   size_t capacity;
+  unsigned long hits;
+  unsigned long misses;
+  unsigned long puts;
+  unsigned long replacements;
 } lc_pouch_index_result_cache;
 
 typedef struct lc_pouch_index_result_page {
@@ -208,7 +212,7 @@ char *lc_pouch_index_result_plan_key(const lc_pouch_allocator *allocator,
                                      const lc_pouch_query_index_scan_req *req,
                                      lc_pouch_index_result_plan_kind kind);
 int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
-                                     const lc_pouch_index_result_cache *cache,
+                                     lc_pouch_index_result_cache *cache,
                                      uint64_t generation, const char *plan_key,
                                      lc_pouch_index_doc_id_set *dst);
 int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,

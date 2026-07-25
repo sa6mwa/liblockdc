@@ -1694,7 +1694,7 @@ int lc_pouch_index_result_page_doc_ids(
 }
 
 int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
-                                     const lc_pouch_index_result_cache *cache,
+                                     lc_pouch_index_result_cache *cache,
                                      uint64_t generation, const char *plan_key,
                                      lc_pouch_index_doc_id_set *dst) {
   size_t position;
@@ -1705,10 +1705,17 @@ int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
   dst->count = 0U;
   if (!lc_pouch_index_result_cache_find_position(cache, generation, plan_key,
                                                  &position)) {
+    if (cache != NULL && plan_key != NULL) {
+      cache->misses++;
+    }
     return 0;
   }
-  return lc_pouch_index_doc_id_set_clone(allocator, dst,
-                                         &cache->entries[position].doc_ids);
+  if (!lc_pouch_index_doc_id_set_clone(allocator, dst,
+                                       &cache->entries[position].doc_ids)) {
+    return 0;
+  }
+  cache->hits++;
+  return 1;
 }
 
 int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
@@ -1733,6 +1740,8 @@ int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
     lc_pouch_index_doc_id_set_cleanup(allocator,
                                       &cache->entries[position].doc_ids);
     cache->entries[position].doc_ids = copy;
+    cache->puts++;
+    cache->replacements++;
     return 1;
   }
   plan_key_copy = lc_pouch_strdup(allocator, plan_key);
@@ -1754,6 +1763,7 @@ int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
   cache->entries[position].plan_key = plan_key_copy;
   cache->entries[position].doc_ids = copy;
   cache->count++;
+  cache->puts++;
   return 1;
 }
 

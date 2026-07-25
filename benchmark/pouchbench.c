@@ -1,5 +1,6 @@
 #include "pouchbench.h"
 
+#include "../src/lc_api_internal.h"
 #include "lc/lc.h"
 
 #include <stdio.h>
@@ -75,6 +76,32 @@ static void set_error(lockdc_pouch_bench_result *out, const char *where,
   message = error != NULL && error->message != NULL ? error->message : "";
   (void)snprintf(out->error, sizeof(out->error), "%s failed rc=%d %s", where,
                  rc, message);
+}
+
+static void capture_result_cache_stats(lc_client *client,
+                                       lockdc_pouch_bench_result *out) {
+  lc_client_handle *handle;
+  lc_pouch_query_result_cache_status status;
+  lc_error error;
+
+  if (client == NULL || out == NULL) {
+    return;
+  }
+  handle = (lc_client_handle *)client;
+  if (handle->pouch_store == NULL ||
+      handle->pouch_store->query_result_cache_status == NULL) {
+    return;
+  }
+  memset(&status, 0, sizeof(status));
+  lc_error_init(&error);
+  if (handle->pouch_store->query_result_cache_status(
+          handle->pouch_store, &status, &error) == LC_OK) {
+    out->result_cache_entries = (uint64_t)status.entries;
+    out->result_cache_hits = (uint64_t)status.hits;
+    out->result_cache_misses = (uint64_t)status.misses;
+    out->result_cache_puts = (uint64_t)status.puts;
+  }
+  lc_error_cleanup(&error);
 }
 
 static uint64_t target_row(uint64_t rows) { return rows > 1U ? rows / 2U : 0U; }
@@ -621,6 +648,7 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
   end = now_ns();
 
   out->c_elapsed_ns = end >= start ? end - start : 0U;
+  capture_result_cache_stats(client, out);
   client->close(client);
   lc_error_cleanup(&error);
   return LC_OK;

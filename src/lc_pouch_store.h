@@ -127,8 +127,9 @@ typedef int (*lc_pouch_scan_meta_visit_fn)(void *context,
                                            const lc_pouch_scan_meta_row *row,
                                            lc_error *error);
 
-typedef int (*lc_pouch_query_index_key_visit_fn)(
-    void *context, const char *key, size_t key_len, lc_error *error);
+typedef int (*lc_pouch_query_index_key_visit_fn)(void *context, const char *key,
+                                                 size_t key_len,
+                                                 lc_error *error);
 
 typedef struct lc_pouch_document_eq_term {
   const char *field;
@@ -457,6 +458,15 @@ typedef struct lc_pouch_read_fd_cache_status {
   unsigned long closes;
 } lc_pouch_read_fd_cache_status;
 
+typedef struct lc_pouch_query_result_cache_status {
+  size_t entries;
+  size_t capacity;
+  unsigned long hits;
+  unsigned long misses;
+  unsigned long puts;
+  unsigned long replacements;
+} lc_pouch_query_result_cache_status;
+
 typedef struct lc_pouch_backend_capabilities {
   char *backend_kind;
   char *write_coordination;
@@ -621,6 +631,9 @@ struct lc_pouch_store {
   int (*read_fd_cache_status)(lc_pouch_store *self,
                               lc_pouch_read_fd_cache_status *out,
                               lc_error *error);
+  int (*query_result_cache_status)(lc_pouch_store *self,
+                                   lc_pouch_query_result_cache_status *out,
+                                   lc_error *error);
   int (*query_config)(lc_pouch_store *self, const char *namespace_name,
                       lc_pouch_query_config *out, lc_error *error);
   int (*backend_capabilities)(lc_pouch_store *self,

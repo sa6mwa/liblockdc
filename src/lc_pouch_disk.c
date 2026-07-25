@@ -742,6 +742,10 @@ static int lc_pouch_disk_lock_fd_cache_status(
     lc_pouch_store *self, lc_pouch_lock_fd_cache_status *out, lc_error *error);
 static int lc_pouch_disk_read_fd_cache_status(
     lc_pouch_store *self, lc_pouch_read_fd_cache_status *out, lc_error *error);
+static int
+lc_pouch_disk_query_result_cache_status(lc_pouch_store *self,
+                                        lc_pouch_query_result_cache_status *out,
+                                        lc_error *error);
 static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key, lc_pouch_key_lock **lock,
@@ -21765,6 +21769,27 @@ static int lc_pouch_disk_read_fd_cache_status(
   return LC_OK;
 }
 
+static int
+lc_pouch_disk_query_result_cache_status(lc_pouch_store *self,
+                                        lc_pouch_query_result_cache_status *out,
+                                        lc_error *error) {
+  lc_pouch_disk_store *store;
+
+  if (self == NULL || out == NULL) {
+    return lc_pouch_set_invalid(
+        error, "query_result_cache_status requires store and output");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  memset(out, 0, sizeof(*out));
+  out->entries = store->query_result_cache.count;
+  out->capacity = store->query_result_cache.capacity;
+  out->hits = store->query_result_cache.hits;
+  out->misses = store->query_result_cache.misses;
+  out->puts = store->query_result_cache.puts;
+  out->replacements = store->query_result_cache.replacements;
+  return LC_OK;
+}
+
 static int lc_pouch_disk_try_lock_key(lc_pouch_store *self,
                                       const char *namespace_name,
                                       const char *key, lc_pouch_key_lock **lock,
@@ -22511,6 +22536,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->pub.unlock_key = lc_pouch_disk_unlock_key;
   store->pub.lock_fd_cache_status = lc_pouch_disk_lock_fd_cache_status;
   store->pub.read_fd_cache_status = lc_pouch_disk_read_fd_cache_status;
+  store->pub.query_result_cache_status =
+      lc_pouch_disk_query_result_cache_status;
   store->pub.query_config = lc_pouch_disk_query_config;
   store->pub.backend_capabilities = lc_pouch_disk_backend_capabilities;
   store->pub.backend_hash = lc_pouch_disk_backend_hash;

@@ -19,6 +19,10 @@ type pouchResult struct {
 	nextPageCount       uint64
 	queryCandidates     uint64
 	queryCandidatePages uint64
+	resultCacheEntries  uint64
+	resultCacheHits     uint64
+	resultCacheMisses   uint64
+	resultCachePuts     uint64
 	elapsedNS           uint64
 	indexSeq            uint64
 	err                 string
@@ -112,6 +116,10 @@ func convertPouchResult(res C.lockdc_pouch_bench_result) pouchResult {
 		nextPageCount:       uint64(res.next_page_count),
 		queryCandidates:     uint64(res.query_candidates),
 		queryCandidatePages: uint64(res.query_candidate_pages),
+		resultCacheEntries:  uint64(res.result_cache_entries),
+		resultCacheHits:     uint64(res.result_cache_hits),
+		resultCacheMisses:   uint64(res.result_cache_misses),
+		resultCachePuts:     uint64(res.result_cache_puts),
 		elapsedNS:           uint64(res.c_elapsed_ns),
 		indexSeq:            uint64(res.index_seq),
 		err:                 C.GoString(&res.error[0]),
