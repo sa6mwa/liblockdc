@@ -1767,6 +1767,71 @@ int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
   return 1;
 }
 
+int lc_pouch_index_cached_result_page(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_doc_table *doc_table,
+    lc_pouch_index_result_cache *cache, uint64_t generation,
+    const lc_pouch_query_index_scan_req *req,
+    lc_pouch_index_result_plan_kind kind,
+    lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
+    lc_pouch_index_result_page *page, int *invalid_doc_id_out,
+    lc_error *error) {
+  lc_pouch_index_doc_id_set doc_ids;
+  char *plan_key;
+  int cacheable;
+  int cache_hit;
+  int invalid_doc_id;
+  int rc;
+
+  if (page == NULL || collect == NULL) {
+    return LC_ERR_INVALID;
+  }
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  invalid_doc_id = 0;
+  plan_key = lc_pouch_index_result_plan_key(allocator, req, kind);
+  cacheable = plan_key != NULL;
+  cache_hit = cacheable &&
+              lc_pouch_index_result_cache_find(allocator, cache, generation,
+                                               plan_key, &doc_ids);
+  if (!cache_hit) {
+    rc = collect(collect_context, cacheable, &doc_ids, error);
+    if (rc != LC_OK) {
+      lc_pouch_free(allocator, plan_key);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &doc_ids);
+      return rc;
+    }
+    if (cacheable && !lc_pouch_index_result_cache_put(
+                         allocator, cache, generation, plan_key, &doc_ids)) {
+      lc_pouch_free(allocator, plan_key);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &doc_ids);
+      return LC_ERR_NOMEM;
+    }
+  }
+  if (!lc_pouch_index_result_page_doc_ids(
+          allocator, doc_table, &doc_ids,
+          req != NULL ? req->namespace_name : NULL,
+          req != NULL ? req->start_after : NULL, req != NULL ? req->limit : 0U,
+          page, &invalid_doc_id)) {
+    if (invalid_doc_id_out != NULL) {
+      *invalid_doc_id_out = invalid_doc_id;
+    }
+    if (invalid_doc_id) {
+      lc_pouch_free(allocator, plan_key);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &doc_ids);
+      return LC_ERR_INVALID;
+    }
+    lc_pouch_free(allocator, plan_key);
+    lc_pouch_index_doc_id_set_cleanup(allocator, &doc_ids);
+    return LC_ERR_NOMEM;
+  }
+  if (invalid_doc_id_out != NULL) {
+    *invalid_doc_id_out = 0;
+  }
+  lc_pouch_free(allocator, plan_key);
+  lc_pouch_index_doc_id_set_cleanup(allocator, &doc_ids);
+  return LC_OK;
+}
+
 int lc_pouch_index_collect_eq_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,

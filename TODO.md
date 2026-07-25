@@ -464,6 +464,12 @@ Latest release targets confirmed on 2026-07-23:
         callbacks let the index layer own primary equality, `in` union, exact
         `exists`, and numeric range planning while the disk backend adapts the
         current sidecar postings.
+      - [x] Move the first result-cache/page orchestration boundary into
+        `lc_pouch_index`: a generation-scoped cached docID page helper now owns
+        normalized plan key lookup, cache miss collection, cache insert, and
+        doc-table cursor paging; the disk equality path supplies sidecar
+        readers and only translates the selected docID page back to summary
+        indices.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.

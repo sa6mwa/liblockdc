@@ -703,6 +703,216 @@ test_result_page_doc_ids_rejects_missing_doc_table_id(void **state) {
   lc_pouch_index_doc_table_cleanup(NULL, &table);
 }
 
+typedef struct fake_result_collector {
+  lc_pouch_index_doc_id ids[8];
+  size_t count;
+  size_t calls;
+  int last_cacheable;
+} fake_result_collector;
+
+static int fake_collect_result_doc_ids(void *context, int cacheable,
+                                       lc_pouch_index_doc_id_set *doc_ids,
+                                       lc_error *error) {
+  fake_result_collector *collector;
+  size_t index;
+
+  (void)error;
+  collector = (fake_result_collector *)context;
+  assert_non_null(collector);
+  collector->calls++;
+  collector->last_cacheable = cacheable;
+  for (index = 0U; index < collector->count; ++index) {
+    assert_true(
+        lc_pouch_index_doc_id_set_append(NULL, doc_ids, collector->ids[index]));
+  }
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(doc_ids));
+  return LC_OK;
+}
+
+static void
+test_cached_result_page_uses_cache_and_applies_cursor(void **state) {
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_result_cache cache;
+  lc_pouch_index_result_page page;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_document_eq_term eq;
+  fake_result_collector collector;
+  lc_pouch_index_doc_id id_alpha;
+  lc_pouch_index_doc_id id_bravo;
+  lc_pouch_index_doc_id id_charlie;
+  lc_pouch_index_doc_id expected_bravo[] = {1U};
+  lc_pouch_index_doc_id expected_charlie[] = {2U};
+  int invalid_doc_id;
+  int rc;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&cache, 0, sizeof(cache));
+  memset(&page, 0, sizeof(page));
+  memset(&req, 0, sizeof(req));
+  memset(&eq, 0, sizeof(eq));
+  memset(&collector, 0, sizeof(collector));
+
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &id_alpha));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "bravo", &id_bravo));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "charlie", &id_charlie));
+  collector.ids[0] = id_charlie;
+  collector.ids[1] = id_alpha;
+  collector.ids[2] = id_bravo;
+  collector.count = 3U;
+
+  eq.field = "/region";
+  eq.value = "s:north";
+  req.namespace_name = "default";
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+  req.start_after = "alpha";
+  req.limit = 1U;
+
+  invalid_doc_id = 0;
+  rc = lc_pouch_index_cached_result_page(
+      NULL, &table, &cache, 7U, &req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+      fake_collect_result_doc_ids, &collector, &page, &invalid_doc_id, NULL);
+  assert_int_equal(rc, LC_OK);
+  assert_false(invalid_doc_id);
+  assert_int_equal(collector.calls, 1U);
+  assert_true(collector.last_cacheable);
+  assert_int_equal(cache.misses, 1U);
+  assert_int_equal(cache.puts, 1U);
+  assert_doc_ids(&page.doc_ids, expected_bravo,
+                 sizeof(expected_bravo) / sizeof(expected_bravo[0]));
+  assert_true(page.truncated);
+  assert_string_equal(page.next_start_after, "bravo");
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+
+  req.start_after = "bravo";
+  invalid_doc_id = 0;
+  rc = lc_pouch_index_cached_result_page(
+      NULL, &table, &cache, 7U, &req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+      fake_collect_result_doc_ids, &collector, &page, &invalid_doc_id, NULL);
+  assert_int_equal(rc, LC_OK);
+  assert_false(invalid_doc_id);
+  assert_int_equal(collector.calls, 1U);
+  assert_int_equal(cache.hits, 1U);
+  assert_doc_ids(&page.doc_ids, expected_charlie,
+                 sizeof(expected_charlie) / sizeof(expected_charlie[0]));
+  assert_false(page.truncated);
+  assert_null(page.next_start_after);
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+
+  req.start_after = NULL;
+  invalid_doc_id = 0;
+  rc = lc_pouch_index_cached_result_page(
+      NULL, &table, &cache, 8U, &req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+      fake_collect_result_doc_ids, &collector, &page, &invalid_doc_id, NULL);
+  assert_int_equal(rc, LC_OK);
+  assert_false(invalid_doc_id);
+  assert_int_equal(collector.calls, 2U);
+  assert_int_equal(cache.misses, 2U);
+  assert_int_equal(cache.puts, 2U);
+
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+  lc_pouch_index_result_cache_cleanup(NULL, &cache);
+  lc_pouch_index_doc_table_cleanup(NULL, &table);
+}
+
+static void test_cached_result_page_allows_uncacheable_collect(void **state) {
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_result_cache cache;
+  lc_pouch_index_result_page page;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_document_eq_term eq;
+  fake_result_collector collector;
+  lc_pouch_index_doc_id id_alpha;
+  lc_pouch_index_doc_id expected[] = {0U};
+  int invalid_doc_id;
+  int rc;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&cache, 0, sizeof(cache));
+  memset(&page, 0, sizeof(page));
+  memset(&req, 0, sizeof(req));
+  memset(&eq, 0, sizeof(eq));
+  memset(&collector, 0, sizeof(collector));
+
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &id_alpha));
+  collector.ids[0] = id_alpha;
+  collector.count = 1U;
+  eq.field = "/region";
+  eq.value = "s:north";
+  req.namespace_name = "default";
+  req.owner = "owner-filter";
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+
+  invalid_doc_id = 0;
+  rc = lc_pouch_index_cached_result_page(
+      NULL, &table, &cache, 7U, &req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+      fake_collect_result_doc_ids, &collector, &page, &invalid_doc_id, NULL);
+  assert_int_equal(rc, LC_OK);
+  assert_false(invalid_doc_id);
+  assert_int_equal(collector.calls, 1U);
+  assert_false(collector.last_cacheable);
+  assert_int_equal(cache.count, 0U);
+  assert_int_equal(cache.hits, 0U);
+  assert_int_equal(cache.misses, 0U);
+  assert_int_equal(cache.puts, 0U);
+  assert_doc_ids(&page.doc_ids, expected,
+                 sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+  lc_pouch_index_result_cache_cleanup(NULL, &cache);
+  lc_pouch_index_doc_table_cleanup(NULL, &table);
+}
+
+static void test_cached_result_page_reports_invalid_doc_id(void **state) {
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_result_cache cache;
+  lc_pouch_index_result_page page;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_document_eq_term eq;
+  fake_result_collector collector;
+  lc_pouch_index_doc_id id_alpha;
+  int invalid_doc_id;
+  int rc;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&cache, 0, sizeof(cache));
+  memset(&page, 0, sizeof(page));
+  memset(&req, 0, sizeof(req));
+  memset(&eq, 0, sizeof(eq));
+  memset(&collector, 0, sizeof(collector));
+
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &id_alpha));
+  collector.ids[0] = id_alpha;
+  collector.ids[1] = 99U;
+  collector.count = 2U;
+  eq.field = "/region";
+  eq.value = "s:north";
+  req.namespace_name = "default";
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+
+  invalid_doc_id = 0;
+  rc = lc_pouch_index_cached_result_page(
+      NULL, &table, &cache, 7U, &req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+      fake_collect_result_doc_ids, &collector, &page, &invalid_doc_id, NULL);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_true(invalid_doc_id);
+  assert_int_equal(page.doc_ids.count, 0U);
+
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+  lc_pouch_index_result_cache_cleanup(NULL, &cache);
+  lc_pouch_index_doc_table_cleanup(NULL, &table);
+}
+
 typedef struct fake_exact_reader {
   size_t calls;
 } fake_exact_reader;
@@ -996,6 +1206,9 @@ int main(void) {
           test_result_page_doc_ids_applies_namespace_cursor_and_limit),
       cmocka_unit_test(test_result_page_doc_ids_does_not_truncate_at_exact_end),
       cmocka_unit_test(test_result_page_doc_ids_rejects_missing_doc_table_id),
+      cmocka_unit_test(test_cached_result_page_uses_cache_and_applies_cursor),
+      cmocka_unit_test(test_cached_result_page_allows_uncacheable_collect),
+      cmocka_unit_test(test_cached_result_page_reports_invalid_doc_id),
       cmocka_unit_test(
           test_collect_in_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
