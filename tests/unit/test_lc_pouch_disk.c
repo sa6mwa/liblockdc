@@ -3397,6 +3397,130 @@ static void test_cas_and_remove_semantics(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_state_lookup_index_orders_updates_and_replays(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_source *read_body;
+  lc_pouch_put_state_res alpha;
+  lc_pouch_put_state_res beta;
+  lc_pouch_put_state_res gamma;
+  lc_pouch_put_state_res beta_update;
+  lc_pouch_state_info info;
+  lc_error error;
+  char *text;
+  int removed;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "state-lookup-index-order");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&alpha, 0, sizeof(alpha));
+  memset(&beta, 0, sizeof(beta));
+  memset(&gamma, 0, sizeof(gamma));
+  memset(&beta_update, 0, sizeof(beta_update));
+  memset(&info, 0, sizeof(info));
+  store = NULL;
+  read_body = NULL;
+  text = NULL;
+  removed = 0;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("gamma");
+  rc = store->write_state(store, "default", "gamma", source, NULL, &gamma,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("alpha");
+  rc = store->write_state(store, "default", "alpha", source, NULL, &alpha,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  source = source_from_text("beta");
+  rc = store->write_state(store, "default", "beta", source, NULL, &beta,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+
+  source = source_from_text("beta-updated");
+  rc = store->write_state(store, "default", "beta", source, NULL,
+                          &beta_update, &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  rc = store->remove_state(store, "default", "gamma", gamma.new_state_etag,
+                           &removed, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(removed);
+
+  rc = store->read_state(store, "default", "alpha", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "alpha");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+  read_body = NULL;
+  memset(&info, 0, sizeof(info));
+
+  rc = store->read_state(store, "default", "beta", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, beta_update.new_state_etag);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "beta-updated");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+  read_body = NULL;
+  memset(&info, 0, sizeof(info));
+
+  rc = store->read_state(store, "default", "gamma", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = store->read_state(store, "default", "beta", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(info.no_content);
+  assert_string_equal(info.etag, beta_update.new_state_etag);
+  text = read_source_text(read_body);
+  assert_string_equal(text, "beta-updated");
+  free(text);
+  lc_source_close(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+  read_body = NULL;
+  memset(&info, 0, sizeof(info));
+
+  rc = store->read_state(store, "default", "gamma", &read_body, &info, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(info.no_content);
+  assert_null(read_body);
+  lc_pouch_state_info_cleanup(&allocator, &info);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &alpha);
+  lc_pouch_put_state_res_cleanup(&allocator, &beta);
+  lc_pouch_put_state_res_cleanup(&allocator, &gamma);
+  lc_pouch_put_state_res_cleanup(&allocator, &beta_update);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void
 test_state_write_index_allocation_failure_replays_cleanly(void **state) {
   char root[256];
@@ -17124,6 +17248,7 @@ int main(void) {
       cmocka_unit_test(
           test_query_index_scan_skips_replay_after_same_handle_write),
       cmocka_unit_test(test_cas_and_remove_semantics),
+      cmocka_unit_test(test_state_lookup_index_orders_updates_and_replays),
       cmocka_unit_test(
           test_state_write_index_allocation_failure_replays_cleanly),
       cmocka_unit_test(test_staged_state_promote_discard_and_reopen),

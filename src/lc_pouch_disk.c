@@ -240,6 +240,9 @@ typedef struct lc_pouch_disk_store {
   lc_pouch_disk_state_entry *state_entries;
   size_t state_entry_count;
   size_t state_entry_capacity;
+  size_t *state_indices;
+  size_t state_index_count;
+  size_t state_index_capacity;
   lc_pouch_disk_meta_entry *meta_entries;
   size_t meta_entry_count;
   size_t meta_entry_capacity;
@@ -3786,19 +3789,111 @@ static int lc_pouch_disk_unlock(lc_pouch_disk_store *store, lc_error *error) {
   return LC_OK;
 }
 
+static int lc_pouch_disk_state_entry_compare_key(
+    const lc_pouch_disk_state_entry *entry, const char *namespace_name,
+    const char *key) {
+  int cmp;
+
+  cmp = strcmp(entry->namespace_name, namespace_name);
+  if (cmp != 0) {
+    return cmp;
+  }
+  return strcmp(entry->key, key);
+}
+
+static int lc_pouch_disk_state_index_find(lc_pouch_disk_store *store,
+                                          const char *namespace_name,
+                                          const char *key, size_t *position) {
+  size_t low;
+  size_t high;
+
+  low = 0U;
+  high = store->state_index_count;
+  while (low < high) {
+    size_t mid;
+    size_t entry_index;
+    int cmp;
+
+    mid = low + ((high - low) / 2U);
+    entry_index = store->state_indices[mid];
+    cmp = lc_pouch_disk_state_entry_compare_key(
+        &store->state_entries[entry_index], namespace_name, key);
+    if (cmp < 0) {
+      low = mid + 1U;
+    } else {
+      high = mid;
+    }
+  }
+  if (position != NULL) {
+    *position = low;
+  }
+  if (low < store->state_index_count) {
+    size_t entry_index;
+
+    entry_index = store->state_indices[low];
+    return lc_pouch_disk_state_entry_compare_key(
+               &store->state_entries[entry_index], namespace_name, key) == 0;
+  }
+  return 0;
+}
+
+static int lc_pouch_disk_state_index_reserve(lc_pouch_disk_store *store,
+                                             size_t needed) {
+  size_t *grown;
+  size_t new_capacity;
+
+  if (needed <= store->state_index_capacity) {
+    return 1;
+  }
+  new_capacity =
+      store->state_index_capacity == 0U ? 16U : store->state_index_capacity;
+  while (new_capacity < needed) {
+    new_capacity *= 2U;
+  }
+  grown = (size_t *)lc_pouch_realloc(
+      &store->allocator, store->state_indices,
+      new_capacity * sizeof(store->state_indices[0]));
+  if (grown == NULL) {
+    return 0;
+  }
+  store->state_indices = grown;
+  store->state_index_capacity = new_capacity;
+  return 1;
+}
+
+static int lc_pouch_disk_state_index_insert(lc_pouch_disk_store *store,
+                                            size_t entry_index) {
+  lc_pouch_disk_state_entry *entry;
+  size_t position;
+
+  entry = &store->state_entries[entry_index];
+  if (!lc_pouch_disk_state_index_reserve(store,
+                                         store->state_index_count + 1U)) {
+    return 0;
+  }
+  (void)lc_pouch_disk_state_index_find(store, entry->namespace_name, entry->key,
+                                       &position);
+  if (position < store->state_index_count) {
+    memmove(store->state_indices + position + 1U,
+            store->state_indices + position,
+            (store->state_index_count - position) *
+                sizeof(store->state_indices[0]));
+  }
+  store->state_indices[position] = entry_index;
+  store->state_index_count++;
+  return 1;
+}
+
 static int lc_pouch_disk_find_entry(lc_pouch_disk_store *store,
                                     const char *namespace_name,
                                     const char *key) {
-  size_t index;
+  size_t position;
 
-  for (index = 0U; index < store->state_entry_count; ++index) {
-    if (strcmp(store->state_entries[index].namespace_name, namespace_name) ==
-            0 &&
-        strcmp(store->state_entries[index].key, key) == 0) {
-      return (int)index;
-    }
+  if (store == NULL || namespace_name == NULL || key == NULL ||
+      !lc_pouch_disk_state_index_find(store, namespace_name, key, &position)) {
+    return -1;
   }
-  return -1;
+  return (int)store->state_indices[position];
 }
 
 static int lc_pouch_disk_key_has_no_deleted_state(lc_pouch_disk_store *store,
@@ -3913,6 +4008,12 @@ static int lc_pouch_disk_upsert_entry(lc_pouch_disk_store *store,
     entry = &store->state_entries[store->state_entry_count++];
     *entry = staged;
     memset(&staged, 0, sizeof(staged));
+    if (!lc_pouch_disk_state_index_insert(store,
+                                          store->state_entry_count - 1U)) {
+      store->state_entry_count--;
+      lc_pouch_disk_entry_cleanup(store, entry);
+      return 0;
+    }
   }
   entry->version = version;
   entry->body_offset = body_offset;
@@ -9976,6 +10077,7 @@ static void lc_pouch_disk_reset_indexes(lc_pouch_disk_store *store) {
     lc_pouch_disk_entry_cleanup(store, &store->state_entries[index]);
   }
   store->state_entry_count = 0U;
+  store->state_index_count = 0U;
   for (index = 0U; index < store->meta_entry_count; ++index) {
     lc_pouch_disk_meta_entry_cleanup(store, &store->meta_entries[index]);
   }
@@ -20242,6 +20344,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
     lc_pouch_disk_queue_entry_cleanup(store, &store->queue_entries[index]);
   }
   lc_pouch_free(&allocator, store->state_entries);
+  lc_pouch_free(&allocator, store->state_indices);
   lc_pouch_free(&allocator, store->meta_entries);
   lc_pouch_free(&allocator, store->query_meta_indices);
   lc_pouch_free(&allocator, store->query_summary_entries);
