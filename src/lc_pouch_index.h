@@ -55,6 +55,12 @@ typedef struct lc_pouch_index_term_posting_table {
   size_t capacity;
 } lc_pouch_index_term_posting_table;
 
+typedef struct lc_pouch_index_prepared_term_cache {
+  uint64_t generation;
+  lc_pouch_index_term_table terms;
+  lc_pouch_index_term_posting_table postings;
+} lc_pouch_index_prepared_term_cache;
+
 typedef struct lc_pouch_index_result_cache_entry {
   uint64_t generation;
   char *plan_key;
@@ -141,6 +147,12 @@ int lc_pouch_index_term_posting_table_decode(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_term_posting_table *table,
     lc_pouch_index_term_id term_id, lc_pouch_index_doc_id_set *dst);
+void lc_pouch_index_prepared_term_cache_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_prepared_term_cache *cache);
+void lc_pouch_index_prepared_term_cache_refresh(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_prepared_term_cache *cache, uint64_t generation);
 void lc_pouch_index_result_cache_cleanup(const lc_pouch_allocator *allocator,
                                          lc_pouch_index_result_cache *cache);
 int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,

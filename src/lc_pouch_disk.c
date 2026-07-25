@@ -214,36 +214,6 @@ typedef struct lc_pouch_disk_marker_dir_snapshot_entry {
   long mtime_nsec;
 } lc_pouch_disk_marker_dir_snapshot_entry;
 
-typedef struct lc_pouch_disk_prepared_exact_cache {
-  unsigned long generation;
-  lc_pouch_index_term_table terms;
-  lc_pouch_index_term_posting_table postings;
-} lc_pouch_disk_prepared_exact_cache;
-
-typedef struct lc_pouch_disk_prepared_exists_cache {
-  unsigned long generation;
-  lc_pouch_index_term_table terms;
-  lc_pouch_index_term_posting_table postings;
-} lc_pouch_disk_prepared_exists_cache;
-
-typedef struct lc_pouch_disk_prepared_range_cache {
-  unsigned long generation;
-  lc_pouch_index_term_table terms;
-  lc_pouch_index_term_posting_table postings;
-} lc_pouch_disk_prepared_range_cache;
-
-typedef struct lc_pouch_disk_prepared_prefix_cache {
-  unsigned long generation;
-  lc_pouch_index_term_table terms;
-  lc_pouch_index_term_posting_table postings;
-} lc_pouch_disk_prepared_prefix_cache;
-
-typedef struct lc_pouch_disk_prepared_contains_cache {
-  unsigned long generation;
-  lc_pouch_index_term_table terms;
-  lc_pouch_index_term_posting_table postings;
-} lc_pouch_disk_prepared_contains_cache;
-
 typedef struct lc_pouch_disk_store {
   lc_pouch_store pub;
   lc_pouch_allocator allocator;
@@ -289,11 +259,11 @@ typedef struct lc_pouch_disk_store {
   lc_pouch_disk_query_field_posting *query_field_postings;
   size_t query_field_posting_count;
   size_t query_field_posting_capacity;
-  lc_pouch_disk_prepared_exact_cache query_prepared_exact_cache;
-  lc_pouch_disk_prepared_exists_cache query_prepared_exists_cache;
-  lc_pouch_disk_prepared_range_cache query_prepared_range_cache;
-  lc_pouch_disk_prepared_prefix_cache query_prepared_prefix_cache;
-  lc_pouch_disk_prepared_contains_cache query_prepared_contains_cache;
+  lc_pouch_index_prepared_term_cache query_prepared_exact_cache;
+  lc_pouch_index_prepared_term_cache query_prepared_exists_cache;
+  lc_pouch_index_prepared_term_cache query_prepared_range_cache;
+  lc_pouch_index_prepared_term_cache query_prepared_prefix_cache;
+  lc_pouch_index_prepared_term_cache query_prepared_contains_cache;
   lc_pouch_index_result_cache query_result_cache;
   lc_pouch_disk_object_entry *object_entries;
   size_t object_entry_count;
@@ -5411,14 +5381,11 @@ static int lc_pouch_disk_query_field_key_matches_in_from(
   return 1;
 }
 
-static int lc_pouch_disk_query_field_key_matches_in(
+static int lc_pouch_disk_query_field_key_matches_not_in(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const char *key) {
   size_t term_index;
 
-  if (!lc_pouch_disk_query_field_key_matches_in_from(store, req, key, 0U)) {
-    return 0;
-  }
   if (req == NULL || key == NULL || req->document_not_in_term_count == 0U) {
     return 1;
   }
@@ -5430,6 +5397,15 @@ static int lc_pouch_disk_query_field_key_matches_in(
     }
   }
   return 1;
+}
+
+static int lc_pouch_disk_query_field_key_matches_in(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const char *key) {
+  if (!lc_pouch_disk_query_field_key_matches_in_from(store, req, key, 0U)) {
+    return 0;
+  }
+  return lc_pouch_disk_query_field_key_matches_not_in(store, req, key);
 }
 
 static int
@@ -6148,6 +6124,7 @@ static int lc_pouch_disk_query_field_add_candidate_doc_id_from(
       !lc_pouch_disk_query_field_key_matches_ranges(store, req, posting->key) ||
       !lc_pouch_disk_query_field_key_matches_in_from(store, req, posting->key,
                                                      in_from) ||
+      !lc_pouch_disk_query_field_key_matches_not_in(store, req, posting->key) ||
       !lc_pouch_disk_query_field_key_matches_prefix(store, req, posting->key) ||
       !lc_pouch_disk_query_field_key_matches_contains(store, req,
                                                       posting->key) ||
@@ -6203,141 +6180,6 @@ typedef struct lc_pouch_disk_exact_term_doc_id_reader {
   const char *alloc_message;
 } lc_pouch_disk_exact_term_doc_id_reader;
 
-static void lc_pouch_disk_prepared_exact_cache_cleanup(
-    lc_pouch_disk_store *store, lc_pouch_disk_prepared_exact_cache *cache) {
-  if (store == NULL || cache == NULL) {
-    return;
-  }
-  lc_pouch_index_term_posting_table_cleanup(&store->allocator,
-                                            &cache->postings);
-  lc_pouch_index_term_table_cleanup(&store->allocator, &cache->terms);
-  cache->generation = 0UL;
-}
-
-static void
-lc_pouch_disk_prepared_exact_cache_refresh(lc_pouch_disk_store *store) {
-  unsigned long generation;
-
-  if (store == NULL) {
-    return;
-  }
-  generation = lc_pouch_disk_index_sequence(store);
-  if (store->query_prepared_exact_cache.generation == generation) {
-    return;
-  }
-  lc_pouch_disk_prepared_exact_cache_cleanup(
-      store, &store->query_prepared_exact_cache);
-  store->query_prepared_exact_cache.generation = generation;
-}
-
-static void lc_pouch_disk_prepared_exists_cache_cleanup(
-    lc_pouch_disk_store *store, lc_pouch_disk_prepared_exists_cache *cache) {
-  if (store == NULL || cache == NULL) {
-    return;
-  }
-  lc_pouch_index_term_posting_table_cleanup(&store->allocator,
-                                            &cache->postings);
-  lc_pouch_index_term_table_cleanup(&store->allocator, &cache->terms);
-  cache->generation = 0UL;
-}
-
-static void
-lc_pouch_disk_prepared_exists_cache_refresh(lc_pouch_disk_store *store) {
-  unsigned long generation;
-
-  if (store == NULL) {
-    return;
-  }
-  generation = lc_pouch_disk_index_sequence(store);
-  if (store->query_prepared_exists_cache.generation == generation) {
-    return;
-  }
-  lc_pouch_disk_prepared_exists_cache_cleanup(
-      store, &store->query_prepared_exists_cache);
-  store->query_prepared_exists_cache.generation = generation;
-}
-
-static void lc_pouch_disk_prepared_range_cache_cleanup(
-    lc_pouch_disk_store *store, lc_pouch_disk_prepared_range_cache *cache) {
-  if (store == NULL || cache == NULL) {
-    return;
-  }
-  lc_pouch_index_term_posting_table_cleanup(&store->allocator,
-                                            &cache->postings);
-  lc_pouch_index_term_table_cleanup(&store->allocator, &cache->terms);
-  cache->generation = 0UL;
-}
-
-static void
-lc_pouch_disk_prepared_range_cache_refresh(lc_pouch_disk_store *store) {
-  unsigned long generation;
-
-  if (store == NULL) {
-    return;
-  }
-  generation = lc_pouch_disk_index_sequence(store);
-  if (store->query_prepared_range_cache.generation == generation) {
-    return;
-  }
-  lc_pouch_disk_prepared_range_cache_cleanup(
-      store, &store->query_prepared_range_cache);
-  store->query_prepared_range_cache.generation = generation;
-}
-
-static void lc_pouch_disk_prepared_prefix_cache_cleanup(
-    lc_pouch_disk_store *store, lc_pouch_disk_prepared_prefix_cache *cache) {
-  if (store == NULL || cache == NULL) {
-    return;
-  }
-  lc_pouch_index_term_posting_table_cleanup(&store->allocator,
-                                            &cache->postings);
-  lc_pouch_index_term_table_cleanup(&store->allocator, &cache->terms);
-  cache->generation = 0UL;
-}
-
-static void
-lc_pouch_disk_prepared_prefix_cache_refresh(lc_pouch_disk_store *store) {
-  unsigned long generation;
-
-  if (store == NULL) {
-    return;
-  }
-  generation = lc_pouch_disk_index_sequence(store);
-  if (store->query_prepared_prefix_cache.generation == generation) {
-    return;
-  }
-  lc_pouch_disk_prepared_prefix_cache_cleanup(
-      store, &store->query_prepared_prefix_cache);
-  store->query_prepared_prefix_cache.generation = generation;
-}
-
-static void lc_pouch_disk_prepared_contains_cache_cleanup(
-    lc_pouch_disk_store *store, lc_pouch_disk_prepared_contains_cache *cache) {
-  if (store == NULL || cache == NULL) {
-    return;
-  }
-  lc_pouch_index_term_posting_table_cleanup(&store->allocator,
-                                            &cache->postings);
-  lc_pouch_index_term_table_cleanup(&store->allocator, &cache->terms);
-  cache->generation = 0UL;
-}
-
-static void
-lc_pouch_disk_prepared_contains_cache_refresh(lc_pouch_disk_store *store) {
-  unsigned long generation;
-
-  if (store == NULL) {
-    return;
-  }
-  generation = lc_pouch_disk_index_sequence(store);
-  if (store->query_prepared_contains_cache.generation == generation) {
-    return;
-  }
-  lc_pouch_disk_prepared_contains_cache_cleanup(
-      store, &store->query_prepared_contains_cache);
-  store->query_prepared_contains_cache.generation = generation;
-}
-
 static char *lc_pouch_disk_query_prepared_field_key(lc_pouch_disk_store *store,
                                                     const char *namespace_name,
                                                     const char *field) {
@@ -6365,6 +6207,15 @@ static char *lc_pouch_disk_query_prepared_field_key(lc_pouch_disk_store *store,
   (void)snprintf(key, needed, "%lu:%s:%lu:%s", (unsigned long)namespace_len,
                  namespace_name, (unsigned long)field_len, field);
   return key;
+}
+
+static void lc_pouch_disk_prepared_term_cache_refresh(
+    lc_pouch_disk_store *store, lc_pouch_index_prepared_term_cache *cache) {
+  if (store == NULL) {
+    return;
+  }
+  lc_pouch_index_prepared_term_cache_refresh(
+      &store->allocator, cache, (uint64_t)lc_pouch_disk_index_sequence(store));
 }
 
 static void lc_pouch_disk_exact_term_doc_id_reader_cleanup(
@@ -6457,10 +6308,11 @@ static int lc_pouch_disk_query_read_exact_term_doc_ids(
     return LC_OK;
   }
   if (reader->use_prepared_exact_cache && reader->req->namespace_name != NULL) {
-    lc_pouch_disk_prepared_exact_cache *cache;
+    lc_pouch_index_prepared_term_cache *cache;
     char *field_key;
 
-    lc_pouch_disk_prepared_exact_cache_refresh(reader->store);
+    lc_pouch_disk_prepared_term_cache_refresh(
+        reader->store, &reader->store->query_prepared_exact_cache);
     cache = &reader->store->query_prepared_exact_cache;
     field_key = lc_pouch_disk_query_prepared_field_key(
         reader->store, reader->req->namespace_name, field);
@@ -6594,10 +6446,11 @@ lc_pouch_disk_query_read_exists_term_doc_ids(void *context, const char *field,
   }
   if (reader->use_prepared_exists_cache &&
       reader->req->namespace_name != NULL) {
-    lc_pouch_disk_prepared_exists_cache *cache;
+    lc_pouch_index_prepared_term_cache *cache;
     char *field_key;
 
-    lc_pouch_disk_prepared_exists_cache_refresh(reader->store);
+    lc_pouch_disk_prepared_term_cache_refresh(
+        reader->store, &reader->store->query_prepared_exists_cache);
     cache = &reader->store->query_prepared_exists_cache;
     field_key = lc_pouch_disk_query_prepared_field_key(
         reader->store, reader->req->namespace_name, field);
@@ -6787,10 +6640,11 @@ static int lc_pouch_disk_query_read_range_term_doc_ids(
     return lc_pouch_set_nomem(error, reader->alloc_message);
   }
   if (reader->use_prepared_range_cache && reader->req->namespace_name != NULL) {
-    lc_pouch_disk_prepared_range_cache *cache;
+    lc_pouch_index_prepared_term_cache *cache;
     char *field_key;
 
-    lc_pouch_disk_prepared_range_cache_refresh(reader->store);
+    lc_pouch_disk_prepared_term_cache_refresh(
+        reader->store, &reader->store->query_prepared_range_cache);
     cache = &reader->store->query_prepared_range_cache;
     field_key = lc_pouch_disk_query_prepared_field_key(
         reader->store, reader->req->namespace_name, term->field);
@@ -6968,10 +6822,11 @@ static int lc_pouch_disk_query_read_prefix_term_doc_ids(
   }
   if (reader->use_prepared_prefix_cache &&
       reader->req->namespace_name != NULL) {
-    lc_pouch_disk_prepared_prefix_cache *cache;
+    lc_pouch_index_prepared_term_cache *cache;
     char *field_key;
 
-    lc_pouch_disk_prepared_prefix_cache_refresh(reader->store);
+    lc_pouch_disk_prepared_term_cache_refresh(
+        reader->store, &reader->store->query_prepared_prefix_cache);
     cache = &reader->store->query_prepared_prefix_cache;
     field_key = lc_pouch_disk_query_prepared_field_key(
         reader->store, reader->req->namespace_name, term->field);
@@ -11038,10 +10893,11 @@ static int lc_pouch_disk_query_read_contains_term_doc_ids(
   }
   if (reader->use_prepared_contains_cache &&
       reader->req->namespace_name != NULL) {
-    lc_pouch_disk_prepared_contains_cache *cache;
+    lc_pouch_index_prepared_term_cache *cache;
     char *field_key;
 
-    lc_pouch_disk_prepared_contains_cache_refresh(reader->store);
+    lc_pouch_disk_prepared_term_cache_refresh(
+        reader->store, &reader->store->query_prepared_contains_cache);
     cache = &reader->store->query_prepared_contains_cache;
     field_key = lc_pouch_disk_query_prepared_field_key(
         reader->store, reader->req->namespace_name, term->field);
@@ -12909,16 +12765,16 @@ static void lc_pouch_disk_reset_indexes(lc_pouch_disk_store *store) {
         store, &store->query_field_postings[index]);
   }
   store->query_field_posting_count = 0U;
-  lc_pouch_disk_prepared_exact_cache_cleanup(
-      store, &store->query_prepared_exact_cache);
-  lc_pouch_disk_prepared_exists_cache_cleanup(
-      store, &store->query_prepared_exists_cache);
-  lc_pouch_disk_prepared_range_cache_cleanup(
-      store, &store->query_prepared_range_cache);
-  lc_pouch_disk_prepared_prefix_cache_cleanup(
-      store, &store->query_prepared_prefix_cache);
-  lc_pouch_disk_prepared_contains_cache_cleanup(
-      store, &store->query_prepared_contains_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &store->allocator, &store->query_prepared_exact_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &store->allocator, &store->query_prepared_exists_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &store->allocator, &store->query_prepared_range_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &store->allocator, &store->query_prepared_prefix_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &store->allocator, &store->query_prepared_contains_cache);
   lc_pouch_index_result_cache_cleanup(&store->allocator,
                                       &store->query_result_cache);
   for (index = 0U; index < store->object_entry_count; ++index) {
@@ -23077,16 +22933,16 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->query_summary_entries);
   lc_pouch_free(&allocator, store->query_owner_indices);
   lc_pouch_free(&allocator, store->query_field_postings);
-  lc_pouch_disk_prepared_exact_cache_cleanup(
-      store, &store->query_prepared_exact_cache);
-  lc_pouch_disk_prepared_exists_cache_cleanup(
-      store, &store->query_prepared_exists_cache);
-  lc_pouch_disk_prepared_range_cache_cleanup(
-      store, &store->query_prepared_range_cache);
-  lc_pouch_disk_prepared_prefix_cache_cleanup(
-      store, &store->query_prepared_prefix_cache);
-  lc_pouch_disk_prepared_contains_cache_cleanup(
-      store, &store->query_prepared_contains_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &allocator, &store->query_prepared_exact_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &allocator, &store->query_prepared_exists_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &allocator, &store->query_prepared_range_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &allocator, &store->query_prepared_prefix_cache);
+  lc_pouch_index_prepared_term_cache_cleanup(
+      &allocator, &store->query_prepared_contains_cache);
   lc_pouch_index_result_cache_cleanup(&allocator, &store->query_result_cache);
   lc_pouch_free(&allocator, store->object_entries);
   lc_pouch_free(&allocator, store->queue_entries);

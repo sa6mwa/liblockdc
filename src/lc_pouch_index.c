@@ -832,6 +832,27 @@ int lc_pouch_index_term_posting_table_decode(
                                        &table->entries[position].posting, dst);
 }
 
+void lc_pouch_index_prepared_term_cache_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_prepared_term_cache *cache) {
+  if (cache == NULL) {
+    return;
+  }
+  lc_pouch_index_term_posting_table_cleanup(allocator, &cache->postings);
+  lc_pouch_index_term_table_cleanup(allocator, &cache->terms);
+  cache->generation = 0U;
+}
+
+void lc_pouch_index_prepared_term_cache_refresh(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_prepared_term_cache *cache, uint64_t generation) {
+  if (cache == NULL || cache->generation == generation) {
+    return;
+  }
+  lc_pouch_index_prepared_term_cache_cleanup(allocator, cache);
+  cache->generation = generation;
+}
+
 static int lc_pouch_index_result_cache_compare(uint64_t left_generation,
                                                const char *left_plan_key,
                                                uint64_t right_generation,

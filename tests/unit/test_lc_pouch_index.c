@@ -355,6 +355,40 @@ static void test_result_cache_keys_by_generation_and_plan(void **state) {
   lc_pouch_index_result_cache_cleanup(NULL, &cache);
 }
 
+static void test_prepared_term_cache_refreshes_by_generation(void **state) {
+  lc_pouch_index_prepared_term_cache cache;
+  lc_pouch_index_doc_id_set decoded;
+  lc_pouch_index_doc_id ids[] = {9U, 1U};
+  lc_pouch_index_doc_id expected[] = {1U, 9U};
+  lc_pouch_index_term_id term_id;
+
+  (void)state;
+  memset(&cache, 0, sizeof(cache));
+  memset(&decoded, 0, sizeof(decoded));
+
+  lc_pouch_index_prepared_term_cache_refresh(NULL, &cache, 7U);
+  assert_int_equal(cache.generation, 7U);
+  assert_true(lc_pouch_index_term_table_find_or_add(
+      NULL, &cache.terms, "default:/field", "s:value", &term_id));
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &cache.postings, term_id, ids, sizeof(ids) / sizeof(ids[0])));
+
+  lc_pouch_index_prepared_term_cache_refresh(NULL, &cache, 7U);
+  assert_int_equal(cache.generation, 7U);
+  assert_int_equal(cache.terms.count, 1U);
+  assert_true(lc_pouch_index_term_posting_table_decode(NULL, &cache.postings,
+                                                       term_id, &decoded));
+  assert_doc_ids(&decoded, expected, sizeof(expected) / sizeof(expected[0]));
+  lc_pouch_index_doc_id_set_cleanup(NULL, &decoded);
+
+  lc_pouch_index_prepared_term_cache_refresh(NULL, &cache, 8U);
+  assert_int_equal(cache.generation, 8U);
+  assert_int_equal(cache.terms.count, 0U);
+  assert_int_equal(cache.postings.count, 0U);
+
+  lc_pouch_index_prepared_term_cache_cleanup(NULL, &cache);
+}
+
 static void test_result_cache_replaces_existing_entry(void **state) {
   lc_pouch_index_result_cache cache;
   lc_pouch_index_doc_id_set first;
@@ -674,6 +708,7 @@ int main(void) {
       cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
       cmocka_unit_test(test_term_posting_table_replaces_existing_posting),
       cmocka_unit_test(test_result_cache_keys_by_generation_and_plan),
+      cmocka_unit_test(test_prepared_term_cache_refreshes_by_generation),
       cmocka_unit_test(test_result_cache_replaces_existing_entry),
       cmocka_unit_test(
           test_collect_in_term_doc_ids_uses_reader_and_deduplicates),

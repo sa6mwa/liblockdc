@@ -541,6 +541,11 @@ Latest release targets confirmed on 2026-07-23:
         postings are reused after trigram narrowing and final substring
         validation, with namespace separation and post-write generation miss
         coverage.
+      - [x] Move the shared prepared-term cache lifecycle into
+        `lc_pouch_index`: disk readers still populate namespace-qualified
+        bridge postings from sidecars, but generation refresh and cleanup now
+        use one index-owned cache primitive instead of per-predicate disk-local
+        structs.
     - [ ] Add sorted matched-key result caching keyed by index generation plus
       normalized selector plan, so multi-page queries reuse the full matching
       key vector instead of recomputing candidates for every page.

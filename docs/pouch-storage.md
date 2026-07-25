@@ -1355,6 +1355,11 @@ design: compound, negative, owner-filtered, key-filtered, and
 secondary-filtered range/prefix/contains selectors still use request-local
 compiled postings until their candidate sets can be cached without baking
 request-specific filters into the prepared view.
+The shared prepared-term cache container and generation refresh/cleanup
+lifecycle now live in `lc_pouch_index` as
+`lc_pouch_index_prepared_term_cache`. The disk bridge still supplies
+namespace-qualified term keys and compiles sidecar-derived candidate docIDs,
+but it no longer owns separate per-predicate cache lifecycle types.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
