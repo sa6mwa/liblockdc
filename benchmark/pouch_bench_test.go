@@ -66,6 +66,15 @@ var queryScenarios = []queryScenario{
 		},
 	},
 	{
+		name: "InTags",
+		lockdLQL: func(rows int) string {
+			return "in{field=/tags[],any=planning|finance}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%3 == 0 || i%5 == 0 })
+		},
+	},
+	{
 		name: "ExistsFlag",
 		lockdLQL: func(rows int) string {
 			return "exists{/flag}"

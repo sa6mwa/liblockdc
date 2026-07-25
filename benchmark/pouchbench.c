@@ -72,6 +72,11 @@ static int match_in_region(uint64_t i, uint64_t rows) {
   return (i % 3U) == 0U || (i % 3U) == 1U;
 }
 
+static int match_in_tags(uint64_t i, uint64_t rows) {
+  (void)rows;
+  return (i % 3U) == 0U || (i % 5U) == 0U;
+}
+
 static int match_exists_flag(uint64_t i, uint64_t rows) {
   (void)rows;
   return (i % 5U) == 0U;
@@ -97,9 +102,10 @@ static int match_or_sparse_or_flag(uint64_t i, uint64_t rows) {
 
 static const query_scenario *find_scenario(const char *name) {
   static const query_scenario scenarios[] = {
-      {"EqSparse"},        {"EqDense"},       {"RangeHalf"},
-      {"InRegion"},        {"ExistsFlag"},    {"PrefixOwner"},
-      {"ContainsMessage"}, {"AndEvenRange"},  {"OrSparseOrFlag"},
+      {"EqSparse"},       {"EqDense"},         {"RangeHalf"},
+      {"InRegion"},       {"InTags"},          {"ExistsFlag"},
+      {"PrefixOwner"},    {"ContainsMessage"}, {"AndEvenRange"},
+      {"OrSparseOrFlag"},
   };
   size_t index;
 
@@ -131,6 +137,9 @@ static uint64_t scenario_expected_rows(const query_scenario *scenario,
   }
   if (strcmp(scenario->name, "InRegion") == 0) {
     return count_matching(rows, match_in_region);
+  }
+  if (strcmp(scenario->name, "InTags") == 0) {
+    return count_matching(rows, match_in_tags);
   }
   if (strcmp(scenario->name, "ExistsFlag") == 0) {
     return count_matching(rows, match_exists_flag);
@@ -175,6 +184,10 @@ static int scenario_selector_json(const query_scenario *scenario,
     written = snprintf(
         out, out_len,
         "{\"in\":{\"field\":\"/region\",\"any\":[\"us\",\"eu\"]}}");
+  } else if (strcmp(name, "InTags") == 0) {
+    written = snprintf(out, out_len,
+                       "{\"in\":{\"field\":\"/tags[]\","
+                       "\"any\":[\"planning\",\"finance\"]}}");
   } else if (strcmp(name, "ExistsFlag") == 0) {
     written = snprintf(out, out_len, "{\"exists\":\"/flag\"}");
   } else if (strcmp(name, "PrefixOwner") == 0) {
