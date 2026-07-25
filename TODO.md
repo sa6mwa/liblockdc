@@ -625,6 +625,17 @@ Latest release targets confirmed on 2026-07-23:
       acceptance gate for the redesigned index path, with pouch expected to
       beat or match Go disk on key-only and document-result scenarios unless
       an explicit design tradeoff is documented.
+      - [x] Run the first 4096/full-scenario matrix attempt and capture the
+        dominant indexed document hotspot: numeric `RangeHalf` spent about
+        426 ms in first-page pouch range planning before the primary-range
+        revalidation fix.
+      - [x] Remove the redundant primary range-term revalidation from the
+        docID candidate helper path; focused 4096 indexed `RangeHalf` now
+        measures about 22.6 ms for pouch document results vs 65.9 ms for Go
+        disk, and about 5.37 ms for pouch key results vs 48.9 ms for Go disk.
+      - [ ] Replace the current broad 4096/full-scenario run with a bounded
+        acceptance matrix that completes inside the intended 3-minute envelope
+        while still covering the slow/representative indexed and scan cases.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

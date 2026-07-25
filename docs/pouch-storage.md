@@ -2157,6 +2157,12 @@ intentionally outside the
 liblockdc release gate: it is a performance and stress-test tool for iterative
 tuning, including short iteration runs and larger multi-page datasets that expose
 cursor, segment, and index behavior.
+The 4096-document tuning run found the first major result-cache-era regression
+in the numeric range path: primary range candidate collection was revalidating
+the same positive range term for each candidate key, producing a quadratic
+first-page cost. The docID helper now skips the already-selected primary range
+term, matching the equality path's primary-term handling while preserving
+additional positive ranges and negative range filters.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local
 benchmarks rather than performance gates; the larger matrix above remains the
