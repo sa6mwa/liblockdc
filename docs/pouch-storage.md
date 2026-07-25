@@ -1287,11 +1287,11 @@ the long-term performance architecture. Incremental hot-loop optimizations are
 allowed only when they move toward this subsystem boundary or protect behavior
 while the subsystem is introduced.
 
-The first C cutover stage uses a private exact-term docID reader callback:
-`lc_pouch_index` owns primary equality and `in` term planning, while
-`lc_pouch_disk.c` adapts the current sidecar postings into docID candidates.
-This is a migration bridge toward immutable compiled readers, not the final
-reader-cache architecture.
+The first C cutover stage uses private exact-term and field-presence docID
+reader callbacks: `lc_pouch_index` owns primary equality, `in`, and exact
+`exists` planning, while `lc_pouch_disk.c` adapts the current sidecar postings
+into docID candidates. This is a migration bridge toward immutable compiled
+readers, not the final reader-cache architecture.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
