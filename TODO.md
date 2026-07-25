@@ -595,6 +595,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Route simple positive numeric `range` document/key scans through
         index-owned docID result paging, so cached range result pages translate
         only selected docIDs back through disk summaries before streaming.
+      - [x] Route simple non-wildcard positive `in` document/key scans through
+        index-owned docID result paging, while leaving wildcard `in` on the
+        existing disk-side pagination path.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

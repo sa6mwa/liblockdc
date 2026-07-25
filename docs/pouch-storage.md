@@ -1334,11 +1334,11 @@ normalized-plan key maps to a sorted docID vector. The simple result-cache plan
 key constructors now live in `lc_pouch_index`, and disk supplies only the known
 simple-plan kind, current index generation, and storage sidecar readers.
 The first disk use is deliberately narrow: simple primary equality, positive
-`exists`, and positive numeric `range` scans cache docIDs by the current index
-sequence and a length-prefixed plan key, then ask the index layer to page the
-cached docIDs over the document table before disk converts the selected page
-back to summary entries. Updates advance the index sequence, so stale cached
-results miss the cache.
+`exists`, positive numeric `range`, and non-wildcard positive `in` scans cache
+docIDs by the current index sequence and a length-prefixed plan key, then ask
+the index layer to page the cached docIDs over the document table before disk
+converts the selected page back to summary entries. Updates advance the index
+sequence, so stale cached results miss the cache.
 Simple positive `exists` scans use the same generation-keyed cache with a
 length-prefixed field-presence plan key.
 Simple non-wildcard positive `in` scans also use the result cache; their plan
@@ -1354,10 +1354,11 @@ values, so repeated text pages can reuse the matching docID vector until the
 index sequence advances.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,
-and simple positive numeric `range` now use the index-owned result page
-primitive, so page-N scans translate only the requested page of docIDs through
-disk summaries. Other simple predicate scans still reuse the full matching
-docID vector before disk-side cursor/limit handling.
+simple positive numeric `range`, and simple non-wildcard positive `in` now use
+the index-owned result page primitive, so page-N scans translate only the
+requested page of docIDs through disk summaries. Wildcard `in` and the
+remaining simple predicate scans still reuse or build the full matching vector
+before disk-side cursor/limit handling.
 
 The disk bridge also keeps a first prepared-reader cache for exact terms. It is
 keyed by the current index sequence plus a namespace-qualified field/value term,

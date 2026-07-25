@@ -9705,6 +9705,76 @@ static void test_pouch_endpoint_index_exists_query_keys_pages(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_pouch_endpoint_index_in_query_keys_pages(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_lease *delta;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-in-keys-pages");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  pouch_save_query_json(charlie, "{\"region\":\"north\"}", &error);
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha, "{\"region\":\"north\"}", &error);
+  delta = pouch_acquire_query_key(client, "delta", &error);
+  pouch_save_query_json(delta, "{\"region\":\"west\"}", &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo, "{\"region\":\"south\"}", &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"in\":{\"field\":\"/region\",\"any\":[\"north\",\"south\"]}}";
+  req.limit = 2L;
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(res.cursor, "bravo");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.cursor = "bravo";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "charlie");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+
+  lc_query_res_cleanup(&res);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  delta->close(delta);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void
 test_pouch_endpoint_index_query_keys_filters_owner_selector(void **state) {
   char root[256];
@@ -12350,6 +12420,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_endpoint_default_index_query_keys_pages),
       cmocka_unit_test(test_pouch_endpoint_index_eq_doc_table_orders_keys),
       cmocka_unit_test(test_pouch_endpoint_index_exists_query_keys_pages),
+      cmocka_unit_test(test_pouch_endpoint_index_in_query_keys_pages),
       cmocka_unit_test(
           test_pouch_endpoint_index_query_keys_filters_owner_selector),
       cmocka_unit_test(
