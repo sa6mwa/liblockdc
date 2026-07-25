@@ -9,13 +9,19 @@ import "C"
 import "unsafe"
 
 type pouchResult struct {
-	operations uint64
-	documents  uint64
-	bytes      uint64
-	pages      uint64
-	elapsedNS  uint64
-	indexSeq   uint64
-	err        string
+	operations          uint64
+	documents           uint64
+	bytes               uint64
+	pages               uint64
+	firstPageElapsedNS  uint64
+	firstPageCount      uint64
+	nextPageElapsedNS   uint64
+	nextPageCount       uint64
+	queryCandidates     uint64
+	queryCandidatePages uint64
+	elapsedNS           uint64
+	indexSeq            uint64
+	err                 string
 }
 
 func runPouchIndexedLQLDocuments(root string, iterations int, seededRows int) (int, pouchResult) {
@@ -96,12 +102,18 @@ func runPouchStateRead(root string, iterations int) (int, pouchResult) {
 
 func convertPouchResult(res C.lockdc_pouch_bench_result) pouchResult {
 	return pouchResult{
-		operations: uint64(res.operations),
-		documents:  uint64(res.documents),
-		bytes:      uint64(res.bytes),
-		pages:      uint64(res.pages),
-		elapsedNS:  uint64(res.c_elapsed_ns),
-		indexSeq:   uint64(res.index_seq),
-		err:        C.GoString(&res.error[0]),
+		operations:          uint64(res.operations),
+		documents:           uint64(res.documents),
+		bytes:               uint64(res.bytes),
+		pages:               uint64(res.pages),
+		firstPageElapsedNS:  uint64(res.first_page_elapsed_ns),
+		firstPageCount:      uint64(res.first_page_count),
+		nextPageElapsedNS:   uint64(res.next_page_elapsed_ns),
+		nextPageCount:       uint64(res.next_page_count),
+		queryCandidates:     uint64(res.query_candidates),
+		queryCandidatePages: uint64(res.query_candidate_pages),
+		elapsedNS:           uint64(res.c_elapsed_ns),
+		indexSeq:            uint64(res.index_seq),
+		err:                 C.GoString(&res.error[0]),
 	}
 }

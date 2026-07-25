@@ -152,6 +152,18 @@ func reportCResult(b *testing.B, res pouchResult) {
 	if res.pages != 0 {
 		b.ReportMetric(float64(res.pages)/float64(ops), "query-pages/op")
 	}
+	if res.firstPageCount != 0 {
+		b.ReportMetric(float64(res.firstPageElapsedNS)/float64(res.firstPageCount), "page1-c-ns/op")
+		b.ReportMetric(float64(res.firstPageCount)/float64(ops), "page1-count/op")
+	}
+	if res.nextPageCount != 0 {
+		b.ReportMetric(float64(res.nextPageElapsedNS)/float64(res.nextPageCount), "pageN-c-ns/op")
+		b.ReportMetric(float64(res.nextPageCount)/float64(ops), "pageN-count/op")
+	}
+	if res.queryCandidatePages != 0 {
+		b.ReportMetric(float64(res.queryCandidates)/float64(res.queryCandidatePages), "query-candidates/page")
+		b.ReportMetric(float64(res.queryCandidates)/float64(ops), "query-candidates/op")
+	}
 }
 
 func seedRows() int {
@@ -580,6 +592,10 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 
 	b.ResetTimer()
 	totalPages := 0
+	firstPageElapsed := time.Duration(0)
+	firstPageCount := 0
+	nextPageElapsed := time.Duration(0)
+	nextPageCount := 0
 	for i := 0; i < b.N; i++ {
 		cursor := ""
 		rows := 0
@@ -597,6 +613,7 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 			if cursor != "" {
 				opts = append(opts, lockdclient.WithQueryCursor(cursor))
 			}
+			pageStart := time.Now()
 			resp, err := cli.Query(ctx, opts...)
 			if err != nil {
 				b.Fatalf("query: %v", err)
@@ -629,6 +646,14 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 			if err := resp.Close(); err != nil {
 				b.Fatalf("close query response: %v", err)
 			}
+			pageElapsed := time.Since(pageStart)
+			if pages == 0 {
+				firstPageElapsed += pageElapsed
+				firstPageCount++
+			} else {
+				nextPageElapsed += pageElapsed
+				nextPageCount++
+			}
 			pages++
 			totalPages++
 			if cursor == "" {
@@ -651,6 +676,14 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 	b.ReportMetric(float64(expectedRows), "matched-documents")
 	if b.N > 0 {
 		b.ReportMetric(float64(totalPages)/float64(b.N), "query-pages/op")
+	}
+	if firstPageCount != 0 {
+		b.ReportMetric(float64(firstPageElapsed.Nanoseconds())/float64(firstPageCount), "page1-ns/op")
+		b.ReportMetric(float64(firstPageCount)/float64(b.N), "page1-count/op")
+	}
+	if nextPageCount != 0 {
+		b.ReportMetric(float64(nextPageElapsed.Nanoseconds())/float64(nextPageCount), "pageN-ns/op")
+		b.ReportMetric(float64(nextPageCount)/float64(b.N), "pageN-count/op")
 	}
 }
 

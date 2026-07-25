@@ -43,6 +43,28 @@ static char *bench_strdup(const char *value) {
   return copy;
 }
 
+static int parse_query_candidates(const char *metadata, uint64_t *out) {
+  const char needle[] = "\"query_candidates\":";
+  const char *at;
+  char *end;
+  unsigned long long value;
+
+  if (metadata == NULL || out == NULL) {
+    return 0;
+  }
+  at = strstr(metadata, needle);
+  if (at == NULL) {
+    return 0;
+  }
+  at += sizeof(needle) - 1U;
+  value = strtoull(at, &end, 10);
+  if (end == at) {
+    return 0;
+  }
+  *out = (uint64_t)value;
+  return 1;
+}
+
 static void set_error(lockdc_pouch_bench_result *out, const char *where,
                       const lc_error *error, int rc) {
   const char *message;
@@ -499,6 +521,9 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
     memset(&keys, 0, sizeof(keys));
     do {
       char *next_cursor;
+      uint64_t page_start;
+      uint64_t page_end;
+      uint64_t query_candidates;
 
       lc_query_req_init(&req);
       memset(&res, 0, sizeof(res));
@@ -514,8 +539,10 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
         handler.begin = key_begin;
         handler.chunk = key_chunk;
         handler.end = key_end;
+        page_start = now_ns();
         rc = client->query_keys(client, &req, &handler, &page_keys, &res,
                                 &error);
+        page_end = now_ns();
         keys.documents += page_keys.documents;
         keys.bytes += page_keys.bytes;
         out->bytes += page_keys.bytes;
@@ -523,8 +550,22 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
         sink = NULL;
         rc = lc_sink_to_file("/dev/null", &sink, &error);
         if (rc == LC_OK) {
+          page_start = now_ns();
           rc = client->query(client, &req, sink, &res, &error);
+          page_end = now_ns();
           lc_sink_close(sink);
+        } else {
+          page_start = 0U;
+          page_end = 0U;
+        }
+      }
+      if (page_end >= page_start) {
+        if (page_count == 0U) {
+          out->first_page_elapsed_ns += page_end - page_start;
+          out->first_page_count++;
+        } else {
+          out->next_page_elapsed_ns += page_end - page_start;
+          out->next_page_count++;
         }
       }
       if (strcmp(engine, "index") == 0 && rc == LC_OK && res.index_seq == 0UL) {
@@ -532,6 +573,11 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
       }
       if (res.index_seq > out->index_seq) {
         out->index_seq = res.index_seq;
+      }
+      if (rc == LC_OK &&
+          parse_query_candidates(res.metadata_json, &query_candidates)) {
+        out->query_candidates += query_candidates;
+        out->query_candidate_pages++;
       }
       next_cursor = NULL;
       if (rc == LC_OK && res.cursor != NULL && res.cursor[0] != '\0') {
