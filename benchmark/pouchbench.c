@@ -392,10 +392,10 @@ static int key_end(void *context, lc_error *error) {
   return 1;
 }
 
-static int run_indexed_lql_scenario(const char *root, const char *scenario_name,
-                                    uint64_t iterations, uint64_t seeded_rows,
-                                    int keys_only,
-                                    lockdc_pouch_bench_result *out) {
+static int run_lql_scenario(const char *root, const char *scenario_name,
+                            const char *engine, uint64_t iterations,
+                            uint64_t seeded_rows, int keys_only,
+                            lockdc_pouch_bench_result *out) {
   char selector[512];
   char endpoint[512];
   lc_client_config config;
@@ -446,6 +446,14 @@ static int run_indexed_lql_scenario(const char *root, const char *scenario_name,
   out->iterations = iterations;
   out->operations = iterations;
   out->rows = seeded_rows;
+  if (engine == NULL || engine[0] == '\0') {
+    engine = "index";
+  }
+  if (strcmp(engine, "index") != 0 && strcmp(engine, "scan") != 0) {
+    set_error(out, "engine validation", &error, LC_ERR_INVALID);
+    lc_error_cleanup(&error);
+    return LC_ERR_INVALID;
+  }
   (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
@@ -472,6 +480,7 @@ static int run_indexed_lql_scenario(const char *root, const char *scenario_name,
     lc_query_req_init(&req);
     memset(&res, 0, sizeof(res));
     req.selector_json = selector;
+    req.engine = engine;
     req.limit = (long)seeded_rows;
     if (keys_only) {
       memset(&handler, 0, sizeof(handler));
@@ -482,6 +491,10 @@ static int run_indexed_lql_scenario(const char *root, const char *scenario_name,
       rc = client->query_keys(client, &req, &handler, &keys, &res, &error);
       out->bytes += keys.bytes;
       if (rc == LC_OK && keys.rows != expected_rows) {
+        (void)snprintf(out->error, sizeof(out->error),
+                       "query keys matched %llu rows, expected %llu",
+                       (unsigned long long)keys.rows,
+                       (unsigned long long)expected_rows);
         rc = LC_ERR_PROTOCOL;
       }
     } else {
@@ -492,7 +505,7 @@ static int run_indexed_lql_scenario(const char *root, const char *scenario_name,
         lc_sink_close(sink);
       }
     }
-    if (rc == LC_OK && res.index_seq == 0UL) {
+    if (strcmp(engine, "index") == 0 && rc == LC_OK && res.index_seq == 0UL) {
       rc = LC_ERR_PROTOCOL;
     }
     if (res.index_seq > out->index_seq) {
@@ -500,7 +513,9 @@ static int run_indexed_lql_scenario(const char *root, const char *scenario_name,
     }
     lc_query_res_cleanup(&res);
     if (rc != LC_OK) {
-      set_error(out, keys_only ? "query keys" : "query rows", &error, rc);
+      if (out->error[0] == '\0') {
+        set_error(out, keys_only ? "query keys" : "query rows", &error, rc);
+      }
       client->close(client);
       lc_error_cleanup(&error);
       return rc;
@@ -517,29 +532,43 @@ static int run_indexed_lql_scenario(const char *root, const char *scenario_name,
 int lockdc_pouch_bench_indexed_lql_rows(const char *root, uint64_t iterations,
                                         uint64_t seeded_rows,
                                         lockdc_pouch_bench_result *out) {
-  return run_indexed_lql_scenario(root, "EqSparse", iterations, seeded_rows, 0,
-                                  out);
+  return run_lql_scenario(root, "EqSparse", "index", iterations, seeded_rows, 0,
+                          out);
 }
 
 int lockdc_pouch_bench_indexed_lql_keys(const char *root, uint64_t iterations,
                                         uint64_t seeded_rows,
                                         lockdc_pouch_bench_result *out) {
-  return run_indexed_lql_scenario(root, "EqSparse", iterations, seeded_rows, 1,
-                                  out);
+  return run_lql_scenario(root, "EqSparse", "index", iterations, seeded_rows, 1,
+                          out);
 }
 
 int lockdc_pouch_bench_indexed_lql_scenario_rows(
     const char *root, const char *scenario, uint64_t iterations,
     uint64_t seeded_rows, lockdc_pouch_bench_result *out) {
-  return run_indexed_lql_scenario(root, scenario, iterations, seeded_rows, 0,
-                                  out);
+  return run_lql_scenario(root, scenario, "index", iterations, seeded_rows, 0,
+                          out);
 }
 
 int lockdc_pouch_bench_indexed_lql_scenario_keys(
     const char *root, const char *scenario, uint64_t iterations,
     uint64_t seeded_rows, lockdc_pouch_bench_result *out) {
-  return run_indexed_lql_scenario(root, scenario, iterations, seeded_rows, 1,
-                                  out);
+  return run_lql_scenario(root, scenario, "index", iterations, seeded_rows, 1,
+                          out);
+}
+
+int lockdc_pouch_bench_lql_scenario_rows(
+    const char *root, const char *scenario, const char *engine,
+    uint64_t iterations, uint64_t seeded_rows, lockdc_pouch_bench_result *out) {
+  return run_lql_scenario(root, scenario, engine, iterations, seeded_rows, 0,
+                          out);
+}
+
+int lockdc_pouch_bench_lql_scenario_keys(
+    const char *root, const char *scenario, const char *engine,
+    uint64_t iterations, uint64_t seeded_rows, lockdc_pouch_bench_result *out) {
+  return run_lql_scenario(root, scenario, engine, iterations, seeded_rows, 1,
+                          out);
 }
 
 int lockdc_pouch_bench_state_write(const char *root, uint64_t iterations,

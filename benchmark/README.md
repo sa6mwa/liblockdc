@@ -26,10 +26,19 @@ Fast iteration suite, capped by Go's test timeout at 30 seconds:
 make benchmark-pouch-go-fast
 ```
 
+Medium comparison suite, capped by Go's test timeout at 3 minutes:
+
+```sh
+make benchmark-pouch-go-medium
+```
+
 Useful overrides:
 
 ```sh
 make benchmark-pouch-go POUCH_GO_BENCH='IndexedLQL' POUCH_GO_BENCHTIME=10s POUCH_GO_SEED_ROWS=100000
+make benchmark-pouch-go-medium POUCH_GO_MEDIUM_SCALE_ROWS=64,1024,10000
+make benchmark-pouch-go-medium POUCH_GO_MEDIUM_SCALE_SCENARIOS=EqSparse,InTags,OrSparseOrFlag
+make benchmark-pouch-go POUCH_GO_BENCH='PouchCMediumLQLKeys/Rows1024/index/RangeHalf' POUCH_GO_MEDIUM_SCALE_ROWS=1024 POUCH_GO_MEDIUM_SCALE_SCENARIOS=RangeHalf
 ```
 
 The query cases seed a local `pouch://` namespace, then run full-form LQL
@@ -42,6 +51,21 @@ value for build/smoke validation and a larger value for stress/perf runs.
 - `BenchmarkPouchCIndexedLQLKeys10k`
 - `BenchmarkLockdDiskIndexedLQLRows10k`
 - `BenchmarkLockdDiskIndexedLQLKeys10k`
+
+The medium LQL cases compare explicit `index` and `scan` engines over each
+configured dataset size for document-return and key-return queries. They reuse
+seeded lockd disk state within each row-count/engine/return-mode group so the
+3-minute profile spends its budget on query behavior instead of repeated setup.
+The default dataset sizes are `64,1024`; `POUCH_GO_MEDIUM_SCALE_ROWS` and
+`POUCH_GO_MEDIUM_SCALE_SCENARIOS` can widen the matrix for dedicated perf runs.
+The default medium scenario set currently excludes `RangeHalf` because the
+1024-row indexed pouch key path exposes a known correctness bug; include it
+explicitly when reproducing that issue.
+
+- `BenchmarkPouchCMediumLQLRows`
+- `BenchmarkPouchCMediumLQLKeys`
+- `BenchmarkLockdDiskMediumLQLRows`
+- `BenchmarkLockdDiskMediumLQLKeys`
 
 The indexed LQL cases run the same scenario matrix for document-return and
 key-return queries:

@@ -162,6 +162,47 @@ func seedRows() int {
 	return rows
 }
 
+func scaleRows() []int {
+	return parsePositiveIntList(os.Getenv("LOCKDC_BENCH_SCALE_ROWS"), []int{64, 1024})
+}
+
+func parsePositiveIntList(value string, fallback []int) []int {
+	parts := strings.Split(value, ",")
+	rows := make([]int, 0, len(parts))
+	for _, part := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err == nil && n > 0 {
+			rows = append(rows, n)
+		}
+	}
+	if len(rows) == 0 {
+		return fallback
+	}
+	return rows
+}
+
+func scaleScenarios() []queryScenario {
+	value := strings.TrimSpace(os.Getenv("LOCKDC_BENCH_SCALE_SCENARIOS"))
+	if value == "" {
+		return queryScenarios
+	}
+	parts := strings.Split(value, ",")
+	scenarios := make([]queryScenario, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		for _, scenario := range queryScenarios {
+			if scenario.name == name {
+				scenarios = append(scenarios, scenario)
+				break
+			}
+		}
+	}
+	if len(scenarios) == 0 {
+		return queryScenarios
+	}
+	return scenarios
+}
+
 func targetRow(rows int) int {
 	if rows > 1 {
 		return rows / 2
@@ -180,8 +221,12 @@ func countMatching(rows int, match func(i int) bool) int {
 }
 
 func runPouchScenarioBenchmarks(b *testing.B, rows int, keysOnly bool) {
+	runPouchScenarioBenchmarksFor(b, rows, "index", queryScenarios, keysOnly)
+}
+
+func runPouchScenarioBenchmarksFor(b *testing.B, rows int, engine string, scenarios []queryScenario, keysOnly bool) {
 	b.Helper()
-	for _, scenario := range queryScenarios {
+	for _, scenario := range scenarios {
 		scenario := scenario
 		b.Run(scenario.name, func(b *testing.B) {
 			root := b.TempDir()
@@ -189,9 +234,9 @@ func runPouchScenarioBenchmarks(b *testing.B, rows int, keysOnly bool) {
 			var rc int
 			var res pouchResult
 			if keysOnly {
-				rc, res = runPouchIndexedLQLScenarioKeys(root, scenario.name, b.N, rows)
+				rc, res = runPouchLQLScenarioKeys(root, scenario.name, engine, b.N, rows)
 			} else {
-				rc, res = runPouchIndexedLQLScenarioRows(root, scenario.name, b.N, rows)
+				rc, res = runPouchLQLScenarioRows(root, scenario.name, engine, b.N, rows)
 			}
 			b.StopTimer()
 			if rc != 0 {
@@ -199,6 +244,21 @@ func runPouchScenarioBenchmarks(b *testing.B, rows int, keysOnly bool) {
 			}
 			reportCResult(b, res)
 			b.ReportMetric(float64(scenario.expected(rows)), "matched-rows")
+		})
+	}
+}
+
+func runPouchScaleBenchmarks(b *testing.B, keysOnly bool) {
+	b.Helper()
+	for _, rows := range scaleRows() {
+		rows := rows
+		b.Run(fmt.Sprintf("Rows%d", rows), func(b *testing.B) {
+			for _, engine := range []string{"index", "scan"} {
+				engine := engine
+				b.Run(engine, func(b *testing.B) {
+					runPouchScenarioBenchmarksFor(b, rows, engine, scaleScenarios(), keysOnly)
+				})
+			}
 		})
 	}
 }
@@ -309,7 +369,23 @@ func startLockdDiskBenchmarkEnv(b *testing.B) *lockdDiskEnv {
 		b.Fatalf("open lockd client: %v", err)
 	}
 	b.Cleanup(func() { cli.Close() })
+	configureLockdBenchmarkNamespace(b, cli)
 	return &lockdDiskEnv{client: cli}
+}
+
+func configureLockdBenchmarkNamespace(b *testing.B, cli *lockdclient.Client) {
+	b.Helper()
+	ctx := context.Background()
+	_, err := cli.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+		Namespace: benchmarkNamespace,
+		Query: &api.NamespaceQueryConfig{
+			PreferredEngine: "index",
+			FallbackEngine:  "scan",
+		},
+	}, lockdclient.NamespaceConfigOptions{})
+	if err != nil {
+		b.Fatalf("configure lockd namespace: %v", err)
+	}
 }
 
 func freeLoopbackAddress(b *testing.B) string {
@@ -462,12 +538,34 @@ func runLockdScenarioBenchmarks(b *testing.B, rows int, keysOnly bool) {
 		b.Run(scenario.name, func(b *testing.B) {
 			env := startLockdDiskBenchmarkEnv(b)
 			seedLockdRows(b, env.client, rows)
-			benchmarkLockdQuery(b, env.client, rows, scenario, keysOnly)
+			benchmarkLockdQuery(b, env.client, rows, scenario, "index", keysOnly)
 		})
 	}
 }
 
-func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, scenario queryScenario, keysOnly bool) {
+func runLockdScaleBenchmarks(b *testing.B, keysOnly bool) {
+	b.Helper()
+	for _, rows := range scaleRows() {
+		rows := rows
+		b.Run(fmt.Sprintf("Rows%d", rows), func(b *testing.B) {
+			for _, engine := range []string{"index", "scan"} {
+				engine := engine
+				b.Run(engine, func(b *testing.B) {
+					env := startLockdDiskBenchmarkEnv(b)
+					seedLockdRows(b, env.client, rows)
+					for _, scenario := range scaleScenarios() {
+						scenario := scenario
+						b.Run(scenario.name, func(b *testing.B) {
+							benchmarkLockdQuery(b, env.client, rows, scenario, engine, keysOnly)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, scenario queryScenario, engine string, keysOnly bool) {
 	b.Helper()
 	ctx := context.Background()
 	returnMode := lockdclient.QueryReturnDocuments
@@ -482,7 +580,7 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 			lockdclient.WithQueryNamespace(benchmarkNamespace),
 			lockdclient.WithQuery(scenario.lockdLQL(seededRows)),
 			lockdclient.WithQueryLimit(seededRows),
-			lockdclient.WithQueryEngineIndex(),
+			lockdclient.WithQueryEngine(engine),
 			lockdclient.WithQueryRefreshWaitFor(),
 			lockdclient.WithQueryReturn(returnMode),
 		)
@@ -515,7 +613,7 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 			_ = resp.Close()
 			b.Fatalf("query matched %d rows, expected %d", rows, expectedRows)
 		}
-		if resp.IndexSeq == 0 {
+		if engine == "index" && resp.IndexSeq == 0 {
 			_ = resp.Close()
 			b.Fatalf("query did not report index sequence")
 		}
@@ -551,4 +649,20 @@ func BenchmarkLockdDiskFastIndexedLQLRows(b *testing.B) {
 func BenchmarkLockdDiskFastIndexedLQLKeys(b *testing.B) {
 	rows := seedRows()
 	runLockdScenarioBenchmarks(b, rows, true)
+}
+
+func BenchmarkPouchCMediumLQLRows(b *testing.B) {
+	runPouchScaleBenchmarks(b, false)
+}
+
+func BenchmarkPouchCMediumLQLKeys(b *testing.B) {
+	runPouchScaleBenchmarks(b, true)
+}
+
+func BenchmarkLockdDiskMediumLQLRows(b *testing.B) {
+	runLockdScaleBenchmarks(b, false)
+}
+
+func BenchmarkLockdDiskMediumLQLKeys(b *testing.B) {
+	runLockdScaleBenchmarks(b, true)
 }

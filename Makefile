@@ -34,6 +34,12 @@ POUCH_GO_FAST_BENCH ?= Fast
 POUCH_GO_FAST_BENCHTIME ?= 1x
 POUCH_GO_FAST_SEED_ROWS ?= 64
 POUCH_GO_FAST_TIMEOUT ?= 30s
+POUCH_GO_MEDIUM_BENCH ?= Medium
+POUCH_GO_MEDIUM_BENCHTIME ?= 1x
+POUCH_GO_MEDIUM_SEED_ROWS ?= 64
+POUCH_GO_MEDIUM_SCALE_ROWS ?= 64,1024
+POUCH_GO_MEDIUM_SCALE_SCENARIOS ?= EqSparse,EqDense,InRegion,InRegionSingle,InTags,ExistsFlag,PrefixOwner,ContainsMessage,AndEvenRange,OrSparseOrFlag
+POUCH_GO_MEDIUM_TIMEOUT ?= 3m
 FUZZ_TIME ?= 30
 POUCH_GO_BENCH_CFLAGS := \
 	-I$(ROOT)/include \
@@ -67,7 +73,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__format \
-	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-go __benchmark-pouch-go-fast \
+	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __clean-dist \
 	__lua-rock __lua-test __lua-env \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test \
@@ -76,7 +82,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
-	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-go benchmark-pouch-go-fast \
+	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives clean-dist \
 	lua-rock lua-test lua-env \
 	dev-up dev-down dev-reset cross-build cross-preset-test cross-test \
@@ -116,6 +122,7 @@ help:
 		'make bench-gate         Compatibility alias for benchmarks.' \
 		'make benchmark-pouch-go Run opt-in Go e2e lockd-disk vs pouch perf/stress benchmarks outside release gates (POUCH_GO_BENCH=$(POUCH_GO_BENCH), POUCH_GO_BENCHTIME=$(POUCH_GO_BENCHTIME), POUCH_GO_SEED_ROWS=$(POUCH_GO_SEED_ROWS)).' \
 		'make benchmark-pouch-go-fast Run the bounded Go e2e pouch-vs-disk iteration suite (timeout $(POUCH_GO_FAST_TIMEOUT), seed rows $(POUCH_GO_FAST_SEED_ROWS)).' \
+		'make benchmark-pouch-go-medium Run the bounded 3m Go e2e pouch-vs-disk scan/index scale suite (rows $(POUCH_GO_MEDIUM_SCALE_ROWS)).' \
 		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive, source archive, and Lua source rock to dist/.' \
 		'make package-source     Build the source-only release archive.' \
 		'make package-source-smoke  Build and verify the source-only release archive.' \
@@ -328,6 +335,8 @@ __benchmark-pouch-go: __build-x86_64-linux-gnu-release
 	  $(LOCKD_GO_CACHE_ENV) \
 	  LOCKDC_BENCH_LOCKD_BIN="$(ROOT)/.cache/go/bin/lockd" \
 	  LOCKDC_BENCH_SEED_ROWS="$(POUCH_GO_SEED_ROWS)" \
+	  LOCKDC_BENCH_SCALE_ROWS="$(POUCH_GO_MEDIUM_SCALE_ROWS)" \
+	  LOCKDC_BENCH_SCALE_SCENARIOS="$(POUCH_GO_MEDIUM_SCALE_SCENARIOS)" \
 	  CGO_CFLAGS="$(POUCH_GO_BENCH_CFLAGS)" \
 	  CGO_LDFLAGS="$(POUCH_GO_BENCH_LDFLAGS)" \
 	  $(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)' -timeout '$(POUCH_GO_TEST_TIMEOUT)'
@@ -341,6 +350,18 @@ __benchmark-pouch-go-fast:
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_FAST_BENCHTIME)' \
 	  POUCH_GO_SEED_ROWS='$(POUCH_GO_FAST_SEED_ROWS)' \
 	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_FAST_TIMEOUT)'
+
+benchmark-pouch-go-medium:
+	$(TIMED) benchmark-pouch-go-medium $(MAKE) __benchmark-pouch-go-medium
+
+__benchmark-pouch-go-medium:
+	$(MAKE) __benchmark-pouch-go \
+	  POUCH_GO_BENCH='$(POUCH_GO_MEDIUM_BENCH)' \
+	  POUCH_GO_BENCHTIME='$(POUCH_GO_MEDIUM_BENCHTIME)' \
+	  POUCH_GO_SEED_ROWS='$(POUCH_GO_MEDIUM_SEED_ROWS)' \
+	  POUCH_GO_MEDIUM_SCALE_ROWS='$(POUCH_GO_MEDIUM_SCALE_ROWS)' \
+	  POUCH_GO_MEDIUM_SCALE_SCENARIOS='$(POUCH_GO_MEDIUM_SCALE_SCENARIOS)' \
+	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_MEDIUM_TIMEOUT)'
 
 package:
 	$(TIMED) package $(MAKE) __package
