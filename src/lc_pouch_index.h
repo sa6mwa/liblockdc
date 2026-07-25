@@ -15,6 +15,18 @@ typedef struct lc_pouch_index_doc_id_set {
   size_t capacity;
 } lc_pouch_index_doc_id_set;
 
+typedef struct lc_pouch_index_doc_entry {
+  char *namespace_name;
+  char *key;
+  lc_pouch_index_doc_id id;
+} lc_pouch_index_doc_entry;
+
+typedef struct lc_pouch_index_doc_table {
+  lc_pouch_index_doc_entry *entries;
+  size_t count;
+  size_t capacity;
+} lc_pouch_index_doc_table;
+
 typedef enum lc_pouch_index_posting_encoding {
   LC_POUCH_INDEX_POSTING_EMPTY = 0,
   LC_POUCH_INDEX_POSTING_SPARSE = 1,
@@ -100,6 +112,20 @@ typedef int (*lc_pouch_index_contains_term_doc_ids_fn)(
 
 void lc_pouch_index_doc_id_set_cleanup(const lc_pouch_allocator *allocator,
                                        lc_pouch_index_doc_id_set *set);
+void lc_pouch_index_doc_table_cleanup(const lc_pouch_allocator *allocator,
+                                      lc_pouch_index_doc_table *table);
+int lc_pouch_index_doc_table_find(const lc_pouch_index_doc_table *table,
+                                  const char *namespace_name, const char *key,
+                                  lc_pouch_index_doc_id *id_out);
+int lc_pouch_index_doc_table_find_or_add(const lc_pouch_allocator *allocator,
+                                         lc_pouch_index_doc_table *table,
+                                         const char *namespace_name,
+                                         const char *key,
+                                         lc_pouch_index_doc_id *id_out);
+int lc_pouch_index_doc_table_lookup(const lc_pouch_index_doc_table *table,
+                                    lc_pouch_index_doc_id id,
+                                    const char **namespace_name_out,
+                                    const char **key_out);
 int lc_pouch_index_doc_id_set_append(const lc_pouch_allocator *allocator,
                                      lc_pouch_index_doc_id_set *set,
                                      lc_pouch_index_doc_id id);

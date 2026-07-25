@@ -467,6 +467,10 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
+      - [x] Add the first private document table primitive in
+        `lc_pouch_index`: namespace/key pairs are sorted into dense docIDs with
+        forward and reverse lookup coverage. Disk query execution still needs
+        to replace summary-array-position docIDs with this immutable table.
       - [x] Add private C docID set primitives and wire exact primary `in`
         candidate collection through docID accumulation while preserving
         secondary-filter and `liblql` predicate authority.

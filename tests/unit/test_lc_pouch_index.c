@@ -23,6 +23,55 @@ static void assert_doc_ids(const lc_pouch_index_doc_id_set *set,
 static int set_from_values(lc_pouch_index_doc_id_set *set,
                            const lc_pouch_index_doc_id *values, size_t count);
 
+static void test_doc_table_assigns_dense_ids_by_namespace_key(void **state) {
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_doc_id id_alpha;
+  lc_pouch_index_doc_id id_bravo;
+  lc_pouch_index_doc_id id_other;
+  lc_pouch_index_doc_id duplicate;
+  const char *namespace_name;
+  const char *key;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "bravo", &id_bravo));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &id_alpha));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "other",
+                                                   "alpha", &id_other));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &duplicate));
+
+  assert_int_equal(table.count, 3U);
+  assert_int_equal(id_bravo, 0U);
+  assert_int_equal(id_alpha, 0U);
+  assert_int_equal(duplicate, 0U);
+  assert_int_equal(id_other, 2U);
+  assert_true(
+      lc_pouch_index_doc_table_find(&table, "default", "bravo", &id_bravo));
+  assert_int_equal(id_bravo, 1U);
+
+  namespace_name = NULL;
+  key = NULL;
+  assert_true(
+      lc_pouch_index_doc_table_lookup(&table, 0U, &namespace_name, &key));
+  assert_string_equal(namespace_name, "default");
+  assert_string_equal(key, "alpha");
+  assert_true(
+      lc_pouch_index_doc_table_lookup(&table, 1U, &namespace_name, &key));
+  assert_string_equal(namespace_name, "default");
+  assert_string_equal(key, "bravo");
+  assert_true(
+      lc_pouch_index_doc_table_lookup(&table, 2U, &namespace_name, &key));
+  assert_string_equal(namespace_name, "other");
+  assert_string_equal(key, "alpha");
+  assert_false(lc_pouch_index_doc_table_lookup(&table, 3U, NULL, NULL));
+
+  lc_pouch_index_doc_table_cleanup(NULL, &table);
+}
+
 static void test_doc_id_set_sort_unique(void **state) {
   lc_pouch_index_doc_id_set set;
   lc_pouch_index_doc_id expected[] = {1U, 2U, 3U, 5U, 8U};
@@ -808,6 +857,7 @@ test_collect_contains_term_doc_ids_uses_reader_and_deduplicates(void **state) {
 
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_doc_table_assigns_dense_ids_by_namespace_key),
       cmocka_unit_test(test_doc_id_set_sort_unique),
       cmocka_unit_test(test_doc_id_set_algebra),
       cmocka_unit_test(test_doc_id_set_algebra_allows_alias_destination),

@@ -1292,6 +1292,11 @@ docID reader callbacks: `lc_pouch_index` owns primary equality, `in`, exact
 `exists`, and numeric range planning, while `lc_pouch_disk.c` adapts the
 current sidecar postings into docID candidates. This is a migration bridge
 toward immutable compiled readers, not the final reader-cache architecture.
+The index layer now has the first private document table primitive:
+namespace/key pairs are sorted into dense docIDs with forward and reverse
+lookup. Current disk query execution still treats summary-entry positions as
+bridge docIDs; the document table is the cutover target for immutable compiled
+generation readers.
 The same internal layer now owns the initial term dictionary primitive:
 `(field,value)` pairs are interned into stable term IDs with sorted lookup so
 compiled readers can stop carrying raw string scans through the planner.

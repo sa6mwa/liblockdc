@@ -24,6 +24,191 @@ static int lc_pouch_index_doc_id_compare(const void *left, const void *right) {
 }
 
 static int
+lc_pouch_index_doc_table_compare_entry(const lc_pouch_index_doc_entry *entry,
+                                       const char *namespace_name,
+                                       const char *key) {
+  int cmp;
+
+  cmp = strcmp(entry->namespace_name, namespace_name);
+  if (cmp != 0) {
+    return cmp;
+  }
+  return strcmp(entry->key, key);
+}
+
+static int
+lc_pouch_index_doc_table_search(const lc_pouch_index_doc_table *table,
+                                const char *namespace_name, const char *key,
+                                size_t *position_out) {
+  size_t low;
+  size_t high;
+
+  if (table == NULL || namespace_name == NULL || key == NULL) {
+    if (position_out != NULL) {
+      *position_out = 0U;
+    }
+    return 0;
+  }
+  low = 0U;
+  high = table->count;
+  while (low < high) {
+    size_t mid;
+    int cmp;
+
+    mid = low + ((high - low) / 2U);
+    cmp = lc_pouch_index_doc_table_compare_entry(&table->entries[mid],
+                                                 namespace_name, key);
+    if (cmp < 0) {
+      low = mid + 1U;
+    } else {
+      high = mid;
+    }
+  }
+  if (position_out != NULL) {
+    *position_out = low;
+  }
+  return low < table->count &&
+         lc_pouch_index_doc_table_compare_entry(&table->entries[low],
+                                                namespace_name, key) == 0;
+}
+
+static int lc_pouch_index_doc_table_reserve(const lc_pouch_allocator *allocator,
+                                            lc_pouch_index_doc_table *table,
+                                            size_t needed) {
+  size_t new_capacity;
+  lc_pouch_index_doc_entry *grown;
+
+  if (table == NULL) {
+    return 0;
+  }
+  if (needed <= table->capacity) {
+    return 1;
+  }
+  new_capacity = table->capacity == 0U ? 16U : table->capacity;
+  while (new_capacity < needed) {
+    if (new_capacity > ((size_t)-1) / 2U) {
+      return 0;
+    }
+    new_capacity *= 2U;
+  }
+  if (new_capacity > ((size_t)-1) / sizeof(table->entries[0])) {
+    return 0;
+  }
+  grown = (lc_pouch_index_doc_entry *)lc_pouch_realloc(
+      allocator, table->entries, new_capacity * sizeof(table->entries[0]));
+  if (grown == NULL) {
+    return 0;
+  }
+  memset(grown + table->capacity, 0,
+         (new_capacity - table->capacity) * sizeof(grown[0]));
+  table->entries = grown;
+  table->capacity = new_capacity;
+  return 1;
+}
+
+static void
+lc_pouch_index_doc_table_assign_ids_from(lc_pouch_index_doc_table *table,
+                                         size_t first) {
+  size_t index;
+
+  if (table == NULL) {
+    return;
+  }
+  for (index = first; index < table->count; ++index) {
+    table->entries[index].id = (lc_pouch_index_doc_id)index;
+  }
+}
+
+void lc_pouch_index_doc_table_cleanup(const lc_pouch_allocator *allocator,
+                                      lc_pouch_index_doc_table *table) {
+  size_t index;
+
+  if (table == NULL) {
+    return;
+  }
+  for (index = 0U; index < table->count; ++index) {
+    lc_pouch_free(allocator, table->entries[index].namespace_name);
+    lc_pouch_free(allocator, table->entries[index].key);
+  }
+  lc_pouch_free(allocator, table->entries);
+  memset(table, 0, sizeof(*table));
+}
+
+int lc_pouch_index_doc_table_find(const lc_pouch_index_doc_table *table,
+                                  const char *namespace_name, const char *key,
+                                  lc_pouch_index_doc_id *id_out) {
+  size_t position;
+
+  if (!lc_pouch_index_doc_table_search(table, namespace_name, key, &position)) {
+    return 0;
+  }
+  if (id_out != NULL) {
+    *id_out = table->entries[position].id;
+  }
+  return 1;
+}
+
+int lc_pouch_index_doc_table_find_or_add(const lc_pouch_allocator *allocator,
+                                         lc_pouch_index_doc_table *table,
+                                         const char *namespace_name,
+                                         const char *key,
+                                         lc_pouch_index_doc_id *id_out) {
+  lc_pouch_index_doc_entry entry;
+  size_t position;
+
+  if (table == NULL || namespace_name == NULL || key == NULL ||
+      table->count > (size_t)UINT32_MAX) {
+    return 0;
+  }
+  if (lc_pouch_index_doc_table_search(table, namespace_name, key, &position)) {
+    if (id_out != NULL) {
+      *id_out = table->entries[position].id;
+    }
+    return 1;
+  }
+  memset(&entry, 0, sizeof(entry));
+  entry.namespace_name = lc_pouch_strdup(allocator, namespace_name);
+  entry.key = lc_pouch_strdup(allocator, key);
+  if (entry.namespace_name == NULL || entry.key == NULL) {
+    lc_pouch_free(allocator, entry.namespace_name);
+    lc_pouch_free(allocator, entry.key);
+    return 0;
+  }
+  if (!lc_pouch_index_doc_table_reserve(allocator, table, table->count + 1U)) {
+    lc_pouch_free(allocator, entry.namespace_name);
+    lc_pouch_free(allocator, entry.key);
+    return 0;
+  }
+  if (position < table->count) {
+    memmove(table->entries + position + 1U, table->entries + position,
+            (table->count - position) * sizeof(table->entries[0]));
+  }
+  table->entries[position] = entry;
+  table->count++;
+  lc_pouch_index_doc_table_assign_ids_from(table, position);
+  if (id_out != NULL) {
+    *id_out = table->entries[position].id;
+  }
+  return 1;
+}
+
+int lc_pouch_index_doc_table_lookup(const lc_pouch_index_doc_table *table,
+                                    lc_pouch_index_doc_id id,
+                                    const char **namespace_name_out,
+                                    const char **key_out) {
+  if (table == NULL || (size_t)id >= table->count) {
+    return 0;
+  }
+  if (namespace_name_out != NULL) {
+    *namespace_name_out = table->entries[id].namespace_name;
+  }
+  if (key_out != NULL) {
+    *key_out = table->entries[id].key;
+  }
+  return 1;
+}
+
+static int
 lc_pouch_index_doc_id_set_reserve(const lc_pouch_allocator *allocator,
                                   lc_pouch_index_doc_id_set *set,
                                   size_t needed) {
