@@ -3615,6 +3615,126 @@ test_query_index_prepared_exists_cache_is_namespace_and_generation_scoped(
   test_cleanup_root(root);
 }
 
+static void
+test_query_index_prepared_range_cache_is_namespace_and_generation_scoped(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res alpha;
+  lc_pouch_put_state_res bravo;
+  lc_pouch_put_state_res charlie;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_document_range_term range;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-prepared-range-cache");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&alpha, 0, sizeof(alpha));
+  memset(&bravo, 0, sizeof(bravo));
+  memset(&charlie, 0, sizeof(charlie));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&range, 0, sizeof(range));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "application/json";
+  source = source_from_text("{\"score\":3}");
+  rc = store->write_state(store, "default", "alpha", source, &opts, &alpha,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.owner = "owner";
+  meta.state_etag = alpha.new_state_etag;
+  meta.version = alpha.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  source = source_from_text("{\"score\":3}");
+  rc = store->write_state(store, "other", "bravo", source, &opts, &bravo,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.state_etag = bravo.new_state_etag;
+  meta.version = bravo.new_version;
+  rc = store->store_meta(store, "other", "bravo", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  range.field = "/score";
+  range.gte = "n:+:2:0";
+  range.lte = "n:+:4:0";
+  req.namespace_name = "default";
+  req.document_range_terms = &range;
+  req.document_range_term_count = 1U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "alpha");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  req.namespace_name = "other";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "bravo");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  source = source_from_text("{\"score\":4}");
+  rc = store->write_state(store, "default", "charlie", source, &opts, &charlie,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.state_etag = charlie.new_state_etag;
+  meta.version = charlie.new_version;
+  rc = store->store_meta(store, "default", "charlie", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  memset(&keys, 0, sizeof(keys));
+  req.namespace_name = "default";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_string_equal(keys.keys[1], "charlie");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &charlie);
+  lc_pouch_put_state_res_cleanup(&allocator, &bravo);
+  lc_pouch_put_state_res_cleanup(&allocator, &alpha);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_cas_and_remove_semantics(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -18014,6 +18134,8 @@ int main(void) {
           test_query_index_prepared_exact_cache_is_namespace_and_generation_scoped),
       cmocka_unit_test(
           test_query_index_prepared_exists_cache_is_namespace_and_generation_scoped),
+      cmocka_unit_test(
+          test_query_index_prepared_range_cache_is_namespace_and_generation_scoped),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_state_lookup_index_orders_updates_and_replays),
       cmocka_unit_test(
