@@ -7765,7 +7765,7 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_null(strstr(text, "charlie"));
   assert_null(strstr(text, "delta"));
   assert_string_equal(res.cursor, "bravo");
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);
@@ -8722,7 +8722,7 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "bravo");
   assert_string_equal(res.cursor, "bravo");
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
 

@@ -16997,6 +16997,7 @@ typedef struct lc_pouch_lql_document_filter {
   lc_pouch_document_exists_term *document_or_exists_path_patterns;
   size_t document_or_exists_path_pattern_count;
   int enabled;
+  int index_covers_selector;
 } lc_pouch_lql_document_filter;
 
 typedef struct lc_pouch_query_scan_context {
@@ -17040,6 +17041,8 @@ typedef struct lc_pouch_lql_memory_reader {
   const unsigned char *data;
   size_t len;
   size_t pos;
+  int append_newline;
+  int newline_emitted;
 } lc_pouch_lql_memory_reader;
 
 typedef struct lc_pouch_lql_decision_capture {
@@ -17064,6 +17067,11 @@ static lql_status lc_pouch_lql_read_memory(void *user, unsigned char *buffer,
   if (take > 0U) {
     memcpy(buffer, reader->data + reader->pos, take);
     reader->pos += take;
+  } else if (capacity > 0U && reader->append_newline &&
+             !reader->newline_emitted) {
+    buffer[0] = '\n';
+    reader->newline_emitted = 1;
+    take = 1U;
   }
   *out_len = take;
   return LQL_STATUS_OK;
@@ -18297,6 +18305,106 @@ lc_pouch_lql_ast_date_exists_hint_parse(lc_pouch_lql_document_filter *filter) {
   return 1;
 }
 
+static int lc_pouch_lql_ast_index_cover_count(const lql *runtime,
+                                              lql_selector_node node,
+                                              size_t *leaf_count) {
+  lql_error lql_err;
+  size_t child_count;
+  size_t index;
+
+  if (runtime == NULL || leaf_count == NULL) {
+    return 0;
+  }
+  switch (node.kind) {
+  case LQL_SELECTOR_NODE_ALL:
+    return 1;
+  case LQL_SELECTOR_NODE_EQ:
+  case LQL_SELECTOR_NODE_CONTAINS:
+  case LQL_SELECTOR_NODE_ICONTAINS:
+  case LQL_SELECTOR_NODE_PREFIX:
+  case LQL_SELECTOR_NODE_IPREFIX:
+  case LQL_SELECTOR_NODE_RANGE:
+  case LQL_SELECTOR_NODE_IN:
+  case LQL_SELECTOR_NODE_EXISTS:
+    (*leaf_count)++;
+    return 1;
+  case LQL_SELECTOR_NODE_AND:
+  case LQL_SELECTOR_NODE_OR:
+    break;
+  case LQL_SELECTOR_NODE_NOT:
+  case LQL_SELECTOR_NODE_DATE:
+  default:
+    return 0;
+  }
+
+  lql_error_init(&lql_err);
+  if (runtime->selector_node_child_count(runtime, node, &child_count,
+                                         &lql_err) != LQL_STATUS_OK ||
+      (node.kind == LQL_SELECTOR_NODE_OR && child_count < 2U)) {
+    return 0;
+  }
+  for (index = 0U; index < child_count; ++index) {
+    lql_selector_node child;
+
+    lql_error_init(&lql_err);
+    if (runtime->selector_node_child(runtime, node, index, &child, &lql_err) !=
+            LQL_STATUS_OK ||
+        !lc_pouch_lql_ast_index_cover_count(runtime, child, leaf_count)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static size_t lc_pouch_lql_document_filter_index_term_count(
+    const lc_pouch_lql_document_filter *filter) {
+  if (filter == NULL) {
+    return 0U;
+  }
+  return filter->document_eq_term_count + filter->document_or_eq_term_count +
+         filter->document_range_term_count +
+         filter->document_or_range_term_count + filter->document_in_term_count +
+         filter->document_or_in_term_count + filter->document_prefix_term_count +
+         filter->document_or_prefix_term_count +
+         filter->document_contains_term_count +
+         filter->document_or_contains_term_count +
+         filter->document_exists_term_count +
+         filter->document_or_exists_term_count +
+         filter->document_exists_path_pattern_count +
+         filter->document_or_exists_path_pattern_count;
+}
+
+static int lc_pouch_lql_document_filter_index_covers_selector(
+    lc_pouch_lql_document_filter *filter,
+    const lql_selector_capabilities *capabilities) {
+  lql_selector_node root;
+  lql_error lql_err;
+  size_t leaf_count;
+  size_t term_count;
+
+  if (filter == NULL || filter->runtime == NULL || filter->selector == NULL ||
+      capabilities == NULL || capabilities->wildcard_path ||
+      capabilities->recursive_path) {
+    return 0;
+  }
+  memset(&root, 0, sizeof(root));
+  lql_error_init(&lql_err);
+  if (filter->runtime->selector_root(filter->runtime, filter->selector, &root,
+                                     &lql_err) != LQL_STATUS_OK) {
+    return 0;
+  }
+  leaf_count = 0U;
+  if (!lc_pouch_lql_ast_index_cover_count(filter->runtime, root,
+                                          &leaf_count)) {
+    return 0;
+  }
+  if (root.kind == LQL_SELECTOR_NODE_ALL) {
+    return 1;
+  }
+  term_count = lc_pouch_lql_document_filter_index_term_count(filter);
+  return leaf_count > 0U && term_count == leaf_count;
+}
+
 static int
 lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
                                   const char *selector_json, lc_error *error) {
@@ -18509,6 +18617,9 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
   (void)lc_pouch_lql_ast_not_range_in_hint_parse(filter);
   (void)lc_pouch_lql_ast_not_text_hint_parse(filter);
   (void)lc_pouch_lql_ast_not_exists_hint_parse(filter);
+  filter->index_covers_selector =
+      lc_pouch_lql_document_filter_index_covers_selector(filter,
+                                                         &capabilities);
   filter->enabled = 1;
   return LC_OK;
 }
@@ -18517,7 +18628,6 @@ static int lc_pouch_lql_document_filter_match_bytes(
     lc_client_handle *client, lc_pouch_lql_document_filter *filter,
     const unsigned char *payload, size_t payload_len, int *matched,
     lc_error *error) {
-  unsigned char *framed;
   lc_pouch_lql_memory_reader reader;
   lc_pouch_lql_decision_capture decision;
   lql_stream_request request;
@@ -18534,29 +18644,18 @@ static int lc_pouch_lql_document_filter_match_bytes(
     }
     return LC_OK;
   }
-  if (client == NULL || (payload == NULL && payload_len > 0U) ||
-      matched == NULL) {
+  (void)client;
+  if ((payload == NULL && payload_len > 0U) || matched == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch LQL document filter requires client, payload, "
                         "and matched output",
                         NULL, NULL, NULL);
   }
 
-  framed = (unsigned char *)lc_client_alloc(client, payload_len + 2U);
-  if (framed == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch LQL document frame", NULL,
-                        NULL, NULL);
-  }
-  if (payload_len > 0U) {
-    memcpy(framed, payload, payload_len);
-  }
-  framed[payload_len] = '\n';
-  framed[payload_len + 1U] = '\0';
-
   memset(&reader, 0, sizeof(reader));
-  reader.data = framed;
-  reader.len = payload_len + 1U;
+  reader.data = payload;
+  reader.len = payload_len;
+  reader.append_newline = 1;
   memset(&decision, 0, sizeof(decision));
   memset(&request, 0, sizeof(request));
   request.reader = lc_pouch_lql_read_memory;
@@ -18568,7 +18667,6 @@ static int lc_pouch_lql_document_filter_match_bytes(
   lql_error_init(&lql_err);
   status = filter->runtime->stream_apply_spooled(filter->runtime, &request,
                                                  &result, &lql_err);
-  lc_client_free(client, framed);
   if (status != LQL_STATUS_OK) {
     return lc_pouch_lql_set_error(error, status, &lql_err,
                                   "failed to evaluate pouch LQL selector");
@@ -19223,6 +19321,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   const char *namespace_name;
   char *key_selector;
   char *owner_selector;
+  int residual_filter;
   int rc;
 
   if (client == NULL || req == NULL || dst == NULL || out == NULL) {
@@ -19315,6 +19414,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
   memset(&scan_res, 0, sizeof(scan_res));
   memset(&visit, 0, sizeof(visit));
   memset(out, 0, sizeof(*out));
+  residual_filter = filter.enabled && !filter.index_covers_selector;
   scan_req.namespace_name = namespace_name;
   if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY ||
       selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
@@ -19324,7 +19424,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
-  scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
+  scan_req.limit = residual_filter ? 0U : (size_t)req->limit;
   scan_req.document_eq_terms = filter.document_eq_terms;
   scan_req.document_eq_term_count = filter.document_eq_term_count;
   scan_req.document_not_eq_terms = filter.document_not_eq_terms;
@@ -19374,7 +19474,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
       filter.document_or_exists_path_pattern_count;
   visit.scan.client = client;
   visit.scan.dst = dst;
-  visit.scan.filter = &filter;
+  visit.scan.filter = residual_filter ? &filter : NULL;
   visit.scan.output_limit = (size_t)req->limit;
   visit.namespace_name = namespace_name;
 
@@ -19389,7 +19489,7 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     owner_req.namespace_name = namespace_name;
     owner_req.owner = owner_selector;
     owner_req.start_after = req->cursor;
-    owner_req.limit = filter.enabled ? 0U : (size_t)req->limit;
+    owner_req.limit = residual_filter ? 0U : (size_t)req->limit;
     rc = client->pouch_store->query_owner_scan(client->pouch_store, &owner_req,
                                                lc_pouch_query_scan_visit_row,
                                                &visit, &scan_res, error);
@@ -19407,10 +19507,10 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
     return rc;
   }
 
-  if (filter.enabled && visit.scan.has_more && visit.scan.cursor != NULL) {
+  if (residual_filter && visit.scan.has_more && visit.scan.cursor != NULL) {
     out->cursor = visit.scan.cursor;
     visit.scan.cursor = NULL;
-  } else if (!filter.enabled && scan_res.next_start_after != NULL) {
+  } else if (!residual_filter && scan_res.next_start_after != NULL) {
     out->cursor = lc_strdup_local(scan_res.next_start_after);
     if (out->cursor == NULL) {
       lc_client_free(client, key_selector);
@@ -19623,6 +19723,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   const char *namespace_name;
   char *key_selector;
   char *owner_selector;
+  int residual_filter;
   int rc;
 
   if (client == NULL || req == NULL || handler == NULL || out == NULL) {
@@ -19715,6 +19816,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   memset(&scan_res, 0, sizeof(scan_res));
   memset(&scan_context, 0, sizeof(scan_context));
   memset(out, 0, sizeof(*out));
+  residual_filter = filter.enabled && !filter.index_covers_selector;
   scan_req.namespace_name = namespace_name;
   if (selector_kind == LC_POUCH_QUERY_SELECTOR_KEY ||
       selector_kind == LC_POUCH_QUERY_SELECTOR_KEY_OWNER) {
@@ -19724,7 +19826,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     scan_req.owner = owner_selector;
   }
   scan_req.start_after = req->cursor;
-  scan_req.limit = filter.enabled ? 0U : (size_t)req->limit;
+  scan_req.limit = residual_filter ? 0U : (size_t)req->limit;
   scan_req.document_eq_terms = filter.document_eq_terms;
   scan_req.document_eq_term_count = filter.document_eq_term_count;
   scan_req.document_not_eq_terms = filter.document_not_eq_terms;
@@ -19774,7 +19876,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
       filter.document_or_exists_path_pattern_count;
   scan_context.handler = handler;
   scan_context.handler_context = context;
-  scan_context.filter = &filter;
+  scan_context.filter = residual_filter ? &filter : NULL;
   scan_context.client = client;
   scan_context.namespace_name = namespace_name;
   scan_context.output_limit = (size_t)req->limit;
@@ -19790,7 +19892,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     owner_req.namespace_name = namespace_name;
     owner_req.owner = owner_selector;
     owner_req.start_after = req->cursor;
-    owner_req.limit = filter.enabled ? 0U : (size_t)req->limit;
+    owner_req.limit = residual_filter ? 0U : (size_t)req->limit;
     rc = client->pouch_store->query_owner_keys_scan(
         client->pouch_store, &owner_req, lc_pouch_query_keys_index_visit,
         &scan_context, &scan_res, error);
@@ -19808,10 +19910,11 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     return rc;
   }
 
-  if (filter.enabled && scan_context.has_more && scan_context.cursor != NULL) {
+  if (residual_filter && scan_context.has_more &&
+      scan_context.cursor != NULL) {
     out->cursor = scan_context.cursor;
     scan_context.cursor = NULL;
-  } else if (!filter.enabled && scan_res.next_start_after != NULL) {
+  } else if (!residual_filter && scan_res.next_start_after != NULL) {
     out->cursor = lc_strdup_local(scan_res.next_start_after);
     if (out->cursor == NULL) {
       lc_client_free(client, key_selector);
