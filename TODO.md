@@ -470,6 +470,10 @@ Latest release targets confirmed on 2026-07-23:
         doc-table cursor paging; the disk equality path supplies sidecar
         readers and only translates the selected docID page back to summary
         indices.
+      - [x] Route simple positive `range` and `exists` result-cache/page
+        orchestration through the same index-owned cached docID page helper;
+        the disk bridge now only adapts sidecar range/presence readers and
+        translates selected docID pages to summaries for these predicates.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.

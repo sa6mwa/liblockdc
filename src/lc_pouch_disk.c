@@ -7093,6 +7093,16 @@ typedef struct lc_pouch_disk_eq_result_collect_context {
   lc_pouch_disk_exact_term_doc_id_reader reader;
 } lc_pouch_disk_eq_result_collect_context;
 
+typedef struct lc_pouch_disk_range_result_collect_context {
+  const lc_pouch_document_range_term *primary;
+  lc_pouch_disk_exact_term_doc_id_reader reader;
+} lc_pouch_disk_range_result_collect_context;
+
+typedef struct lc_pouch_disk_exists_result_collect_context {
+  const lc_pouch_document_exists_term *primary;
+  lc_pouch_disk_exact_term_doc_id_reader reader;
+} lc_pouch_disk_exists_result_collect_context;
+
 static int
 lc_pouch_disk_collect_eq_result_doc_ids(void *context, int cacheable,
                                         lc_pouch_index_doc_id_set *doc_ids,
@@ -7107,6 +7117,40 @@ lc_pouch_disk_collect_eq_result_doc_ids(void *context, int cacheable,
   return lc_pouch_index_collect_eq_term_doc_ids(
       &collect->reader.store->allocator, collect->primary,
       lc_pouch_disk_query_read_exact_term_doc_ids, &collect->reader, doc_ids,
+      error);
+}
+
+static int
+lc_pouch_disk_collect_range_result_doc_ids(void *context, int cacheable,
+                                           lc_pouch_index_doc_id_set *doc_ids,
+                                           lc_error *error) {
+  lc_pouch_disk_range_result_collect_context *collect;
+
+  collect = (lc_pouch_disk_range_result_collect_context *)context;
+  if (collect == NULL) {
+    return LC_OK;
+  }
+  collect->reader.use_prepared_range_cache = cacheable;
+  return lc_pouch_index_collect_range_term_doc_ids(
+      &collect->reader.store->allocator, collect->primary,
+      lc_pouch_disk_query_read_range_term_doc_ids, &collect->reader, doc_ids,
+      error);
+}
+
+static int
+lc_pouch_disk_collect_exists_result_doc_ids(void *context, int cacheable,
+                                            lc_pouch_index_doc_id_set *doc_ids,
+                                            lc_error *error) {
+  lc_pouch_disk_exists_result_collect_context *collect;
+
+  collect = (lc_pouch_disk_exists_result_collect_context *)context;
+  if (collect == NULL) {
+    return LC_OK;
+  }
+  collect->reader.use_prepared_exists_cache = cacheable;
+  return lc_pouch_index_collect_exists_term_doc_ids(
+      &collect->reader.store->allocator, collect->primary,
+      lc_pouch_disk_query_read_exists_term_doc_ids, &collect->reader, doc_ids,
       error);
 }
 
@@ -8144,13 +8188,11 @@ static int lc_pouch_disk_query_field_collect_range_summary_indices_locked(
     size_t **indices_out, size_t *index_count_out, int *truncated_out,
     char **next_start_after_out, lc_error *error) {
   const lc_pouch_document_range_term *primary;
-  lc_pouch_index_doc_id_set doc_ids;
-  lc_pouch_disk_exact_term_doc_id_reader reader;
+  lc_pouch_disk_range_result_collect_context collect;
+  lc_pouch_index_result_page page;
   size_t *indices;
   size_t index_count;
-  char *cache_key;
-  unsigned long cache_generation;
-  int cache_hit;
+  int invalid_doc_id;
   int rc;
 
   *indices_out = NULL;
@@ -8167,51 +8209,50 @@ static int lc_pouch_disk_query_field_collect_range_summary_indices_locked(
     return LC_OK;
   }
   primary = &req->document_range_terms[0];
-  memset(&doc_ids, 0, sizeof(doc_ids));
-  memset(&reader, 0, sizeof(reader));
+  memset(&collect, 0, sizeof(collect));
+  memset(&page, 0, sizeof(page));
   indices = NULL;
   index_count = 0U;
-  cache_key = lc_pouch_index_result_plan_key(&store->allocator, req,
-                                             LC_POUCH_INDEX_RESULT_PLAN_RANGE);
-  cache_generation = lc_pouch_disk_index_sequence(store);
-  cache_hit =
-      cache_key != NULL && lc_pouch_index_result_cache_find(
-                               &store->allocator, &store->query_result_cache,
-                               (uint64_t)cache_generation, cache_key, &doc_ids);
-  if (!cache_hit) {
-    reader.store = store;
-    reader.req = req;
-    reader.range_from = 1U;
-    reader.in_from = 0U;
-    reader.require_summary_match = 1;
-    reader.require_positive_terms_summary_match = 1;
-    reader.use_prepared_range_cache = cache_key != NULL;
-    reader.alloc_message = "failed to allocate pouch range query docIDs";
-    rc = lc_pouch_index_collect_range_term_doc_ids(
-        &store->allocator, primary, lc_pouch_disk_query_read_range_term_doc_ids,
-        &reader, &doc_ids, error);
-    if (rc != LC_OK) {
-      lc_pouch_free(&store->allocator, cache_key);
-      lc_pouch_disk_exact_term_doc_id_reader_cleanup(&reader);
-      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &doc_ids);
-      return rc;
-    }
-    if (cache_key != NULL) {
-      (void)lc_pouch_index_result_cache_put(
-          &store->allocator, &store->query_result_cache,
-          (uint64_t)cache_generation, cache_key, &doc_ids);
-    }
-    lc_pouch_disk_exact_term_doc_id_reader_cleanup(&reader);
+  invalid_doc_id = 0;
+  collect.primary = primary;
+  collect.reader.store = store;
+  collect.reader.req = req;
+  collect.reader.range_from = 1U;
+  collect.reader.in_from = 0U;
+  collect.reader.require_summary_match = 1;
+  collect.reader.require_positive_terms_summary_match = 1;
+  collect.reader.alloc_message = "failed to allocate pouch range query docIDs";
+  rc = lc_pouch_index_cached_result_page(
+      &store->allocator, &store->query_doc_table, &store->query_result_cache,
+      (uint64_t)lc_pouch_disk_index_sequence(store), req,
+      LC_POUCH_INDEX_RESULT_PLAN_RANGE,
+      lc_pouch_disk_collect_range_result_doc_ids, &collect, &page,
+      &invalid_doc_id, error);
+  lc_pouch_disk_exact_term_doc_id_reader_cleanup(&collect.reader);
+  if (rc == LC_ERR_INVALID && invalid_doc_id) {
+    lc_pouch_index_result_page_cleanup(&store->allocator, &page);
+    return lc_pouch_set_invalid(
+        error, "pouch query doc table is missing result docID");
   }
-  rc = lc_pouch_disk_query_page_doc_ids_to_summary_indices(
-      store, req, &doc_ids, &indices, &index_count, truncated_out,
-      next_start_after_out, error, "failed to allocate pouch range query page",
-      "failed to allocate pouch range query row indices");
-  lc_pouch_free(&store->allocator, cache_key);
-  lc_pouch_index_doc_id_set_cleanup(&store->allocator, &doc_ids);
   if (rc != LC_OK) {
+    lc_pouch_index_result_page_cleanup(&store->allocator, &page);
     return rc;
   }
+  rc = lc_pouch_disk_query_doc_ids_to_summary_indices(
+      store, &page.doc_ids, &indices, &index_count, error,
+      "failed to allocate pouch range query row indices");
+  if (rc != LC_OK) {
+    lc_pouch_index_result_page_cleanup(&store->allocator, &page);
+    return rc;
+  }
+  if (truncated_out != NULL) {
+    *truncated_out = page.truncated;
+  }
+  if (next_start_after_out != NULL) {
+    *next_start_after_out = page.next_start_after;
+    page.next_start_after = NULL;
+  }
+  lc_pouch_index_result_page_cleanup(&store->allocator, &page);
   *indices_out = indices;
   *index_count_out = index_count;
   return LC_OK;
@@ -8698,13 +8739,11 @@ static int lc_pouch_disk_query_field_collect_exists_summary_indices_locked(
     size_t **indices_out, size_t *index_count_out, int *truncated_out,
     char **next_start_after_out, lc_error *error) {
   const lc_pouch_document_exists_term *primary;
-  lc_pouch_index_doc_id_set doc_ids;
-  lc_pouch_disk_exact_term_doc_id_reader reader;
+  lc_pouch_disk_exists_result_collect_context collect;
+  lc_pouch_index_result_page page;
   size_t *indices;
   size_t index_count;
-  char *cache_key;
-  unsigned long cache_generation;
-  int cache_hit;
+  int invalid_doc_id;
   int rc;
 
   *indices_out = NULL;
@@ -8721,49 +8760,48 @@ static int lc_pouch_disk_query_field_collect_exists_summary_indices_locked(
     return LC_OK;
   }
   primary = &req->document_exists_terms[0];
-  memset(&doc_ids, 0, sizeof(doc_ids));
-  memset(&reader, 0, sizeof(reader));
+  memset(&collect, 0, sizeof(collect));
+  memset(&page, 0, sizeof(page));
   indices = NULL;
   index_count = 0U;
-  cache_key = lc_pouch_index_result_plan_key(&store->allocator, req,
-                                             LC_POUCH_INDEX_RESULT_PLAN_EXISTS);
-  cache_generation = lc_pouch_disk_index_sequence(store);
-  cache_hit =
-      cache_key != NULL && lc_pouch_index_result_cache_find(
-                               &store->allocator, &store->query_result_cache,
-                               (uint64_t)cache_generation, cache_key, &doc_ids);
-  if (!cache_hit) {
-    reader.store = store;
-    reader.req = req;
-    reader.in_from = 0U;
-    reader.require_summary_match = 1;
-    reader.use_prepared_exists_cache = cache_key != NULL;
-    reader.alloc_message = "failed to allocate pouch exists query docIDs";
-    rc = lc_pouch_index_collect_exists_term_doc_ids(
-        &store->allocator, primary,
-        lc_pouch_disk_query_read_exists_term_doc_ids, &reader, &doc_ids, error);
-    if (rc != LC_OK) {
-      lc_pouch_free(&store->allocator, cache_key);
-      lc_pouch_disk_exact_term_doc_id_reader_cleanup(&reader);
-      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &doc_ids);
-      return rc;
-    }
-    if (cache_key != NULL) {
-      (void)lc_pouch_index_result_cache_put(
-          &store->allocator, &store->query_result_cache,
-          (uint64_t)cache_generation, cache_key, &doc_ids);
-    }
-    lc_pouch_disk_exact_term_doc_id_reader_cleanup(&reader);
+  invalid_doc_id = 0;
+  collect.primary = primary;
+  collect.reader.store = store;
+  collect.reader.req = req;
+  collect.reader.in_from = 0U;
+  collect.reader.require_summary_match = 1;
+  collect.reader.alloc_message = "failed to allocate pouch exists query docIDs";
+  rc = lc_pouch_index_cached_result_page(
+      &store->allocator, &store->query_doc_table, &store->query_result_cache,
+      (uint64_t)lc_pouch_disk_index_sequence(store), req,
+      LC_POUCH_INDEX_RESULT_PLAN_EXISTS,
+      lc_pouch_disk_collect_exists_result_doc_ids, &collect, &page,
+      &invalid_doc_id, error);
+  lc_pouch_disk_exact_term_doc_id_reader_cleanup(&collect.reader);
+  if (rc == LC_ERR_INVALID && invalid_doc_id) {
+    lc_pouch_index_result_page_cleanup(&store->allocator, &page);
+    return lc_pouch_set_invalid(
+        error, "pouch query doc table is missing result docID");
   }
-  rc = lc_pouch_disk_query_page_doc_ids_to_summary_indices(
-      store, req, &doc_ids, &indices, &index_count, truncated_out,
-      next_start_after_out, error, "failed to allocate pouch exists query page",
-      "failed to allocate pouch exists query row indices");
-  lc_pouch_free(&store->allocator, cache_key);
-  lc_pouch_index_doc_id_set_cleanup(&store->allocator, &doc_ids);
   if (rc != LC_OK) {
+    lc_pouch_index_result_page_cleanup(&store->allocator, &page);
     return rc;
   }
+  rc = lc_pouch_disk_query_doc_ids_to_summary_indices(
+      store, &page.doc_ids, &indices, &index_count, error,
+      "failed to allocate pouch exists query row indices");
+  if (rc != LC_OK) {
+    lc_pouch_index_result_page_cleanup(&store->allocator, &page);
+    return rc;
+  }
+  if (truncated_out != NULL) {
+    *truncated_out = page.truncated;
+  }
+  if (next_start_after_out != NULL) {
+    *next_start_after_out = page.next_start_after;
+    page.next_start_after = NULL;
+  }
+  lc_pouch_index_result_page_cleanup(&store->allocator, &page);
   *indices_out = indices;
   *index_count_out = index_count;
   return LC_OK;
