@@ -1346,11 +1346,12 @@ and stores adaptive docID postings for simple equality and non-wildcard `in`
 plans. Simple positive `exists` scans use the same prepared-reader pattern with
 namespace-qualified field-presence terms. Simple positive numeric `range` scans
 also use prepared postings keyed by namespace-qualified field plus normalized
-range bounds. These caches are intentionally narrower than the final design:
-compound, negative, owner-filtered, key-filtered, prefix, contains, and
-secondary-filtered range selectors still use request-local compiled postings
-until their candidate sets can be cached without baking request-specific filters
-into the prepared view.
+range bounds. Simple positive `prefix` scans use prepared postings keyed by
+namespace-qualified field plus the case-sensitivity flag and text prefix. These
+caches are intentionally narrower than the final design: compound, negative,
+owner-filtered, key-filtered, contains, and secondary-filtered range/prefix
+selectors still use request-local compiled postings until their candidate sets
+can be cached without baking request-specific filters into the prepared view.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
