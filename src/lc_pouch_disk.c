@@ -5700,9 +5700,13 @@ static void lc_pouch_disk_query_key_array_cleanup(lc_pouch_disk_store *store,
   lc_pouch_free(&store->allocator, keys);
 }
 
+typedef struct lc_pouch_disk_key_snapshot_entry {
+  char *key;
+  size_t key_len;
+} lc_pouch_disk_key_snapshot_entry;
+
 typedef struct lc_pouch_disk_key_snapshot {
-  char **keys;
-  size_t *key_lengths;
+  lc_pouch_disk_key_snapshot_entry *entries;
   char *buffer;
   size_t count;
 } lc_pouch_disk_key_snapshot;
@@ -5712,8 +5716,7 @@ static void lc_pouch_disk_key_snapshot_cleanup(
   if (snapshot == NULL) {
     return;
   }
-  lc_pouch_free(&store->allocator, snapshot->keys);
-  lc_pouch_free(&store->allocator, snapshot->key_lengths);
+  lc_pouch_free(&store->allocator, snapshot->entries);
   lc_pouch_free(&store->allocator, snapshot->buffer);
   memset(snapshot, 0, sizeof(*snapshot));
 }
@@ -5731,6 +5734,12 @@ static int lc_pouch_disk_key_snapshot_from_summary_indices(
     return LC_OK;
   }
 
+  snapshot->entries = (lc_pouch_disk_key_snapshot_entry *)lc_pouch_calloc(
+      &store->allocator, count, sizeof(snapshot->entries[0]));
+  if (snapshot->entries == NULL) {
+    return lc_pouch_set_nomem(error, alloc_message);
+  }
+
   total_size = 0U;
   for (index = 0U; index < count; ++index) {
     const char *key;
@@ -5739,22 +5748,13 @@ static int lc_pouch_disk_key_snapshot_from_summary_indices(
     key = store->query_summary_entries[indices[start_index + index]].key;
     key_size = strlen(key) + 1U;
     if (((size_t)-1) - total_size < key_size) {
+      lc_pouch_disk_key_snapshot_cleanup(store, snapshot);
       return lc_pouch_set_nomem(error, copy_message);
     }
+    snapshot->entries[index].key_len = key_size - 1U;
     total_size += key_size;
   }
 
-  snapshot->keys = (char **)lc_pouch_calloc(&store->allocator, count,
-                                            sizeof(snapshot->keys[0]));
-  if (snapshot->keys == NULL) {
-    return lc_pouch_set_nomem(error, alloc_message);
-  }
-  snapshot->key_lengths = (size_t *)lc_pouch_calloc(
-      &store->allocator, count, sizeof(snapshot->key_lengths[0]));
-  if (snapshot->key_lengths == NULL) {
-    lc_pouch_disk_key_snapshot_cleanup(store, snapshot);
-    return lc_pouch_set_nomem(error, alloc_message);
-  }
   snapshot->buffer = (char *)lc_pouch_alloc(&store->allocator, total_size);
   if (snapshot->buffer == NULL) {
     lc_pouch_disk_key_snapshot_cleanup(store, snapshot);
@@ -5767,10 +5767,9 @@ static int lc_pouch_disk_key_snapshot_from_summary_indices(
     size_t key_size;
 
     key = store->query_summary_entries[indices[start_index + index]].key;
-    key_size = strlen(key) + 1U;
+    key_size = snapshot->entries[index].key_len + 1U;
     memcpy(cursor, key, key_size);
-    snapshot->keys[index] = cursor;
-    snapshot->key_lengths[index] = key_size - 1U;
+    snapshot->entries[index].key = cursor;
     cursor += key_size;
   }
   snapshot->count = count;
@@ -7036,8 +7035,8 @@ static int lc_pouch_disk_query_field_or_exists_keys_scan_locked(
     }
 
     for (index = 0U; index < visit_count; ++index) {
-      rc = visit(visit_context, key_snapshot.keys[index],
-                 key_snapshot.key_lengths[index], error);
+      rc = visit(visit_context, key_snapshot.entries[index].key,
+                 key_snapshot.entries[index].key_len, error);
       if (rc != LC_OK) {
         lc_pouch_disk_key_snapshot_cleanup(store, &key_snapshot);
         lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
@@ -7514,8 +7513,8 @@ static int lc_pouch_disk_query_field_range_keys_scan_locked(
   }
 
   for (index = 0U; index < visit_count; ++index) {
-    rc = visit(visit_context, key_snapshot.keys[index],
-               key_snapshot.key_lengths[index], error);
+    rc = visit(visit_context, key_snapshot.entries[index].key,
+               key_snapshot.entries[index].key_len, error);
     if (rc != LC_OK) {
       lc_pouch_disk_key_snapshot_cleanup(store, &key_snapshot);
       lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
@@ -7993,8 +7992,8 @@ static int lc_pouch_disk_query_field_exists_keys_scan_locked(
   }
 
   for (index = 0U; index < visit_count; ++index) {
-    rc = visit(visit_context, key_snapshot.keys[index],
-               key_snapshot.key_lengths[index], error);
+    rc = visit(visit_context, key_snapshot.entries[index].key,
+               key_snapshot.entries[index].key_len, error);
     if (rc != LC_OK) {
       lc_pouch_disk_key_snapshot_cleanup(store, &key_snapshot);
       lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
@@ -8459,8 +8458,8 @@ static int lc_pouch_disk_query_field_in_keys_scan_locked(
   }
 
   for (index = 0U; index < visit_count; ++index) {
-    rc = visit(visit_context, key_snapshot.keys[index],
-               key_snapshot.key_lengths[index], error);
+    rc = visit(visit_context, key_snapshot.entries[index].key,
+               key_snapshot.entries[index].key_len, error);
     if (rc != LC_OK) {
       lc_pouch_disk_key_snapshot_cleanup(store, &key_snapshot);
       lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
@@ -9775,8 +9774,8 @@ static int lc_pouch_disk_query_field_contains_keys_scan_locked(
   }
 
   for (index = 0U; index < visit_count; ++index) {
-    rc = visit(visit_context, key_snapshot.keys[index],
-               key_snapshot.key_lengths[index], error);
+    rc = visit(visit_context, key_snapshot.entries[index].key,
+               key_snapshot.entries[index].key_len, error);
     if (rc != LC_OK) {
       lc_pouch_disk_key_snapshot_cleanup(store, &key_snapshot);
       lc_pouch_query_index_scan_res_cleanup(&store->allocator, out);
