@@ -18980,6 +18980,8 @@ static int lc_pouch_query_keys_scan_visit(void *context,
   lc_pouch_state_info state;
   const lc_pouch_state_info *state_view;
   lc_source *body;
+  unsigned char *payload;
+  size_t payload_len;
   int borrowed_body;
   int embed_json;
   int emit;
@@ -18999,6 +19001,8 @@ static int lc_pouch_query_keys_scan_visit(void *context,
     memset(&state, 0, sizeof(state));
     state_view = NULL;
     body = NULL;
+    payload = NULL;
+    payload_len = 0U;
     borrowed_body = 0;
     if (row->body != NULL && row->state != NULL) {
       body = row->body;
@@ -19018,9 +19022,20 @@ static int lc_pouch_query_keys_scan_visit(void *context,
                  lc_pouch_content_type_is_json(state_view->content_type);
     matched = 0;
     if (embed_json) {
-      rc = lc_pouch_lql_document_filter_match_source(
-          scan->client, scan->filter, body, &matched, error);
+      if (state_view->bytes >= 0L && state_view->bytes <= 65536L) {
+        rc = lc_pouch_txn_read_source_all(scan->client, body, &payload,
+                                          &payload_len, error);
+        if (rc == LC_OK) {
+          rc = lc_pouch_lql_document_filter_match_bytes(
+              scan->client, scan->filter, payload, payload_len, &matched,
+              error);
+        }
+      } else {
+        rc = lc_pouch_lql_document_filter_match_source(
+            scan->client, scan->filter, body, &matched, error);
+      }
     }
+    lc_client_free(scan->client, payload);
     if (body != NULL && !borrowed_body) {
       body->close(body);
     }
