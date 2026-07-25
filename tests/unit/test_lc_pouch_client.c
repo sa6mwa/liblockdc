@@ -6123,21 +6123,25 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   alpha = pouch_acquire_query_key(client, "alpha", &error);
   pouch_save_query_json(alpha,
                         "{\"value\":\"alpha\",\"n\":1.0,"
-                        "\"created_at\":\"2026-01-01T00:00:00Z\"}",
+                        "\"created_at\":\"2026-01-01T00:00:00Z\","
+                        "\"tags\":[\"planning\"]}",
                         &error);
   bravo = pouch_acquire_query_key(client, "bravo", &error);
   pouch_save_query_json(bravo,
                         "{\"value\":\"beta\",\"kind\":\"selected\",\"n\":2,"
-                        "\"created_at\":\"2024-01-01T00:00:00Z\"}",
+                        "\"created_at\":\"2024-01-01T00:00:00Z\","
+                        "\"tags\":[\"finance\"]}",
                         &error);
   charlie = pouch_acquire_query_key(client, "charlie", &error);
   pouch_save_query_json(charlie,
                         "{\"other\":\"alpha\",\"n\":3,"
-                        "\"box\":{\"leaf\":true}}",
+                        "\"box\":{\"leaf\":true},\"tags\":[\"ops\"]}",
                         &error);
   delta = pouch_acquire_query_key(client, "delta", &error);
   pouch_save_query_json(
-      delta, "{\"value\":\"beta\",\"kind\":\"other\",\"n\":4}", &error);
+      delta, "{\"value\":\"beta\",\"kind\":\"other\",\"n\":4,"
+             "\"tags\":[\"planning\"]}",
+      &error);
   alpha->close(alpha);
   bravo->close(bravo);
   charlie->close(charlie);
@@ -6158,7 +6162,8 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   text = memory_sink_text(sink);
   assert_non_null(strstr(text, "{\"key\":\"alpha\""));
   assert_non_null(strstr(text, "\"document\":{\"value\":\"alpha\",\"n\":1.0,"
-                               "\"created_at\":\"2026-01-01T00:00:00Z\"}"));
+                               "\"created_at\":\"2026-01-01T00:00:00Z\","
+                               "\"tags\":[\"planning\"]}"));
   assert_null(strstr(text, "bravo"));
   assert_null(strstr(text, "charlie"));
   assert_null(strstr(text, "delta"));
@@ -8699,6 +8704,20 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "charlie");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"in\":{\"field\":\"/tags[]\",\"any\":[\"planning\",\"finance\"]}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(capture.keys[2], "delta");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
 

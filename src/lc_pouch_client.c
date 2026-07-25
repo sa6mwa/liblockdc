@@ -8258,6 +8258,8 @@ static int lc_pouch_lql_in_hint_add_value(lc_pouch_lql_in_hint_term *term) {
   return 1;
 }
 
+static char *lc_pouch_lql_field_copy_with_array_wildcards(const char *field);
+
 static lonejson_status
 lc_pouch_lql_in_hint_string_begin(void *user, const lonejson_value_path *path,
                                   lonejson_error *error) {
@@ -8329,6 +8331,8 @@ static lonejson_status
 lc_pouch_lql_in_hint_string_end(void *user, const lonejson_value_path *path,
                                 lonejson_error *error) {
   lc_pouch_lql_in_hint_visit *visit;
+  lc_pouch_lql_in_hint_term *term;
+  char *normalized;
   size_t term_index;
 
   (void)error;
@@ -8337,9 +8341,20 @@ lc_pouch_lql_in_hint_string_end(void *user, const lonejson_value_path *path,
       lc_pouch_lql_in_hint_path_is_member(path, "field", &term_index) &&
       term_index < visit->term_count) {
     visit->string_field_active = 0;
-    visit->terms[term_index].saw_field =
-        visit->terms[term_index].field != NULL &&
-        visit->terms[term_index].field[0] == '/';
+    term = &visit->terms[term_index];
+    if (term->field != NULL && term->field[0] == '/') {
+      normalized = lc_pouch_lql_field_copy_with_array_wildcards(term->field);
+      if (normalized == NULL) {
+        return LONEJSON_STATUS_ALLOCATION_FAILED;
+      }
+      lc_free_with_allocator(NULL, term->field);
+      term->field = normalized;
+      term->field_len = strlen(normalized);
+      term->field_capacity = term->field_len + 1U;
+      term->saw_field = 1;
+    } else {
+      term->saw_field = 0;
+    }
   } else if (visit != NULL &&
              lc_pouch_lql_in_hint_path_is_any_value(path, &term_index) &&
              term_index < visit->term_count) {
@@ -17320,6 +17335,56 @@ static char *lc_pouch_lql_ast_view_copy(lql_string_view view) {
   return copy;
 }
 
+static char *lc_pouch_lql_field_copy_with_array_wildcards(const char *field) {
+  char *copy;
+  size_t length;
+  size_t extra;
+  size_t read_index;
+  size_t write_index;
+
+  if (field == NULL || field[0] != '/') {
+    return NULL;
+  }
+  length = strlen(field);
+  extra = 0U;
+  for (read_index = 0U; read_index + 1U < length; ++read_index) {
+    if (field[read_index] == '[' && field[read_index + 1U] == ']') {
+      extra++;
+    }
+  }
+  copy = (char *)lc_calloc_with_allocator(NULL, length + extra + 1U, 1U);
+  if (copy == NULL) {
+    return NULL;
+  }
+  write_index = 0U;
+  for (read_index = 0U; read_index < length; ++read_index) {
+    if (read_index + 1U < length && field[read_index] == '[' &&
+        field[read_index + 1U] == ']') {
+      copy[write_index++] = '/';
+      copy[write_index++] = '*';
+      read_index++;
+      continue;
+    }
+    copy[write_index++] = field[read_index];
+  }
+  copy[write_index] = '\0';
+  return copy;
+}
+
+static char *lc_pouch_lql_ast_field_copy_with_array_wildcards(
+    lql_string_view view) {
+  char *raw;
+  char *normalized;
+
+  raw = lc_pouch_lql_ast_view_copy(view);
+  if (raw == NULL) {
+    return NULL;
+  }
+  normalized = lc_pouch_lql_field_copy_with_array_wildcards(raw);
+  lc_free_with_allocator(NULL, raw);
+  return normalized;
+}
+
 static char *lc_pouch_lql_ast_string_value_copy(lql_string_view view) {
   char *copy;
 
@@ -17609,7 +17674,7 @@ static int lc_pouch_lql_ast_or_terms_add_in(lc_pouch_lql_ast_or_terms *terms,
     return 0;
   }
   term = &terms->in_terms[terms->in_count];
-  term->field = lc_pouch_lql_ast_view_copy(source->field);
+  term->field = lc_pouch_lql_ast_field_copy_with_array_wildcards(source->field);
   values = (char **)lc_calloc_with_allocator(NULL, source->any_count,
                                              sizeof(values[0]));
   if (term->field == NULL || values == NULL) {
@@ -18383,8 +18448,7 @@ static int lc_pouch_lql_document_filter_index_covers_selector(
   size_t term_count;
 
   if (filter == NULL || filter->runtime == NULL || filter->selector == NULL ||
-      capabilities == NULL || capabilities->wildcard_path ||
-      capabilities->recursive_path) {
+      capabilities == NULL || capabilities->recursive_path) {
     return 0;
   }
   memset(&root, 0, sizeof(root));
@@ -18452,6 +18516,9 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
           selector_json, &filter->document_exists_path_patterns,
           &filter->document_exists_path_pattern_count);
     }
+    lc_pouch_lql_in_hint_parse_full_form(selector_json,
+                                         &filter->document_in_terms,
+                                         &filter->document_in_term_count);
     lc_pouch_lql_not_eq_hint_parse(selector_json,
                                    &filter->document_not_eq_terms,
                                    &filter->document_not_eq_term_count);
@@ -18459,6 +18526,9 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
     (void)lc_pouch_lql_ast_not_range_in_hint_parse(filter);
     (void)lc_pouch_lql_ast_not_text_hint_parse(filter);
     (void)lc_pouch_lql_ast_not_exists_hint_parse(filter);
+    filter->index_covers_selector =
+        lc_pouch_lql_document_filter_index_covers_selector(filter,
+                                                           &capabilities);
     filter->enabled = 1;
     return LC_OK;
   }

@@ -6313,6 +6313,31 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
+  memset(&keys, 0, sizeof(keys));
+  memset(&rows, 0, sizeof(rows));
+  in_term.field = "/tags/*";
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 3U);
+  assert_string_equal(keys.keys[0], "both");
+  assert_string_equal(keys.keys[1], "finance");
+  assert_string_equal(keys.keys[2], "planning");
+  assert_false(scan.truncated);
+  assert_true(scan.index_seq > 0UL);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 3U);
+  assert_string_equal(rows.keys[0], "both");
+  assert_string_equal(rows.keys[1], "finance");
+  assert_string_equal(rows.keys[2], "planning");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
