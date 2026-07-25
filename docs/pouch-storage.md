@@ -88,6 +88,65 @@ general database. The design borrows proven storage ideas where they fit the
 lockd API, and rejects features that would weaken pouch's primary contract:
 deterministic local lockd-compatible behavior from a filesystem root.
 
+## Practical Architecture
+
+At runtime a `pouch://` endpoint is selected inside the normal `lc_client`
+engine and routed to `lc_pouch_client` instead of the HTTP transport. The
+adapter translates public client operations into private storage calls against
+`lc_pouch_store`. The current concrete backend is `lc_pouch_disk`, which owns
+the filesystem root, namespace logstores, replay projections, key locks,
+marker refresh state, queue state, compaction lifecycle, and query indexes.
+
+A pouch operation normally follows this path:
+
+1. The public client API validates the request and resolves the endpoint.
+2. `lc_pouch_client` maps the request onto storage primitives such as metadata
+   load/store, state read/write, object put/get, queue dequeue/ack, transaction
+   replay, query, or maintenance.
+3. `lc_pouch_disk` refreshes the namespace when required, waits for relevant
+   pending commit groups, and acquires the per-key or multi-key guard needed by
+   the operation.
+4. Mutations append typed records to the active namespace segment, join a commit
+   group, wait for the configured durability policy, then apply the committed
+   refs into the in-memory projections.
+5. Query-visible metadata updates also advance the durable query-index sidecar
+   and update summary rows, owner postings, strict JSON Pointer field postings,
+   text postings, trigrams, numeric postings, and live/deleted state.
+6. Readers serve from refreshed projections and open payload spans only after a
+   row survives visibility, pagination, and query filtering.
+7. Maintenance and compaction run through explicit synchronous entry points so
+   tests can verify each lifecycle step without relying on hidden background
+   threads.
+
+The important practical boundary is that the log is authoritative and every
+index is derived. A corrupted or obsolete index sidecar can be rebuilt from
+namespace segments and snapshots. A corrupted segment tail stops replay at the
+first invalid record and preserves all earlier committed history. Compaction
+creates new snapshot files and manifest lifecycle records; it never rewrites
+existing committed records in place.
+
+The query engine has two concrete routes. Indexed mode is the production
+default and uses durable summary/posting data to produce candidate rows before
+final `liblql` acceptance. Scan mode is an explicit log-backed route that
+refreshes authoritative summaries and walks stable key order without consulting
+the durable index sequence. Scan mode exists for diagnostics, tiny stores, and
+fallback policy; it is not the preferred route for predicate-heavy workloads.
+
+Full-form LQL support is deliberately split between planning and acceptance.
+Pouch may use storage-owned postings for exact equality, scalar `in`, array
+`in` via explicit JSON Pointer array notation such as `/tags[]`, numeric ranges,
+exists, prefix/iprefix, contains/icontains, supported OR unions, supported AND
+intersections, and safe indexed exclusions. It must never let those planner
+hints become the source of query truth. Candidate generation may return false
+positives, but final `liblql` evaluation must remove them; candidate generation
+must not create false negatives for a selector shape it claims to support.
+
+This split is also why storage metadata predicates should not be forced through
+public LQL when the storage model already has typed facts. Metadata such as
+owner, key, query-hidden, version, timestamps, and state ETag are typed storage
+columns. The public query language remains client-facing, while the backend can
+use cheaper typed summary checks for storage-owned metadata semantics.
+
 ## Source Design Reading
 
 The server-side disk backend was designed as a storage contract first and a
@@ -362,9 +421,9 @@ of rewritten JSON files.
 - Keep the backend single-writer at the mutation level while allowing readers to
   refresh their indexes from committed log records.
 - Make indexed query support a first-class v1 storage requirement. `liblql`
-  supplies the query language/parser/evaluator layer, but pouch must maintain
-  storage-owned indexes and expose indexed scan primitives before `liblql` is
-  ready.
+  supplies the public query language, parser, and final evaluator, while pouch
+  maintains storage-owned summaries and postings for the candidate-generation
+  paths it can prove without false negatives.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
@@ -374,18 +433,17 @@ of rewritten JSON files.
 ## Non-Goals
 
 - Pouch v1 does not implement management APIs.
-- Public client surfaces that pouch does not yet implement, including public
-  LQL query calls before `liblql`, namespace/index mutation management, and TC
-  cluster/resource-manager calls, must return deterministic local unsupported
-  errors. Pouch may report the locally configured query engine defaults through
-  namespace configuration reads. Public transaction prepare/commit/rollback and
-  explicit replay are local pouch operations backed by durable decision objects;
-  open-time recovery scans durable decision objects directly and also scans
-  pending transactional metadata as a compatibility fallback before replaying
-  matching decisions. A `pouch://` client must never fall through to HTTP
-  transport for an unimplemented server-side surface. Internal indexed metadata
-  scans are not optional: they are part of the storage engine even before the
-  public LQL surface is enabled.
+- Public client surfaces that pouch does not yet implement, including
+  namespace/index mutation management and TC cluster/resource-manager calls,
+  must return deterministic local unsupported errors. Pouch may report the
+  locally configured query engine defaults through namespace configuration
+  reads. Public transaction prepare/commit/rollback and explicit replay are
+  local pouch operations backed by durable decision objects; open-time recovery
+  scans durable decision objects directly and also scans pending transactional
+  metadata as a compatibility fallback before replaying matching decisions. A
+  `pouch://` client must never fall through to HTTP transport for an
+  unimplemented server-side surface. Internal indexed metadata scans are not
+  optional: they are part of the storage engine.
 - Pouch v1 does not implement authentication, authorization, permissions, TLS,
   or remote networking concerns.
 - Pouch is not a fake HTTP server. The client adapter may preserve the public
@@ -508,8 +566,8 @@ struct lc_pouch_store {
 The interface intentionally separates metadata, state blobs, and arbitrary
 objects. Queue messages and attachments can use the object plane while lease and
 state coordination use the metadata/state plane. Query hot paths need
-storage-owned summary and posting scans so LQL, or the temporary pre-LQL query
-adapter, can avoid loading full metadata and payloads for every key.
+storage-owned summary and posting scans so LQL planning and acceptance can avoid
+loading full metadata and payloads for every key.
 
 The interface should also expose optional capability functions or flags:
 
@@ -655,13 +713,12 @@ not throttled by scheduled-maintenance budgets.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query
-path. Before public query/LQL support ships, the disk backend must grow
-append-friendly index storage: compactable index segments or equivalent
-Lucene-style sidecar files with term/range postings, per-field summary columns,
+path. The disk backend therefore maintains append-friendly index storage:
+compactable index records with term/range postings, per-field summary columns,
 deleted/live filters, and stable key ordering. The authoritative object state
-still comes from the log, but the preferred query path should touch index data
-first and load full metadata or payload bytes only for candidate rows that
-survive the index predicates.
+still comes from the log, but the preferred query path touches index data first
+and loads full metadata or payload bytes only for candidate rows that survive
+the index predicates.
 Current pouch field postings support strict JSON Pointer equality, `in`,
 `exists`, prefix/iprefix, contains/icontains, and numeric range candidate
 collection. Range-primary document and key-only scans walk ordered numeric field
@@ -765,38 +822,36 @@ Scan mode acceptance criteria:
 - Scan mode must report no index sequence for results served by the scan route;
   indexed mode must report the durable query-index sequence.
 
-The first public query surfaces are `query_keys` and `query` with the match-all
-selector `{}`. In indexed mode these calls route through a storage-owned index
-scan primitive and return the current `index_seq`. Before `liblql` integration,
-indexed mode also accepts exact key selector form `{"key":"..."}`, exact owner
+The public query surfaces are `query_keys` and `query`. In indexed mode these
+calls route through a storage-owned index scan primitive and return the current
+`index_seq`. Match-all, exact key selector form `{"key":"..."}`, exact owner
 selector form `{"owner":"..."}`, and their exact conjunction
-`{"key":"...","owner":"..."}`. Exact keys route through the sorted
-query-summary projection and can validate owner as a post-filter; exact owners
-route through storage-owned owner postings. Scan mode accepts the same pre-LQL
-selector set, but resolves equality by walking ordered full-summary or metadata
-scan routes instead of consulting postings. The current disk backend keeps the
-sorted metadata projection as the authoritative in-memory index for match-all
-and exact-key scans, while
+`{"key":"...","owner":"..."}` are handled through typed summary columns: exact
+keys route through the sorted query-summary projection and can validate owner
+as a post-filter; exact owners route through storage-owned owner postings. Scan
+mode accepts the same metadata selector set, but resolves equality by walking
+ordered full-summary or metadata scan routes instead of consulting postings.
+The current disk backend keeps the sorted metadata projection as the
+authoritative in-memory index for match-all and exact-key scans, while
 the internal `.lockd` namespace logstore `query.index` remains a durable
 sidecar accelerator that can be validated against current metadata and rebuilt
 from authoritative namespace segments/snapshots. Indexed scans must never trust
 sidecar rows that do not match current metadata, and key-only scans must agree
-with document scans even after a sidecar tail fault. Later field postings and
-`liblql` predicates must extend this boundary with storage-owned index
-segments/postings and candidate iteration, rather than falling back to a single
-full-log scan. Scan-mode key-only queries use a storage key-scan primitive when
-the backend provides one, so configured scan mode does not copy full metadata
-rows for `query_keys`. Key-only scan and indexed-scan primitives copy only
-visible keys before invoking callbacks. The current disk backend serves both
-primitives from the query-summary projection rather than the full metadata row
-array, so `query_keys` does not pay for metadata row
-copies.
+with document scans even after a sidecar tail fault. LQL predicates extend this
+boundary with storage-owned index postings and candidate iteration, rather than
+falling back to a single full-log scan for supported indexed shapes. Scan-mode
+key-only queries use a storage key-scan primitive when the backend provides
+one, so configured scan mode does not copy full metadata rows for
+`query_keys`. Key-only scan and indexed-scan primitives copy only visible keys
+before invoking callbacks. The current disk backend serves both primitives from
+the query-summary projection rather than the full metadata row array, so
+`query_keys` does not pay for metadata row copies.
 Indexed match-all document scans also page over the query-summary projection
 and copy only the row fields currently required by query callbacks: key, ETag,
 owner, version, update timestamp, and query-hidden state. Document payloads are
 still loaded only after a summary row survives pagination and visibility
 filtering. The current disk backend also maintains an internal owner posting
-index over query-summary rows. That pre-LQL predicate boundary can return
+index over query-summary rows. That typed metadata predicate boundary can return
 document rows or key-only candidates for one owner in stable key order without
 walking unrelated owners in the namespace. The `query.index` sidecar records
 written by the current implementation carry the owner column; older sidecar
@@ -912,9 +967,10 @@ cannot make query tokens move backwards. Indexed match-all queries accept
 scanning the indexed projection. Explicit scan mode remains available for
 full-log/full-summary scanning through the ordered metadata summary API, but it
 does not accept refresh hints because no durable query index is consulted.
-Non-empty field selection, non-document scan return modes, and LQL selectors
-beyond exact key/owner equality and their conjunction remain unsupported until
-the indexed/LQL query slice lands.
+Non-empty field selection and non-document scan return modes remain outside the
+current pouch v1 query surface. Unsupported LQL selector families are explicit
+fallback or deterministic unsupported cases; supported indexed families must
+preserve final `liblql` acceptance.
 
 C makes the allocation side easier to control, but it does not remove the need
 for allocation discipline. The pouch implementation should be written so a
@@ -1184,7 +1240,7 @@ Each opened namespace maintains in-memory indexes:
 - sorted object key list
 - cached decoded metadata summary for query hot paths
 - owner postings over cached query summaries
-- later field/term/range postings for additional indexed metadata fields
+- field/term/range postings for indexed JSON Pointer document fields
 - live/deleted filters for compacted index segments
 - segment-level min/max and cardinality hints for fast negative matches
 
@@ -1194,18 +1250,16 @@ durable performance artifacts. They may be rebuilt after corruption or version
 upgrade, yet normal indexed query execution must use them rather than falling
 back to a full log scan.
 
-LQL integration should consume storage query APIs, not raw log scans. Until
-`liblql` is available, pouch exposes a narrow internal predicate/query boundary
-over indexed summaries, owner postings, stable ordering, limits, and cursors.
-That same boundary must also support explicit scan mode over ordered metadata
-summaries that were refreshed from authoritative log state. Additional
-term/range postings should extend this boundary rather than bypass it.
-Indexed mode is the preferred default; scan mode is a configured backend mode
-or configured fallback. The persistent format should not encode LQL-specific
-query plans. Pre-LQL scan support is intentionally limited to match-all, exact
-key/owner equality, and key+owner conjunction for `query_keys` and document
-`query`; richer predicate evaluation requires the later query/index
-integration.
+LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
+an internal predicate/query boundary over indexed summaries, owner postings,
+field postings, stable ordering, limits, and cursors. That same boundary also
+supports explicit scan mode over ordered metadata summaries that were refreshed
+from authoritative log state. New term/range posting families should extend
+this boundary rather than bypass it. Indexed mode is the preferred default;
+scan mode is a configured backend mode or configured fallback. The persistent
+format should not encode LQL-specific query plans; it stores typed summaries
+and postings that can serve the current public query language and future
+planner improvements.
 
 Query refresh contracts are storage-visible. A query that waits for a flush or
 refresh target must observe committed summary records without requiring a full
