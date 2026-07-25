@@ -140,8 +140,8 @@ func reportCResult(b *testing.B, res pouchResult) {
 	cNsPerOp := float64(res.elapsedNS) / float64(ops)
 	b.ReportMetric(cNsPerOp, "ns/op")
 	b.ReportMetric(cNsPerOp, "c-ns/op")
-	if res.rows != 0 {
-		b.ReportMetric(float64(res.rows), "seeded-rows")
+	if res.documents != 0 {
+		b.ReportMetric(float64(res.documents), "seeded-documents")
 	}
 	if res.indexSeq != 0 {
 		b.ReportMetric(float64(res.indexSeq), "index-seq")
@@ -647,7 +647,7 @@ func benchmarkLockdQuery(b *testing.B, cli *lockdclient.Client, seededRows int, 
 		}
 	}
 	b.StopTimer()
-	b.ReportMetric(float64(seededRows), "seeded-rows")
+	b.ReportMetric(float64(seededRows), "seeded-documents")
 	b.ReportMetric(float64(expectedRows), "matched-documents")
 	if b.N > 0 {
 		b.ReportMetric(float64(totalPages)/float64(b.N), "query-pages/op")

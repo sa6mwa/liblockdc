@@ -534,14 +534,14 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.
-    - [ ] Rename or clearly alias benchmark labels from `Rows` to
+    - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not
       relational rows.
     - [ ] Update pouch-vs-Go benchmarks to expose cache-warm page 1/page N
       behavior, matched-key vector reuse, candidate docID counts, and document
       streaming/materialization cost separately.
-    - [ ] Re-run the expanded 4096+ row benchmark matrix and use it as the
+    - [ ] Re-run the expanded 4096+ document benchmark matrix and use it as the
       acceptance gate for the redesigned index path, with pouch expected to
       beat or match Go disk on key-only and document-result scenarios unless
       an explicit design tradeoff is documented.
@@ -736,7 +736,7 @@ Latest release targets confirmed on 2026-07-23:
         low-match strict JSON Pointer LQL field selector document and key-only
         query paths, keeping them out of default local `all` runs unless
         `LOCKDC_BENCH_LIVE=1` is set.
-      - [x] Use the benchmark iteration argument as the row-count control so
+      - [x] Use the benchmark iteration argument as the document-count control so
         local pouch and live Go disk cases can be run at 1k, 100k, or larger
         sizes without changing the benchmark binary.
       - [ ] Keep expanding the in-project C benchmark matrix as the release-gate

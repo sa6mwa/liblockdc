@@ -6,7 +6,7 @@
 typedef struct lockdc_pouch_bench_result {
   uint64_t iterations;
   uint64_t operations;
-  uint64_t rows;
+  uint64_t documents;
   uint64_t bytes;
   uint64_t pages;
   uint64_t c_elapsed_ns;
@@ -14,24 +14,30 @@ typedef struct lockdc_pouch_bench_result {
   char error[256];
 } lockdc_pouch_bench_result;
 
-int lockdc_pouch_bench_indexed_lql_rows(const char *root, uint64_t iterations,
-                                        uint64_t seeded_rows,
-                                        lockdc_pouch_bench_result *out);
+int lockdc_pouch_bench_indexed_lql_documents(const char *root,
+                                             uint64_t iterations,
+                                             uint64_t seeded_documents,
+                                             lockdc_pouch_bench_result *out);
 int lockdc_pouch_bench_indexed_lql_keys(const char *root, uint64_t iterations,
-                                        uint64_t seeded_rows,
+                                        uint64_t seeded_documents,
                                         lockdc_pouch_bench_result *out);
-int lockdc_pouch_bench_indexed_lql_scenario_rows(
+int lockdc_pouch_bench_indexed_lql_scenario_documents(
     const char *root, const char *scenario, uint64_t iterations,
-    uint64_t seeded_rows, lockdc_pouch_bench_result *out);
+    uint64_t seeded_documents, lockdc_pouch_bench_result *out);
 int lockdc_pouch_bench_indexed_lql_scenario_keys(
     const char *root, const char *scenario, uint64_t iterations,
-    uint64_t seeded_rows, lockdc_pouch_bench_result *out);
-int lockdc_pouch_bench_lql_scenario_rows(
-    const char *root, const char *scenario, const char *engine,
-    uint64_t iterations, uint64_t seeded_rows, lockdc_pouch_bench_result *out);
-int lockdc_pouch_bench_lql_scenario_keys(
-    const char *root, const char *scenario, const char *engine,
-    uint64_t iterations, uint64_t seeded_rows, lockdc_pouch_bench_result *out);
+    uint64_t seeded_documents, lockdc_pouch_bench_result *out);
+int lockdc_pouch_bench_lql_scenario_documents(const char *root,
+                                              const char *scenario,
+                                              const char *engine,
+                                              uint64_t iterations,
+                                              uint64_t seeded_documents,
+                                              lockdc_pouch_bench_result *out);
+int lockdc_pouch_bench_lql_scenario_keys(const char *root, const char *scenario,
+                                         const char *engine,
+                                         uint64_t iterations,
+                                         uint64_t seeded_documents,
+                                         lockdc_pouch_bench_result *out);
 int lockdc_pouch_bench_state_write(const char *root, uint64_t iterations,
                                    lockdc_pouch_bench_result *out);
 int lockdc_pouch_bench_state_read(const char *root, uint64_t iterations,

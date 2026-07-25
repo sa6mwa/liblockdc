@@ -2090,10 +2090,10 @@ public client surface.
 The separate Go module under `benchmark/` is the broader pouch-versus-Go disk
 comparison suite. It starts the current `pkt.systems/lockd` disk backend,
 exercises equivalent public LQL scenarios against that server and an actual
-liblockdc pouch instance, and reports matched rows, page counts, stream bytes,
-and C-side pouch timings. This suite is intentionally outside the liblockdc
-release gate: it is a performance and stress-test tool for iterative tuning,
-including short iteration runs and larger multi-page datasets that expose
+liblockdc pouch instance, and reports matched documents, page counts, stream
+bytes, and C-side pouch timings. This suite is intentionally outside the
+liblockdc release gate: it is a performance and stress-test tool for iterative
+tuning, including short iteration runs and larger multi-page datasets that expose
 cursor, segment, and index behavior.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local

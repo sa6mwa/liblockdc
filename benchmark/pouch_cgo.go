@@ -10,7 +10,7 @@ import "unsafe"
 
 type pouchResult struct {
 	operations uint64
-	rows       uint64
+	documents  uint64
 	bytes      uint64
 	pages      uint64
 	elapsedNS  uint64
@@ -22,7 +22,7 @@ func runPouchIndexedLQLDocuments(root string, iterations int, seededRows int) (i
 	cRoot := C.CString(root)
 	defer C.free(unsafe.Pointer(cRoot))
 	var res C.lockdc_pouch_bench_result
-	rc := C.lockdc_pouch_bench_indexed_lql_rows(cRoot, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
+	rc := C.lockdc_pouch_bench_indexed_lql_documents(cRoot, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
 	return int(rc), convertPouchResult(res)
 }
 
@@ -40,7 +40,7 @@ func runPouchIndexedLQLScenarioDocuments(root string, scenario string, iteration
 	cScenario := C.CString(scenario)
 	defer C.free(unsafe.Pointer(cScenario))
 	var res C.lockdc_pouch_bench_result
-	rc := C.lockdc_pouch_bench_indexed_lql_scenario_rows(cRoot, cScenario, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
+	rc := C.lockdc_pouch_bench_indexed_lql_scenario_documents(cRoot, cScenario, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
 	return int(rc), convertPouchResult(res)
 }
 
@@ -62,7 +62,7 @@ func runPouchLQLScenarioDocuments(root string, scenario string, engine string, i
 	cEngine := C.CString(engine)
 	defer C.free(unsafe.Pointer(cEngine))
 	var res C.lockdc_pouch_bench_result
-	rc := C.lockdc_pouch_bench_lql_scenario_rows(cRoot, cScenario, cEngine, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
+	rc := C.lockdc_pouch_bench_lql_scenario_documents(cRoot, cScenario, cEngine, C.uint64_t(iterations), C.uint64_t(seededRows), &res)
 	return int(rc), convertPouchResult(res)
 }
 
@@ -97,7 +97,7 @@ func runPouchStateRead(root string, iterations int) (int, pouchResult) {
 func convertPouchResult(res C.lockdc_pouch_bench_result) pouchResult {
 	return pouchResult{
 		operations: uint64(res.operations),
-		rows:       uint64(res.rows),
+		documents:  uint64(res.documents),
 		bytes:      uint64(res.bytes),
 		pages:      uint64(res.pages),
 		elapsedNS:  uint64(res.c_elapsed_ns),
