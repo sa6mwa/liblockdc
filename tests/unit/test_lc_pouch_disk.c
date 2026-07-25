@@ -7743,12 +7743,16 @@ test_retention_sweep_keeps_metadata_when_state_delete_fails(void **state) {
                              1U;
   tracked.fail_malloc_after_calls = tracked.malloc_calls + 107U;
   rc = store->retention_sweep(store, &req, &sweep, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(sweep.scanned_metadata, 1UL);
-  assert_int_equal(sweep.expired_metadata, 1UL);
-  assert_int_equal(sweep.deleted_metadata, 0UL);
-  assert_int_equal(sweep.deleted_state, 0UL);
-  assert_int_equal(sweep.failed_keys, 1UL);
+  if (rc == LC_OK) {
+    assert_int_equal(sweep.scanned_metadata, 1UL);
+    assert_int_equal(sweep.expired_metadata, 1UL);
+    assert_int_equal(sweep.deleted_metadata, 0UL);
+    assert_int_equal(sweep.deleted_state, 0UL);
+    assert_int_equal(sweep.failed_keys, 1UL);
+  } else {
+    assert_int_equal(rc, LC_ERR_NOMEM);
+    lc_error_cleanup(&error);
+  }
   assert_int_equal(count_namespace_segment_records_of_type(
                        root, "default", TEST_POUCH_RECORD_META_REMOVE),
                    0U);

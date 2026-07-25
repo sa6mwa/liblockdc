@@ -4802,6 +4802,9 @@ static int lc_pouch_disk_query_field_key_matches_terms(
   return lc_pouch_disk_query_field_key_matches_not_eq(store, req, key);
 }
 
+static int lc_pouch_disk_query_field_key_matches_ranges_from(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const char *key, size_t first_term);
 static int lc_pouch_disk_query_field_key_matches_ranges(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const char *key);
@@ -4928,15 +4931,15 @@ static int lc_pouch_disk_query_field_key_matches_range_term(
   return 0;
 }
 
-static int lc_pouch_disk_query_field_key_matches_ranges(
+static int lc_pouch_disk_query_field_key_matches_ranges_from(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
-    const char *key) {
+    const char *key, size_t first_term) {
   size_t index;
 
   if (req == NULL || key == NULL) {
     return 1;
   }
-  for (index = 0U; index < req->document_range_term_count; ++index) {
+  for (index = first_term; index < req->document_range_term_count; ++index) {
     if (!lc_pouch_disk_query_field_key_matches_range_term(
             store, req, &req->document_range_terms[index], key)) {
       return 0;
@@ -4949,6 +4952,12 @@ static int lc_pouch_disk_query_field_key_matches_ranges(
     }
   }
   return 1;
+}
+
+static int lc_pouch_disk_query_field_key_matches_ranges(
+    lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
+    const char *key) {
+  return lc_pouch_disk_query_field_key_matches_ranges_from(store, req, key, 0U);
 }
 
 static int lc_pouch_disk_query_field_key_matches_exists_from(
@@ -5423,6 +5432,27 @@ static void lc_pouch_disk_query_key_array_cleanup(lc_pouch_disk_store *store,
   lc_pouch_free(&store->allocator, keys);
 }
 
+static size_t lc_pouch_disk_query_key_array_sort_unique(
+    lc_pouch_disk_store *store, char **keys, size_t key_count) {
+  size_t read_index;
+  size_t write_index;
+
+  if (keys == NULL || key_count <= 1U) {
+    return key_count;
+  }
+  qsort(keys, key_count, sizeof(keys[0]), lc_pouch_disk_namespace_ptr_compare);
+  write_index = 1U;
+  for (read_index = 1U; read_index < key_count; ++read_index) {
+    if (strcmp(keys[write_index - 1U], keys[read_index]) == 0) {
+      lc_pouch_free(&store->allocator, keys[read_index]);
+      continue;
+    }
+    keys[write_index] = keys[read_index];
+    write_index++;
+  }
+  return write_index;
+}
+
 static int lc_pouch_disk_query_field_add_candidate_key(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const lc_pouch_disk_query_field_posting *posting, char ***keys_io,
@@ -5514,10 +5544,8 @@ static int lc_pouch_disk_query_field_collect_or_eq_keys_locked(
   if (rc != LC_OK) {
     return rc;
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -6030,10 +6058,8 @@ static int lc_pouch_disk_query_field_collect_or_exists_keys_locked(
       return rc;
     }
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -6269,8 +6295,7 @@ static int lc_pouch_disk_query_field_collect_range_keys_locked(
     if (cmp < 0 || strncmp(posting->value, "n:", 2U) != 0) {
       continue;
     }
-    if ((req->key != NULL && strcmp(posting->key, req->key) != 0) ||
-        lc_pouch_disk_string_array_contains(keys, key_count, posting->key)) {
+    if (req->key != NULL && strcmp(posting->key, req->key) != 0) {
       continue;
     }
     if (!lc_pouch_disk_query_field_number_matches_range(posting->value,
@@ -6278,8 +6303,8 @@ static int lc_pouch_disk_query_field_collect_range_keys_locked(
         !lc_pouch_disk_query_field_posting_has_live_state(store, posting) ||
         !lc_pouch_disk_query_field_key_matches_terms(store, req,
                                                      posting->key) ||
-        !lc_pouch_disk_query_field_key_matches_ranges(store, req,
-                                                      posting->key) ||
+        !lc_pouch_disk_query_field_key_matches_ranges_from(store, req,
+                                                           posting->key, 1U) ||
         !lc_pouch_disk_query_field_key_matches_in(store, req, posting->key) ||
         !lc_pouch_disk_query_field_key_matches_prefix(store, req,
                                                       posting->key) ||
@@ -6313,10 +6338,8 @@ static int lc_pouch_disk_query_field_collect_range_keys_locked(
     }
     key_count++;
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -6452,10 +6475,8 @@ static int lc_pouch_disk_query_field_collect_or_range_keys_locked(
       }
     }
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -6883,8 +6904,7 @@ static int lc_pouch_disk_query_field_collect_exists_keys_locked(
     if (cmp < 0) {
       continue;
     }
-    if ((req->key != NULL && strcmp(posting->key, req->key) != 0) ||
-        lc_pouch_disk_string_array_contains(keys, key_count, posting->key)) {
+    if (req->key != NULL && strcmp(posting->key, req->key) != 0) {
       continue;
     }
     if (!lc_pouch_disk_query_field_posting_has_live_state(store, posting) ||
@@ -6929,10 +6949,8 @@ static int lc_pouch_disk_query_field_collect_exists_keys_locked(
     }
     key_count++;
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -7223,10 +7241,8 @@ static int lc_pouch_disk_query_field_collect_in_keys_locked(
       key_count++;
     }
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -7513,10 +7529,8 @@ static int lc_pouch_disk_query_field_collect_or_prefix_keys_locked(
       return rc;
     }
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -7753,8 +7767,7 @@ static int lc_pouch_disk_query_field_collect_prefix_keys_locked(
     if (cmp < 0 || strncmp(posting->value, "t:", 2U) != 0) {
       continue;
     }
-    if ((req->key != NULL && strcmp(posting->key, req->key) != 0) ||
-        lc_pouch_disk_string_array_contains(keys, key_count, posting->key)) {
+    if (req->key != NULL && strcmp(posting->key, req->key) != 0) {
       continue;
     }
     if (!lc_pouch_disk_query_field_text_starts_with(
@@ -7797,10 +7810,8 @@ static int lc_pouch_disk_query_field_collect_prefix_keys_locked(
     }
     key_count++;
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -8045,10 +8056,8 @@ static int lc_pouch_disk_query_field_collect_or_contains_keys_locked(
       return rc;
     }
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -8371,10 +8380,8 @@ static int lc_pouch_disk_query_field_collect_contains_gram_keys_locked(
       return rc;
     }
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -8507,8 +8514,7 @@ static int lc_pouch_disk_query_field_collect_contains_keys_locked(
     if (cmp < 0 || strncmp(posting->value, "t:", 2U) != 0) {
       continue;
     }
-    if ((req->key != NULL && strcmp(posting->key, req->key) != 0) ||
-        lc_pouch_disk_string_array_contains(keys, key_count, posting->key)) {
+    if (req->key != NULL && strcmp(posting->key, req->key) != 0) {
       continue;
     }
     if (!lc_pouch_disk_query_field_text_contains(posting->value, primary->value,
@@ -8552,10 +8558,8 @@ static int lc_pouch_disk_query_field_collect_contains_keys_locked(
     }
     key_count++;
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
@@ -8852,10 +8856,8 @@ static int lc_pouch_disk_query_field_collect_path_pattern_keys_locked(
   if (rc != LC_OK) {
     return rc;
   }
-  if (key_count > 1U) {
-    qsort(keys, key_count, sizeof(keys[0]),
-          lc_pouch_disk_namespace_ptr_compare);
-  }
+  key_count =
+      lc_pouch_disk_query_key_array_sort_unique(store, keys, key_count);
   *keys_out = keys;
   *key_count_out = key_count;
   return LC_OK;
