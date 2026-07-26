@@ -646,6 +646,122 @@ static void test_term_posting_table_replaces_existing_posting(void **state) {
   lc_pouch_index_term_posting_table_cleanup(NULL, &table);
 }
 
+static void test_term_generation_codec_round_trips(void **state) {
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_term_generation decoded;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_term_id region_id;
+  lc_pouch_index_term_id kind_id;
+  lc_pouch_index_term_id found_id;
+  lc_pouch_index_doc_id sparse_ids[] = {9U, 3U, 3U, 7U};
+  lc_pouch_index_doc_id sparse_expected[] = {3U, 7U, 9U};
+  lc_pouch_index_doc_id dense_ids[128];
+  unsigned char *bytes;
+  size_t size;
+  size_t written;
+  size_t index;
+
+  (void)state;
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  bytes = NULL;
+  for (index = 0U; index < sizeof(dense_ids) / sizeof(dense_ids[0]); ++index) {
+    dense_ids[index] = (lc_pouch_index_doc_id)index;
+  }
+
+  generation.identity.sequence = 33U;
+  generation.identity.manifest_generation = 44U;
+  generation.namespace_name = lc_pouch_strdup(NULL, "default");
+  assert_non_null(generation.namespace_name);
+  assert_true(lc_pouch_index_term_table_find_or_add(
+      NULL, &generation.terms, "/region", "s:north", &region_id));
+  assert_true(lc_pouch_index_term_table_find_or_add(
+      NULL, &generation.terms, "/kind", "s:invoice", &kind_id));
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &generation.postings, region_id, sparse_ids,
+      sizeof(sparse_ids) / sizeof(sparse_ids[0])));
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &generation.postings, kind_id, dense_ids,
+      sizeof(dense_ids) / sizeof(dense_ids[0])));
+
+  assert_true(lc_pouch_index_term_generation_encoded_size(&generation, &size));
+  bytes = (unsigned char *)malloc(size);
+  assert_non_null(bytes);
+  assert_true(lc_pouch_index_term_generation_encode(&generation, bytes, size,
+                                                    &written));
+  assert_int_equal(written, size);
+  assert_true(
+      lc_pouch_index_term_generation_decode(NULL, &decoded, bytes, size));
+
+  assert_int_equal(decoded.identity.sequence, 33U);
+  assert_int_equal(decoded.identity.manifest_generation, 44U);
+  assert_string_equal(decoded.namespace_name, "default");
+  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "/region",
+                                             "s:north", &found_id));
+  assert_int_equal(found_id, region_id);
+  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "/kind",
+                                             "s:invoice", &found_id));
+  assert_int_equal(found_id, kind_id);
+  assert_true(lc_pouch_index_term_posting_table_decode(NULL, &decoded.postings,
+                                                       region_id, &doc_ids));
+  assert_doc_ids(&doc_ids, sparse_expected,
+                 sizeof(sparse_expected) / sizeof(sparse_expected[0]));
+  assert_int_equal(decoded.postings.entries[0].posting.encoding,
+                   LC_POUCH_INDEX_POSTING_SPARSE);
+  assert_int_equal(decoded.postings.entries[1].posting.encoding,
+                   LC_POUCH_INDEX_POSTING_DENSE);
+
+  free(bytes);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_term_generation_cleanup(NULL, &decoded);
+  lc_pouch_index_term_generation_cleanup(NULL, &generation);
+}
+
+static void test_term_generation_codec_rejects_corruption(void **state) {
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_term_generation decoded;
+  lc_pouch_index_term_id term_id;
+  lc_pouch_index_doc_id ids[] = {1U, 2U, 3U};
+  unsigned char *bytes;
+  size_t size;
+  size_t written;
+
+  (void)state;
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  bytes = NULL;
+
+  generation.identity.sequence = 33U;
+  generation.identity.manifest_generation = 44U;
+  generation.namespace_name = lc_pouch_strdup(NULL, "default");
+  assert_non_null(generation.namespace_name);
+  assert_true(lc_pouch_index_term_table_find_or_add(
+      NULL, &generation.terms, "/region", "s:north", &term_id));
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &generation.postings, term_id, ids, sizeof(ids) / sizeof(ids[0])));
+  assert_true(lc_pouch_index_term_generation_encoded_size(&generation, &size));
+  bytes = (unsigned char *)malloc(size);
+  assert_non_null(bytes);
+  assert_true(lc_pouch_index_term_generation_encode(&generation, bytes, size,
+                                                    &written));
+  assert_int_equal(written, size);
+
+  bytes[0] ^= 0xffU;
+  assert_false(
+      lc_pouch_index_term_generation_decode(NULL, &decoded, bytes, size));
+  bytes[0] ^= 0xffU;
+  assert_false(
+      lc_pouch_index_term_generation_decode(NULL, &decoded, bytes, size - 1U));
+  bytes[size - 1U] ^= 0xffU;
+  assert_false(
+      lc_pouch_index_term_generation_decode(NULL, &decoded, bytes, size));
+
+  free(bytes);
+  lc_pouch_index_term_generation_cleanup(NULL, &decoded);
+  lc_pouch_index_term_generation_cleanup(NULL, &generation);
+}
+
 static void test_result_cache_keys_by_generation_and_plan(void **state) {
   lc_pouch_index_result_cache cache;
   lc_pouch_index_doc_id_set source;
@@ -2230,6 +2346,8 @@ int main(void) {
       cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
       cmocka_unit_test(test_term_posting_table_appends_by_term_id),
       cmocka_unit_test(test_term_posting_table_replaces_existing_posting),
+      cmocka_unit_test(test_term_generation_codec_round_trips),
+      cmocka_unit_test(test_term_generation_codec_rejects_corruption),
       cmocka_unit_test(test_result_cache_keys_by_generation_and_plan),
       cmocka_unit_test(test_result_plan_keys_are_normalized_by_index),
       cmocka_unit_test(test_result_plan_keys_reject_filtered_compound_views),

@@ -580,6 +580,12 @@ Latest release targets confirmed on 2026-07-23:
         exact terms now map to adaptive sparse/dense docID postings with
         binary lookup, missing-term, and replacement coverage. Disk readers
         still need to compile sidecar postings into this table.
+      - [x] Add the first immutable exact-term generation codec in
+        `lc_pouch_index`: namespace-scoped term dictionaries and adaptive
+        term-ID postings now round-trip under index sequence plus segmented
+        manifest identity, with corruption/truncation rejection coverage.
+        Disk publication and consumption of these exact-term generation files
+        is still pending.
       - [x] Compile filtered exact sidecar candidates into a per-request
         term-ID posting table for equality and `in` docID readers, preserving
         existing live-state and secondary predicate guards while exercising

@@ -1383,6 +1383,14 @@ compiled readers can stop carrying raw string scans through the planner.
 Exact-term postings can also be stored by term ID as adaptive sparse/dense
 docID postings, giving the compiled reader a direct lookup target for equality
 and `in` plans before the disk adapter is fully cut over.
+The index layer now defines the first immutable exact-term generation codec:
+a namespace-scoped dictionary plus term-ID posting table is wrapped with the
+same index sequence and segmented manifest identity used by prepared/result
+caches and temporal generations. Decode validates magic/version headers,
+lengths, term/posting references, posting payload shape, decoded count, sorted
+docID order, and max docID before a reader can trust the artifact. Disk still
+needs to publish and consume these exact-term generation files; current
+queries continue to populate exact postings from sidecar scans.
 The current disk adapter now builds that exact-term table per request from
 filtered sidecar candidates, so equality and `in` plans can use compiled
 postings without bypassing existing live-state, owner, hidden, generation, or

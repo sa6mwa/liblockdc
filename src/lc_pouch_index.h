@@ -123,6 +123,13 @@ typedef struct lc_pouch_index_prepared_term_cache {
   lc_pouch_index_term_posting_table postings;
 } lc_pouch_index_prepared_term_cache;
 
+typedef struct lc_pouch_index_term_generation {
+  lc_pouch_index_identity identity;
+  char *namespace_name;
+  lc_pouch_index_term_table terms;
+  lc_pouch_index_term_posting_table postings;
+} lc_pouch_index_term_generation;
+
 typedef struct lc_pouch_index_prepared_temporal_cache {
   uint64_t generation;
   lc_pouch_index_identity identity;
@@ -257,6 +264,18 @@ int lc_pouch_index_term_posting_table_append(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_term_posting_table *table,
     lc_pouch_index_term_id term_id, lc_pouch_index_doc_id_set *dst);
+void lc_pouch_index_term_generation_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_term_generation *generation);
+int lc_pouch_index_term_generation_encoded_size(
+    const lc_pouch_index_term_generation *generation, size_t *size_out);
+int lc_pouch_index_term_generation_encode(
+    const lc_pouch_index_term_generation *generation, unsigned char *dst,
+    size_t dst_size, size_t *written_out);
+int lc_pouch_index_term_generation_decode(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_term_generation *generation, const unsigned char *src,
+    size_t src_size);
 void lc_pouch_index_temporal_posting_table_cleanup(
     const lc_pouch_allocator *allocator,
     lc_pouch_index_temporal_posting_table *table);
