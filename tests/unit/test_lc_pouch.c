@@ -2573,7 +2573,7 @@ static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
   lc_query_key_handler handler;
   pouch_query_key_capture first_page;
   pouch_query_key_capture second_page;
-  pouch_query_key_capture rejected_page;
+  pouch_query_key_capture indexed_page;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
   lc_pouch_state_write_result delete_result;
@@ -2592,7 +2592,7 @@ static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
   memset(&handler, 0, sizeof(handler));
   memset(&first_page, 0, sizeof(first_page));
   memset(&second_page, 0, sizeof(second_page));
-  memset(&rejected_page, 0, sizeof(rejected_page));
+  memset(&indexed_page, 0, sizeof(indexed_page));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
   memset(&delete_result, 0, sizeof(delete_result));
@@ -2678,6 +2678,8 @@ static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
   assert_non_null(namespace_path);
   assert_path_file_contains(namespace_path, "index/query.index",
                             "row_count=3");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_index_complete=1");
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
@@ -2701,12 +2703,189 @@ static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
   query_req.selector_json = selector;
-  rc = client->query_keys(client, &query_req, &handler, &rejected_page,
+  rc = client->query_keys(client, &query_req, &handler, &indexed_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(indexed_page.count, 1);
+  assert_true(pouch_query_capture_has(&indexed_page, "doc/a"));
+  assert_false(pouch_query_capture_has(&indexed_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&indexed_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&indexed_page, "doc/deleted"));
+  assert_null(query_res.cursor);
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+
+  free(namespace_path);
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
+  static const char selector[] =
+      "{\"in\":{\"field\":\"/tags[]\",\"any\":[\"planning\",\"finance\"]}}";
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture first_page;
+  pouch_query_key_capture second_page;
+  pouch_query_key_capture unsupported_page;
+  lc_pouch_state_write_options hidden_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_error error;
+  char *namespace_path;
+  char root[512];
+  char cursor[64];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  namespace_path = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&first_page, 0, sizeof(first_page));
+  memset(&second_page, 0, sizeof(second_page));
+  memset(&unsupported_page, 0, sizeof(unsupported_page));
+  memset(&hidden_options, 0, sizeof(hidden_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-in", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory(
+      "{\"tags\":[\"planning\",\"finance\"],\"n\":1}",
+      strlen("{\"tags\":[\"planning\",\"finance\"],\"n\":1}"), &source,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/a", source,
+                            NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"tags\":[\"ops\"],\"n\":2}",
+                             strlen("{\"tags\":[\"ops\"],\"n\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/b", source,
+                            NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"tags\":[\"finance\"],\"n\":3}",
+                             strlen("{\"tags\":[\"finance\"],\"n\":3}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/c", source,
+                            NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  hidden_options.has_query_hidden = 1;
+  hidden_options.query_hidden = 1;
+  rc = lc_source_from_memory("{\"tags\":[\"planning\"],\"n\":4}",
+                             strlen("{\"tags\":[\"planning\"],\"n\":4}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/hidden",
+                            source, &hidden_options, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"tags\":[\"finance\"],\"n\":5}",
+                             strlen("{\"tags\":[\"finance\"],\"n\":5}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/deleted",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_pouch_state_delete(pouch, "docs/query-index-in", "doc/deleted",
+                             NULL, &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/query-index-in";
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  query_req.limit = 1L;
+  rc = client->query_keys(client, &query_req, &handler, &first_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(first_page.count, 1);
+  assert_non_null(query_res.cursor);
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  namespace_path =
+      lc_pouch_namespace_path(NULL, root, "docs/query-index-in");
+  assert_non_null(namespace_path);
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_index_complete=1");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "2f746167732f5b5d");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "706c616e6e696e67");
+
+  snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
+  query_req.cursor = cursor;
+  lc_query_res_cleanup(&query_res);
+  rc = client->query_keys(client, &query_req, &handler, &second_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(second_page.count, 1);
+  assert_null(query_res.cursor);
+  assert_true(pouch_query_capture_has(&first_page, "doc/a") ||
+              pouch_query_capture_has(&second_page, "doc/a"));
+  assert_true(pouch_query_capture_has(&first_page, "doc/c") ||
+              pouch_query_capture_has(&second_page, "doc/c"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/deleted"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/deleted"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"/n\",\"value\":\"1\"}}]}";
+  rc = client->query_keys(client, &query_req, &handler, &unsupported_page,
                           &query_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
-  assert_string_equal(error.message,
-                      "pouch query_keys index engine with selectors requires "
-                      "typed postings");
+  assert_true(bytes_contain_text(error.message, strlen(error.message),
+                                 "supports exact scalar equality and in"));
 
   free(namespace_path);
   lc_query_res_cleanup(&query_res);
@@ -2968,11 +3147,15 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_non_null(namespace_path);
   assert_path_file_contains(namespace_path, "index/query.index",
                             "format=pouch-query-index");
-  assert_path_file_contains(namespace_path, "index/query.index", "version=2");
+  assert_path_file_contains(namespace_path, "index/query.index", "version=3");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "state_index_seq=4");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "row_count=2");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_count=");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_index_complete=1");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "summary_hash=");
   assert_path_file_contains(namespace_path, "index/query.index",
@@ -2983,6 +3166,10 @@ static void test_flush_index_reports_projection_high_water(void **state) {
                             "646f632f68696464656e");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "row 2 ");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "2f6b696e64");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "666c757368");
   lc_index_flush_res_cleanup(&flush_res);
 
   snprintf(sidecar_path, sizeof(sidecar_path), "%s/index/query.index",
@@ -3621,6 +3808,7 @@ int main(void) {
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
+      cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
       cmocka_unit_test(test_query_documents_scan_streams_rows),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),

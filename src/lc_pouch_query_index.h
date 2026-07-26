@@ -19,6 +19,13 @@ typedef struct lc_pouch_query_index_row_view {
 typedef int (*lc_pouch_query_index_row_visit_fn)(
     const lc_pouch_query_index_row_view *row, void *context, lc_error *error);
 
+typedef struct lc_pouch_query_index_key_view {
+  const char *key;
+} lc_pouch_query_index_key_view;
+
+typedef int (*lc_pouch_query_index_key_visit_fn)(
+    const lc_pouch_query_index_key_view *key, void *context, lc_error *error);
+
 int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                unsigned long state_index_seq,
                                lc_pouch_query_index_flush_result *out,
@@ -27,5 +34,13 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_query_index_row_visit_fn visit,
                                void *context, unsigned long *index_seq,
                                lc_error *error);
+int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
+                                      const char *namespace_name,
+                                      const char *field,
+                                      const char *value,
+                                      lc_pouch_query_index_key_visit_fn visit,
+                                      void *context,
+                                      unsigned long *index_seq,
+                                      lc_error *error);
 
 #endif

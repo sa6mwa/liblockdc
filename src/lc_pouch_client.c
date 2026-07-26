@@ -71,6 +71,19 @@ typedef struct lc_pouch_query_scan_context {
   int emit_documents;
 } lc_pouch_query_scan_context;
 
+typedef struct lc_pouch_query_index_plan {
+  char *field;
+  char **values;
+  size_t value_count;
+  size_t value_capacity;
+} lc_pouch_query_index_plan;
+
+typedef struct lc_pouch_query_index_key_set {
+  char **keys;
+  size_t count;
+  size_t capacity;
+} lc_pouch_query_index_key_set;
+
 static size_t lc_pouch_lonejson_source_read(void *context, void *buffer,
                                             size_t count, lc_error *error) {
   lc_pouch_lonejson_source *source;
@@ -599,6 +612,343 @@ static char *lc_pouch_query_index_summary_metadata_string(size_t candidates,
     return NULL;
   }
   return lc_strdup_local(stack);
+}
+
+static char *lc_pouch_query_index_metadata_string(size_t candidates,
+                                                  size_t matches,
+                                                  lc_error *error) {
+  char stack[160];
+  int written;
+
+  written = snprintf(stack, sizeof(stack),
+                     "{\"engine\":\"index\",\"query_candidates\":%lu,"
+                     "\"query_matches\":%lu}",
+                     (unsigned long)candidates, (unsigned long)matches);
+  if (written < 0 || (size_t)written >= sizeof(stack)) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch query metadata exceeds local formatting limit", NULL,
+                 NULL, NULL);
+    return NULL;
+  }
+  return lc_strdup_local(stack);
+}
+
+static void lc_pouch_query_index_plan_cleanup(
+    lc_pouch_query_index_plan *plan) {
+  size_t index;
+
+  if (plan == NULL) {
+    return;
+  }
+  free(plan->field);
+  for (index = 0U; index < plan->value_count; ++index) {
+    free(plan->values[index]);
+  }
+  free(plan->values);
+  memset(plan, 0, sizeof(*plan));
+}
+
+static char *lc_pouch_query_dup_lql_string(lql_string_view view,
+                                           lc_error *error) {
+  char *out;
+
+  if (view.data == NULL && view.len > 0U) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch query selector has invalid string view", NULL, NULL,
+                 "pouch-redesign");
+    return NULL;
+  }
+  out = (char *)malloc(view.len + 1U);
+  if (out == NULL) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to allocate pouch query selector term", NULL, NULL,
+                 NULL);
+    return NULL;
+  }
+  if (view.len > 0U) {
+    memcpy(out, view.data, view.len);
+  }
+  out[view.len] = '\0';
+  return out;
+}
+
+static int lc_pouch_query_index_plan_add_value(
+    lc_pouch_query_index_plan *plan, lql_string_view value, lc_error *error) {
+  char **next_values;
+  size_t next_capacity;
+  char *copy;
+
+  if (plan->value_count >= plan->value_capacity) {
+    next_capacity = plan->value_capacity == 0U ? 4U : plan->value_capacity;
+    while (next_capacity <= plan->value_count) {
+      if (next_capacity > ((size_t)-1 / 2U)) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "pouch query selector value list exceeds local "
+                            "limit",
+                            NULL, NULL, NULL);
+      }
+      next_capacity *= 2U;
+    }
+    next_values = (char **)realloc(plan->values,
+                                   next_capacity * sizeof(*next_values));
+    if (next_values == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch query selector values",
+                          NULL, NULL, NULL);
+    }
+    memset(next_values + plan->value_capacity, 0,
+           (next_capacity - plan->value_capacity) * sizeof(*next_values));
+    plan->values = next_values;
+    plan->value_capacity = next_capacity;
+  }
+  copy = lc_pouch_query_dup_lql_string(value, error);
+  if (copy == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  plan->values[plan->value_count++] = copy;
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_plan_from_selector(
+    lql *runtime, const lql_selector *selector,
+    lc_pouch_query_index_plan *plan, lc_error *error) {
+  lql_selector_node root;
+  lql_selector_string_term string_term;
+  lql_selector_in_term in_term;
+  lql_error lql_error_value;
+  lql_status status;
+  size_t index;
+
+  if (runtime == NULL || selector == NULL || plan == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query index planning requires runtime, "
+                        "selector, and plan",
+                        NULL, NULL, NULL);
+  }
+  memset(plan, 0, sizeof(*plan));
+  lql_error_init(&lql_error_value);
+  status = runtime->selector_root(runtime, selector, &root, &lql_error_value);
+  if (status != LQL_STATUS_OK) {
+    return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                    "failed to inspect pouch query selector");
+  }
+  if (root.kind == LQL_SELECTOR_NODE_EQ) {
+    memset(&string_term, 0, sizeof(string_term));
+    status = runtime->selector_node_string_term(runtime, root, &string_term,
+                                                &lql_error_value);
+    if (status != LQL_STATUS_OK) {
+      return lc_pouch_query_lql_error(
+          error, status, &lql_error_value,
+          "failed to inspect pouch equality selector");
+    }
+    if (!string_term.value_present || string_term.any_count != 0U ||
+        string_term.field.len == 0U) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query_keys index engine supports exact "
+                          "scalar equality selectors only",
+                          NULL, NULL, "pouch-redesign");
+    }
+    plan->field = lc_pouch_query_dup_lql_string(string_term.field, error);
+    if (plan->field == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
+  }
+  if (root.kind == LQL_SELECTOR_NODE_IN) {
+    memset(&in_term, 0, sizeof(in_term));
+    status = runtime->selector_node_in_term(runtime, root, &in_term,
+                                            &lql_error_value);
+    if (status != LQL_STATUS_OK) {
+      return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                      "failed to inspect pouch in selector");
+    }
+    if (in_term.field.len == 0U || in_term.any_count == 0U) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query_keys index engine supports non-empty "
+                          "scalar in selectors only",
+                          NULL, NULL, "pouch-redesign");
+    }
+    plan->field = lc_pouch_query_dup_lql_string(in_term.field, error);
+    if (plan->field == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    for (index = 0U; index < in_term.any_count; ++index) {
+      lql_string_view value;
+
+      status = runtime->selector_node_in_term_any(runtime, root, index, &value,
+                                                  &lql_error_value);
+      if (status != LQL_STATUS_OK) {
+        return lc_pouch_query_lql_error(
+            error, status, &lql_error_value,
+            "failed to inspect pouch in selector value");
+      }
+      if (lc_pouch_query_index_plan_add_value(plan, value, error) != LC_OK) {
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_NOMEM;
+      }
+    }
+    return LC_OK;
+  }
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch query_keys index engine supports exact scalar "
+                      "equality and in selectors only",
+                      NULL, NULL, "pouch-redesign");
+}
+
+static void lc_pouch_query_index_key_set_cleanup(
+    lc_pouch_query_index_key_set *set) {
+  size_t index;
+
+  if (set == NULL) {
+    return;
+  }
+  for (index = 0U; index < set->count; ++index) {
+    free(set->keys[index]);
+  }
+  free(set->keys);
+  memset(set, 0, sizeof(*set));
+}
+
+static int lc_pouch_query_index_key_compare(const void *left,
+                                            const void *right) {
+  const char *const *a;
+  const char *const *b;
+
+  a = (const char *const *)left;
+  b = (const char *const *)right;
+  return strcmp(*a, *b);
+}
+
+static int lc_pouch_query_index_key_set_contains(
+    const lc_pouch_query_index_key_set *set, const char *key) {
+  size_t index;
+
+  if (set == NULL || key == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < set->count; ++index) {
+    if (strcmp(set->keys[index], key) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_query_index_key_set_add(
+    lc_pouch_query_index_key_set *set, const char *key, lc_error *error) {
+  char **next_keys;
+  size_t next_capacity;
+
+  if (key == NULL || key[0] == '\0' ||
+      lc_pouch_query_index_key_set_contains(set, key)) {
+    return LC_OK;
+  }
+  if (set->count >= set->capacity) {
+    next_capacity = set->capacity == 0U ? 16U : set->capacity;
+    while (next_capacity <= set->count) {
+      if (next_capacity > ((size_t)-1 / 2U)) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "pouch query index key set exceeds local limit",
+                            NULL, NULL, NULL);
+      }
+      next_capacity *= 2U;
+    }
+    next_keys = (char **)realloc(set->keys, next_capacity * sizeof(*next_keys));
+    if (next_keys == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch query index key set", NULL,
+                          NULL, NULL);
+    }
+    memset(next_keys + set->capacity, 0,
+           (next_capacity - set->capacity) * sizeof(*next_keys));
+    set->keys = next_keys;
+    set->capacity = next_capacity;
+  }
+  set->keys[set->count] = lc_strdup_local(key);
+  if (set->keys[set->count] == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query index key", NULL, NULL,
+                        NULL);
+  }
+  ++set->count;
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_key_collect(
+    const lc_pouch_query_index_key_view *key, void *context, lc_error *error) {
+  return lc_pouch_query_index_key_set_add(
+      (lc_pouch_query_index_key_set *)context, key != NULL ? key->key : NULL,
+      error);
+}
+
+static int lc_pouch_query_index_process_keys(
+    lc_pouch_query_scan_context *context, lc_pouch_query_index_key_set *keys,
+    lc_error *error) {
+  size_t index;
+  int rc;
+
+  if (context == NULL || keys == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch indexed query requires context and key set",
+                        NULL, NULL, NULL);
+  }
+  if (keys->count > 1U) {
+    qsort(keys->keys, keys->count, sizeof(keys->keys[0]),
+          lc_pouch_query_index_key_compare);
+  }
+  rc = LC_OK;
+  for (index = 0U; rc == LC_OK && index < keys->count; ++index) {
+    lc_pouch_state_read_result read_result;
+    int matched;
+
+    if (strncmp(keys->keys[index], ".staging/", sizeof(".staging/") - 1U) ==
+            0 ||
+        strstr(keys->keys[index], "/.staging/") != NULL) {
+      continue;
+    }
+    memset(&read_result, 0, sizeof(read_result));
+    rc = lc_pouch_state_read(context->client->pouch, context->namespace_name,
+                             keys->keys[index], &read_result, error);
+    if (rc != LC_OK) {
+      break;
+    }
+    if (!read_result.found ||
+        (read_result.has_query_hidden && read_result.query_hidden)) {
+      lc_pouch_state_read_result_cleanup(&context->client->allocator,
+                                         &read_result);
+      continue;
+    }
+    if (read_result.version > context->index_seq) {
+      context->index_seq = read_result.version;
+    }
+    if (context->seen++ < context->offset) {
+      lc_pouch_state_read_result_cleanup(&context->client->allocator,
+                                         &read_result);
+      continue;
+    }
+    rc = lc_pouch_query_match_body(context, read_result.body, &matched, error);
+    if (rc == LC_OK && matched) {
+      ++context->matched;
+      if (context->request->limit > 0L &&
+          context->emitted >= (size_t)context->request->limit) {
+        if (context->next_offset == 0U) {
+          context->next_offset = context->seen - 1U;
+        }
+      } else {
+        rc = lc_pouch_query_emit_key(context->handler,
+                                     context->handler_context,
+                                     keys->keys[index], error);
+        if (rc == LC_OK && context->next_offset == 0U) {
+          ++context->emitted;
+        }
+      }
+    }
+    lc_pouch_state_read_result_cleanup(&context->client->allocator,
+                                       &read_result);
+  }
+  return rc;
 }
 
 static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
@@ -2414,6 +2764,7 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   lql_status status;
   int has_selector;
   int use_index_summary;
+  int use_index_predicate;
   int rc;
 
   if (self == NULL || req == NULL || handler == NULL || out == NULL) {
@@ -2430,28 +2781,26 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   }
   has_selector = req->selector_json != NULL && req->selector_json[0] != '\0';
   use_index_summary = 0;
+  use_index_predicate = 0;
   if (req->engine != NULL && req->engine[0] != '\0' &&
       strcmp(req->engine, "scan") != 0 && strcmp(req->engine, "index") != 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query_keys engine must be scan or index",
                         NULL, NULL, "pouch-redesign");
   }
-  if (req->engine != NULL && strcmp(req->engine, "index") == 0 &&
-      has_selector) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query_keys index engine with selectors requires "
-                        "typed postings",
-                        NULL, NULL, "pouch-redesign");
-  }
   if (!has_selector && (req->engine == NULL || req->engine[0] == '\0' ||
                         strcmp(req->engine, "index") == 0)) {
     use_index_summary = 1;
   }
+  if (has_selector && req->engine != NULL && strcmp(req->engine, "index") == 0) {
+    use_index_predicate = 1;
+  }
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
-      (!use_index_summary || strcmp(req->refresh, "wait_for") != 0)) {
+      (!(use_index_summary || use_index_predicate) ||
+       strcmp(req->refresh, "wait_for") != 0)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query_keys refresh is only supported as "
-                        "wait_for on indexed summary queries",
+                        "wait_for on indexed queries",
                         NULL, NULL, "pouch-redesign");
   }
   client = (lc_client_handle *)self;
@@ -2521,11 +2870,52 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   }
   scan.runtime = runtime;
   scan.selector = selector;
-  rc = lc_pouch_state_visit(client->pouch, scan.namespace_name,
-                            lc_pouch_query_scan_visit, &scan, error);
+  if (use_index_predicate) {
+    lc_pouch_query_index_plan plan;
+    lc_pouch_query_index_key_set keys;
+    unsigned long flushed_seq;
+    unsigned long value_seq;
+    size_t value_index;
+
+    memset(&plan, 0, sizeof(plan));
+    memset(&keys, 0, sizeof(keys));
+    flushed_seq = 0UL;
+    rc = lc_pouch_query_index_plan_from_selector(runtime, selector, &plan,
+                                                 error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_flush_summary_index(client, scan.namespace_name,
+                                              &flushed_seq, error);
+    }
+    for (value_index = 0U; rc == LC_OK && value_index < plan.value_count;
+         ++value_index) {
+      value_seq = 0UL;
+      rc = lc_pouch_query_index_visit_scalar(
+          client->pouch, scan.namespace_name, plan.field,
+          plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
+          &value_seq, error);
+      if (rc == LC_OK && value_seq > scan.index_seq) {
+        scan.index_seq = value_seq;
+      }
+    }
+    if (rc == LC_OK && scan.index_seq < flushed_seq) {
+      scan.index_seq = flushed_seq;
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_process_keys(&scan, &keys, error);
+    }
+    lc_pouch_query_index_key_set_cleanup(&keys);
+    lc_pouch_query_index_plan_cleanup(&plan);
+  } else {
+    rc = lc_pouch_state_visit(client->pouch, scan.namespace_name,
+                              lc_pouch_query_scan_visit, &scan, error);
+  }
   if (rc == LC_OK) {
     out->return_mode = lc_strdup_local("keys");
-    out->metadata_json = lc_strdup_local("{\"engine\":\"scan\"}");
+    out->metadata_json =
+        use_index_predicate
+            ? lc_pouch_query_index_metadata_string(scan.seen, scan.matched,
+                                                   error)
+            : lc_strdup_local("{\"engine\":\"scan\"}");
     out->correlation_id = lc_strdup_local("pouch-query-keys");
     out->index_seq = scan.index_seq;
     if (scan.next_offset != 0U) {
