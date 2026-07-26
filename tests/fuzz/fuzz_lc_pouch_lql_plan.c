@@ -139,18 +139,22 @@ static int fuzz_seed_store(lc_client *client, lc_error *error) {
       {"fuzz/doc/0001",
        "{\"bucket\":\"needle\",\"group\":\"even\",\"region\":\"us\","
        "\"value\":1,\"tags\":[\"planning\",\"ops\"],"
+       "\"created_at\":\"2026-01-01T00:00:00Z\","
        "\"details\":{\"message\":\"timeout alpha\"},\"flag\":true}"},
       {"fuzz/doc/0002",
        "{\"bucket\":\"haystack\",\"group\":\"odd\",\"region\":\"eu\","
        "\"value\":2,\"tags\":[\"runtime\",\"finance\"],"
-       "\"details\":{\"message\":\"normal beta\"}}"},
+       "\"created_at\":\"not-a-date\","
+       "\"details\":{\"message\":\"normal beta\"},\"flag\":false}"},
       {"fuzz/doc/0003",
        "{\"bucket\":\"haystack\",\"group\":\"even\",\"region\":\"apac\","
        "\"value\":3,\"tags\":[\"ops\",\"runtime\"],"
+       "\"created_at\":\"2027-01-01T00:00:00Z\","
        "\"details\":{\"message\":\"timeout gamma\"}}"},
       {"fuzz/doc/0004",
        "{\"bucket\":\"needle\",\"group\":\"odd\",\"region\":\"us\","
        "\"value\":4,\"tags\":[\"planning\",\"finance\"],"
+       "\"created_at\":\"2024-01-01T00:00:00Z\","
        "\"details\":{\"message\":\"normal delta\"},\"flag\":true}"}};
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;

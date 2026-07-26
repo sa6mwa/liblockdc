@@ -1108,3 +1108,7 @@ Latest release targets confirmed on 2026-07-23:
       match-all, strict equality, `/tags[]` array membership, and compound
       range/presence/text planning; the harness runs accepted selectors through
       both pouch index and scan `query_keys` paths and asserts row-count parity.
+    - [x] Extend the pouch LQL planning corpus with date residual filtering,
+      recursive `exists`, and negated typed equality seeds; the fuzz fixture now
+      includes valid, invalid, and out-of-range dates plus a false boolean flag
+      so index-vs-scan parity covers candidate-superset planner paths.
