@@ -514,9 +514,15 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Publish immutable per-namespace document-table generation files
         from the disk bridge: full query-index rebuilds and compaction publish
         `.lcpdtg` files under the backend logstore with client coverage
-        decoding default and non-default namespace artifacts. Namespace-local
-        reader/result-page consumption is still pending because current
-        prepared reader files continue to use the in-memory global docID table.
+        decoding default and non-default namespace artifacts.
+      - [x] Cut exact-term generation files over to namespace-local docIDs:
+        exact generation build stores postings by the matching per-namespace
+        document-table generation, prepared exact readers require an
+        identity-matched `.lcpdtg`, remap local docIDs back into the current
+        global in-memory doc table, and repair corrupt/missing doc generation
+        files through the exact query path. Other reader families and
+        result-page consumption still need the same namespace-local doc table
+        cutover.
       - [x] Wire the disk query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
         namespace/key docIDs, candidate readers append table docIDs, and result

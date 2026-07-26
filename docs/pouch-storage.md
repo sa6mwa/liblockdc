@@ -1391,11 +1391,13 @@ generation files under
 `<root>/%2elockd/logstore/query.index.docs/<escaped-namespace>.lcpdtg`
 during full query-index rebuilds and after successful compaction replay. The
 current query path still rebuilds the live in-memory global document table from
-summary refresh state; namespace-local reader/result-page consumption of the
-document-table files is the next cutover before compiled reader files can stop
-depending on the global docID table. Even before that cutover, the query path
-no longer depends on direct summary-array-position casts for field predicate
-candidate sets.
+summary refresh state; exact-term generations are the first reader family cut
+over to namespace-local persisted docIDs and remap through these document-table
+files when loading prepared exact postings. The remaining reader families and
+result-page selection still need the same namespace-local doc table cutover
+before compiled reader files can stop depending on the global docID table.
+Even before that cutover, the query path no longer depends on direct
+summary-array-position casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
 `(field,value)` pairs are interned into stable term IDs with sorted lookup so
 compiled readers can stop carrying raw string scans through the planner.
@@ -1414,8 +1416,11 @@ during full query-index rebuilds and after successful compaction replay.
 Prepared exact readers load identity-matched namespace files into the
 generation-scoped exact cache before compiling from sidecar postings; absent,
 stale, or corrupt files trigger a namespace refresh and republish on the exact
-query path. Sidecar compilation remains the fallback when a current generation
-does not contain the requested term.
+query path. Exact generation postings are stored with namespace-local docIDs;
+loading them requires the identity-matched document-table generation and remaps
+those local IDs into the current in-memory global doc table before publishing
+to the prepared exact cache. Sidecar compilation remains the fallback when a
+current generation does not contain the requested term.
 Field-presence terms use the same immutable generation container under
 `<root>/%2elockd/logstore/query.index.exists/<escaped-namespace>.lcpttg`.
 The term field is the namespace-qualified JSON Pointer and the term value is
