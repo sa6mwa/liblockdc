@@ -629,6 +629,13 @@ Latest release targets confirmed on 2026-07-23:
         `ExistsFlag` and about 1.05 ms for `PrefixOwner`; the Go exists number
         was noisy relative to earlier runs, so this records pouch improvement
         without closing the persisted-dictionary parity gap.
+      - [x] Extend the simple-primary docID candidate helper to numeric
+        `range` compilation after the active range reader has already validated
+        the numeric bound predicate, preserving the same live-state, summary,
+        hidden, owner, and doc-table checks.
+        Verified on 2026-07-26 with the focused 4096-doc indexed key
+        `RangeHalf` benchmark: pouch measured about 5.14 ms and Go disk about
+        47.8 ms in the same run.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.

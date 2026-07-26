@@ -6325,6 +6325,37 @@ static int lc_pouch_disk_query_req_only_primary_prefix(
           req->document_exists_path_patterns == NULL);
 }
 
+static int lc_pouch_disk_query_req_only_primary_range(
+    const lc_pouch_query_index_scan_req *req) {
+  return req != NULL &&
+         (req->document_eq_term_count == 0U ||
+          req->document_eq_terms == NULL) &&
+         (req->document_not_eq_term_count == 0U ||
+          req->document_not_eq_terms == NULL) &&
+         req->document_range_term_count == 1U &&
+         req->document_range_terms != NULL &&
+         (req->document_not_range_term_count == 0U ||
+          req->document_not_range_terms == NULL) &&
+         (req->document_in_term_count == 0U ||
+          req->document_in_terms == NULL) &&
+         (req->document_not_in_term_count == 0U ||
+          req->document_not_in_terms == NULL) &&
+         (req->document_prefix_term_count == 0U ||
+          req->document_prefix_terms == NULL) &&
+         (req->document_not_prefix_term_count == 0U ||
+          req->document_not_prefix_terms == NULL) &&
+         (req->document_contains_term_count == 0U ||
+          req->document_contains_terms == NULL) &&
+         (req->document_not_contains_term_count == 0U ||
+          req->document_not_contains_terms == NULL) &&
+         (req->document_exists_term_count == 0U ||
+          req->document_exists_terms == NULL) &&
+         (req->document_not_exists_term_count == 0U ||
+          req->document_not_exists_terms == NULL) &&
+         (req->document_exists_path_pattern_count == 0U ||
+          req->document_exists_path_patterns == NULL);
+}
+
 static int lc_pouch_disk_query_field_add_simple_primary_doc_id(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const lc_pouch_disk_query_field_posting *posting,
@@ -6768,6 +6799,7 @@ static int lc_pouch_disk_query_compile_range_term_doc_ids(
   lc_pouch_index_doc_id_set compiled;
   size_t position;
   size_t index;
+  int simple_primary;
   int rc;
 
   if (reader == NULL || reader->store == NULL || reader->req == NULL ||
@@ -6775,6 +6807,7 @@ static int lc_pouch_disk_query_compile_range_term_doc_ids(
     return LC_OK;
   }
   memset(&compiled, 0, sizeof(compiled));
+  simple_primary = lc_pouch_disk_query_req_only_primary_range(reader->req);
   (void)lc_pouch_disk_query_field_find(reader->store,
                                        reader->req->namespace_name, term->field,
                                        "", "", &position);
@@ -6794,12 +6827,18 @@ static int lc_pouch_disk_query_compile_range_term_doc_ids(
         !lc_pouch_disk_query_field_number_matches_range(posting->value, term)) {
       continue;
     }
-    rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
-        reader->store, reader->req, posting, &compiled, reader->eq_from,
-        reader->range_from, reader->in_from, 0U, 0U, 0U,
-        reader->require_summary_match,
-        reader->require_positive_terms_summary_match, reader->skip_not_eq_match,
-        error, reader->alloc_message);
+    if (simple_primary) {
+      rc = lc_pouch_disk_query_field_add_simple_primary_doc_id(
+          reader->store, reader->req, posting, &compiled,
+          reader->require_summary_match, error, reader->alloc_message);
+    } else {
+      rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
+          reader->store, reader->req, posting, &compiled, reader->eq_from,
+          reader->range_from, reader->in_from, 0U, 0U, 0U,
+          reader->require_summary_match,
+          reader->require_positive_terms_summary_match,
+          reader->skip_not_eq_match, error, reader->alloc_message);
+    }
     if (rc != LC_OK) {
       lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &compiled);
       return rc;

@@ -734,10 +734,10 @@ The generic docID candidate guard accepts per-predicate offsets for primary
 equality, range, `in`, prefix, contains, and exists readers, so a reader that
 has already proven its primary predicate does not rescan that same predicate for
 every candidate while secondary and negated predicates remain enforced. Simple
-primary `exists` and `prefix` compilation also has a narrower docID append path
-for no-residual-filter queries; it still verifies live state, summary freshness,
-hidden state, owner filtering, and doc-table membership before accepting a
-candidate.
+primary `range`, `exists`, and `prefix` compilation also has a narrower docID
+append path for no-residual-filter queries; it still verifies live state,
+summary freshness, hidden state, owner filtering, and doc-table membership
+before accepting a candidate.
 Contains compilation checks raw text postings for the substring directly;
 trigrams remain a zero-candidate fast reject until the compiled field dictionary
 can drive a docID-first text search path. The client planner also recognizes
