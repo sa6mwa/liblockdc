@@ -198,12 +198,26 @@ int lc_pouch_index_posting_build(const lc_pouch_allocator *allocator,
 int lc_pouch_index_posting_decode(const lc_pouch_allocator *allocator,
                                   const lc_pouch_index_posting *posting,
                                   lc_pouch_index_doc_id_set *dst) {
+  if (dst == NULL) {
+    return 0;
+  }
+  dst->count = 0U;
+  return lc_pouch_index_posting_append(allocator, posting, dst);
+}
+
+int lc_pouch_index_posting_append(const lc_pouch_allocator *allocator,
+                                  const lc_pouch_index_posting *posting,
+                                  lc_pouch_index_doc_id_set *dst) {
+  size_t original_count;
   size_t index;
 
   if (posting == NULL || dst == NULL) {
     return 0;
   }
-  dst->count = 0U;
+  original_count = dst->count;
+  if (original_count > ((size_t)-1) - posting->count) {
+    return 0;
+  }
   if (posting->count == 0U ||
       posting->encoding == LC_POUCH_INDEX_POSTING_EMPTY) {
     return 1;
@@ -229,7 +243,7 @@ int lc_pouch_index_posting_decode(const lc_pouch_allocator *allocator,
         }
       }
     }
-    return dst->count == posting->count;
+    return dst->count == original_count + posting->count;
   }
   if (posting->encoding == LC_POUCH_INDEX_POSTING_SPARSE) {
     const unsigned char *cursor;

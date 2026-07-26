@@ -6455,9 +6455,7 @@ static int lc_pouch_disk_query_read_exact_term_doc_ids(
     void *context, const char *field, const char *value,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
   lc_pouch_disk_exact_term_doc_id_reader *reader;
-  lc_pouch_index_doc_id_set decoded;
   lc_pouch_index_term_id term_id;
-  size_t index;
   int rc;
 
   reader = (lc_pouch_disk_exact_term_doc_id_reader *)context;
@@ -6492,20 +6490,10 @@ static int lc_pouch_disk_query_read_exact_term_doc_ids(
         return rc;
       }
     }
-    memset(&decoded, 0, sizeof(decoded));
-    if (!lc_pouch_index_term_posting_table_decode(
-            &reader->store->allocator, &cache->postings, term_id, &decoded)) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+    if (!lc_pouch_index_term_posting_table_append(
+            &reader->store->allocator, &cache->postings, term_id, doc_ids)) {
       return lc_pouch_set_nomem(error, reader->alloc_message);
     }
-    for (index = 0U; index < decoded.count; ++index) {
-      if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                            decoded.items[index])) {
-        lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-        return lc_pouch_set_nomem(error, reader->alloc_message);
-      }
-    }
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
     return LC_OK;
   }
   if (!lc_pouch_index_term_table_find_or_add(&reader->store->allocator,
@@ -6521,21 +6509,11 @@ static int lc_pouch_disk_query_read_exact_term_doc_ids(
       return rc;
     }
   }
-  memset(&decoded, 0, sizeof(decoded));
-  if (!lc_pouch_index_term_posting_table_decode(&reader->store->allocator,
+  if (!lc_pouch_index_term_posting_table_append(&reader->store->allocator,
                                                 &reader->exact_postings,
-                                                term_id, &decoded)) {
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+                                                term_id, doc_ids)) {
     return lc_pouch_set_nomem(error, reader->alloc_message);
   }
-  for (index = 0U; index < decoded.count; ++index) {
-    if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                          decoded.items[index])) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-      return lc_pouch_set_nomem(error, reader->alloc_message);
-    }
-  }
-  lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
   return LC_OK;
 }
 
@@ -6592,9 +6570,7 @@ lc_pouch_disk_query_read_exists_term_doc_ids(void *context, const char *field,
                                              lc_pouch_index_doc_id_set *doc_ids,
                                              lc_error *error) {
   lc_pouch_disk_exact_term_doc_id_reader *reader;
-  lc_pouch_index_doc_id_set decoded;
   lc_pouch_index_term_id term_id;
-  size_t index;
   int rc;
 
   reader = (lc_pouch_disk_exact_term_doc_id_reader *)context;
@@ -6630,20 +6606,10 @@ lc_pouch_disk_query_read_exists_term_doc_ids(void *context, const char *field,
         return rc;
       }
     }
-    memset(&decoded, 0, sizeof(decoded));
-    if (!lc_pouch_index_term_posting_table_decode(
-            &reader->store->allocator, &cache->postings, term_id, &decoded)) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+    if (!lc_pouch_index_term_posting_table_append(
+            &reader->store->allocator, &cache->postings, term_id, doc_ids)) {
       return lc_pouch_set_nomem(error, reader->alloc_message);
     }
-    for (index = 0U; index < decoded.count; ++index) {
-      if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                            decoded.items[index])) {
-        lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-        return lc_pouch_set_nomem(error, reader->alloc_message);
-      }
-    }
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
     return LC_OK;
   }
   if (!lc_pouch_index_term_table_find_or_add(&reader->store->allocator,
@@ -6659,21 +6625,11 @@ lc_pouch_disk_query_read_exists_term_doc_ids(void *context, const char *field,
       return rc;
     }
   }
-  memset(&decoded, 0, sizeof(decoded));
-  if (!lc_pouch_index_term_posting_table_decode(&reader->store->allocator,
+  if (!lc_pouch_index_term_posting_table_append(&reader->store->allocator,
                                                 &reader->exists_postings,
-                                                term_id, &decoded)) {
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+                                                term_id, doc_ids)) {
     return lc_pouch_set_nomem(error, reader->alloc_message);
   }
-  for (index = 0U; index < decoded.count; ++index) {
-    if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                          decoded.items[index])) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-      return lc_pouch_set_nomem(error, reader->alloc_message);
-    }
-  }
-  lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
   return LC_OK;
 }
 
@@ -6782,10 +6738,8 @@ static int lc_pouch_disk_query_read_range_term_doc_ids(
     void *context, const lc_pouch_document_range_term *term,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
   lc_pouch_disk_exact_term_doc_id_reader *reader;
-  lc_pouch_index_doc_id_set decoded;
   lc_pouch_index_term_id term_id;
   char *range_key;
-  size_t index;
   int rc;
 
   reader = (lc_pouch_disk_exact_term_doc_id_reader *)context;
@@ -6827,20 +6781,10 @@ static int lc_pouch_disk_query_read_range_term_doc_ids(
         return rc;
       }
     }
-    memset(&decoded, 0, sizeof(decoded));
-    if (!lc_pouch_index_term_posting_table_decode(
-            &reader->store->allocator, &cache->postings, term_id, &decoded)) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+    if (!lc_pouch_index_term_posting_table_append(
+            &reader->store->allocator, &cache->postings, term_id, doc_ids)) {
       return lc_pouch_set_nomem(error, reader->alloc_message);
     }
-    for (index = 0U; index < decoded.count; ++index) {
-      if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                            decoded.items[index])) {
-        lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-        return lc_pouch_set_nomem(error, reader->alloc_message);
-      }
-    }
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
     return LC_OK;
   }
   if (!lc_pouch_index_term_table_find_or_add(&reader->store->allocator,
@@ -6858,21 +6802,11 @@ static int lc_pouch_disk_query_read_range_term_doc_ids(
       return rc;
     }
   }
-  memset(&decoded, 0, sizeof(decoded));
-  if (!lc_pouch_index_term_posting_table_decode(&reader->store->allocator,
+  if (!lc_pouch_index_term_posting_table_append(&reader->store->allocator,
                                                 &reader->range_postings,
-                                                term_id, &decoded)) {
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+                                                term_id, doc_ids)) {
     return lc_pouch_set_nomem(error, reader->alloc_message);
   }
-  for (index = 0U; index < decoded.count; ++index) {
-    if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                          decoded.items[index])) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-      return lc_pouch_set_nomem(error, reader->alloc_message);
-    }
-  }
-  lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
   return LC_OK;
 }
 
@@ -6962,10 +6896,8 @@ static int lc_pouch_disk_query_read_prefix_term_doc_ids(
     void *context, const lc_pouch_document_prefix_term *term,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
   lc_pouch_disk_exact_term_doc_id_reader *reader;
-  lc_pouch_index_doc_id_set decoded;
   lc_pouch_index_term_id term_id;
   char *prefix_key;
-  size_t index;
   int rc;
 
   reader = (lc_pouch_disk_exact_term_doc_id_reader *)context;
@@ -7009,20 +6941,10 @@ static int lc_pouch_disk_query_read_prefix_term_doc_ids(
         return rc;
       }
     }
-    memset(&decoded, 0, sizeof(decoded));
-    if (!lc_pouch_index_term_posting_table_decode(
-            &reader->store->allocator, &cache->postings, term_id, &decoded)) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+    if (!lc_pouch_index_term_posting_table_append(
+            &reader->store->allocator, &cache->postings, term_id, doc_ids)) {
       return lc_pouch_set_nomem(error, reader->alloc_message);
     }
-    for (index = 0U; index < decoded.count; ++index) {
-      if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                            decoded.items[index])) {
-        lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-        return lc_pouch_set_nomem(error, reader->alloc_message);
-      }
-    }
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
     return LC_OK;
   }
   if (!lc_pouch_index_term_table_find_or_add(&reader->store->allocator,
@@ -7040,21 +6962,11 @@ static int lc_pouch_disk_query_read_prefix_term_doc_ids(
       return rc;
     }
   }
-  memset(&decoded, 0, sizeof(decoded));
-  if (!lc_pouch_index_term_posting_table_decode(&reader->store->allocator,
+  if (!lc_pouch_index_term_posting_table_append(&reader->store->allocator,
                                                 &reader->prefix_postings,
-                                                term_id, &decoded)) {
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+                                                term_id, doc_ids)) {
     return lc_pouch_set_nomem(error, reader->alloc_message);
   }
-  for (index = 0U; index < decoded.count; ++index) {
-    if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                          decoded.items[index])) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-      return lc_pouch_set_nomem(error, reader->alloc_message);
-    }
-  }
-  lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
   return LC_OK;
 }
 
@@ -10868,10 +10780,8 @@ static int lc_pouch_disk_query_read_contains_term_doc_ids(
     void *context, const lc_pouch_document_contains_term *term,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
   lc_pouch_disk_exact_term_doc_id_reader *reader;
-  lc_pouch_index_doc_id_set decoded;
   lc_pouch_index_term_id term_id;
   char *contains_key;
-  size_t index;
   int rc;
 
   reader = (lc_pouch_disk_exact_term_doc_id_reader *)context;
@@ -10915,20 +10825,10 @@ static int lc_pouch_disk_query_read_contains_term_doc_ids(
         return rc;
       }
     }
-    memset(&decoded, 0, sizeof(decoded));
-    if (!lc_pouch_index_term_posting_table_decode(
-            &reader->store->allocator, &cache->postings, term_id, &decoded)) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+    if (!lc_pouch_index_term_posting_table_append(
+            &reader->store->allocator, &cache->postings, term_id, doc_ids)) {
       return lc_pouch_set_nomem(error, reader->alloc_message);
     }
-    for (index = 0U; index < decoded.count; ++index) {
-      if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                            decoded.items[index])) {
-        lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-        return lc_pouch_set_nomem(error, reader->alloc_message);
-      }
-    }
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
     return LC_OK;
   }
   if (!lc_pouch_index_term_table_find_or_add(
@@ -10946,21 +10846,11 @@ static int lc_pouch_disk_query_read_contains_term_doc_ids(
       return rc;
     }
   }
-  memset(&decoded, 0, sizeof(decoded));
-  if (!lc_pouch_index_term_posting_table_decode(&reader->store->allocator,
+  if (!lc_pouch_index_term_posting_table_append(&reader->store->allocator,
                                                 &reader->contains_postings,
-                                                term_id, &decoded)) {
-    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
+                                                term_id, doc_ids)) {
     return lc_pouch_set_nomem(error, reader->alloc_message);
   }
-  for (index = 0U; index < decoded.count; ++index) {
-    if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, doc_ids,
-                                          decoded.items[index])) {
-      lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
-      return lc_pouch_set_nomem(error, reader->alloc_message);
-    }
-  }
-  lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator, &decoded);
   return LC_OK;
 }
 

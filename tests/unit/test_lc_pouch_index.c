@@ -387,6 +387,34 @@ static void test_term_posting_table_decodes_by_term_id(void **state) {
   lc_pouch_index_term_posting_table_cleanup(NULL, &table);
 }
 
+static void test_term_posting_table_appends_by_term_id(void **state) {
+  lc_pouch_index_term_posting_table table;
+  lc_pouch_index_doc_id_set appended;
+  lc_pouch_index_doc_id ids[] = {9U, 3U, 3U, 7U};
+  lc_pouch_index_doc_id expected[] = {1U, 3U, 7U, 9U};
+  lc_pouch_index_doc_id missing_expected[] = {1U, 3U, 7U, 9U};
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&appended, 0, sizeof(appended));
+
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &appended, 1U));
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &table, 42U, ids, sizeof(ids) / sizeof(ids[0])));
+
+  assert_true(
+      lc_pouch_index_term_posting_table_append(NULL, &table, 42U, &appended));
+  assert_doc_ids(&appended, expected, sizeof(expected) / sizeof(expected[0]));
+
+  assert_true(
+      lc_pouch_index_term_posting_table_append(NULL, &table, 99U, &appended));
+  assert_doc_ids(&appended, missing_expected,
+                 sizeof(missing_expected) / sizeof(missing_expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &appended);
+  lc_pouch_index_term_posting_table_cleanup(NULL, &table);
+}
+
 static void test_term_posting_table_replaces_existing_posting(void **state) {
   lc_pouch_index_term_posting_table table;
   lc_pouch_index_doc_id_set decoded;
@@ -1858,6 +1886,7 @@ int main(void) {
       cmocka_unit_test(test_posting_dense_decodes_and_intersects),
       cmocka_unit_test(test_term_table_interns_sorted_terms_with_stable_ids),
       cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
+      cmocka_unit_test(test_term_posting_table_appends_by_term_id),
       cmocka_unit_test(test_term_posting_table_replaces_existing_posting),
       cmocka_unit_test(test_result_cache_keys_by_generation_and_plan),
       cmocka_unit_test(test_result_plan_keys_are_normalized_by_index),

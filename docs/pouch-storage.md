@@ -727,7 +727,10 @@ live state etag/version check, and then restore stable key/cursor ordering for
 the public result stream. Cached docID result pages for key-only range,
 non-wildcard `in`, and contains scans snapshot keys directly from the immutable
 document table, avoiding a summary-index translation layer when metadata rows
-are not needed. The client planner also recognizes full-form `or`
+are not needed. Prepared adaptive postings decode directly into caller-owned
+docID sets, so equality, `in`, exists, range, prefix, and contains readers avoid
+temporary decoded vectors on cache hits. The client planner also recognizes
+full-form `or`
 selectors whose branches are exact equality predicates over the same strict
 field and lowers them to the existing storage-owned `in` candidate path; mixed
 field equality OR branches use a storage-owned branch-union posting path.

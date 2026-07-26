@@ -751,6 +751,14 @@ Latest release targets confirmed on 2026-07-23:
         `ContainsMessage` about 4.39 ms. Go disk measured about 46.6 ms, 1.95
         ms, and 1.06 ms respectively in the same run, so `InTags` and
         `ContainsMessage` key-return paths remain pouch performance gaps.
+      - [x] Add index-owned posting append decode and route disk exact,
+        exists, range, prefix, and contains readers through it, so cached
+        adaptive postings append into the caller's docID set without allocating
+        a temporary decoded set and copying it item-by-item.
+        Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
+        pouch `InTags` measured about 7.04 ms and `ContainsMessage` about 3.22
+        ms; Go disk measured about 47.9 ms and 1.19 ms respectively in the
+        same run, so contains key-return remains a pouch performance gap.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

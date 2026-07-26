@@ -298,6 +298,23 @@ int lc_pouch_index_term_posting_table_decode(
                                        &table->entries[position].posting, dst);
 }
 
+int lc_pouch_index_term_posting_table_append(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_term_posting_table *table,
+    lc_pouch_index_term_id term_id, lc_pouch_index_doc_id_set *dst) {
+  size_t position;
+
+  if (dst == NULL) {
+    return 0;
+  }
+  if (!lc_pouch_index_term_posting_table_find_position(table, term_id,
+                                                       &position)) {
+    return 1;
+  }
+  return lc_pouch_index_posting_append(allocator,
+                                       &table->entries[position].posting, dst);
+}
+
 void lc_pouch_index_prepared_term_cache_cleanup(
     const lc_pouch_allocator *allocator,
     lc_pouch_index_prepared_term_cache *cache) {

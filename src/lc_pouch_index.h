@@ -184,6 +184,9 @@ int lc_pouch_index_posting_build(const lc_pouch_allocator *allocator,
 int lc_pouch_index_posting_decode(const lc_pouch_allocator *allocator,
                                   const lc_pouch_index_posting *posting,
                                   lc_pouch_index_doc_id_set *dst);
+int lc_pouch_index_posting_append(const lc_pouch_allocator *allocator,
+                                  const lc_pouch_index_posting *posting,
+                                  lc_pouch_index_doc_id_set *dst);
 int lc_pouch_index_posting_intersect(const lc_pouch_allocator *allocator,
                                      const lc_pouch_index_posting *posting,
                                      const lc_pouch_index_doc_id_set *filter,
@@ -208,6 +211,10 @@ int lc_pouch_index_term_posting_table_contains(
     const lc_pouch_index_term_posting_table *table,
     lc_pouch_index_term_id term_id);
 int lc_pouch_index_term_posting_table_decode(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_term_posting_table *table,
+    lc_pouch_index_term_id term_id, lc_pouch_index_doc_id_set *dst);
+int lc_pouch_index_term_posting_table_append(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_term_posting_table *table,
     lc_pouch_index_term_id term_id, lc_pouch_index_doc_id_set *dst);
