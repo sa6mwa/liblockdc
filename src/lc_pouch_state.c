@@ -2250,6 +2250,122 @@ cleanup:
   return rc;
 }
 
+int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
+                                 const char *key, const char *txn_id,
+                                 lc_pouch_state_write_result *out,
+                                 lc_error *error) {
+  lc_pouch_state_entry committed;
+  lc_pouch_state_entry staged;
+  lc_pouch_namespace_manifest manifest;
+  char *staged_key;
+  unsigned long committed_max_version;
+  unsigned long staged_max_version;
+  unsigned long version;
+  unsigned long decision_version;
+  unsigned long discard_version;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || txn_id == NULL || txn_id[0] == '\0' ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_state_commit_staged requires pouch, "
+                        "namespace, key, txn_id and out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  staged_key = lc_pouch_state_staged_key(&pouch->allocator, key, txn_id);
+  if (staged_key == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch staged state key", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, staged_key);
+    return rc;
+  }
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, error);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, staged_key);
+    return rc;
+  }
+  memset(&committed, 0, sizeof(committed));
+  memset(&staged, 0, sizeof(staged));
+  rc = lc_pouch_state_scan(pouch, &manifest, key, &committed,
+                           &committed_max_version, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_scan(pouch, &manifest, staged_key, &staged,
+                             &staged_max_version, error);
+  }
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  if (!staged.found) {
+    goto cleanup;
+  }
+
+  version = committed_max_version > staged_max_version ? committed_max_version
+                                                       : staged_max_version;
+  version++;
+  rc = lc_pouch_state_append_record(
+      pouch, namespace_name, &manifest, 'L', key, staged.content_type,
+      staged.etag, staged.payload_leaf, version, staged.bytes,
+      staged.has_query_hidden, staged.query_hidden, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  decision_version = version + 1UL;
+  rc = lc_pouch_state_append_decision(
+      pouch, namespace_name, &manifest, staged_key, staged.etag,
+      LC_POUCH_STATE_DECISION_COMMITTED, decision_version, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  discard_version = decision_version + 1UL;
+  rc = lc_pouch_state_append_tombstone(pouch, namespace_name, &manifest,
+                                       staged_key, staged.etag,
+                                       discard_version, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_state_touch_marker(pouch, &manifest, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  (void)lc_pouch_state_cache_apply_write(
+      pouch, namespace_name, &manifest, key, staged.content_type, staged.etag,
+      staged.payload_leaf, version, staged.bytes, staged.has_query_hidden,
+      staged.query_hidden, 1);
+  (void)lc_pouch_state_cache_apply_write(
+      pouch, namespace_name, &manifest, staged_key, NULL, staged.etag, NULL,
+      discard_version, 0UL, 0, 0, 0);
+  out->etag = lc_strdup_with_allocator(&pouch->allocator, staged.etag);
+  if (out->etag == NULL) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to allocate pouch staged commit etag", NULL,
+                      NULL, NULL);
+    goto cleanup;
+  }
+  out->version = version;
+  out->bytes = staged.bytes;
+  out->has_query_hidden = staged.has_query_hidden;
+  out->query_hidden = staged.query_hidden;
+  lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
+
+cleanup:
+  lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
+  lc_pouch_state_entry_cleanup(&pouch->allocator, &committed);
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  lc_free_with_allocator(&pouch->allocator, staged_key);
+  if (rc != LC_OK) {
+    lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
+  }
+  return rc;
+}
+
 int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
                                   const char *key, const char *txn_id,
                                   int *discarded, lc_error *error) {

@@ -2348,15 +2348,18 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   lc_client *client;
   lc_client *reader;
   lc_pouch *pouch;
+  lc_source *source;
   lc_txn_participant participants[2];
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
   lc_txn_replay_req replay_req;
   lc_txn_replay_res replay_res;
+  lc_pouch_state_write_result write_result;
   lc_pouch_state_read_result read_result;
   lc_error error;
   char root[512];
   char txn_record[1024];
+  char state_bytes[128];
   char namespace_hex[128];
   char key_hex[128];
   char backend_hex[128];
@@ -2366,9 +2369,11 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   client = NULL;
   reader = NULL;
   pouch = NULL;
+  source = NULL;
   memset(participants, 0, sizeof(participants));
   memset(&decision_res, 0, sizeof(decision_res));
   memset(&replay_res, 0, sizeof(replay_res));
+  memset(&write_result, 0, sizeof(write_result));
   memset(&read_result, 0, sizeof(read_result));
   lc_txn_decision_req_init(&decision_req);
   lc_txn_replay_req_init(&replay_req);
@@ -2400,6 +2405,43 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   lc_client_close(client);
   client = NULL;
 
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("committed-order-1",
+                             strlen("committed-order-1"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "orders/eu", "state/order-1",
+                                  "txn-pouch-records", source, NULL,
+                                  &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("committed-order-2",
+                             strlen("committed-order-2"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "orders/us", "state/order-2",
+                                  "txn-pouch-records", source, NULL,
+                                  &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("rolled-back-order",
+                             strlen("rolled-back-order"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "orders/eu", "state/order-1",
+                                  "txn-pouch-rollback", source, NULL,
+                                  &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
   open_pouch_client(root, &reader, &error);
   replay_req.txn_id = "txn-pouch-records";
   rc = reader->txn_replay(reader, &replay_req, &replay_res, &error);
@@ -2423,6 +2465,30 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_string_equal(replay_res.correlation_id,
                       "pouch-txn-00000000000000000002");
   lc_txn_replay_res_cleanup(&replay_res);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "orders/eu", "state/order-1",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, state_bytes, sizeof(state_bytes));
+  assert_string_equal(state_bytes, "committed-order-1");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, "orders/eu",
+                           "state/order-1/.staging/txn-pouch-records",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, "orders/eu", "state/order-1",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, state_bytes, sizeof(state_bytes));
+  assert_string_equal(state_bytes, "committed-order-1");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
 
   decision_req.txn_id = "txn-pouch-rollback";
   rc = reader->txn_rollback(reader, &decision_req, &decision_res, &error);
@@ -2441,6 +2507,16 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_string_equal(replay_res.correlation_id,
                       "pouch-txn-00000000000000000003");
   lc_txn_replay_res_cleanup(&replay_res);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "orders/eu",
+                           "state/order-1/.staging/txn-pouch-rollback",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
   lc_client_close(reader);
   reader = NULL;
 

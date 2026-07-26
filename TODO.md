@@ -47,9 +47,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       - [x] Persist pouch transaction coordinator prepare/commit/rollback
         records with participant namespace/key/backend tuples in the internal
         segmented `.lockd/txn` namespace and replay them after reopen.
-      - [ ] Apply committed/rolled-back transaction participant records to
-        staged state promotion/discard and add expired undecided staged-state
-        cleanup on reopen.
+      - [x] Apply foreground `txn_commit` and `txn_rollback` participant
+        records to staged state promotion/discard.
+      - [ ] Replay committed/rolled-back transaction participant records during
+        client open and add expired undecided staged-state cleanup on reopen.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

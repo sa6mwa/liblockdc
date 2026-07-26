@@ -532,7 +532,8 @@ static int lc_pouch_txn_validate_participants(
   for (i = 0U; i < req->participant_count; ++i) {
     if (req->participants[i].namespace_name == NULL ||
         req->participants[i].namespace_name[0] == '\0' ||
-        req->participants[i].key == NULL || req->participants[i].key[0] == '\0') {
+        req->participants[i].key == NULL ||
+        req->participants[i].key[0] == '\0') {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch transaction participant requires namespace "
                           "and key",
@@ -671,6 +672,54 @@ static int lc_pouch_txn_replay_response(lc_txn_replay_res *out,
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch transaction replay response",
                         NULL, NULL, NULL);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_txn_apply_participants(lc_client_handle *client,
+                                           const lc_txn_decision_req *req,
+                                           const char *state,
+                                           lc_error *error) {
+  size_t i;
+
+  if (strcmp(state, "prepare") == 0) {
+    return LC_OK;
+  }
+  for (i = 0U; i < req->participant_count; ++i) {
+    const char *namespace_name;
+    int rc;
+
+    rc = lc_pouch_client_validate_public_key(req->participants[i].key, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    namespace_name =
+        lc_pouch_client_namespace(client, req->participants[i].namespace_name);
+    if (strcmp(state, "commit") == 0) {
+      lc_pouch_state_write_result result;
+
+      memset(&result, 0, sizeof(result));
+      rc = lc_pouch_state_commit_staged(client->pouch, namespace_name,
+                                        req->participants[i].key, req->txn_id,
+                                        &result, error);
+      lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+      if (rc != LC_OK) {
+        return rc;
+      }
+    } else if (strcmp(state, "rollback") == 0) {
+      int discarded;
+
+      rc = lc_pouch_state_discard_staged(client->pouch, namespace_name,
+                                         req->participants[i].key,
+                                         req->txn_id, &discarded, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+    } else {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch transaction state is unsupported", NULL,
+                          NULL, NULL);
+    }
   }
   return LC_OK;
 }
@@ -1730,6 +1779,9 @@ static int lc_pouch_client_txn_decision(lc_client *self,
   }
   if (source != NULL) {
     lc_source_close(source);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_apply_participants(client, req, state, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_decision_response(out, req->txn_id, state,
