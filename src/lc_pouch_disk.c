@@ -223,6 +223,7 @@ typedef struct lc_pouch_disk_store {
   char *lock_path;
   char *query_index_path;
   char *query_temporal_index_dir_path;
+  char *query_doc_index_dir_path;
   char *query_exact_index_dir_path;
   char *query_exists_index_dir_path;
   char *query_number_index_dir_path;
@@ -1274,6 +1275,51 @@ lc_pouch_disk_make_query_temporal_index_dir_path(lc_pouch_disk_store *store,
 }
 
 static char *
+lc_pouch_disk_make_query_doc_index_dir_path(lc_pouch_disk_store *store,
+                                            lc_error *error) {
+  char *namespace_path;
+  char *logstore_path;
+  char *doc_path;
+  int rc;
+
+  namespace_path =
+      lc_pouch_disk_make_namespace_path(store, LC_POUCH_BACKEND_NAMESPACE);
+  logstore_path =
+      namespace_path != NULL
+          ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+          : NULL;
+  doc_path = logstore_path != NULL
+                 ? lc_pouch_join_path(&store->allocator, logstore_path,
+                                      "query.index.docs")
+                 : NULL;
+  if (namespace_path == NULL || logstore_path == NULL || doc_path == NULL) {
+    lc_pouch_free(&store->allocator, namespace_path);
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, doc_path);
+    (void)lc_pouch_set_nomem(error,
+                             "failed to allocate pouch doc query index path");
+    return NULL;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      namespace_path, "failed to create pouch backend namespace", error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_ensure_directory(
+        logstore_path, "failed to create pouch backend logstore", error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_ensure_directory(
+        doc_path, "failed to create pouch doc query index", error);
+  }
+  lc_pouch_free(&store->allocator, namespace_path);
+  lc_pouch_free(&store->allocator, logstore_path);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, doc_path);
+    return NULL;
+  }
+  return doc_path;
+}
+
+static char *
 lc_pouch_disk_make_query_exact_index_dir_path(lc_pouch_disk_store *store,
                                               lc_error *error) {
   char *namespace_path;
@@ -1485,6 +1531,43 @@ lc_pouch_disk_make_query_temporal_generation_path(lc_pouch_disk_store *store,
   memcpy(leaf + escaped_len, ".lcptgn", sizeof(".lcptgn"));
   path = lc_pouch_join_path(&store->allocator,
                             store->query_temporal_index_dir_path, leaf);
+  lc_pouch_free(&store->allocator, escaped);
+  lc_pouch_free(&store->allocator, leaf);
+  return path;
+}
+
+static char *
+lc_pouch_disk_make_query_doc_generation_path(lc_pouch_disk_store *store,
+                                             const char *namespace_name) {
+  char *escaped;
+  char *leaf;
+  char *path;
+  size_t escaped_len;
+  size_t leaf_len;
+
+  if (store == NULL || store->query_doc_index_dir_path == NULL ||
+      namespace_name == NULL) {
+    return NULL;
+  }
+  escaped_len = lc_pouch_disk_lock_escaped_length(namespace_name);
+  if (escaped_len > ((size_t)-1) - sizeof(".lcpdtg")) {
+    return NULL;
+  }
+  escaped = (char *)lc_pouch_alloc(&store->allocator, escaped_len + 1U);
+  if (escaped == NULL) {
+    return NULL;
+  }
+  lc_pouch_disk_lock_escape(escaped, namespace_name);
+  leaf_len = escaped_len + sizeof(".lcpdtg");
+  leaf = (char *)lc_pouch_alloc(&store->allocator, leaf_len);
+  if (leaf == NULL) {
+    lc_pouch_free(&store->allocator, escaped);
+    return NULL;
+  }
+  memcpy(leaf, escaped, escaped_len);
+  memcpy(leaf + escaped_len, ".lcpdtg", sizeof(".lcpdtg"));
+  path = lc_pouch_join_path(&store->allocator, store->query_doc_index_dir_path,
+                            leaf);
   lc_pouch_free(&store->allocator, escaped);
   lc_pouch_free(&store->allocator, leaf);
   return path;
@@ -13950,6 +14033,91 @@ done:
   return rc;
 }
 
+static int lc_pouch_disk_write_query_doc_generation(
+    lc_pouch_disk_store *store, const lc_pouch_index_doc_generation *generation,
+    lc_error *error) {
+  unsigned char *encoded;
+  char *path;
+  char *temp_path;
+  size_t encoded_size;
+  size_t written;
+  int fd;
+  int rc;
+
+  encoded = NULL;
+  path = NULL;
+  temp_path = NULL;
+  fd = -1;
+  if (!lc_pouch_index_doc_generation_encoded_size(generation, &encoded_size)) {
+    return lc_pouch_set_invalid(error, "pouch doc query index exceeds limits");
+  }
+  encoded = (unsigned char *)lc_pouch_alloc(&store->allocator, encoded_size);
+  path = lc_pouch_disk_make_query_doc_generation_path(
+      store, generation->namespace_name);
+  if (encoded == NULL || path == NULL) {
+    lc_pouch_free(&store->allocator, encoded);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch doc query index generation");
+  }
+  temp_path =
+      lc_pouch_disk_make_query_temporal_generation_temp_path(store, path);
+  if (temp_path == NULL) {
+    lc_pouch_free(&store->allocator, encoded);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch doc query index temp path");
+  }
+  if (!lc_pouch_index_doc_generation_encode(generation, encoded, encoded_size,
+                                            &written) ||
+      written != encoded_size) {
+    lc_pouch_free(&store->allocator, encoded);
+    lc_pouch_free(&store->allocator, path);
+    lc_pouch_free(&store->allocator, temp_path);
+    return lc_pouch_set_invalid(error,
+                                "failed to encode pouch doc query index");
+  }
+
+  fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd < 0) {
+    rc = lc_pouch_set_errno(error, "failed to open pouch doc query index");
+    goto done;
+  }
+  if (!lc_pouch_write_all(fd, encoded, encoded_size)) {
+    rc = lc_pouch_set_errno(error, "failed to write pouch doc query index");
+    goto done;
+  }
+  if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
+    rc = lc_pouch_set_errno(error, "failed to fsync pouch doc query index");
+    goto done;
+  }
+  if (close(fd) != 0) {
+    fd = -1;
+    rc = lc_pouch_set_errno(error, "failed to close pouch doc query index");
+    goto done;
+  }
+  fd = -1;
+  if (rename(temp_path, path) != 0) {
+    rc = lc_pouch_set_errno(error, "failed to install pouch doc query index");
+    goto done;
+  }
+  rc = lc_pouch_disk_fsync_directory(
+      store, store->query_doc_index_dir_path, error,
+      "failed to fsync pouch doc query index directory");
+
+done:
+  if (fd >= 0) {
+    (void)close(fd);
+  }
+  if (rc != LC_OK && temp_path != NULL) {
+    (void)unlink(temp_path);
+  }
+  lc_pouch_free(&store->allocator, encoded);
+  lc_pouch_free(&store->allocator, path);
+  lc_pouch_free(&store->allocator, temp_path);
+  return rc;
+}
+
 static int lc_pouch_disk_write_query_exact_generation(
     lc_pouch_disk_store *store,
     const lc_pouch_index_term_generation *generation, lc_error *error) {
@@ -14351,6 +14519,58 @@ lc_pouch_disk_clear_query_temporal_generations(lc_pouch_disk_store *store,
       "failed to fsync pouch temporal query index directory");
 }
 
+static int lc_pouch_disk_clear_query_doc_generations(lc_pouch_disk_store *store,
+                                                     lc_error *error) {
+  DIR *dir;
+  struct dirent *entry;
+
+  if (store == NULL || store->query_doc_index_dir_path == NULL) {
+    return LC_OK;
+  }
+  dir = opendir(store->query_doc_index_dir_path);
+  if (dir == NULL) {
+    return lc_pouch_set_errno(error, "failed to open pouch doc query index");
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    const char *name;
+    size_t name_len;
+    char *path;
+
+    name = entry->d_name;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+      continue;
+    }
+    name_len = strlen(name);
+    if (!((name_len > strlen(".lcpdtg") &&
+           strcmp(name + name_len - strlen(".lcpdtg"), ".lcpdtg") == 0) ||
+          (name_len > strlen(".lcpdtg.tmp") &&
+           strcmp(name + name_len - strlen(".lcpdtg.tmp"), ".lcpdtg.tmp") ==
+               0))) {
+      continue;
+    }
+    path = lc_pouch_join_path(&store->allocator,
+                              store->query_doc_index_dir_path, name);
+    if (path == NULL) {
+      (void)closedir(dir);
+      return lc_pouch_set_nomem(
+          error, "failed to allocate pouch doc query index path");
+    }
+    if (unlink(path) != 0 && errno != ENOENT) {
+      lc_pouch_free(&store->allocator, path);
+      (void)closedir(dir);
+      return lc_pouch_set_errno(error,
+                                "failed to remove pouch doc query index");
+    }
+    lc_pouch_free(&store->allocator, path);
+  }
+  if (closedir(dir) != 0) {
+    return lc_pouch_set_errno(error, "failed to close pouch doc query index");
+  }
+  return lc_pouch_disk_fsync_directory(
+      store, store->query_doc_index_dir_path, error,
+      "failed to fsync pouch doc query index directory");
+}
+
 static int
 lc_pouch_disk_clear_query_exact_generations(lc_pouch_disk_store *store,
                                             lc_error *error) {
@@ -14635,6 +14855,42 @@ static int lc_pouch_disk_build_query_temporal_generation(
           &store->allocator, &generation->postings)) {
     return lc_pouch_set_nomem(error,
                               "failed to encode pouch temporal query index");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_build_query_doc_generation(
+    lc_pouch_disk_store *store, const char *namespace_name,
+    lc_pouch_index_doc_generation *generation, lc_error *error) {
+  size_t index;
+
+  memset(generation, 0, sizeof(*generation));
+  generation->identity = lc_pouch_disk_query_index_identity(store);
+  generation->namespace_name =
+      lc_pouch_strdup(&store->allocator, namespace_name);
+  if (generation->namespace_name == NULL) {
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch doc query index namespace");
+  }
+
+  for (index = 0U; index < store->query_doc_table.count; ++index) {
+    const lc_pouch_index_doc_entry *entry;
+
+    entry = &store->query_doc_table.entries[index];
+    if (entry->namespace_name == NULL || entry->key == NULL) {
+      continue;
+    }
+    if (strcmp(entry->namespace_name, namespace_name) < 0) {
+      continue;
+    }
+    if (strcmp(entry->namespace_name, namespace_name) > 0) {
+      break;
+    }
+    if (!lc_pouch_index_doc_table_find_or_add(&store->allocator,
+                                              &generation->docs, namespace_name,
+                                              entry->key, NULL)) {
+      return lc_pouch_set_nomem(error, "failed to build pouch doc query index");
+    }
   }
   return LC_OK;
 }
@@ -15042,6 +15298,21 @@ static int lc_pouch_disk_publish_query_temporal_generation(
   return rc;
 }
 
+static int lc_pouch_disk_publish_query_doc_generation(
+    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
+  lc_pouch_index_doc_generation generation;
+  int rc;
+
+  memset(&generation, 0, sizeof(generation));
+  rc = lc_pouch_disk_build_query_doc_generation(store, namespace_name,
+                                                &generation, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_write_query_doc_generation(store, &generation, error);
+  }
+  lc_pouch_index_doc_generation_cleanup(&store->allocator, &generation);
+  return rc;
+}
+
 static int lc_pouch_disk_publish_query_exact_generation(
     lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
   lc_pouch_index_term_generation generation;
@@ -15125,6 +15396,37 @@ lc_pouch_disk_publish_query_temporal_generations(lc_pouch_disk_store *store,
     }
     rc = lc_pouch_disk_publish_query_temporal_generation(store, namespace_name,
                                                          error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    last_namespace = namespace_name;
+  }
+  return LC_OK;
+}
+
+static int
+lc_pouch_disk_publish_query_doc_generations(lc_pouch_disk_store *store,
+                                            lc_error *error) {
+  const char *last_namespace;
+  size_t index;
+  int rc;
+
+  rc = lc_pouch_disk_clear_query_doc_generations(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  last_namespace = NULL;
+  for (index = 0U; index < store->query_doc_table.count; ++index) {
+    const char *namespace_name;
+
+    namespace_name = store->query_doc_table.entries[index].namespace_name;
+    if (namespace_name == NULL ||
+        (last_namespace != NULL &&
+         strcmp(last_namespace, namespace_name) == 0)) {
+      continue;
+    }
+    rc = lc_pouch_disk_publish_query_doc_generation(store, namespace_name,
+                                                    error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -15384,6 +15686,10 @@ static int lc_pouch_disk_rebuild_query_index(lc_pouch_disk_store *store,
     }
   }
   rc = lc_pouch_disk_publish_query_temporal_generations(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_publish_query_doc_generations(store, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -20822,6 +21128,9 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
   }
   if (rc == LC_OK) {
     rc = lc_pouch_disk_publish_query_temporal_generations(store, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_publish_query_doc_generations(store, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_disk_publish_query_exact_generations(store, error);
@@ -26494,6 +26803,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->lock_path);
   lc_pouch_free(&allocator, store->query_index_path);
   lc_pouch_free(&allocator, store->query_temporal_index_dir_path);
+  lc_pouch_free(&allocator, store->query_doc_index_dir_path);
   lc_pouch_free(&allocator, store->query_exact_index_dir_path);
   lc_pouch_free(&allocator, store->query_exists_index_dir_path);
   lc_pouch_free(&allocator, store->query_number_index_dir_path);
@@ -26610,6 +26920,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->query_index_path = lc_pouch_disk_make_query_index_path(store, error);
   store->query_temporal_index_dir_path =
       lc_pouch_disk_make_query_temporal_index_dir_path(store, error);
+  store->query_doc_index_dir_path =
+      lc_pouch_disk_make_query_doc_index_dir_path(store, error);
   store->query_exact_index_dir_path =
       lc_pouch_disk_make_query_exact_index_dir_path(store, error);
   store->query_exists_index_dir_path =
@@ -26629,6 +26941,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   if (store->root_path == NULL || store->log_path == NULL ||
       store->lock_path == NULL || store->query_index_path == NULL ||
       store->query_temporal_index_dir_path == NULL ||
+      store->query_doc_index_dir_path == NULL ||
       store->query_exact_index_dir_path == NULL ||
       store->query_exists_index_dir_path == NULL ||
       store->query_number_index_dir_path == NULL ||

@@ -1386,11 +1386,16 @@ identity used by compiled reader files. The document table is the cutover
 target for immutable compiled generation readers.
 The disk bridge now maintains that document table alongside query summaries
 and routes field-predicate candidate docIDs through it before converting
-results back to summary entries. The table is still rebuilt from current
-summary refresh state rather than persisted as an immutable compiled segment,
-and disk publication/consumption of document-table generation files is still
-pending, but the query path no longer depends on direct summary-array-position
-casts for field predicate candidate sets.
+results back to summary entries. Disk publishes per-namespace document-table
+generation files under
+`<root>/%2elockd/logstore/query.index.docs/<escaped-namespace>.lcpdtg`
+during full query-index rebuilds and after successful compaction replay. The
+current query path still rebuilds the live in-memory global document table from
+summary refresh state; namespace-local reader/result-page consumption of the
+document-table files is the next cutover before compiled reader files can stop
+depending on the global docID table. Even before that cutover, the query path
+no longer depends on direct summary-array-position casts for field predicate
+candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
 `(field,value)` pairs are interned into stable term IDs with sorted lookup so
 compiled readers can stop carrying raw string scans through the planner.

@@ -510,8 +510,13 @@ Latest release targets confirmed on 2026-07-23:
         `lc_pouch_index`: per-namespace document tables round-trip under index
         sequence plus segmented manifest identity with sorted key order,
         implicit dense docIDs, duplicate rejection, and corruption/truncation
-        rejection coverage. Disk publication and consumption are still
-        pending.
+        rejection coverage.
+      - [x] Publish immutable per-namespace document-table generation files
+        from the disk bridge: full query-index rebuilds and compaction publish
+        `.lcpdtg` files under the backend logstore with client coverage
+        decoding default and non-default namespace artifacts. Namespace-local
+        reader/result-page consumption is still pending because current
+        prepared reader files continue to use the in-memory global docID table.
       - [x] Wire the disk query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
         namespace/key docIDs, candidate readers append table docIDs, and result
