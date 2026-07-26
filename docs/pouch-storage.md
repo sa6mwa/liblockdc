@@ -1767,10 +1767,10 @@ path for unchanged marker directories and a forced-refresh counter so marker
 hints cannot suppress validation indefinitely. The state projection cache is now
 active for both `single_writer` and shared handles; shared state reads compare
 peer-marker snapshots before deciding whether to replay namespace segments, and
-same-handle writes update the initialized projection directly. The remaining
-marker optimization work is to make the directory fast path stat cached peer
-markers when directory metadata is unchanged, so same-file marker rewrites keep
-the fast path without sacrificing freshness.
+same-handle writes update the initialized projection directly. When marker
+directory metadata is unchanged, refresh stats the cached peer marker files by
+name and compares size/mtime so same-file marker rewrites still invalidate
+cached projections without a full marker directory scan.
 
 Refresh needs two modes:
 

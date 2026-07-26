@@ -449,6 +449,22 @@ static void test_marker_refresh_uses_directory_fast_path_and_force(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 1);
 
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(
+      NULL, namespace_path, &before_dir, &error);
+  assert_int_equal(rc, LC_OK);
+  write_text_file(peer_path, "writer_pid=9\nsequence=2\npad=longer\n");
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(
+      NULL, namespace_path, &after_dir, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lc_pouch_namespace_marker_directory_snapshot_changed(
+                       &before_dir, &after_dir),
+                   0);
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(should_scan, 1);
+
   rc = lc_pouch_namespace_marker_refresh_should_scan(
       NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
       &error);

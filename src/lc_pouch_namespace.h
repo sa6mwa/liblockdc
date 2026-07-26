@@ -28,11 +28,19 @@ typedef struct lc_pouch_namespace_marker_directory_snapshot {
   long mtime;
 } lc_pouch_namespace_marker_directory_snapshot;
 
+typedef struct lc_pouch_namespace_marker_peer_stat {
+  char *name;
+  long size;
+  long mtime;
+} lc_pouch_namespace_marker_peer_stat;
+
 typedef struct lc_pouch_namespace_marker_refresh_state {
   int initialized;
   unsigned long skipped_refreshes;
   lc_pouch_namespace_marker_directory_snapshot directory;
   lc_pouch_namespace_marker_snapshot peers;
+  lc_pouch_namespace_marker_peer_stat *peer_stats;
+  unsigned long peer_stat_count;
 } lc_pouch_namespace_marker_refresh_state;
 
 char *lc_pouch_namespace_segment_leaf(const lc_allocator *allocator,

@@ -15,11 +15,7 @@
 #define LC_POUCH_SEGMENT_PREFIX "seg-"
 #define LC_POUCH_SEGMENT_SUFFIX ".log"
 
-typedef struct lc_pouch_marker_entry {
-  char *name;
-  long size;
-  long mtime;
-} lc_pouch_marker_entry;
+typedef lc_pouch_namespace_marker_peer_stat lc_pouch_marker_entry;
 
 char *lc_pouch_namespace_path(const lc_allocator *allocator,
                               const char *root_path,
@@ -220,6 +216,17 @@ static void lc_pouch_marker_entries_cleanup(
   lc_free_with_allocator(allocator, entries);
 }
 
+static void lc_pouch_marker_refresh_peer_stats_cleanup(
+    const lc_allocator *allocator, lc_pouch_namespace_marker_refresh_state *state) {
+  if (state == NULL) {
+    return;
+  }
+  lc_pouch_marker_entries_cleanup(allocator, state->peer_stats,
+                                  (size_t)state->peer_stat_count);
+  state->peer_stats = NULL;
+  state->peer_stat_count = 0UL;
+}
+
 static int lc_pouch_marker_entries_append(
     const lc_allocator *allocator, lc_pouch_marker_entry **entries,
     size_t *count, size_t *capacity, const char *name, long size, long mtime,
@@ -339,6 +346,79 @@ static int lc_pouch_marker_snapshot_build_fingerprint(
     }
   }
   *out = fingerprint;
+  return LC_OK;
+}
+
+static int lc_pouch_marker_entries_read(
+    const lc_allocator *allocator, const char *namespace_path,
+    const char *self_marker_leaf, lc_pouch_marker_entry **entries_out,
+    size_t *count_out, lc_error *error) {
+  lc_pouch_marker_entry *entries;
+  char *markers_path;
+  DIR *dir;
+  struct dirent *entry;
+  size_t count;
+  size_t capacity;
+  int rc;
+
+  *entries_out = NULL;
+  *count_out = 0U;
+  entries = NULL;
+  markers_path = lc_pouch_path_join(allocator, namespace_path, "markers");
+  if (markers_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch markers path", NULL, NULL,
+                        NULL);
+  }
+  dir = opendir(markers_path);
+  if (dir == NULL) {
+    lc_free_with_allocator(allocator, markers_path);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open pouch marker directory", NULL, NULL,
+                        NULL);
+  }
+  count = 0U;
+  capacity = 0U;
+  rc = LC_OK;
+  while ((entry = readdir(dir)) != NULL) {
+    char *marker_path;
+    struct stat st;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
+        (self_marker_leaf != NULL &&
+         strcmp(entry->d_name, self_marker_leaf) == 0)) {
+      continue;
+    }
+    marker_path = lc_pouch_path_join(allocator, markers_path, entry->d_name);
+    if (marker_path == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch marker path", NULL, NULL,
+                        NULL);
+      break;
+    }
+    if (stat(marker_path, &st) == 0 && S_ISREG(st.st_mode)) {
+      rc = lc_pouch_marker_entries_append(allocator, &entries, &count,
+                                          &capacity, entry->d_name,
+                                          (long)st.st_size, (long)st.st_mtime,
+                                          error);
+      if (rc != LC_OK) {
+        lc_free_with_allocator(allocator, marker_path);
+        break;
+      }
+    }
+    lc_free_with_allocator(allocator, marker_path);
+  }
+  closedir(dir);
+  lc_free_with_allocator(allocator, markers_path);
+  if (rc != LC_OK) {
+    lc_pouch_marker_entries_cleanup(allocator, entries, count);
+    return rc;
+  }
+  if (count > 1U) {
+    qsort(entries, count, sizeof(*entries), lc_pouch_marker_entry_compare);
+  }
+  *entries_out = entries;
+  *count_out = count;
   return LC_OK;
 }
 
@@ -489,11 +569,7 @@ int lc_pouch_namespace_marker_snapshot_read(
     const char *self_marker_leaf, lc_pouch_namespace_marker_snapshot *out,
     lc_error *error) {
   lc_pouch_marker_entry *entries;
-  char *markers_path;
-  DIR *dir;
-  struct dirent *entry;
   size_t count;
-  size_t capacity;
   int rc;
 
   if (namespace_path == NULL || out == NULL) {
@@ -504,58 +580,10 @@ int lc_pouch_namespace_marker_snapshot_read(
   }
   memset(out, 0, sizeof(*out));
   entries = NULL;
-  markers_path = lc_pouch_path_join(allocator, namespace_path, "markers");
-  if (markers_path == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch markers path", NULL, NULL,
-                        NULL);
-  }
-  dir = opendir(markers_path);
-  if (dir == NULL) {
-    lc_free_with_allocator(allocator, markers_path);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to open pouch marker directory", NULL, NULL,
-                        NULL);
-  }
-  count = 0U;
-  capacity = 0U;
-  rc = LC_OK;
-  while ((entry = readdir(dir)) != NULL) {
-    char *marker_path;
-    struct stat st;
-
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
-        (self_marker_leaf != NULL &&
-         strcmp(entry->d_name, self_marker_leaf) == 0)) {
-      continue;
-    }
-    marker_path = lc_pouch_path_join(allocator, markers_path, entry->d_name);
-    if (marker_path == NULL) {
-      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch marker path", NULL, NULL,
-                        NULL);
-      break;
-    }
-    if (stat(marker_path, &st) == 0 && S_ISREG(st.st_mode)) {
-      rc = lc_pouch_marker_entries_append(allocator, &entries, &count,
-                                          &capacity, entry->d_name,
-                                          (long)st.st_size, (long)st.st_mtime,
-                                          error);
-      if (rc != LC_OK) {
-        lc_free_with_allocator(allocator, marker_path);
-        break;
-      }
-    }
-    lc_free_with_allocator(allocator, marker_path);
-  }
-  closedir(dir);
-  lc_free_with_allocator(allocator, markers_path);
+  rc = lc_pouch_marker_entries_read(allocator, namespace_path,
+                                    self_marker_leaf, &entries, &count, error);
   if (rc != LC_OK) {
-    lc_pouch_marker_entries_cleanup(allocator, entries, count);
     return rc;
-  }
-  if (count > 1U) {
-    qsort(entries, count, sizeof(*entries), lc_pouch_marker_entry_compare);
   }
   rc = lc_pouch_marker_snapshot_build_fingerprint(allocator, entries, count,
                                                   &out->fingerprint, error);
@@ -631,16 +659,99 @@ int lc_pouch_namespace_marker_directory_snapshot_changed(
   return before->size != after->size || before->mtime != after->mtime;
 }
 
+static int lc_pouch_marker_refresh_cached_peer_stats_changed(
+    const lc_allocator *allocator, const char *namespace_path,
+    const lc_pouch_namespace_marker_refresh_state *state, int *changed,
+    lc_error *error) {
+  char *markers_path;
+  unsigned long i;
+  int rc;
+
+  *changed = 0;
+  markers_path = lc_pouch_path_join(allocator, namespace_path, "markers");
+  if (markers_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch markers path", NULL, NULL,
+                        NULL);
+  }
+  rc = LC_OK;
+  for (i = 0UL; i < state->peer_stat_count; ++i) {
+    char *marker_path;
+    struct stat st;
+
+    marker_path =
+        lc_pouch_path_join(allocator, markers_path, state->peer_stats[i].name);
+    if (marker_path == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch marker path", NULL, NULL,
+                        NULL);
+      break;
+    }
+    if (stat(marker_path, &st) != 0 || !S_ISREG(st.st_mode) ||
+        state->peer_stats[i].size != (long)st.st_size ||
+        state->peer_stats[i].mtime != (long)st.st_mtime) {
+      *changed = 1;
+      lc_free_with_allocator(allocator, marker_path);
+      break;
+    }
+    lc_free_with_allocator(allocator, marker_path);
+  }
+  lc_free_with_allocator(allocator, markers_path);
+  return rc;
+}
+
+static int lc_pouch_marker_refresh_full(
+    const lc_allocator *allocator, const char *namespace_path,
+    const char *self_marker_leaf,
+    lc_pouch_namespace_marker_refresh_state *state,
+    const lc_pouch_namespace_marker_directory_snapshot *directory,
+    int forced, int *should_scan, lc_error *error) {
+  lc_pouch_marker_entry *entries;
+  lc_pouch_namespace_marker_snapshot peers;
+  size_t count;
+  int peers_changed;
+  int rc;
+
+  memset(&peers, 0, sizeof(peers));
+  entries = NULL;
+  rc = lc_pouch_marker_entries_read(allocator, namespace_path,
+                                    self_marker_leaf, &entries, &count, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_marker_snapshot_build_fingerprint(allocator, entries, count,
+                                                  &peers.fingerprint, error);
+  if (rc != LC_OK) {
+    lc_pouch_marker_entries_cleanup(allocator, entries, count);
+    return rc;
+  }
+  peers.marker_count = (unsigned long)count;
+  peers_changed =
+      !state->initialized ||
+      lc_pouch_namespace_marker_snapshot_changed(&state->peers, &peers);
+  lc_pouch_namespace_marker_snapshot_cleanup(allocator, &state->peers);
+  lc_pouch_marker_refresh_peer_stats_cleanup(allocator, state);
+  state->peers = peers;
+  state->peer_stats = entries;
+  state->peer_stat_count = (unsigned long)count;
+  memset(&peers, 0, sizeof(peers));
+  entries = NULL;
+  state->directory = *directory;
+  state->initialized = 1;
+  state->skipped_refreshes = 0UL;
+  *should_scan = forced || peers_changed;
+  return LC_OK;
+}
+
 int lc_pouch_namespace_marker_refresh_should_scan(
     const lc_allocator *allocator, const char *namespace_path,
     const char *self_marker_leaf,
     lc_pouch_namespace_marker_refresh_state *state,
     unsigned long force_after_skips, int *should_scan, lc_error *error) {
   lc_pouch_namespace_marker_directory_snapshot directory;
-  lc_pouch_namespace_marker_snapshot peers;
+  int cached_peers_changed;
   int directory_changed;
   int forced;
-  int peers_changed;
   int rc;
 
   if (state == NULL || should_scan == NULL) {
@@ -649,7 +760,6 @@ int lc_pouch_namespace_marker_refresh_should_scan(
                         NULL, NULL, NULL);
   }
   memset(&directory, 0, sizeof(directory));
-  memset(&peers, 0, sizeof(peers));
   rc = lc_pouch_namespace_marker_directory_snapshot_read(
       allocator, namespace_path, &directory, error);
   if (rc != LC_OK) {
@@ -662,27 +772,23 @@ int lc_pouch_namespace_marker_refresh_should_scan(
   forced = state->initialized && force_after_skips > 0UL &&
            state->skipped_refreshes >= force_after_skips;
   if (!directory_changed && !forced) {
+    rc = lc_pouch_marker_refresh_cached_peer_stats_changed(
+        allocator, namespace_path, state, &cached_peers_changed, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (cached_peers_changed) {
+      return lc_pouch_marker_refresh_full(
+          allocator, namespace_path, self_marker_leaf, state, &directory, 0,
+          should_scan, error);
+    }
     ++state->skipped_refreshes;
     *should_scan = 0;
     return LC_OK;
   }
-  rc = lc_pouch_namespace_marker_snapshot_read(allocator, namespace_path,
-                                               self_marker_leaf, &peers,
-                                               error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  peers_changed =
-      !state->initialized ||
-      lc_pouch_namespace_marker_snapshot_changed(&state->peers, &peers);
-  lc_pouch_namespace_marker_snapshot_cleanup(allocator, &state->peers);
-  state->peers = peers;
-  memset(&peers, 0, sizeof(peers));
-  state->directory = directory;
-  state->initialized = 1;
-  state->skipped_refreshes = 0UL;
-  *should_scan = forced || peers_changed;
-  return LC_OK;
+  return lc_pouch_marker_refresh_full(allocator, namespace_path,
+                                      self_marker_leaf, state, &directory,
+                                      forced, should_scan, error);
 }
 
 void lc_pouch_namespace_marker_snapshot_cleanup(
@@ -702,6 +808,7 @@ void lc_pouch_namespace_marker_refresh_state_cleanup(
     return;
   }
   lc_pouch_namespace_marker_snapshot_cleanup(allocator, &state->peers);
+  lc_pouch_marker_refresh_peer_stats_cleanup(allocator, state);
   memset(state, 0, sizeof(*state));
 }
 

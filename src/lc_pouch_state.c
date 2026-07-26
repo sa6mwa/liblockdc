@@ -722,43 +722,6 @@ static int lc_pouch_state_cache_refresh(
   return rc;
 }
 
-static int lc_pouch_state_cache_shared_marker_refresh_needed(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
-    const lc_pouch_namespace_manifest *manifest, int *refresh,
-    lc_error *error) {
-  lc_pouch_namespace_marker_snapshot peers;
-  int changed;
-  int forced;
-  int rc;
-
-  memset(&peers, 0, sizeof(peers));
-  rc = lc_pouch_namespace_marker_snapshot_read(
-      &pouch->allocator, manifest->namespace_path, pouch->writer_marker_leaf,
-      &peers, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  changed = !cache->marker_refresh.initialized ||
-            lc_pouch_namespace_marker_snapshot_changed(
-                &cache->marker_refresh.peers, &peers);
-  forced = cache->marker_refresh.initialized &&
-           cache->marker_refresh.skipped_refreshes >=
-               LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS;
-  lc_pouch_namespace_marker_snapshot_cleanup(&pouch->allocator,
-                                             &cache->marker_refresh.peers);
-  cache->marker_refresh.peers = peers;
-  memset(&peers, 0, sizeof(peers));
-  cache->marker_refresh.initialized = 1;
-  if (changed || forced) {
-    cache->marker_refresh.skipped_refreshes = 0UL;
-    *refresh = 1;
-  } else {
-    ++cache->marker_refresh.skipped_refreshes;
-    *refresh = 0;
-  }
-  return LC_OK;
-}
-
 static int lc_pouch_state_cache_lookup(
     lc_pouch *pouch, const char *namespace_name,
     const lc_pouch_namespace_manifest *manifest, const char *key,
@@ -774,8 +737,10 @@ static int lc_pouch_state_cache_lookup(
   }
   force_refresh = 0;
   if (!pouch->single_writer) {
-    rc = lc_pouch_state_cache_shared_marker_refresh_needed(
-        pouch, cache, manifest, &force_refresh, error);
+    rc = lc_pouch_namespace_marker_refresh_should_scan(
+        &pouch->allocator, manifest->namespace_path, pouch->writer_marker_leaf,
+        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+        &force_refresh, error);
     if (rc != LC_OK) {
       return rc;
     }
