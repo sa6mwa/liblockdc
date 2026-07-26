@@ -743,6 +743,14 @@ Latest release targets confirmed on 2026-07-23:
         through index-owned docID result paging, so text predicate pages no
         longer translate the full cached match vector through disk summaries
         before cursor/limit handling.
+      - [x] Add direct document-table key snapshots for key-only numeric
+        `range`, non-wildcard `in`, and `contains` scans so cached result pages
+        do not allocate summary-index arrays before streaming keys.
+        Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
+        pouch `RangeHalf` measured about 5.26 ms, `InTags` about 4.28 ms, and
+        `ContainsMessage` about 4.39 ms. Go disk measured about 46.6 ms, 1.95
+        ms, and 1.06 ms respectively in the same run, so `InTags` and
+        `ContainsMessage` key-return paths remain pouch performance gaps.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

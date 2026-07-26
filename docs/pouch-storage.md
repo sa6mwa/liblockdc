@@ -724,7 +724,10 @@ Current pouch field postings support strict JSON Pointer equality, `in`,
 collection. Range-primary document and key-only scans walk ordered numeric field
 postings, apply upper-bound termination, filter stale/deleted rows through the
 live state etag/version check, and then restore stable key/cursor ordering for
-the public result stream. The client planner also recognizes full-form `or`
+the public result stream. Cached docID result pages for key-only range,
+non-wildcard `in`, and contains scans snapshot keys directly from the immutable
+document table, avoiding a summary-index translation layer when metadata rows
+are not needed. The client planner also recognizes full-form `or`
 selectors whose branches are exact equality predicates over the same strict
 field and lowers them to the existing storage-owned `in` candidate path; mixed
 field equality OR branches use a storage-owned branch-union posting path.
