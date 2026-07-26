@@ -46,6 +46,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     stats, ordinary dequeue, dequeue batch, ack, nack, extend, and pouch
     message methods over internal segmented queue records with payload
     roundtrip, visibility, redelivery, and ack coverage.
+    - [x] Add the first stateful queue delivery path: `dequeue_with_state`
+      now attaches a pouch-local state lease for `q/<queue>/state/<message_id>`,
+      patches that lease to the local pouch methods, and covers save/read/ack
+      behavior through the public message state handle.
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.

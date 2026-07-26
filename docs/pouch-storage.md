@@ -2283,10 +2283,13 @@ The current redesigned C backend implements the first ordinary queue surface
 with internal `.lockd/queue` segmented records. Enqueue stores payload and
 delivery metadata durably; stats, ordinary dequeue, dequeue batch, ack, nack,
 extend, and pouch message methods operate over those records with visibility
-and redelivery state persisted through the same append/replay path. This is not
-full queue parity yet: dequeue-with-state, subscribe/watch loops, notification
-hints, transaction side effects, TTL/retry exhaustion hardening, and
-high-contention duplicate-delivery tests remain broader queue work.
+and redelivery state persisted through the same append/replay path.
+`dequeue_with_state` now attaches a pouch-local state lease for the SDK
+convention `q/<queue>/state/<message_id>`, so public message state operations
+use the normal pouch state path. This is not full queue parity yet:
+subscribe/watch loops, notification hints, transaction side effects,
+stateful commit/rollback, TTL/retry exhaustion hardening, and high-contention
+duplicate-delivery tests remain broader queue work.
 
 Current pouch backend milestone: the private storage interface exposes queue
 wake status. The pouch backend reports `polling`, marks queue marker files as

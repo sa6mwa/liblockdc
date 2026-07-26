@@ -2079,7 +2079,6 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   nack_req.intent = LC_NACK_INTENT_DEFER;
   rc = message->nack(message, &nack_req, &error);
   assert_int_equal(rc, LC_OK);
-  message->close(message);
   message = NULL;
 
   rc = client->queue_stats(client, &stats_req, &stats_res, &error);
@@ -2172,6 +2171,104 @@ static void test_client_queue_dequeue_batch_returns_page(void **state) {
   assert_string_equal(batch.messages[1]->queue, "batch");
 
   lc_dequeue_batch_cleanup(&batch);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_queue_dequeue_with_state_uses_pouch_lease(
+    void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_lease *state_lease;
+  lc_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char expected_key[256];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  message = NULL;
+  state_lease = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("client-queue-state", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "application/json";
+  rc = lc_source_from_memory("{\"job\":1}", strlen("{\"job\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-state";
+  dequeue_req.visibility_timeout_seconds = 45L;
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  state_lease = message->state(message);
+  assert_non_null(state_lease);
+  snprintf(expected_key, sizeof(expected_key), "q/jobs/state/%s",
+           enqueue_res.message_id);
+  assert_string_equal(state_lease->key, expected_key);
+  assert_string_equal(state_lease->owner, "worker-state");
+  assert_int_equal(state_lease->version, 0L);
+  assert_null(state_lease->state_etag);
+  assert_int_equal(state_lease->lease_expires_at_unix,
+                   message->not_visible_until_unix);
+
+  rc = lc_source_from_memory("{\"handled\":true}",
+                             strlen("{\"handled\":true}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = state_lease->update(state_lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(state_lease->version, 1L);
+  assert_string_equal(state_lease->state_etag, "pouch-state-1");
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = state_lease->get(state_lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"handled\":true}"));
+  assert_memory_equal(bytes, "{\"handled\":true}",
+                      strlen("{\"handled\":true}"));
+  sink->close(sink);
+  sink = NULL;
+
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+
+  lc_get_res_cleanup(&get_res);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -4615,6 +4712,7 @@ int main(void) {
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
       cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),
+      cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),
