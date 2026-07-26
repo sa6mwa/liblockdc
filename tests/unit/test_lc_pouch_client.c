@@ -10312,6 +10312,40 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_int_equal(cache_status.misses, cache_baseline.misses + 1UL);
   assert_int_equal(cache_status.puts, cache_baseline.puts + 1UL);
 
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  lc_query_req_init(&req);
+  req.selector_json =
+      "{\"and\":[{\"date\":{\"field\":\"/created_at\","
+      "\"after\":\"2025-01-01T00:00:00Z\"}},"
+      "{\"eq\":{\"field\":\"/value\",\"value\":\"accepted-one\"}}]}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+  pouch_query_result_cache_status(client, &cache_status, &error);
+  assert_int_equal(cache_status.hits, cache_baseline.hits + 3UL);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 2UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 2UL);
+
+  memset(&capture, 0, sizeof(capture));
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 1U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+  pouch_query_result_cache_status(client, &cache_status, &error);
+  assert_int_equal(cache_status.hits, cache_baseline.hits + 4UL);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 2UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 2UL);
+
   alpha->close(alpha);
   bravo->close(bravo);
   charlie->close(charlie);

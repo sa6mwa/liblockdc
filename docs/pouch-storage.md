@@ -1463,6 +1463,12 @@ doc-table cursor paging; disk only adapts the temporal generation reader and
 translates the selected page. The client-level `liblql` filter remains
 authoritative for final acceptance and owns public cursor selection for
 residual pages.
+DateAfter result-cache plan keys include the namespace, temporal field,
+exclusive bound, and any sorted/deduplicated positive or negative equality
+suffixes. The cacheability boundary allows the parser's implied positive
+`exists` guard only when it names the same temporal field. Other secondary
+families are not cacheable under the DateAfter plan, so a filtered temporal
+query cannot alias the broader unfiltered temporal candidate vector.
 The temporal reader codec is intentionally private to pouch index generations:
 it writes a fixed magic/version header, sorted fields, normalized temporal
 docID entries, and residual docIDs. Decode rejects wrong versions, truncated

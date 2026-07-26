@@ -724,6 +724,7 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
   lc_pouch_document_range_term range;
   lc_pouch_document_prefix_term prefix;
   lc_pouch_document_contains_term contains;
+  lc_pouch_document_date_after_term date_after;
   const char *in_values[] = {"s:beta", "s:alpha", "s:alpha"};
 
   (void)state;
@@ -913,11 +914,43 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
       &req, LC_POUCH_INDEX_RESULT_PLAN_CONTAINS,
       "contains:7:default:5:/name:0:3:pha:eq:2:7:/bucket:5:s:hot:5:/kind:9:s:"
       "include:not_eq:2:7:/bucket:6:s:cold:5:/kind:7:s:block");
+
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  date_after.field = "/created_at";
+  date_after.after = "2025-01-01T00:00:00Z";
+  req.document_date_after_terms = &date_after;
+  req.document_date_after_term_count = 1U;
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_DATE_AFTER,
+      "date_after:7:default:11:/created_at:0:20:2025-01-01T00:00:00Z");
+
+  compound_eq[0].field = "/kind";
+  compound_eq[0].value = "s:include";
+  compound_eq[1].field = "/bucket";
+  compound_eq[1].value = "s:hot";
+  compound_eq[2].field = "/kind";
+  compound_eq[2].value = "s:include";
+  req.document_eq_terms = compound_eq;
+  req.document_eq_term_count = sizeof(compound_eq) / sizeof(compound_eq[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_DATE_AFTER,
+      "date_after:7:default:11:/created_at:0:20:2025-01-01T00:00:00Z:eq:2:7:/"
+      "bucket:5:s:hot:5:/kind:9:s:include");
+
+  req.document_not_eq_terms = not_equal;
+  req.document_not_eq_term_count = sizeof(not_equal) / sizeof(not_equal[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_DATE_AFTER,
+      "date_after:7:default:11:/created_at:0:20:2025-01-01T00:00:00Z:eq:2:7:/"
+      "bucket:5:s:hot:5:/kind:9:s:include:not_eq:2:7:/bucket:6:s:cold:5:/"
+      "kind:7:s:block");
 }
 
 static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
   lc_pouch_query_index_scan_req req;
   lc_pouch_document_exists_term exists;
+  lc_pouch_document_date_after_term date_after;
   lc_pouch_document_in_term not_in;
   lc_pouch_document_range_term range;
   const char *values[] = {"s:beta"};
@@ -951,6 +984,17 @@ static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
   req.document_not_in_term_count = 1U;
   assert_null(lc_pouch_index_result_plan_key(NULL, &req,
                                              LC_POUCH_INDEX_RESULT_PLAN_RANGE));
+
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  date_after.field = "/created_at";
+  date_after.after = "2025-01-01T00:00:00Z";
+  req.document_date_after_terms = &date_after;
+  req.document_date_after_term_count = 1U;
+  req.document_not_in_terms = &not_in;
+  req.document_not_in_term_count = 1U;
+  assert_null(lc_pouch_index_result_plan_key(
+      NULL, &req, LC_POUCH_INDEX_RESULT_PLAN_DATE_AFTER));
 }
 
 static void test_prepared_term_cache_refreshes_by_generation(void **state) {

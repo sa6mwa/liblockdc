@@ -785,6 +785,12 @@ Latest release targets confirmed on 2026-07-23:
         negative exact-term docID sets in `lc_pouch_index`, and reuse cached
         filtered pages across document and key scans until the index
         generation advances.
+      - [x] Extend normalized result-cache planning to indexed `DateAfter`
+        scans with positive and negative equality filters: DateAfter plans now
+        append sorted/deduplicated `eq` and `not_eq` suffixes, allow only the
+        parser's same-field implied `exists` guard, reject unsupported
+        secondary predicate families, and keep filtered temporal pages from
+        sharing broader cached candidate vectors.
       - [x] Add index-owned docID result paging over the document table and
         route the equality document/key scans through it, so cached equality
         result pages translate only the selected page of docIDs back through
