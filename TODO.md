@@ -1107,16 +1107,18 @@ Latest release targets confirmed on 2026-07-23:
         regression coverage proves a multi-field state write emits one
         query-index fsync after the format record exists, and a 64-document
         focused Go `DateAfter` smoke passes with result-cache/page metrics.
-      - [ ] Re-run `make benchmark-pouch-go-acceptance` after timeout
-        hardening and use the completed output as acceptance evidence. After
-        lazy temporal publication and lazy field-posting sorting,
-        `pouch-index-lql-keys-date-after` now completes focused native probes
-        at 2048 documents in about 42 seconds and 4096 documents in about
-        185 seconds after the fresh-key clear-scan skip and single-writer
-        benchmark endpoint mode; a focused Go pouch `DateAfter` 4096-doc run
-        still timed out under the 3-minute Go timeout, so the full matrix still
-        needs real commit/fsync grouping or a narrower bounded acceptance split
-        before it can be treated as a reliable 3-minute iteration gate.
+      - [x] Re-run `make benchmark-pouch-go-acceptance` after timeout
+        hardening and use the completed output as acceptance evidence. Verified
+        on 2026-07-26: the bounded 4096-document pouch-vs-Go matrix completed
+        in 1m05s under the 3-minute outer timeout. The previously failing
+        focused pouch indexed key-return `DateAfter` case now completes in
+        about 30s wall time with about 94 ms C-side query time after removing
+        forced full query-index replay from generation refresh and making
+        `flush_index` perform the lightweight query-field posting
+        sort/deduplicate barrier. The same acceptance run still identifies
+        slower-than-Go indexed pouch cases for follow-up performance work:
+        indexed key/document `EqSparse`, indexed `ContainsMessage`, and indexed
+        `DateAfter` remain materially slower than Go lockd disk.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

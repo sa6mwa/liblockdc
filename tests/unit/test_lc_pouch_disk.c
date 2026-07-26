@@ -16160,6 +16160,116 @@ static void test_fsync_stats_report_disk_sync_targets(void **state) {
   test_cleanup_root(root);
 }
 
+static void test_durability_batch_groups_seed_fsyncs_and_reopens(void **state) {
+  char root[256];
+  char key[32];
+  char json[64];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_fsync_stats before;
+  lc_pouch_fsync_stats during;
+  lc_pouch_fsync_stats after;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_meta_record loaded_meta;
+  lc_pouch_state_info state_info;
+  lc_source *source;
+  lc_source *body;
+  lc_error error;
+  int rc;
+  int i;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "durability-batch");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&before, 0, sizeof(before));
+  memset(&during, 0, sizeof(during));
+  memset(&after, 0, sizeof(after));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&put_res, 0, sizeof(put_res));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&loaded_meta, 0, sizeof(loaded_meta));
+  memset(&state_info, 0, sizeof(state_info));
+  store = NULL;
+  source = NULL;
+  body = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->fsync_stats(store, &before, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_disk_durability_batch_begin(store, &error);
+  assert_int_equal(rc, LC_OK);
+  put_opts.content_type = "application/json";
+  for (i = 0; i < 3; ++i) {
+    (void)snprintf(key, sizeof(key), "batch-%d", i);
+    (void)snprintf(json, sizeof(json), "{\"idx\":%d,\"tag\":\"batch\"}", i);
+    source = source_from_text(json);
+    rc = store->write_state(store, "default", key, source, &put_opts, &put_res,
+                            &error);
+    lc_source_close(source);
+    source = NULL;
+    assert_int_equal(rc, LC_OK);
+
+    memset(&meta, 0, sizeof(meta));
+    meta.owner = "batch-owner";
+    meta.state_etag = put_res.new_state_etag;
+    meta.version = put_res.new_version;
+    rc = store->store_meta(store, "default", key, &meta, NULL, &meta_res,
+                           &error);
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+  }
+
+  rc = store->fsync_stats(store, &during, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(during.query_index_fsyncs, before.query_index_fsyncs);
+  assert_int_equal(during.writer_marker_fsyncs, before.writer_marker_fsyncs);
+
+  rc = lc_pouch_disk_durability_batch_end(store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->fsync_stats(store, &after, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(after.query_index_fsyncs, before.query_index_fsyncs + 1UL);
+  assert_int_equal(after.writer_marker_fsyncs,
+                   before.writer_marker_fsyncs + 2UL);
+  assert_true(after.log_fsyncs <= before.log_fsyncs + 2UL);
+  assert_int_equal(after.failed_fsyncs, 0UL);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->load_meta(store, "default", "batch-2", &loaded_meta, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(loaded_meta.found);
+  assert_string_equal(loaded_meta.meta.owner, "batch-owner");
+  lc_pouch_meta_record_cleanup(&allocator, &loaded_meta);
+
+  rc = store->read_state(store, "default", "batch-2", &body, &state_info,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(body);
+  assert_string_equal(state_info.content_type, "application/json");
+  lc_source_close(body);
+  lc_pouch_state_info_cleanup(&allocator, &state_info);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static int child_exit_code(pid_t pid);
 static void child_process_backend_hash(const char *root, int start_fd);
 
@@ -20052,6 +20162,7 @@ int main(void) {
       cmocka_unit_test(test_list_namespaces_reports_live_projection_names),
       cmocka_unit_test(test_backend_capabilities_report_disk_writer_model),
       cmocka_unit_test(test_fsync_stats_report_disk_sync_targets),
+      cmocka_unit_test(test_durability_batch_groups_seed_fsyncs_and_reopens),
       cmocka_unit_test(test_backend_hash_persists_across_handles),
       cmocka_unit_test(test_backend_hash_create_race_publishes_single_identity),
   };

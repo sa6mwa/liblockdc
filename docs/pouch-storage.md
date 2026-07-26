@@ -1004,10 +1004,12 @@ filter that same ordered scan before limits and cursors are applied. Both
 document rows in the same ordered page, embeds JSON state payloads as
 `document`, emits `null` for non-JSON or empty state payloads, and returns
 `documents`. Pouch `flush_index` is synchronous for the current local
-projection: it returns accepted/flushed/not-pending and the latest index
-sequence. That sequence is a logical monotonic token derived from the storage
-high-water mark, not a physical log record count, so compaction and reopen
-cannot make query tokens move backwards. Indexed match-all queries accept
+projection: it replays query-index sidecar records when the sidecar changed,
+runs the lightweight query-field posting sort/deduplicate barrier, and returns
+accepted/flushed/not-pending plus the latest index sequence. That sequence is a
+logical monotonic token derived from the storage high-water mark, not a
+physical log record count, so compaction and reopen cannot make query tokens
+move backwards. Indexed match-all queries accept
 `refresh=wait_for` by performing the same synchronous local index flush before
 scanning the indexed projection. Explicit scan mode remains available for
 full-log/full-summary scanning through the ordered metadata summary API, but it
@@ -1586,11 +1588,13 @@ index identity without eagerly rebuilding temporal generation files, so ingest
 does not pay a whole-namespace DateAfter rebuild per mutation. The reader trusts
 only files whose encoded identity equals the current index identity. When the
 file is absent, stale, or corrupt and the prepared temporal cache does not
-already contain the namespace/field for the current identity, DateAfter
-refreshes query-index replay, republishes the namespace generation, rereads the
-artifact, and uses the repaired file when it matches the refreshed identity. If
-repair still cannot produce an identity-matched generation, indexed DateAfter
-produces no candidates rather than scanning sidecar postings on the hot path.
+already contain the namespace/field for the current identity, DateAfter checks
+query-index replay freshness, republishes the namespace generation, rereads the
+artifact, and uses the repaired file when it matches the refreshed identity. The
+freshness check does not force a full sidecar replay when the current handle has
+already replayed the query-index file size and identity. If repair still cannot
+produce an identity-matched generation, indexed DateAfter produces no
+candidates rather than scanning sidecar postings on the hot path.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every
@@ -1866,9 +1870,12 @@ The append path should distinguish:
 
 The current query-field sidecar append path batches all clear/value records
 emitted while indexing one JSON state body and performs one query-index fsync at
-the end of that body. Metadata query-index records, generation files, and the
-authoritative segmented state log keep their existing fsync boundaries until the
-broader commit-group batcher is implemented.
+the end of that body. Pouch also has a private internal durability-batch scope
+used by the benchmark seeder: data segment appends, query-index appends, and
+writer-marker refreshes are accumulated and flushed before the scope returns.
+This is not a public no-sync mode; callers do not treat setup as complete until
+the closing batch fsyncs have succeeded. Generation files keep their existing
+fsync boundaries until the broader commit-group batcher is implemented.
 
 For inline records, the backend can encode the complete record into a bounded
 buffer and batch contiguous appends into one write. For large payloads, it should

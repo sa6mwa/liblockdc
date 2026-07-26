@@ -350,6 +350,11 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_disk_durability_batch_begin(store, error);
+  if (rc != LC_OK) {
+    (void)store->close(store, error);
+    return rc;
+  }
   memset(&put_opts, 0, sizeof(put_opts));
   put_opts.content_type = "application/json";
 
@@ -414,6 +419,11 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
     }
   }
 
+  rc = lc_pouch_disk_durability_batch_end(store, error);
+  if (rc != LC_OK) {
+    (void)store->close(store, error);
+    return rc;
+  }
   return store->close(store, error);
 }
 

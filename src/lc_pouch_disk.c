@@ -297,8 +297,14 @@ typedef struct lc_pouch_disk_store {
   unsigned long marker_snapshot_clean_checks;
   lc_pouch_fsync_stats fsync_stats;
   int defer_record_fsync;
+  int deferred_record_fsync_dirty;
+  char **deferred_record_fsync_namespaces;
+  size_t deferred_record_fsync_namespace_count;
+  size_t deferred_record_fsync_namespace_capacity;
   int defer_query_index_fsync;
   int deferred_query_index_fsync_dirty;
+  int deferred_writer_marker_dirty;
+  int deferred_all_namespace_writer_markers_dirty;
   int query_index_rebuild_needed;
   int background_compaction;
   unsigned long compaction_min_log_bytes;
@@ -504,6 +510,9 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
     lc_error *error);
 static int lc_pouch_write_all(int fd, const void *bytes, size_t count);
 static int lc_pouch_disk_fsync(lc_pouch_disk_store *store, int fd, int kind);
+static int lc_pouch_disk_segment_fsync_after_append(
+    lc_pouch_disk_store *store, const char *namespace_name, int fd,
+    lc_error *error);
 static int lc_pouch_disk_write_fd_span(int out_fd, int in_fd,
                                        unsigned long in_offset,
                                        unsigned long length, lc_error *error);
@@ -757,6 +766,8 @@ static int lc_pouch_disk_writer_status(lc_pouch_store *self,
                                        lc_error *error);
 static char *lc_pouch_join_path(const lc_pouch_allocator *allocator,
                                 const char *root, const char *leaf);
+static int lc_pouch_disk_lock(lc_pouch_disk_store *store, lc_error *error);
+static int lc_pouch_disk_unlock(lc_pouch_disk_store *store, lc_error *error);
 static int lc_pouch_disk_lock_status(lc_pouch_store *self,
                                      lc_pouch_lock_status *out,
                                      lc_error *error);
@@ -3389,6 +3400,190 @@ static int lc_pouch_disk_fsync(lc_pouch_disk_store *store, int fd, int kind) {
   return rc;
 }
 
+static void lc_pouch_disk_deferred_record_fsync_namespaces_clear(
+    lc_pouch_disk_store *store) {
+  size_t index;
+
+  if (store == NULL) {
+    return;
+  }
+  for (index = 0U; index < store->deferred_record_fsync_namespace_count;
+       ++index) {
+    lc_pouch_free(&store->allocator,
+                  store->deferred_record_fsync_namespaces[index]);
+  }
+  store->deferred_record_fsync_namespace_count = 0U;
+  store->deferred_all_namespace_writer_markers_dirty = 0;
+}
+
+static int lc_pouch_disk_deferred_record_fsync_namespace_add(
+    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
+  char **grown;
+  char *copy;
+  size_t capacity;
+  size_t index;
+
+  if (store == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return LC_OK;
+  }
+  for (index = 0U; index < store->deferred_record_fsync_namespace_count;
+       ++index) {
+    if (strcmp(store->deferred_record_fsync_namespaces[index],
+               namespace_name) == 0) {
+      return LC_OK;
+    }
+  }
+  if (store->deferred_record_fsync_namespace_count ==
+      store->deferred_record_fsync_namespace_capacity) {
+    capacity = store->deferred_record_fsync_namespace_capacity == 0U
+                   ? 8U
+                   : store->deferred_record_fsync_namespace_capacity * 2U;
+    grown = (char **)lc_pouch_realloc(
+        &store->allocator, store->deferred_record_fsync_namespaces,
+        capacity * sizeof(store->deferred_record_fsync_namespaces[0]));
+    if (grown == NULL) {
+      return lc_pouch_set_nomem(error,
+                                "failed to track pouch deferred namespace");
+    }
+    store->deferred_record_fsync_namespaces = grown;
+    store->deferred_record_fsync_namespace_capacity = capacity;
+  }
+  copy = lc_pouch_strdup(&store->allocator, namespace_name);
+  if (copy == NULL) {
+    return lc_pouch_set_nomem(error,
+                              "failed to track pouch deferred namespace");
+  }
+  store->deferred_record_fsync_namespaces
+      [store->deferred_record_fsync_namespace_count++] = copy;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_fsync_segment_path(lc_pouch_disk_store *store,
+                                            const char *path,
+                                            lc_error *error) {
+  int fd;
+  int rc;
+
+  fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    return lc_pouch_set_errno(error, "failed to open pouch segment for fsync");
+  }
+  rc = LC_OK;
+  if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG) != 0) {
+    rc = lc_pouch_set_errno(error, "failed to fsync pouch segment");
+  }
+  if (close(fd) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch segment");
+  }
+  return rc;
+}
+
+static int lc_pouch_disk_fsync_namespace_segments(
+    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
+  DIR *dir;
+  struct dirent *entry;
+  char *namespace_path;
+  char *logstore_path;
+  char *segments_path;
+  char *segment_path;
+  unsigned long number;
+  int rc;
+
+  namespace_path = lc_pouch_disk_make_namespace_path(store, namespace_name);
+  logstore_path =
+      namespace_path != NULL
+          ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+          : NULL;
+  segments_path =
+      logstore_path != NULL
+          ? lc_pouch_join_path(&store->allocator, logstore_path, "segments")
+          : NULL;
+  if (namespace_path == NULL || logstore_path == NULL ||
+      segments_path == NULL) {
+    lc_pouch_free(&store->allocator, segments_path);
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, namespace_path);
+    return lc_pouch_set_nomem(error, "failed to allocate pouch segment path");
+  }
+  dir = opendir(segments_path);
+  if (dir == NULL) {
+    rc = errno == ENOENT
+             ? LC_OK
+             : lc_pouch_set_errno(error,
+                                  "failed to open pouch segments directory");
+    lc_pouch_free(&store->allocator, segments_path);
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, namespace_path);
+    return rc;
+  }
+  rc = LC_OK;
+  while ((entry = readdir(dir)) != NULL) {
+    if (!lc_pouch_disk_segment_name_parse(entry->d_name, &number)) {
+      continue;
+    }
+    segment_path =
+        lc_pouch_join_path(&store->allocator, segments_path, entry->d_name);
+    if (segment_path == NULL) {
+      rc = lc_pouch_set_nomem(error, "failed to allocate pouch segment path");
+      break;
+    }
+    rc = lc_pouch_disk_fsync_segment_path(store, segment_path, error);
+    lc_pouch_free(&store->allocator, segment_path);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  if (closedir(dir) != 0 && rc == LC_OK) {
+    rc = lc_pouch_set_errno(error, "failed to close pouch segments directory");
+  }
+  lc_pouch_free(&store->allocator, segments_path);
+  lc_pouch_free(&store->allocator, logstore_path);
+  lc_pouch_free(&store->allocator, namespace_path);
+  return rc;
+}
+
+static int lc_pouch_disk_segment_fsync_batch_end(lc_pouch_disk_store *store,
+                                                 lc_error *error) {
+  size_t index;
+  int rc;
+
+  if (store == NULL || !store->deferred_record_fsync_dirty) {
+    return LC_OK;
+  }
+  rc = LC_OK;
+  for (index = 0U; rc == LC_OK &&
+                   index < store->deferred_record_fsync_namespace_count;
+       ++index) {
+    rc = lc_pouch_disk_fsync_namespace_segments(
+        store, store->deferred_record_fsync_namespaces[index], error);
+  }
+  if (rc == LC_OK) {
+    store->deferred_record_fsync_dirty = 0;
+  }
+  return rc;
+}
+
+static int lc_pouch_disk_segment_fsync_after_append(
+    lc_pouch_disk_store *store, const char *namespace_name, int fd,
+    lc_error *error) {
+  int rc;
+
+  if (store != NULL && store->defer_record_fsync > 0) {
+    store->deferred_record_fsync_dirty = 1;
+    rc = lc_pouch_disk_deferred_record_fsync_namespace_add(
+        store, namespace_name, error);
+    if (rc == LC_OK) {
+      return LC_OK;
+    }
+    (void)lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG);
+    return rc;
+  }
+  if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG) != 0) {
+    return lc_pouch_set_errno(error, "failed to fsync pouch segment");
+  }
+  return LC_OK;
+}
+
 static void lc_pouch_disk_query_index_fsync_batch_begin(
     lc_pouch_disk_store *store) {
   if (store == NULL) {
@@ -4329,9 +4524,91 @@ static int lc_pouch_disk_mark_replayed_to_current_size(
   if (rc != LC_OK) {
     return rc;
   }
+  if (store->defer_record_fsync > 0) {
+    store->deferred_writer_marker_dirty = 1;
+    if (namespace_name == NULL || namespace_name[0] == '\0') {
+      store->deferred_all_namespace_writer_markers_dirty = 1;
+    } else {
+      rc = lc_pouch_disk_deferred_record_fsync_namespace_add(
+          store, namespace_name, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+    }
+    return LC_OK;
+  }
   lc_pouch_disk_touch_writer_marker(store);
   lc_pouch_disk_touch_namespace_writer_marker(store, namespace_name);
   return LC_OK;
+}
+
+int lc_pouch_disk_durability_batch_begin(lc_pouch_store *self,
+                                         lc_error *error) {
+  lc_pouch_disk_store *store;
+  int rc;
+
+  if (self == NULL || self->impl == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "durability_batch_begin requires store");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  rc = lc_pouch_disk_lock(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  store->defer_record_fsync++;
+  lc_pouch_disk_query_index_fsync_batch_begin(store);
+  if (lc_pouch_disk_unlock(store, error) != LC_OK) {
+    return LC_ERR_TRANSPORT;
+  }
+  return LC_OK;
+}
+
+int lc_pouch_disk_durability_batch_end(lc_pouch_store *self, lc_error *error) {
+  lc_pouch_disk_store *store;
+  size_t index;
+  int rc;
+
+  if (self == NULL || self->impl == NULL) {
+    return lc_pouch_set_invalid(error, "durability_batch_end requires store");
+  }
+  store = (lc_pouch_disk_store *)self->impl;
+  rc = lc_pouch_disk_lock(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (store->defer_record_fsync <= 0) {
+    lc_pouch_disk_unlock(store, error);
+    return lc_pouch_set_invalid(error, "pouch durability batch is not active");
+  }
+  store->defer_record_fsync--;
+  rc = lc_pouch_disk_query_index_fsync_batch_end(
+      store, error, "failed to fsync pouch query index");
+  if (rc == LC_OK && store->defer_record_fsync == 0) {
+    rc = lc_pouch_disk_segment_fsync_batch_end(store, error);
+  }
+  if (rc == LC_OK && store->defer_record_fsync == 0 &&
+      store->deferred_writer_marker_dirty) {
+    lc_pouch_disk_touch_writer_marker(store);
+    if (store->deferred_all_namespace_writer_markers_dirty) {
+      lc_pouch_disk_touch_all_namespace_writer_markers(store);
+    } else {
+      for (index = 0U;
+           index < store->deferred_record_fsync_namespace_count; ++index) {
+        lc_pouch_disk_touch_namespace_writer_marker(
+            store, store->deferred_record_fsync_namespaces[index]);
+      }
+    }
+    store->deferred_writer_marker_dirty = 0;
+    store->deferred_all_namespace_writer_markers_dirty = 0;
+    lc_pouch_disk_deferred_record_fsync_namespaces_clear(store);
+  } else if (rc == LC_OK && store->defer_record_fsync == 0) {
+    lc_pouch_disk_deferred_record_fsync_namespaces_clear(store);
+  }
+  if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  return rc;
 }
 
 static int lc_pouch_disk_force_replay_locked(lc_pouch_disk_store *store,
@@ -14324,9 +14601,9 @@ lc_pouch_disk_append_query_index_format_record(lc_pouch_disk_store *store,
     return lc_pouch_set_errno(error,
                               "failed to append pouch query index format");
   }
-  if (lc_pouch_disk_fsync(store, store->query_index_fd,
-                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
-    return lc_pouch_set_errno(error, "failed to fsync pouch query index");
+  if (lc_pouch_disk_query_index_fsync_after_append(
+          store, error, "failed to fsync pouch query index") != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
   }
   return LC_OK;
 }
@@ -14446,9 +14723,9 @@ static int lc_pouch_disk_append_query_index_record(
     return lc_pouch_set_errno(error,
                               "failed to append pouch query index record");
   }
-  if (lc_pouch_disk_fsync(store, store->query_index_fd,
-                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
-    return lc_pouch_set_errno(error, "failed to fsync pouch query index");
+  if (lc_pouch_disk_query_index_fsync_after_append(
+          store, error, "failed to fsync pouch query index") != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
   }
   record_size = LC_POUCH_QUERY_INDEX_HEADER_SIZE + payload_len;
   if (record_offset != (unsigned long)-1 &&
@@ -16277,8 +16554,6 @@ static int lc_pouch_disk_refresh_and_publish_query_temporal_generation(
     lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
   int rc;
 
-  store->replayed_query_index_size = (unsigned long)-1;
-  store->replayed_query_index_record_count = 0UL;
   rc = lc_pouch_disk_replay_query_index(store, error);
   if (rc != LC_OK) {
     return rc;
@@ -16295,8 +16570,6 @@ static int lc_pouch_disk_refresh_and_publish_query_exact_generation(
     lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
   int rc;
 
-  store->replayed_query_index_size = (unsigned long)-1;
-  store->replayed_query_index_record_count = 0UL;
   rc = lc_pouch_disk_replay_query_index(store, error);
   if (rc != LC_OK) {
     return rc;
@@ -16313,8 +16586,6 @@ static int lc_pouch_disk_refresh_and_publish_query_exists_generation(
     lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
   int rc;
 
-  store->replayed_query_index_size = (unsigned long)-1;
-  store->replayed_query_index_record_count = 0UL;
   rc = lc_pouch_disk_replay_query_index(store, error);
   if (rc != LC_OK) {
     return rc;
@@ -16331,8 +16602,6 @@ static int lc_pouch_disk_refresh_and_publish_query_number_generation(
     lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
   int rc;
 
-  store->replayed_query_index_size = (unsigned long)-1;
-  store->replayed_query_index_record_count = 0UL;
   rc = lc_pouch_disk_replay_query_index(store, error);
   if (rc != LC_OK) {
     return rc;
@@ -16349,8 +16618,6 @@ static int lc_pouch_disk_refresh_and_publish_query_text_generation(
     lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
   int rc;
 
-  store->replayed_query_index_size = (unsigned long)-1;
-  store->replayed_query_index_record_count = 0UL;
   rc = lc_pouch_disk_replay_query_index(store, error);
   if (rc != LC_OK) {
     return rc;
@@ -19600,6 +19867,7 @@ static int lc_pouch_disk_flush_index(lc_pouch_store *self,
     lc_pouch_disk_unlock(store, error);
     return rc;
   }
+  lc_pouch_disk_query_field_sort_unique(store);
   out->namespace_name = lc_pouch_strdup(&store->allocator, namespace_name);
   out->mode = lc_pouch_strdup(&store->allocator, effective_mode);
   out->flush_id = lc_pouch_strdup(&store->allocator, "local");
@@ -20092,8 +20360,9 @@ static int lc_pouch_disk_append_segment_memory_shadow(
       (etag != NULL && !lc_pouch_write_all(fd, etag, strlen(etag))) ||
       (body_length > 0U && !lc_pouch_write_all(fd, body, body_length))) {
     rc = lc_pouch_set_errno(error, "failed to append pouch segment record");
-  } else if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG) != 0) {
-    rc = lc_pouch_set_errno(error, "failed to fsync pouch segment");
+  } else {
+    rc = lc_pouch_disk_segment_fsync_after_append(store, namespace_name, fd,
+                                                  error);
   }
   if (close(fd) != 0 && rc == LC_OK) {
     rc = lc_pouch_set_errno(error, "failed to close pouch segment");
@@ -20152,8 +20421,9 @@ static int lc_pouch_disk_append_segment_fd_shadow(
     rc = lc_pouch_disk_write_fd_span(fd, body_fd, body_offset, body_length,
                                      error);
   }
-  if (rc == LC_OK && lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG) != 0) {
-    rc = lc_pouch_set_errno(error, "failed to fsync pouch segment");
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_segment_fsync_after_append(store, namespace_name, fd,
+                                                  error);
   }
   if (close(fd) != 0 && rc == LC_OK) {
     rc = lc_pouch_set_errno(error, "failed to close pouch segment");
@@ -20279,8 +20549,9 @@ static int lc_pouch_disk_append_high_water_record(lc_pouch_disk_store *store,
     rc = lc_pouch_set_errno(error, "failed to seek pouch segment");
   } else if (!lc_pouch_write_all(fd, header, sizeof(header))) {
     rc = lc_pouch_set_errno(error, "failed to append pouch segment record");
-  } else if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_LOG) != 0) {
-    rc = lc_pouch_set_errno(error, "failed to fsync pouch segment");
+  } else {
+    rc = lc_pouch_disk_segment_fsync_after_append(
+        store, LC_POUCH_BACKEND_NAMESPACE, fd, error);
   }
   if (close(fd) != 0 && rc == LC_OK) {
     rc = lc_pouch_set_errno(error, "failed to close pouch segment");
@@ -21798,7 +22069,17 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
                                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
     rc = lc_pouch_set_errno(error, "failed to fsync pouch compact query index");
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_segment_fsync_batch_end(store, error);
+  }
   store->defer_record_fsync = 0;
+  if (rc == LC_OK) {
+    lc_pouch_disk_deferred_record_fsync_namespaces_clear(store);
+  }
+  if (rc != LC_OK) {
+    store->deferred_record_fsync_dirty = 0;
+    lc_pouch_disk_deferred_record_fsync_namespaces_clear(store);
+  }
   if (rc == LC_OK) {
     rc = lc_pouch_disk_replay(store, error);
   }
@@ -22028,10 +22309,11 @@ static int lc_pouch_disk_append_object_copy_record(
     lc_pouch_free(&store->allocator, segment_path);
     return rc;
   }
-  if (lc_pouch_disk_fsync(store, segment_fd, LC_POUCH_FSYNC_LOG) != 0) {
+  if (lc_pouch_disk_segment_fsync_after_append(
+          store, namespace_name, segment_fd, error) != LC_OK) {
     close(segment_fd);
     lc_pouch_free(&store->allocator, segment_path);
-    return lc_pouch_set_errno(error, "failed to fsync pouch segment");
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
   }
   if (close(segment_fd) != 0) {
     lc_pouch_free(&store->allocator, segment_path);
@@ -26002,10 +26284,11 @@ static int lc_pouch_disk_append_queue_put_fd_entry(
     lc_pouch_free(&store->allocator, segment_path);
     return rc;
   }
-  if (lc_pouch_disk_fsync(store, segment_fd, LC_POUCH_FSYNC_LOG) != 0) {
+  if (lc_pouch_disk_segment_fsync_after_append(
+          store, entry->namespace_name, segment_fd, error) != LC_OK) {
     close(segment_fd);
     lc_pouch_free(&store->allocator, segment_path);
-    return lc_pouch_set_errno(error, "failed to fsync pouch segment");
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
   }
   if (close(segment_fd) != 0) {
     lc_pouch_free(&store->allocator, segment_path);
@@ -27540,6 +27823,8 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->object_entries);
   lc_pouch_free(&allocator, store->queue_entries);
   lc_pouch_disk_marker_snapshot_cleanup(store);
+  lc_pouch_disk_deferred_record_fsync_namespaces_clear(store);
+  lc_pouch_free(&allocator, store->deferred_record_fsync_namespaces);
   lc_pouch_disk_close_lock_fd_cache(store);
   lc_pouch_read_cache_owner_mark_closed(store->read_cache_owner);
   lc_pouch_disk_close_read_fd_cache(store);

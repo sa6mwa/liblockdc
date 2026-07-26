@@ -717,5 +717,9 @@ int lc_pouch_disk_open_with_options(const char *root_path,
                                     const lc_pouch_allocator *allocator,
                                     const lc_pouch_disk_open_opts *opts,
                                     lc_pouch_store **out, lc_error *error);
+int lc_pouch_disk_durability_batch_begin(lc_pouch_store *self,
+                                         lc_error *error);
+int lc_pouch_disk_durability_batch_end(lc_pouch_store *self,
+                                       lc_error *error);
 
 #endif
