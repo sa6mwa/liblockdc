@@ -9607,12 +9607,14 @@ test_pouch_endpoint_index_range_query_preserves_numeric_order(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
+  lc_client *other_client;
   lc_lease *k07;
   lc_lease *k08;
   lc_lease *k09;
   lc_lease *k10;
   lc_lease *k11;
   lc_lease *k12;
+  lc_lease *other_doc;
   lc_query_req req;
   lc_query_res res;
   lc_query_key_handler handler;
@@ -9633,6 +9635,12 @@ test_pouch_endpoint_index_range_query_preserves_numeric_order(void **state) {
   handler.begin = query_key_capture_begin;
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
+  other_client = open_pouch_client_with_namespace(endpoint, "aard");
+  other_doc = pouch_acquire_query_key(other_client, "aardvark", &error);
+  pouch_save_query_json(other_doc, "{\"score\":9}", &error);
+  other_doc->close(other_doc);
+  other_client->close(other_client);
+
   client = open_pouch_client(endpoint);
 
   k07 = pouch_acquire_query_key(client, "k07", &error);
@@ -9663,6 +9671,7 @@ test_pouch_endpoint_index_range_query_preserves_numeric_order(void **state) {
   assert_int_equal(rc, LC_OK);
   text = memory_sink_text(sink);
   assert_null(strstr(text, "{\"key\":\"k07\""));
+  assert_null(strstr(text, "aardvark"));
   assert_non_null(strstr(text, "{\"key\":\"k08\""));
   assert_non_null(strstr(text, "{\"key\":\"k09\""));
   assert_non_null(strstr(text, "{\"key\":\"k10\""));
