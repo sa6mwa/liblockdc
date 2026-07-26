@@ -154,6 +154,48 @@ static int fuzz_seed_store(lc_client *client, lc_error *error) {
   return rc;
 }
 
+static void fuzz_damage_query_index(const char *root, unsigned int mode) {
+  char path[768];
+  FILE *fp;
+  int written;
+
+  if (root == NULL || mode == 0U) {
+    return;
+  }
+  written = snprintf(path, sizeof(path),
+                     "%s/namespaces/fuzz/index/query.index", root);
+  if (written <= 0 || (size_t)written >= sizeof(path)) {
+    return;
+  }
+  if (mode == 1U) {
+    (void)remove(path);
+    return;
+  }
+  fp = fopen(path, "wb");
+  if (fp == NULL) {
+    return;
+  }
+  if (mode == 2U) {
+    (void)fwrite("not-a-pouch-query-index\nterm broken\n", 1U,
+                 strlen("not-a-pouch-query-index\nterm broken\n"), fp);
+  } else {
+    static const char future_index[] =
+        "format=pouch-query-index\n"
+        "version=999999\n"
+        "state_index_seq=999999\n"
+        "row_count=1\n"
+        "row_hash=1\n"
+        "term_index_complete=1\n"
+        "term_count=1\n"
+        "term_hash=1\n"
+        "presence_index_complete=1\n"
+        "presence_count=1\n"
+        "presence_hash=1\n";
+    (void)fwrite(future_index, 1U, sizeof(future_index) - 1U, fp);
+  }
+  (void)fclose(fp);
+}
+
 static int fuzz_query_keys(lc_client *client, const char *selector,
                            size_t *rows_out, lc_error *error) {
   lc_query_key_handler handler;
@@ -238,6 +280,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   index_rc = fuzz_open_client(root, 0, &index_client, &index_error);
   if (index_rc == LC_OK) {
     index_rc = fuzz_seed_store(index_client, &index_error);
+    if (index_rc == LC_OK) {
+      fuzz_damage_query_index(root, (unsigned int)(size % 4U));
+    }
   }
   scan_rc = fuzz_open_client(root, 1, &scan_client, &scan_error);
   if (index_rc == LC_OK && scan_rc == LC_OK) {
