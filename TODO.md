@@ -1025,10 +1025,12 @@ Latest release targets confirmed on 2026-07-23:
           secondary-predicate guards. Stale or absent generation files remain
           ignored so incremental writes do not lose results before full
           generation publication exists on all update paths.
-        - [x] Republish temporal generation files after ordinary state
-          writes/removes, metadata identity changes, and successful compaction
-          replay so the DateAfter reader can keep using current immutable
-          generation files across normal mutation paths.
+        - [x] Keep ordinary state writes/removes and metadata changes on the
+          live query-index mutation path, and publish temporal generation files
+          only from controlled rebuild/compaction or lazy DateAfter repair.
+          Disk regression coverage proves ordinary mutations no longer create
+          `.lcptgn` files eagerly, while the first DateAfter read publishes the
+          identity-matched generation before returning indexed results.
         - [x] Repair missing, stale, or corrupt temporal generation files on
           DateAfter reads by refreshing query-index replay, republishing the
           namespace generation, and rereading the identity-matched artifact
@@ -1096,6 +1098,13 @@ Latest release targets confirmed on 2026-07-23:
         indexed `EqSparse` smoke run proved the wrapper path.
       - [ ] Re-run `make benchmark-pouch-go-acceptance` after timeout
         hardening and use the completed output as acceptance evidence.
+      - [ ] Remove the remaining nonlinear 4096-document `DateAfter` setup
+        cost from the live query-index mutation path. After lazy temporal
+        generation publication, `pouch-index-lql-keys-date-after` improved
+        enough for 1024 documents to complete in about 18 seconds, but 2048
+        and 4096 documents still exceeded 30/60 second focused native probes;
+        the next redesign slice should replace or bulk-build the sorted
+        mutable `query_field_postings` maintenance used during ingest.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

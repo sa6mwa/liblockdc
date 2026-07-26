@@ -17660,10 +17660,6 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
                                                      error);
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
-        store, namespace_name, error);
-  }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, payload);
   lc_pouch_disk_meta_upsert_cleanup(store, &upsert);
@@ -17719,10 +17715,6 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
                                                      error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
-        store, namespace_name, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
@@ -24169,10 +24161,6 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
                                                      error);
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
-        store, namespace_name, error);
-  }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, body_path);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
@@ -24263,10 +24251,6 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
     *removed = 1;
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
                                                      error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
-        store, namespace_name, error);
   }
   lc_pouch_free(&store->allocator, etag);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
