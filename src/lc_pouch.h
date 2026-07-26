@@ -31,6 +31,8 @@ typedef struct lc_pouch_status {
 typedef struct lc_pouch_state_write_options {
   const char *content_type;
   const char *expected_etag;
+  unsigned long expected_version;
+  int has_expected_version;
 } lc_pouch_state_write_options;
 
 typedef struct lc_pouch_state_write_result {

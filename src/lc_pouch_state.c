@@ -542,6 +542,15 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
                           NULL);
     }
   }
+  if (options != NULL && options->has_expected_version) {
+    if (!current.found || current.version != options->expected_version) {
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch state version precondition failed", NULL,
+                          NULL, NULL);
+    }
+  }
   version = max_version + 1UL;
   etag = lc_pouch_state_etag(&pouch->allocator, version);
   payload_leaf = lc_pouch_state_payload_leaf(&pouch->allocator, version);

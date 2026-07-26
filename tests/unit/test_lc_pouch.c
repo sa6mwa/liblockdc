@@ -16,9 +16,23 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+typedef struct pouch_value_doc {
+  lonejson_int64 value;
+} pouch_value_doc;
+
+static const lonejson_field pouch_value_fields[] = {
+    LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
+
+LONEJSON_MAP_DEFINE(pouch_value_map, pouch_value_doc, pouch_value_fields);
+
 static void make_root(const char *suffix, char *root, size_t root_size) {
   snprintf(root, root_size, "/tmp/liblockdc-unit-pouch-redesign-%ld-%s",
            (long)getpid(), suffix);
+}
+
+static void make_endpoint(const char *root, char *endpoint,
+                          size_t endpoint_size) {
+  snprintf(endpoint, endpoint_size, "pouch://%s", root);
 }
 
 static int has_prefix(const char *value, const char *prefix) {
@@ -165,6 +179,45 @@ static void read_source_to_string(lc_source *source, char *buffer,
   }
   buffer[offset] = '\0';
   lc_error_cleanup(&error);
+}
+
+static void open_pouch_client(const char *root, lc_client **out,
+                              lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  char endpoint[540];
+  int rc;
+
+  make_endpoint(root, endpoint, sizeof(endpoint));
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  rc = lc_client_open(&config, out, error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(*out);
+}
+
+static void write_client_state(lc_client *client, const char *key,
+                               const char *json,
+                               const char *expected_etag,
+                               long expected_version,
+                               int has_expected_version,
+                               lc_update_res *out, lc_error *error) {
+  lc_update_req update_req;
+  lc_source *source;
+  int rc;
+
+  lc_update_req_init(&update_req);
+  update_req.lease.key = key;
+  update_req.if_state_etag = expected_etag;
+  update_req.if_version = expected_version;
+  update_req.has_if_version = has_expected_version;
+  rc = lc_source_from_memory(json, strlen(json), &source, error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, out, error);
+  source->close(source);
+  assert_int_equal(rc, LC_OK);
 }
 
 static void test_open_creates_segmented_root_layout(void **state) {
@@ -503,6 +556,169 @@ static void test_namespace_manifest_repairs_from_existing_segments(
   lc_error_cleanup(&error);
 }
 
+static void test_client_update_get_load_roundtrips_state(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  pouch_value_doc doc;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&doc, 0, sizeof(doc));
+  make_root("client-state", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/client/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{\"value\":42}", NULL, 0L, 0, &update_res,
+                     &error);
+  assert_string_equal(update_res.new_state_etag, "pouch-state-1");
+  assert_int_equal(update_res.new_version, 1L);
+  assert_int_equal(update_res.bytes, strlen("{\"value\":42}"));
+  lc_client_close(client);
+
+  open_pouch_client(root, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reader->get(reader, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_int_equal(get_res.version, 1L);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"value\":42}"));
+  assert_memory_equal(bytes, "{\"value\":42}", strlen("{\"value\":42}"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+  memset(&get_res, 0, sizeof(get_res));
+
+  rc = reader->load(reader, key, &pouch_value_map, &doc, NULL, &get_res,
+                    &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_int_equal(doc.value, 42);
+  assert_string_equal(get_res.etag, "pouch-state-1");
+
+  lc_get_res_cleanup(&get_res);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_update_enforces_state_preconditions(void **state) {
+  lc_client *client;
+  lc_update_res first;
+  lc_update_res second;
+  lc_source *source;
+  lc_update_req update_req;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  make_root("client-preconditions", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, "state/current", "{\"value\":1}", NULL, 0L, 0,
+                     &first, &error);
+
+  lc_update_req_init(&update_req);
+  update_req.lease.key = "state/current";
+  update_req.if_state_etag = "wrong";
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &second, &error);
+  source->close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_update_req_init(&update_req);
+  update_req.lease.key = "state/current";
+  update_req.if_state_etag = first.new_state_etag;
+  update_req.if_version = 99L;
+  update_req.has_if_version = 1;
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &second, &error);
+  source->close(source);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  write_client_state(client, "state/current", "{\"value\":2}",
+                     first.new_state_etag, 1L, 1, &second, &error);
+  assert_string_equal(second.new_state_etag, "pouch-state-2");
+  assert_int_equal(second.new_version, 2L);
+
+  lc_update_res_cleanup(&first);
+  lc_update_res_cleanup(&second);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_get_missing_and_public_state_behavior(void **state) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_get_opts_init(&get_opts);
+  make_root("client-missing", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "missing", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  memset(&get_res, 0, sizeof(get_res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  get_opts.public_read = 1;
+  rc = client->get(client, "missing", &get_opts, sink, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  sink->close(sink);
+
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_open_creates_segmented_root_layout),
@@ -514,6 +730,9 @@ int main(void) {
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
       cmocka_unit_test(
           test_namespace_manifest_repairs_from_existing_segments),
+      cmocka_unit_test(test_client_update_get_load_roundtrips_state),
+      cmocka_unit_test(test_client_update_enforces_state_preconditions),
+      cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
   };
 
   return cmocka_run_group_tests(tests, setup_pouch_unit_group,

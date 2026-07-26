@@ -1,6 +1,11 @@
 #include "lc_api_internal.h"
 #include "lc_pouch.h"
 
+#include "lc_internal.h"
+
+#include <stdlib.h>
+#include <string.h>
+
 static int lc_pouch_client_rebuilding(lc_error *error) {
   return lc_error_set(
       error, LC_ERR_INVALID, 0L,
@@ -8,6 +13,63 @@ static int lc_pouch_client_rebuilding(lc_error *error) {
       "storage, index, search, queue, object, and transaction subsystems are "
       "being rebuilt on the new pouch architecture",
       NULL, "pouch-redesign");
+}
+
+static const char *lc_pouch_client_namespace(lc_client_handle *client,
+                                             const char *namespace_name) {
+  if (namespace_name != NULL && namespace_name[0] != '\0') {
+    return namespace_name;
+  }
+  if (client->default_namespace != NULL && client->default_namespace[0] != '\0') {
+    return client->default_namespace;
+  }
+  return "default";
+}
+
+static int lc_pouch_client_public_read_unsupported(lc_error *error) {
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch public state reads are not implemented yet", NULL,
+                      NULL, "pouch-redesign");
+}
+
+static int lc_pouch_client_copy_state_metadata(
+    const lc_pouch_state_read_result *read_result, lc_get_res *out,
+    lc_error *error) {
+  char *content_type;
+  char *etag;
+
+  content_type = lc_strdup_local(read_result->content_type);
+  etag = lc_strdup_local(read_result->etag);
+  if ((read_result->content_type != NULL && content_type == NULL) ||
+      (read_result->etag != NULL && etag == NULL)) {
+    free(content_type);
+    free(etag);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch get metadata", NULL, NULL,
+                        NULL);
+  }
+  out->content_type = content_type;
+  out->etag = etag;
+  out->version = (long)read_result->version;
+  out->no_content = !read_result->found;
+  return LC_OK;
+}
+
+static int lc_pouch_client_copy_update_metadata(
+    const lc_pouch_state_write_result *write_result, lc_update_res *out,
+    lc_error *error) {
+  char *etag;
+
+  etag = lc_strdup_local(write_result->etag);
+  if (write_result->etag != NULL && etag == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch update metadata", NULL, NULL,
+                        NULL);
+  }
+  out->new_state_etag = etag;
+  out->new_version = (long)write_result->version;
+  out->bytes = (long)write_result->bytes;
+  return LC_OK;
 }
 
 int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
@@ -42,35 +104,159 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
 int lc_pouch_client_get_method(lc_client *self, const char *key,
                                const lc_get_opts *opts, lc_sink *dst,
                                lc_get_res *out, lc_error *error) {
-  (void)self;
-  (void)key;
-  (void)opts;
-  (void)dst;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_state_read_result read_result;
+  int rc;
+
+  if (self == NULL || key == NULL || dst == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch get requires self, key, dst, and out", NULL,
+                        NULL, NULL);
+  }
+  if (opts != NULL && opts->public_read) {
+    return lc_pouch_client_public_read_unsupported(error);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(
+      client->pouch, lc_pouch_client_namespace(client, NULL), key,
+      &read_result, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!read_result.found) {
+    out->no_content = 1;
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    return LC_OK;
+  }
+  rc = lc_copy(read_result.body, dst, NULL, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_client_copy_state_metadata(&read_result, out, error);
+  }
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  return rc;
 }
 
 int lc_pouch_client_load_method(lc_client *self, const char *key,
                                 const lonejson_map *map, void *dst,
                                 const lc_get_opts *opts, lc_get_res *out,
                                 lc_error *error) {
-  (void)self;
-  (void)key;
-  (void)map;
-  (void)dst;
-  (void)opts;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_state_read_result read_result;
+  lc_sink *memory_sink;
+  const void *bytes;
+  size_t length;
+  char *json;
+  lonejson *runtime;
+  lonejson_error lj_error;
+  lonejson_status status;
+  int rc;
+
+  if (self == NULL || key == NULL || map == NULL || dst == NULL ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch load requires self, key, map, destination, "
+                        "and out",
+                        NULL, NULL, NULL);
+  }
+  if (opts != NULL && opts->public_read) {
+    return lc_pouch_client_public_read_unsupported(error);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  memset(&read_result, 0, sizeof(read_result));
+  memory_sink = NULL;
+  json = NULL;
+  rc = lc_pouch_state_read(
+      client->pouch, lc_pouch_client_namespace(client, NULL), key,
+      &read_result, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!read_result.found) {
+    out->no_content = 1;
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    return LC_OK;
+  }
+  rc = lc_sink_to_memory(&memory_sink, error);
+  if (rc == LC_OK) {
+    rc = lc_copy(read_result.body, memory_sink, NULL, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_sink_memory_bytes(memory_sink, &bytes, &length, error);
+  }
+  if (rc == LC_OK) {
+    json = (char *)malloc(length + 1U);
+    if (json == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch mapped load buffer", NULL,
+                        NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    memcpy(json, bytes, length);
+    json[length] = '\0';
+    runtime = lc_thread_lonejson_runtime();
+    lc_lonejson_prepare_parse_destination(runtime, map, dst);
+    memset(&lj_error, 0, sizeof(lj_error));
+    status = lc_lonejson_parse_cstr_value(runtime, map, dst, json, &lj_error);
+    if (status != LONEJSON_STATUS_OK) {
+      rc = lc_lonejson_error_from_status(error, status, &lj_error,
+                                         "failed to parse pouch mapped state");
+    }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_client_copy_state_metadata(&read_result, out, error);
+  }
+  free(json);
+  if (memory_sink != NULL) {
+    memory_sink->close(memory_sink);
+  }
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  return rc;
 }
 
 int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)src;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  int rc;
+
+  if (self == NULL || req == NULL || req->lease.key == NULL || src == NULL ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch update requires self, req with key, src, and "
+                        "out",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  options.content_type =
+      req->content_type != NULL ? req->content_type : "application/json";
+  options.expected_etag = req->if_state_etag;
+  if (req->has_if_version) {
+    if (req->if_version < 0L) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch update if_version must be non-negative", NULL,
+                          NULL, NULL);
+    }
+    options.expected_version = (unsigned long)req->if_version;
+    options.has_expected_version = 1;
+  }
+  rc = lc_pouch_state_write(
+      client->pouch,
+      lc_pouch_client_namespace(client, req->lease.namespace_name),
+      req->lease.key, src, &options, &write_result, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_client_copy_update_metadata(&write_result, out, error);
+  }
+  lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
+  return rc;
 }
 
 int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
