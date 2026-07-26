@@ -735,7 +735,7 @@ Latest release targets confirmed on 2026-07-23:
         2026-07-26 measured pouch `InTags` at about 7.23 ms C-side and Go disk
         at about 46.9 ms, so this is now treated as a benchmark-noise watch
         item rather than a confirmed persisted-dictionary/posting-union gap.
-    - [ ] Add prepared-reader caching keyed by the immutable pouch index
+    - [x] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
       - [x] Add the first generation-scoped prepared exact-term cache in the
@@ -776,6 +776,12 @@ Latest release targets confirmed on 2026-07-23:
         sequence plus segmented manifest generation instead of a bare sequence
         counter, while the compiled reader contents still come from current
         sidecar scans.
+      - [x] Extend prepared-reader caching to typed temporal `DateAfter`
+        generations: the disk bridge loads identity-matched per-namespace
+        temporal generation files into `lc_pouch_index_prepared_temporal_cache`,
+        remaps namespace-local docIDs into the current global doc table once,
+        and reuses the compiled temporal table across distinct DateAfter plan
+        keys until the index identity changes.
     - [ ] Add sorted matched-key result caching keyed by index generation plus
       normalized selector plan, so multi-page queries reuse the full matching
       key vector instead of recomputing candidates for every page.
@@ -991,7 +997,7 @@ Latest release targets confirmed on 2026-07-23:
         candidates plus a date-only selector bound; the 2026-07-26
         4096-document `DateAfter` benchmark reported 1,048 candidates and about
         43.4 ms C-side for keys / 60.7 ms C-side for documents.
-      - [ ] Persist typed temporal postings in immutable compiled index
+      - [x] Persist typed temporal postings in immutable compiled index
         generations instead of reparsing string field postings in the disk
         bridge, so the final reader-cache architecture can avoid the remaining
         DateAfter document-return cost.
@@ -1035,6 +1041,11 @@ Latest release targets confirmed on 2026-07-23:
           2026-07-26 and rejected because building the temporal table on the
           hot path regressed 4096-document DateAfter page-one latency to
           roughly 110-140 ms C-side.
+        - [x] Cache decoded/remapped temporal generations in the
+          identity-scoped prepared temporal reader cache. Disk-level regression
+          coverage now proves a second DateAfter bound in the same generation
+          can use the prepared cache even after the persisted `.lcptgn` file is
+          corrupted, avoiding per-query temporal generation decode/repair.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not

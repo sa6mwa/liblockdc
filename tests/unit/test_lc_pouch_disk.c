@@ -329,6 +329,25 @@ static void test_read_file_text(const char *path, char *buffer,
   assert_int_equal(close(fd), 0);
 }
 
+static void test_query_temporal_generation_path(const char *root,
+                                                const char *namespace_name,
+                                                char *path, size_t path_size) {
+  snprintf(path, path_size,
+           "%s/%%2elockd/logstore/query.index.temporal/%s.lcptgn", root,
+           namespace_name);
+}
+
+static void test_corrupt_temporal_generation_file(const char *path) {
+  static const char corrupt[] = "not-a-temporal-generation";
+  int fd;
+
+  fd = open(path, O_WRONLY | O_TRUNC);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, corrupt, sizeof(corrupt) - 1U),
+                   (ssize_t)(sizeof(corrupt) - 1U));
+  assert_int_equal(close(fd), 0);
+}
+
 static void test_remove_writer_markers(const char *root) {
   DIR *dir;
   struct dirent *entry;
@@ -4082,6 +4101,111 @@ test_query_index_prepared_contains_cache_is_namespace_and_generation_scoped(
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   lc_pouch_put_state_res_cleanup(&allocator, &charlie);
+  lc_pouch_put_state_res_cleanup(&allocator, &bravo);
+  lc_pouch_put_state_res_cleanup(&allocator, &alpha);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
+test_query_index_prepared_temporal_cache_reuses_generation_after_file_corrupt(
+    void **state) {
+  char root[256];
+  char generation_path[512];
+  char generation_text[128];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res alpha;
+  lc_pouch_put_state_res bravo;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_document_date_after_term date_after;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-prepared-temporal-cache");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&alpha, 0, sizeof(alpha));
+  memset(&bravo, 0, sizeof(bravo));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&date_after, 0, sizeof(date_after));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "application/json";
+  source = source_from_text("{\"created_at\":\"2025-01-10T00:00:00Z\"}");
+  rc = store->write_state(store, "default", "alpha", source, &opts, &alpha,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.owner = "owner";
+  meta.state_etag = alpha.new_state_etag;
+  meta.version = alpha.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  source = source_from_text("{\"created_at\":\"2025-02-10T00:00:00Z\"}");
+  rc = store->write_state(store, "default", "bravo", source, &opts, &bravo,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.state_etag = bravo.new_state_etag;
+  meta.version = bravo.new_version;
+  rc = store->store_meta(store, "default", "bravo", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  date_after.field = "/created_at";
+  date_after.after = "2025-01-01T00:00:00Z";
+  req.namespace_name = "default";
+  req.document_date_after_terms = &date_after;
+  req.document_date_after_term_count = 1U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_string_equal(keys.keys[1], "bravo");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  test_query_temporal_generation_path(root, "default", generation_path,
+                                      sizeof(generation_path));
+  test_corrupt_temporal_generation_file(generation_path);
+
+  memset(&keys, 0, sizeof(keys));
+  date_after.after = "2025-01-15T00:00:00Z";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "bravo");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  test_read_file_text(generation_path, generation_text,
+                      sizeof(generation_text));
+  assert_string_equal(generation_text, "not-a-temporal-generation");
+
   lc_pouch_put_state_res_cleanup(&allocator, &bravo);
   lc_pouch_put_state_res_cleanup(&allocator, &alpha);
   rc = store->close(store, &error);
@@ -19533,6 +19657,8 @@ int main(void) {
           test_query_index_prepared_prefix_cache_is_namespace_and_generation_scoped),
       cmocka_unit_test(
           test_query_index_prepared_contains_cache_is_namespace_and_generation_scoped),
+      cmocka_unit_test(
+          test_query_index_prepared_temporal_cache_reuses_generation_after_file_corrupt),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_state_lookup_index_orders_updates_and_replays),
       cmocka_unit_test(

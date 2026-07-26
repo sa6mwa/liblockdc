@@ -1537,18 +1537,22 @@ snapshots.
 Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
 Residual selectors such as date predicates use the same identity-keyed result
-cache for accepted candidate docIDs. DateAfter now first tries an
-identity-matched per-namespace temporal generation file: supported temporal
-strings are read as typed docID vectors newer than the bound and plausible
-unsupported temporal strings remain residual docIDs. Indexed DateAfter treats
-that generation as authoritative after repair and then applies live-state,
-owner, hidden, key, and secondary-predicate guards before paging. It does not
-fall back to reparsing field postings on the query hot path. DateAfter converts
-the accepted global candidate docIDs into the identity-matched document-table
-generation, stores and pages those namespace-local docIDs, and then translates
-only the selected local page. The client-level `liblql` filter remains
-authoritative for final acceptance and owns public cursor selection for
-residual pages.
+cache for accepted candidate docIDs. DateAfter now first tries the prepared
+temporal reader cache for the current index identity. On a miss, it loads an
+identity-matched per-namespace temporal generation file into that cache:
+supported temporal strings are read as typed docID vectors newer than the bound
+and plausible unsupported temporal strings remain residual docIDs. The disk
+bridge remaps the generation's namespace-local docIDs into the current global
+doc table once when filling the prepared temporal cache, so distinct DateAfter
+plan keys can reuse the compiled temporal table without decoding the
+generation file again. Indexed DateAfter treats that generation as
+authoritative after repair and then applies live-state, owner, hidden, key, and
+secondary-predicate guards before paging. It does not fall back to reparsing
+field postings on the query hot path. DateAfter converts the accepted global
+candidate docIDs into the identity-matched document-table generation, stores
+and pages those namespace-local docIDs, and then translates only the selected
+local page. The client-level `liblql` filter remains authoritative for final
+acceptance and owns public cursor selection for residual pages.
 Temporal generation postings are stored with namespace-local docIDs and remap
 through the identity-matched document-table generation before DateAfter applies
 live-state and selector guards against the current global in-memory doc table.
@@ -1572,11 +1576,12 @@ postings and atomically publishes
 files. Successful compaction replay republishes all namespace temporal
 generations because the segmented-manifest identity changes. The reader trusts
 only files whose encoded identity equals the current index identity. When the
-file is absent, stale, or corrupt, DateAfter refreshes query-index replay,
-republishes the namespace generation, rereads the artifact, and uses the
-repaired file when it matches the refreshed identity. If repair still cannot
-produce an identity-matched generation, indexed DateAfter produces no
-candidates rather than scanning sidecar postings on the hot path.
+file is absent, stale, or corrupt and the prepared temporal cache does not
+already contain the namespace/field for the current identity, DateAfter
+refreshes query-index replay, republishes the namespace generation, rereads the
+artifact, and uses the repaired file when it matches the refreshed identity. If
+repair still cannot produce an identity-matched generation, indexed DateAfter
+produces no candidates rather than scanning sidecar postings on the hot path.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every
@@ -1632,26 +1637,32 @@ docIDs through disk summaries. Wildcard `in` and broader OR/path-pattern
 predicate scans still reuse or build the full matching vector before disk-side
 cursor/limit handling.
 
-The disk bridge also keeps a first prepared-reader cache for exact terms. It is
-keyed by the current index sequence plus a namespace-qualified field/value term,
-and stores adaptive docID postings for simple equality and non-wildcard `in`
-plans. Simple positive `exists` scans use the same prepared-reader pattern with
-namespace-qualified field-presence terms. Simple positive numeric `range` scans
-also use prepared postings keyed by namespace-qualified field plus normalized
-range bounds. Simple positive `prefix` scans use prepared postings keyed by
-namespace-qualified field plus the case-sensitivity flag and text prefix.
-Simple positive `contains` scans use prepared postings keyed by the same
-namespace-qualified field and substring key after trigram narrowing and final
-substring validation. These caches are intentionally narrower than the final
-design: compound, negative, owner-filtered, key-filtered, and
-secondary-filtered range/prefix/contains selectors still use request-local
-compiled postings until their candidate sets can be cached without baking
-request-specific filters into the prepared view.
+The disk bridge keeps prepared-reader caches keyed by the current index
+sequence plus segmented manifest generation. Exact terms are stored under a
+namespace-qualified field/value term and back simple equality and non-wildcard
+`in` plans. Simple positive `exists` scans use the same prepared-reader pattern
+with namespace-qualified field-presence terms. Simple positive numeric `range`
+scans also use prepared postings keyed by namespace-qualified field plus
+normalized range bounds. Simple positive `prefix` scans use prepared postings
+keyed by namespace-qualified field plus the case-sensitivity flag and text
+prefix. Simple positive `contains` scans use prepared postings keyed by the
+same namespace-qualified field and substring key after trigram narrowing and
+final substring validation. DateAfter uses a prepared temporal table keyed by
+namespace-qualified field, with typed temporal values and residual postings
+loaded from immutable temporal generation files. These caches are intentionally
+narrower than the final design: compound, negative, owner-filtered,
+key-filtered, and secondary-filtered range/prefix/contains selectors still use
+request-local compiled postings until their candidate sets can be cached
+without baking request-specific filters into the prepared view.
 The shared prepared-term cache container and generation refresh/cleanup
 lifecycle now live in `lc_pouch_index` as
 `lc_pouch_index_prepared_term_cache`. The disk bridge still supplies
 namespace-qualified term keys and compiles sidecar-derived candidate docIDs,
 but it no longer owns separate per-predicate cache lifecycle types.
+The temporal prepared-cache lifecycle similarly lives in `lc_pouch_index` as
+`lc_pouch_index_prepared_temporal_cache`; the disk bridge supplies
+namespace-qualified temporal fields and only owns generation-file IO plus
+docID remapping into the active in-memory table.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
