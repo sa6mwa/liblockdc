@@ -34,6 +34,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add pouch-native local lease lifecycle coverage for positive TTL
     acquire expiration, keepalive refresh metadata, invalid TTL rejection, and
     release acknowledgement without reviving legacy compatibility paths.
+  - [x] Route pouch client-level `mutate`, bound lease `mutate`, and bound
+    lease `mutate_local` through the redesigned state path by applying the
+    shared mutation planner to current pouch state and persisting the result
+    through segmented state writes or staged lease updates with CAS coverage.
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.

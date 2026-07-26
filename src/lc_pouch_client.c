@@ -1,4 +1,5 @@
 #include "lc_api_internal.h"
+#include "lc_mutate_stream.h"
 #include "lc_pouch.h"
 #include "lc_pouch_query_index.h"
 
@@ -34,6 +35,13 @@ typedef struct lc_pouch_txn_key_list {
   size_t count;
   size_t capacity;
 } lc_pouch_txn_key_list;
+
+typedef struct lc_pouch_mutate_file {
+  FILE *fp;
+  int found;
+  char *etag;
+  unsigned long version;
+} lc_pouch_mutate_file;
 
 typedef struct lc_pouch_txn_record {
   char *state;
@@ -1194,6 +1202,171 @@ static int lc_pouch_client_copy_update_metadata(
   out->new_version = (long)write_result->version;
   out->bytes = (long)write_result->bytes;
   return LC_OK;
+}
+
+static int lc_pouch_client_copy_mutate_metadata(
+    const lc_pouch_state_write_result *write_result, lc_mutate_res *out,
+    lc_error *error) {
+  char *etag;
+
+  etag = lc_strdup_local(write_result->etag);
+  if (write_result->etag != NULL && etag == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch mutate metadata", NULL,
+                        NULL, NULL);
+  }
+  out->new_state_etag = etag;
+  out->new_version = (long)write_result->version;
+  out->bytes = (long)write_result->bytes;
+  return LC_OK;
+}
+
+static void lc_pouch_mutate_file_cleanup(lc_pouch_mutate_file *file) {
+  if (file == NULL) {
+    return;
+  }
+  if (file->fp != NULL) {
+    fclose(file->fp);
+  }
+  free(file->etag);
+  memset(file, 0, sizeof(*file));
+}
+
+static int lc_pouch_copy_source_to_file(lc_source *source, FILE *fp,
+                                        lc_error *error) {
+  unsigned char buffer[8192];
+
+  if (source == NULL || fp == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutate copy requires source and file", NULL,
+                        NULL, NULL);
+  }
+  for (;;) {
+    size_t nread;
+
+    nread = source->read(source, buffer, sizeof(buffer), error);
+    if (nread == 0U) {
+      if (error != NULL && error->code != LC_OK) {
+        return error->code;
+      }
+      break;
+    }
+    if (fwrite(buffer, 1U, nread, fp) != nread) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to write pouch mutate scratch file",
+                          strerror(errno), NULL, NULL);
+    }
+  }
+  if (fflush(fp) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to flush pouch mutate scratch file",
+                        strerror(errno), NULL, NULL);
+  }
+  rewind(fp);
+  return LC_OK;
+}
+
+static int lc_pouch_mutate_seed_empty(FILE *fp, lc_error *error) {
+  if (fwrite("{}", 1U, 2U, fp) != 2U) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to seed pouch mutate state", strerror(errno),
+                        NULL, NULL);
+  }
+  if (fflush(fp) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to flush pouch mutate seed state",
+                        strerror(errno), NULL, NULL);
+  }
+  rewind(fp);
+  return LC_OK;
+}
+
+static int lc_pouch_prepare_mutation_file(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *const *mutations, size_t mutation_count,
+    const lc_mutation_parse_options *parse_options,
+    lc_pouch_mutate_file *out, lc_error *error) {
+  lc_mutation_plan *plan;
+  lc_pouch_state_read_result read_result;
+  FILE *input_fp;
+  FILE *final_fp;
+  char *etag;
+  int rc;
+
+  if (client == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutate requires client, namespace, key, and "
+                        "out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&read_result, 0, sizeof(read_result));
+  plan = NULL;
+  input_fp = NULL;
+  final_fp = NULL;
+  etag = NULL;
+
+  rc = lc_mutation_plan_build(mutations, mutation_count, parse_options, &plan,
+                              error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  input_fp = tmpfile();
+  if (input_fp == NULL) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to create pouch mutate input scratch file",
+                      strerror(errno), NULL, NULL);
+    goto cleanup;
+  }
+  rc = lc_pouch_state_read(client->pouch, namespace_name, key, &read_result,
+                           error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  if (read_result.found) {
+    rc = lc_pouch_copy_source_to_file(read_result.body, input_fp, error);
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+    etag = lc_strdup_local(read_result.etag);
+    if (read_result.etag != NULL && etag == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch mutate fetched etag", NULL,
+                        NULL, NULL);
+      goto cleanup;
+    }
+  } else {
+    rc = lc_pouch_mutate_seed_empty(input_fp, error);
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+  }
+  rc = lc_mutation_plan_apply(plan, input_fp, &final_fp, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+
+  out->fp = final_fp;
+  out->found = read_result.found;
+  out->etag = etag;
+  out->version = read_result.version;
+  final_fp = NULL;
+  etag = NULL;
+
+cleanup:
+  free(etag);
+  if (final_fp != NULL) {
+    fclose(final_fp);
+  }
+  if (input_fp != NULL) {
+    fclose(input_fp);
+  }
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  if (plan != NULL) {
+    lc_mutation_plan_close(plan);
+  }
+  return rc;
 }
 
 static void lc_pouch_txn_buffer_cleanup(lc_pouch_txn_buffer *buffer) {
@@ -2385,10 +2558,69 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
 
 int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
                                   lc_mutate_res *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_mutate_file mutated;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  const char *namespace_name;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutate requires self, req, and out", NULL,
+                        NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&mutated, 0, sizeof(mutated));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  source = NULL;
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+
+  rc = lc_pouch_prepare_mutation_file(client, namespace_name, req->lease.key,
+                                      req->mutations, req->mutation_count,
+                                      NULL, &mutated, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  source = lc_source_from_open_file(mutated.fp, 0);
+  if (source == NULL) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to wrap pouch mutate result source", NULL, NULL,
+                      NULL);
+    goto cleanup;
+  }
+  options.content_type = "application/json";
+  options.expected_etag = req->if_state_etag;
+  if (req->has_if_version) {
+    if (req->if_version < 0L) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutate if_version must be non-negative", NULL,
+                        NULL, NULL);
+      goto cleanup;
+    }
+    options.expected_version = (unsigned long)req->if_version;
+    options.has_expected_version = 1;
+  }
+  rc = lc_pouch_state_write(client->pouch, namespace_name, req->lease.key,
+                            source, &options, &write_result, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_client_copy_mutate_metadata(&write_result, out, error);
+  }
+
+cleanup:
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_pouch_mutate_file_cleanup(&mutated);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
+  return rc;
 }
 
 int lc_pouch_client_metadata_method(lc_client *self,
@@ -3649,17 +3881,115 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
 static int lc_pouch_lease_mutate_method(lc_lease *self,
                                         const lc_mutate_req *req,
                                         lc_error *error) {
-  (void)self;
-  (void)req;
-  return lc_pouch_lease_rebuilding(error);
+  lc_lease_handle *lease;
+  lc_pouch_mutate_file mutated;
+  lc_update_opts opts;
+  lc_source *source;
+  int rc;
+
+  if (self == NULL || req == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease mutate requires self and req", NULL,
+                        NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  memset(&mutated, 0, sizeof(mutated));
+  lc_update_opts_init(&opts);
+  source = NULL;
+
+  rc = lc_pouch_prepare_mutation_file(lease->client, lease->namespace_name,
+                                      lease->key, req->mutations,
+                                      req->mutation_count, NULL, &mutated,
+                                      error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  source = lc_source_from_open_file(mutated.fp, 0);
+  if (source == NULL) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to wrap pouch lease mutate result source", NULL,
+                      NULL, NULL);
+    goto cleanup;
+  }
+  opts.content_type = "application/json";
+  opts.if_state_etag = req->if_state_etag;
+  opts.if_version = req->if_version;
+  opts.has_if_version = req->has_if_version;
+  if (!opts.has_if_version && lease->version > 0L) {
+    opts.if_version = lease->version;
+    opts.has_if_version = 1;
+  }
+  rc = self->update(self, source, &opts, error);
+
+cleanup:
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_pouch_mutate_file_cleanup(&mutated);
+  return rc;
 }
 
 static int lc_pouch_lease_mutate_local_method(lc_lease *self,
                                               const lc_mutate_local_req *req,
                                               lc_error *error) {
-  (void)self;
-  (void)req;
-  return lc_pouch_lease_rebuilding(error);
+  lc_lease_handle *lease;
+  lc_mutation_parse_options parse_options;
+  lc_pouch_mutate_file mutated;
+  lc_update_opts opts;
+  lc_source *source;
+  int rc;
+
+  if (self == NULL || req == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease mutate_local requires self and req",
+                        NULL, NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  memset(&parse_options, 0, sizeof(parse_options));
+  memset(&mutated, 0, sizeof(mutated));
+  lc_update_opts_init(&opts);
+  source = NULL;
+
+  parse_options.file_value_base_dir = req->file_value_base_dir;
+  parse_options.file_value_resolver = req->file_value_resolver;
+  if (clock_gettime(CLOCK_REALTIME, &parse_options.now) == 0) {
+    parse_options.has_now = 1;
+  }
+  rc = lc_pouch_prepare_mutation_file(
+      lease->client, lease->namespace_name, lease->key, req->mutations,
+      req->mutation_count, &parse_options, &mutated, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  source = lc_source_from_open_file(mutated.fp, 0);
+  if (source == NULL) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to wrap pouch lease local mutate result source",
+                      NULL, NULL, NULL);
+    goto cleanup;
+  }
+  opts = req->update;
+  if (opts.content_type == NULL || opts.content_type[0] == '\0') {
+    opts.content_type = "application/json";
+  }
+  if (!req->disable_fetched_cas) {
+    if ((opts.if_state_etag == NULL || opts.if_state_etag[0] == '\0') &&
+        mutated.etag != NULL && mutated.etag[0] != '\0') {
+      opts.if_state_etag = mutated.etag;
+    }
+    if (!opts.has_if_version && mutated.found) {
+      opts.if_version = (long)mutated.version;
+      opts.has_if_version = 1;
+    }
+  }
+  rc = self->update(self, source, &opts, error);
+
+cleanup:
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_pouch_mutate_file_cleanup(&mutated);
+  return rc;
 }
 
 int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,

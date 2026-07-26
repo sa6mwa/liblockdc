@@ -1719,6 +1719,82 @@ static void test_client_update_enforces_state_preconditions(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_client_mutate_applies_plan_and_preconditions(void **state) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_mutate_op mutate_op;
+  lc_mutate_res mutate_res;
+  lc_get_res get_res;
+  lc_error error;
+  const char *mutations[3];
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_mutate_op_init(&mutate_op);
+  memset(&mutate_res, 0, sizeof(mutate_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("client-mutate", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/mutate/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{\"counter\":1,\"drop\":true}", NULL, 0L,
+                     0, &update_res, &error);
+
+  mutations[0] = "/counter++";
+  mutations[1] = "/status=\"ok\"";
+  mutations[2] = "rm:/drop";
+  mutate_op.lease.key = key;
+  mutate_op.mutations = mutations;
+  mutate_op.mutation_count = 3U;
+  mutate_op.if_state_etag = update_res.new_state_etag;
+  mutate_op.if_version = update_res.new_version;
+  mutate_op.has_if_version = 1;
+  rc = client->mutate(client, &mutate_op, &mutate_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(mutate_res.new_version, 2L);
+  assert_string_equal(mutate_res.new_state_etag, "pouch-state-2");
+  assert_true(mutate_res.bytes > 0L);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length, "\"counter\":2"));
+  assert_true(bytes_contain_text(bytes, length, "\"status\":\"ok\""));
+  assert_false(bytes_contain_text(bytes, length, "\"drop\""));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  lc_mutate_res_cleanup(&mutate_res);
+  memset(&mutate_res, 0, sizeof(mutate_res));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  mutate_op.if_state_etag = update_res.new_state_etag;
+  mutate_op.if_version = update_res.new_version;
+  rc = client->mutate(client, &mutate_op, &mutate_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "precondition"));
+
+  lc_mutate_res_cleanup(&mutate_res);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_get_missing_and_public_state_behavior(void **state) {
   lc_client *client;
   lc_sink *sink;
@@ -2056,6 +2132,89 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
 
   lc_get_res_cleanup(&get_res);
   lc_client_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_lease_mutate_and_local_mutate_refresh_state(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_mutate_req mutate_req;
+  lc_mutate_local_req local_req;
+  lc_get_res get_res;
+  lc_error error;
+  const char *mutations[1];
+  const char *local_mutations[1];
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_mutate_req_init(&mutate_req);
+  lc_mutate_local_req_init(&local_req);
+  memset(&get_res, 0, sizeof(get_res));
+  make_root("lease-mutate", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-mutate/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("{\"counter\":1}", strlen("{\"counter\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+
+  mutations[0] = "/counter++";
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 1U;
+  rc = lease->mutate(lease, &mutate_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 2L);
+  assert_string_equal(lease->state_etag, "pouch-state-2");
+
+  local_mutations[0] = "/label=\"local\"";
+  local_req.mutations = local_mutations;
+  local_req.mutation_count = 1U;
+  rc = lease->mutate_local(lease, &local_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 3L);
+  assert_string_equal(lease->state_etag, "pouch-state-3");
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length, "\"counter\":2"));
+  assert_true(bytes_contain_text(bytes, length, "\"label\":\"local\""));
+  sink->close(sink);
+
+  lc_get_res_cleanup(&get_res);
+  lease->close(lease);
+  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -4024,6 +4183,7 @@ int main(void) {
           test_staged_decision_recovery_tombstones_interrupted_discard),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
+      cmocka_unit_test(test_client_mutate_applies_plan_and_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
@@ -4037,6 +4197,7 @@ int main(void) {
       cmocka_unit_test(
           test_shared_state_projection_cache_refreshes_peer_markers),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
+      cmocka_unit_test(test_lease_mutate_and_local_mutate_refresh_state),
       cmocka_unit_test(
           test_lease_save_streams_mapped_json_and_replays_after_reopen),
       cmocka_unit_test(test_lease_keepalive_and_release_use_local_lifecycle),
