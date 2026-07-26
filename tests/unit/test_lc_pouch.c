@@ -5640,11 +5640,19 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(
 }
 
 static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
+  static const char committed_body[] =
+      "{\"category\":\"planning\",\"value\":\"recovered-commit\"}";
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   lc_client *client;
   lc_pouch *pouch;
   lc_source *source;
   lc_pouch_state_write_result write_result;
   lc_pouch_state_read_result read_result;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture query_capture;
   lc_error error;
   char root[512];
   char record[1024];
@@ -5661,6 +5669,10 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   source = NULL;
   memset(&write_result, 0, sizeof(write_result));
   memset(&read_result, 0, sizeof(read_result));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&query_capture, 0, sizeof(query_capture));
   lc_error_init(&error);
   make_root("txn-recovery", root, sizeof(root));
   cleanup_root(root);
@@ -5677,8 +5689,8 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
                      "participant %s %s %s\n",
                      namespace_hex, key_hex, backend_hex);
   assert_true(written > 0 && (size_t)written < sizeof(record));
-  rc = lc_source_from_memory("recovered-commit", strlen("recovered-commit"),
-                             &source, &error);
+  rc = lc_source_from_memory(committed_body, strlen(committed_body), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/recover",
                                   "state/recover-commit",
@@ -5735,8 +5747,30 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, bytes, sizeof(bytes));
-  assert_string_equal(bytes, "recovered-commit");
+  assert_true(bytes_contain_text(bytes, strlen(bytes),
+                                 "\"value\":\"recovered-commit\""));
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "orders/recover";
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &query_capture,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_capture.count, 1);
+  assert_true(pouch_query_capture_has(&query_capture,
+                                      "state/recover-commit"));
+  assert_null(query_res.cursor);
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
   rc = lc_pouch_state_read(
       pouch, "orders/recover",
       "state/recover-expired/.staging/txn-recover-expired", &read_result,
