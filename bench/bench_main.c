@@ -898,6 +898,11 @@ static int bench_pouch_lql_match_contains_message(long row, long rows) {
   return row % 8L == 0L;
 }
 
+static int bench_pouch_lql_match_date_after(long row, long rows) {
+  (void)rows;
+  return row % 4L == 0L;
+}
+
 static int bench_pouch_lql_match_and_even_range(long row, long rows) {
   return bench_pouch_lql_match_eq_dense(row, rows) &&
          bench_pouch_lql_match_range_half(row, rows);
@@ -919,6 +924,7 @@ static const bench_pouch_lql_scenario *bench_pouch_lql_scenarios(void) {
       {"ExistsFlag", bench_pouch_lql_match_exists_flag},
       {"PrefixOwner", bench_pouch_lql_match_prefix_owner},
       {"ContainsMessage", bench_pouch_lql_match_contains_message},
+      {"DateAfter", bench_pouch_lql_match_date_after},
       {"AndEvenRange", bench_pouch_lql_match_and_even_range},
       {"OrSparseOrFlag", bench_pouch_lql_match_or_sparse_or_flag},
       {NULL, NULL}};
@@ -995,6 +1001,10 @@ bench_pouch_lql_selector_json(const bench_pouch_lql_scenario *scenario,
     written = snprintf(buffer, buffer_size,
                        "{\"contains\":{\"field\":\"/details/message\","
                        "\"value\":\"timeout\"}}");
+  } else if (strcmp(scenario->name, "DateAfter") == 0) {
+    written = snprintf(buffer, buffer_size,
+                       "{\"date\":{\"field\":\"/created_at\","
+                       "\"after\":\"2025-01-01T00:00:00Z\"}}");
   } else if (strcmp(scenario->name, "AndEvenRange") == 0) {
     written =
         snprintf(buffer, buffer_size,
@@ -1032,6 +1042,7 @@ static int bench_pouch_seed_public_lql_rows(const char *root, long rows,
   char key[96];
   char owner[32];
   char json[512];
+  const char *created_at;
   char flag_json[32];
   lc_client_config config;
   const char *endpoints[1];
@@ -1070,15 +1081,23 @@ static int bench_pouch_seed_public_lql_rows(const char *root, long rows,
     } else {
       flag_json[0] = '\0';
     }
+    if (i % 4L == 0L) {
+      created_at = "2026-01-01T00:00:00Z";
+    } else if (i % 4L == 1L) {
+      created_at = "not-a-date";
+    } else {
+      created_at = "2024-01-01T00:00:00Z";
+    }
     snprintf(json, sizeof(json),
              "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
              "\"owner\":\"%s\",\"value\":%ld,\"tags\":[\"%s\",\"%s\"],"
+             "\"created_at\":\"%s\","
              "\"details\":{\"message\":\"%s event %ld\"}%s}",
              i == target ? "needle" : "haystack", i % 2L == 0L ? "even" : "odd",
              i % 3L == 0L ? "us" : (i % 3L == 1L ? "eu" : "apac"), owner, i,
              i % 3L == 0L ? "planning" : "ops",
              i % 5L == 0L ? "finance" : "runtime",
-             i % 8L == 0L ? "timeout" : "normal", i, flag_json);
+             created_at, i % 8L == 0L ? "timeout" : "normal", i, flag_json);
     lease = NULL;
     source = NULL;
     acquire.key = key;
@@ -3464,6 +3483,11 @@ DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_contains_message,
                        "ContainsMessage", 1, 1)
 DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_contains_message,
                        "ContainsMessage", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_date_after, "DateAfter", 1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_date_after, "DateAfter", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_date_after, "DateAfter", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_date_after, "DateAfter", 0,
+                       1)
 DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_and_even_range, "AndEvenRange", 1,
                        0)
 DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_and_even_range, "AndEvenRange", 0,
@@ -4189,6 +4213,14 @@ int main(int argc, char **argv) {
        bench_pouch_scan_lql_keys_contains_message},
       {"pouch-index-lql-keys-contains-message", 1000L, 0,
        bench_pouch_index_lql_keys_contains_message},
+      {"pouch-scan-lql-date-after", 1000L, 0,
+       bench_pouch_scan_lql_date_after},
+      {"pouch-index-lql-date-after", 1000L, 0,
+       bench_pouch_index_lql_date_after},
+      {"pouch-scan-lql-keys-date-after", 1000L, 0,
+       bench_pouch_scan_lql_keys_date_after},
+      {"pouch-index-lql-keys-date-after", 1000L, 0,
+       bench_pouch_index_lql_keys_date_after},
       {"pouch-scan-lql-and-even-range", 1000L, 0,
        bench_pouch_scan_lql_and_even_range},
       {"pouch-index-lql-and-even-range", 1000L, 0,
