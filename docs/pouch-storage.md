@@ -2289,9 +2289,11 @@ convention `q/<queue>/state/<message_id>`, so public message state operations
 use the normal pouch state path. Queue records also persist TTL expiry and
 explicit retry-exhausted terminal status, so expired messages and messages that
 hit `max_attempts` are excluded from stats and dequeue after refresh/replay.
-This is not full queue parity yet: subscribe/watch loops, notification hints,
-transaction side effects, stateful commit/rollback, and high-contention
-duplicate-delivery tests remain broader queue work.
+Direct `subscribe` and `subscribe_with_state` use the polling dequeue path for
+bounded pages and enforce the public explicit ack/nack callback contract. This
+is not full queue parity yet: watch/notification hints, transaction side
+effects, stateful commit/rollback, and high-contention duplicate-delivery
+tests remain broader queue work.
 
 Current pouch backend milestone: the private storage interface exposes queue
 wake status. The pouch backend reports `polling`, marks queue marker files as

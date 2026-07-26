@@ -54,6 +54,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       explicit: expired records are excluded from stats/dequeue, and failure
       nacks that hit `max_attempts` persist a terminal queue status with
       stats/dequeue coverage.
+    - [x] Add direct pouch polling subscribe paths: `subscribe` and
+      `subscribe_with_state` deliver bounded pages from local dequeue, enforce
+      the public explicit ack/nack callback contract, auto-nack missing
+      terminal callbacks as failure, and cover stateful delivery.
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.

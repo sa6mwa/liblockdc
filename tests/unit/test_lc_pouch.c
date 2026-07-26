@@ -2382,6 +2382,160 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
   lc_error_cleanup(&error);
 }
 
+typedef struct pouch_subscribe_capture {
+  int count;
+  int saw_state;
+} pouch_subscribe_capture;
+
+static int pouch_subscribe_ack_handler(void *context, lc_message *message,
+                                       lc_error *error) {
+  pouch_subscribe_capture *capture;
+
+  capture = (pouch_subscribe_capture *)context;
+  assert_non_null(message);
+  capture->count += 1;
+  return message->ack(message, error);
+}
+
+static int pouch_subscribe_state_ack_handler(void *context, lc_message *message,
+                                             lc_error *error) {
+  pouch_subscribe_capture *capture;
+
+  capture = (pouch_subscribe_capture *)context;
+  assert_non_null(message);
+  assert_non_null(message->state(message));
+  capture->count += 1;
+  capture->saw_state = 1;
+  return message->ack(message, error);
+}
+
+static int pouch_subscribe_missing_terminal_handler(void *context,
+                                                   lc_message *message,
+                                                   lc_error *error) {
+  pouch_subscribe_capture *capture;
+
+  (void)error;
+  capture = (pouch_subscribe_capture *)context;
+  assert_non_null(message);
+  capture->count += 1;
+  return LC_OK;
+}
+
+static void test_client_queue_subscribe_polling_paths(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req subscribe_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_consumer consumer;
+  pouch_subscribe_capture capture;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&subscribe_req);
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  lc_consumer_init(&consumer);
+  memset(&capture, 0, sizeof(capture));
+  lc_error_init(&error);
+  make_root("client-queue-subscribe", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "subscribe";
+  rc = lc_source_from_memory("one", strlen("one"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  rc = lc_source_from_memory("two", strlen("two"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  subscribe_req.queue = "subscribe";
+  subscribe_req.page_size = 2;
+  consumer.handle = pouch_subscribe_ack_handler;
+  consumer.context = &capture;
+  rc = client->subscribe(client, &subscribe_req, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 2);
+
+  stats_req.queue = "subscribe";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "state-subscribe";
+  rc = lc_source_from_memory("state", strlen("state"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  lc_dequeue_req_init(&subscribe_req);
+  subscribe_req.queue = "state-subscribe";
+  consumer.handle = pouch_subscribe_state_ack_handler;
+  consumer.context = &capture;
+  rc = client->subscribe_with_state(client, &subscribe_req, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_int_equal(capture.saw_state, 1);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "missing-terminal";
+  rc = lc_source_from_memory("missing", strlen("missing"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  lc_dequeue_req_init(&subscribe_req);
+  subscribe_req.queue = "missing-terminal";
+  consumer.handle = pouch_subscribe_missing_terminal_handler;
+  consumer.context = &capture;
+  rc = client->subscribe(client, &subscribe_req, &consumer, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(
+      error.message,
+      "consumer callback must ack() or nack() before returning LC_OK");
+  assert_int_equal(capture.count, 1);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  stats_req.queue = "missing-terminal";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 1);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_remove_tombstones_state_and_enforces_preconditions(
     void **state) {
   lc_client *client;
@@ -4821,6 +4975,7 @@ int main(void) {
       cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),
+      cmocka_unit_test(test_client_queue_subscribe_polling_paths),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),
