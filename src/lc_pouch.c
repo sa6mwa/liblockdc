@@ -124,6 +124,7 @@ void lc_pouch_close(lc_pouch *pouch) {
     return;
   }
   allocator = pouch->allocator;
+  lc_pouch_state_cache_cleanup(pouch);
   lc_free_with_allocator(&allocator, pouch->root_path);
   lc_free_with_allocator(&allocator, pouch);
 }

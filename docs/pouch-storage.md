@@ -123,6 +123,9 @@ A pouch operation normally follows this path:
 4. Mutations append typed records to the active namespace segment, join a commit
    group, wait for the configured durability policy, then apply the committed
    refs into the in-memory projections.
+   The current redesigned C backend has this projection path for state records
+   in `single_writer` mode; shared-mode projection refresh is still being
+   rebuilt.
 5. Query-visible metadata updates also advance the durable query-index sidecar
    and update summary rows, owner postings, strict JSON Pointer field postings,
    text postings, trigrams, numeric postings, and live/deleted state.
@@ -1758,8 +1761,10 @@ adjacent writes. It also has deterministic reader-side peer-marker snapshots
 that ignore the current writer marker and compare peer markers by name, size,
 and modification time. Marker-directory snapshot state now provides a fast path
 for unchanged marker directories and a forced-refresh counter so marker hints
-cannot suppress validation indefinitely. Wiring this decision state into cached
-namespace projections remains to be rebuilt on top of these primitives.
+cannot suppress validation indefinitely. The first state projection cache is
+active for `single_writer` handles; wiring marker refresh decisions into
+shared-mode cached namespace projections remains to be rebuilt on top of these
+primitives.
 
 Refresh needs two modes:
 

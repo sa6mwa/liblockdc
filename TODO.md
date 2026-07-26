@@ -25,6 +25,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Replace the interim `acquire_for_update` committed-log rollback path
     with staged-state writes, link-style promotion, discard, and public
     staging-key rejection.
+  - [x] Add the first rebuildable in-memory state projection cache for
+    single-writer reads, with local mutation updates and segment replay rebuild
+    on first use.
   - [ ] Add durable transaction decision records, replay, staged participant
     recovery, and expired staged-state cleanup on reopen.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
@@ -39,8 +42,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add marker-directory fast-path metadata and periodic forced-refresh
     decision state so cached readers can skip unchanged marker scans without
     suppressing full validation indefinitely.
-  - [ ] Wire marker refresh decisions into cached namespace projections, then
-    add snapshot creation, compaction scheduling, and obsolete-file cleanup.
+  - [ ] Wire marker refresh decisions into shared-mode cached namespace
+    projections, then add snapshot creation, compaction scheduling, and
+    obsolete-file cleanup.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the

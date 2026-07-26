@@ -3,6 +3,8 @@
 
 #include "lc_pouch.h"
 
+typedef struct lc_pouch_state_cache_namespace lc_pouch_state_cache_namespace;
+
 struct lc_pouch {
   lc_allocator allocator;
   char *root_path;
@@ -13,6 +15,9 @@ struct lc_pouch {
   unsigned long marker_sequence;
   int background_compaction_enabled;
   int single_writer;
+  lc_pouch_state_cache_namespace *state_cache_namespaces;
 };
+
+void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
 
 #endif

@@ -395,6 +395,77 @@ static void read_source_to_string(lc_source *source, char *buffer,
   lc_error_cleanup(&error);
 }
 
+static void test_single_writer_state_read_uses_projection_cache(void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result write_res;
+  lc_pouch_state_read_result read_res;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *segment_leaf;
+  char segment_path[1024];
+  char buffer[64];
+  int written;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  namespace_path = NULL;
+  segment_leaf = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_res, 0, sizeof(write_res));
+  memset(&read_res, 0, sizeof(read_res));
+  lc_error_init(&error);
+  make_root("single-writer-cache", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer = 1;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "cache/key", source, NULL,
+                            &write_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+
+  rc = lc_pouch_state_read(pouch, "default", "cache/key", &read_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_res.found);
+  read_source_to_string(read_res.body, buffer, sizeof(buffer));
+  assert_string_equal(buffer, "{\"value\":1}");
+  lc_pouch_state_read_result_cleanup(NULL, &read_res);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
+  assert_non_null(namespace_path);
+  assert_non_null(segment_leaf);
+  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
+                     namespace_path, segment_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  assert_int_equal(unlink(segment_path), 0);
+
+  rc = lc_pouch_state_read(pouch, "default", "cache/key", &read_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_res.found);
+  assert_int_equal(read_res.version, write_res.version);
+  read_source_to_string(read_res.body, buffer, sizeof(buffer));
+  assert_string_equal(buffer, "{\"value\":1}");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_res);
+  lc_pouch_state_write_result_cleanup(NULL, &write_res);
+  free(segment_leaf);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void open_pouch_client(const char *root, lc_client **out,
                               lc_error *error) {
   lc_client_config config;
@@ -1566,6 +1637,7 @@ int main(void) {
       cmocka_unit_test(test_marker_snapshots_detect_peer_changes),
       cmocka_unit_test(
           test_marker_refresh_uses_directory_fast_path_and_force),
+      cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
