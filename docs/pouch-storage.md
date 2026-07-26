@@ -1339,6 +1339,10 @@ The current disk adapter now builds that exact-term table per request from
 filtered sidecar candidates, so equality and `in` plans can use compiled
 postings without bypassing existing live-state, owner, hidden, generation, or
 secondary-predicate checks.
+For primary equality plans with negative equality filters, the disk adapter can
+now ask exact-term readers for unfiltered primary and negative term docIDs,
+then lets `lc_pouch_index` subtract sorted negative docID sets from the primary
+candidate set before paging.
 Positive `exists` plans use the same bridge for field-presence postings:
 filtered sidecar candidates are compiled into adaptive docID postings per
 request, then decoded through the index layer.
@@ -1410,6 +1414,10 @@ before the generic equality path. Their normalized plan keys sort and
 deduplicate typed `in` values first, then append the same sorted/deduplicated
 equality suffix, so document scans and key scans share the filtered result
 cache until the index sequence advances.
+Primary equality/not-equality scans use a normalized equality key with a
+sorted/deduplicated `not_eq` suffix. The cached docID vector is the primary
+equality candidate set after index-owned subtraction, so document scans and key
+scans reuse the same filtered result until the index sequence advances.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,
 simple positive numeric `range`, simple non-wildcard positive `in`, simple

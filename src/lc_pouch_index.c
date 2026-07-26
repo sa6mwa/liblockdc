@@ -24,6 +24,57 @@ int lc_pouch_index_collect_eq_term_doc_ids(
   return LC_OK;
 }
 
+int lc_pouch_index_collect_eq_term_with_not_eq_doc_ids(
+    const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,
+    const lc_pouch_document_eq_term *not_eq_terms, size_t not_eq_term_count,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  size_t index;
+  int rc;
+
+  rc = lc_pouch_index_collect_eq_term_doc_ids(allocator, term, read_exact,
+                                              read_context, doc_ids, error);
+  if (rc != LC_OK || doc_ids == NULL || doc_ids->count == 0U ||
+      not_eq_term_count == 0U) {
+    return rc;
+  }
+  if (not_eq_terms == NULL || read_exact == NULL) {
+    return LC_OK;
+  }
+  for (index = 0U; index < not_eq_term_count; ++index) {
+    lc_pouch_index_doc_id_set not_doc_ids;
+    lc_pouch_index_doc_id_set subtracted;
+    const lc_pouch_document_eq_term *not_term;
+
+    not_term = &not_eq_terms[index];
+    if (not_term->field == NULL || not_term->value == NULL) {
+      continue;
+    }
+    memset(&not_doc_ids, 0, sizeof(not_doc_ids));
+    memset(&subtracted, 0, sizeof(subtracted));
+    rc = read_exact(read_context, not_term->field, not_term->value,
+                    &not_doc_ids, error);
+    if (rc != LC_OK) {
+      lc_pouch_index_doc_id_set_cleanup(allocator, &not_doc_ids);
+      return rc;
+    }
+    if (!lc_pouch_index_doc_id_set_sort_unique(&not_doc_ids) ||
+        !lc_pouch_index_doc_id_set_subtract(allocator, &subtracted, doc_ids,
+                                            &not_doc_ids)) {
+      lc_pouch_index_doc_id_set_cleanup(allocator, &subtracted);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &not_doc_ids);
+      return LC_ERR_NOMEM;
+    }
+    lc_pouch_index_doc_id_set_cleanup(allocator, doc_ids);
+    *doc_ids = subtracted;
+    lc_pouch_index_doc_id_set_cleanup(allocator, &not_doc_ids);
+    if (doc_ids->count == 0U) {
+      return LC_OK;
+    }
+  }
+  return LC_OK;
+}
+
 int lc_pouch_index_collect_in_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_in_term *term,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
