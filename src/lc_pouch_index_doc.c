@@ -246,6 +246,24 @@ void lc_pouch_index_doc_id_set_cleanup(const lc_pouch_allocator *allocator,
   memset(set, 0, sizeof(*set));
 }
 
+void lc_pouch_index_doc_id_set_reset(lc_pouch_index_doc_id_set *set) {
+  if (set == NULL) {
+    return;
+  }
+  set->count = 0U;
+}
+
+void lc_pouch_index_doc_id_scratch_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_doc_id_scratch *scratch) {
+  if (scratch == NULL) {
+    return;
+  }
+  lc_pouch_index_doc_id_set_cleanup(allocator, &scratch->term);
+  lc_pouch_index_doc_id_set_cleanup(allocator, &scratch->merge);
+  memset(scratch, 0, sizeof(*scratch));
+}
+
 int lc_pouch_index_doc_id_set_append(const lc_pouch_allocator *allocator,
                                      lc_pouch_index_doc_id_set *set,
                                      lc_pouch_index_doc_id id) {

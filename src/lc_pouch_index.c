@@ -2,6 +2,28 @@
 
 #include <string.h>
 
+static void lc_pouch_index_doc_id_set_swap(lc_pouch_index_doc_id_set *left,
+                                           lc_pouch_index_doc_id_set *right) {
+  lc_pouch_index_doc_id_set tmp;
+
+  tmp = *left;
+  *left = *right;
+  *right = tmp;
+}
+
+static int lc_pouch_index_intersect_eq_term_doc_ids_with_scratch(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_pouch_index_doc_id_scratch *scratch,
+    lc_error *error);
+static int lc_pouch_index_subtract_eq_term_doc_ids_with_scratch(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_eq_term *not_eq_terms, size_t not_eq_term_count,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_pouch_index_doc_id_scratch *scratch,
+    lc_error *error);
+
 int lc_pouch_index_collect_eq_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
@@ -29,42 +51,55 @@ static int lc_pouch_index_subtract_eq_term_doc_ids(
     const lc_pouch_document_eq_term *not_eq_terms, size_t not_eq_term_count,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  lc_pouch_index_doc_id_scratch scratch;
+  int rc;
+
+  memset(&scratch, 0, sizeof(scratch));
+  rc = lc_pouch_index_subtract_eq_term_doc_ids_with_scratch(
+      allocator, not_eq_terms, not_eq_term_count, read_exact, read_context,
+      doc_ids, &scratch, error);
+  lc_pouch_index_doc_id_scratch_cleanup(allocator, &scratch);
+  return rc;
+}
+
+static int lc_pouch_index_subtract_eq_term_doc_ids_with_scratch(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_eq_term *not_eq_terms, size_t not_eq_term_count,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_pouch_index_doc_id_scratch *scratch,
+    lc_error *error) {
   size_t index;
   int rc;
 
-  if (doc_ids == NULL || doc_ids->count == 0U || not_eq_term_count == 0U) {
+  if (doc_ids == NULL || scratch == NULL || doc_ids->count == 0U ||
+      not_eq_term_count == 0U) {
     return LC_OK;
   }
   if (not_eq_terms == NULL || read_exact == NULL) {
     return LC_OK;
   }
   for (index = 0U; index < not_eq_term_count; ++index) {
-    lc_pouch_index_doc_id_set not_doc_ids;
-    lc_pouch_index_doc_id_set subtracted;
     const lc_pouch_document_eq_term *not_term;
 
     not_term = &not_eq_terms[index];
     if (not_term->field == NULL || not_term->value == NULL) {
       continue;
     }
-    memset(&not_doc_ids, 0, sizeof(not_doc_ids));
-    memset(&subtracted, 0, sizeof(subtracted));
+    lc_pouch_index_doc_id_set_reset(&scratch->term);
+    lc_pouch_index_doc_id_set_reset(&scratch->merge);
     rc = read_exact(read_context, not_term->field, not_term->value,
-                    &not_doc_ids, error);
+                    &scratch->term, error);
     if (rc != LC_OK) {
-      lc_pouch_index_doc_id_set_cleanup(allocator, &not_doc_ids);
       return rc;
     }
-    if (!lc_pouch_index_doc_id_set_sort_unique(&not_doc_ids) ||
-        !lc_pouch_index_doc_id_set_subtract(allocator, &subtracted, doc_ids,
-                                            &not_doc_ids)) {
-      lc_pouch_index_doc_id_set_cleanup(allocator, &subtracted);
-      lc_pouch_index_doc_id_set_cleanup(allocator, &not_doc_ids);
+    if (!lc_pouch_index_doc_id_set_sort_unique(&scratch->term) ||
+        !lc_pouch_index_doc_id_set_subtract(allocator, &scratch->merge, doc_ids,
+                                            &scratch->term)) {
       return LC_ERR_NOMEM;
     }
-    lc_pouch_index_doc_id_set_cleanup(allocator, doc_ids);
-    *doc_ids = subtracted;
-    lc_pouch_index_doc_id_set_cleanup(allocator, &not_doc_ids);
+    lc_pouch_index_doc_id_set_swap(doc_ids, &scratch->merge);
+    lc_pouch_index_doc_id_set_reset(&scratch->merge);
+    lc_pouch_index_doc_id_set_reset(&scratch->term);
     if (doc_ids->count == 0U) {
       return LC_OK;
     }
@@ -169,10 +204,49 @@ static int lc_pouch_index_intersect_eq_term_doc_ids(
     const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
     lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  lc_pouch_index_doc_id_scratch scratch;
+  int rc;
+
+  memset(&scratch, 0, sizeof(scratch));
+  rc = lc_pouch_index_intersect_eq_term_doc_ids_with_scratch(
+      allocator, eq_terms, eq_term_count, read_exact, read_context, doc_ids,
+      &scratch, error);
+  lc_pouch_index_doc_id_scratch_cleanup(allocator, &scratch);
+  return rc;
+}
+
+static int lc_pouch_index_filter_eq_and_not_eq_term_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
+    const lc_pouch_document_eq_term *not_eq_terms, size_t not_eq_term_count,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  lc_pouch_index_doc_id_scratch scratch;
+  int rc;
+
+  memset(&scratch, 0, sizeof(scratch));
+  rc = lc_pouch_index_intersect_eq_term_doc_ids_with_scratch(
+      allocator, eq_terms, eq_term_count, read_exact, read_context, doc_ids,
+      &scratch, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_index_subtract_eq_term_doc_ids_with_scratch(
+        allocator, not_eq_terms, not_eq_term_count, read_exact, read_context,
+        doc_ids, &scratch, error);
+  }
+  lc_pouch_index_doc_id_scratch_cleanup(allocator, &scratch);
+  return rc;
+}
+
+static int lc_pouch_index_intersect_eq_term_doc_ids_with_scratch(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_pouch_index_doc_id_scratch *scratch,
+    lc_error *error) {
   size_t index;
   int rc;
 
-  if (doc_ids == NULL || eq_term_count == 0U) {
+  if (doc_ids == NULL || scratch == NULL || eq_term_count == 0U) {
     return LC_OK;
   }
   if (eq_terms == NULL || read_exact == NULL) {
@@ -180,8 +254,6 @@ static int lc_pouch_index_intersect_eq_term_doc_ids(
     return LC_OK;
   }
   for (index = 0U; index < eq_term_count; ++index) {
-    lc_pouch_index_doc_id_set eq_doc_ids;
-    lc_pouch_index_doc_id_set intersected;
     const lc_pouch_document_eq_term *term;
 
     term = &eq_terms[index];
@@ -189,23 +261,21 @@ static int lc_pouch_index_intersect_eq_term_doc_ids(
       doc_ids->count = 0U;
       return LC_OK;
     }
-    memset(&eq_doc_ids, 0, sizeof(eq_doc_ids));
-    memset(&intersected, 0, sizeof(intersected));
-    rc = read_exact(read_context, term->field, term->value, &eq_doc_ids, error);
+    lc_pouch_index_doc_id_set_reset(&scratch->term);
+    lc_pouch_index_doc_id_set_reset(&scratch->merge);
+    rc = read_exact(read_context, term->field, term->value, &scratch->term,
+                    error);
     if (rc != LC_OK) {
-      lc_pouch_index_doc_id_set_cleanup(allocator, &eq_doc_ids);
       return rc;
     }
-    if (!lc_pouch_index_doc_id_set_sort_unique(&eq_doc_ids) ||
-        !lc_pouch_index_doc_id_set_intersect(allocator, &intersected, doc_ids,
-                                             &eq_doc_ids)) {
-      lc_pouch_index_doc_id_set_cleanup(allocator, &intersected);
-      lc_pouch_index_doc_id_set_cleanup(allocator, &eq_doc_ids);
+    if (!lc_pouch_index_doc_id_set_sort_unique(&scratch->term) ||
+        !lc_pouch_index_doc_id_set_intersect(allocator, &scratch->merge,
+                                             doc_ids, &scratch->term)) {
       return LC_ERR_NOMEM;
     }
-    lc_pouch_index_doc_id_set_cleanup(allocator, doc_ids);
-    *doc_ids = intersected;
-    lc_pouch_index_doc_id_set_cleanup(allocator, &eq_doc_ids);
+    lc_pouch_index_doc_id_set_swap(doc_ids, &scratch->merge);
+    lc_pouch_index_doc_id_set_reset(&scratch->merge);
+    lc_pouch_index_doc_id_set_reset(&scratch->term);
     if (doc_ids->count == 0U) {
       return LC_OK;
     }
@@ -247,15 +317,9 @@ int lc_pouch_index_collect_exists_term_with_eq_and_not_eq_doc_ids(
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
-                                                eq_term_count, read_exact,
-                                                read_context, doc_ids, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_pouch_index_subtract_eq_term_doc_ids(allocator, not_eq_terms,
-                                                 not_eq_term_count, read_exact,
-                                                 read_context, doc_ids, error);
+  return lc_pouch_index_filter_eq_and_not_eq_term_doc_ids(
+      allocator, eq_terms, eq_term_count, not_eq_terms, not_eq_term_count,
+      read_exact, read_context, doc_ids, error);
 }
 
 int lc_pouch_index_collect_in_term_with_eq_doc_ids(
@@ -290,15 +354,9 @@ int lc_pouch_index_collect_in_term_with_eq_and_not_eq_doc_ids(
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
-                                                eq_term_count, read_exact,
-                                                read_context, doc_ids, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_pouch_index_subtract_eq_term_doc_ids(allocator, not_eq_terms,
-                                                 not_eq_term_count, read_exact,
-                                                 read_context, doc_ids, error);
+  return lc_pouch_index_filter_eq_and_not_eq_term_doc_ids(
+      allocator, eq_terms, eq_term_count, not_eq_terms, not_eq_term_count,
+      read_exact, read_context, doc_ids, error);
 }
 
 int lc_pouch_index_collect_range_term_with_eq_doc_ids(
@@ -335,15 +393,9 @@ int lc_pouch_index_collect_range_term_with_eq_and_not_eq_doc_ids(
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
-                                                eq_term_count, read_exact,
-                                                read_context, doc_ids, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_pouch_index_subtract_eq_term_doc_ids(allocator, not_eq_terms,
-                                                 not_eq_term_count, read_exact,
-                                                 read_context, doc_ids, error);
+  return lc_pouch_index_filter_eq_and_not_eq_term_doc_ids(
+      allocator, eq_terms, eq_term_count, not_eq_terms, not_eq_term_count,
+      read_exact, read_context, doc_ids, error);
 }
 
 int lc_pouch_index_collect_prefix_term_doc_ids(
@@ -403,15 +455,9 @@ int lc_pouch_index_collect_prefix_term_with_eq_and_not_eq_doc_ids(
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
-                                                eq_term_count, read_exact,
-                                                read_context, doc_ids, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_pouch_index_subtract_eq_term_doc_ids(allocator, not_eq_terms,
-                                                 not_eq_term_count, read_exact,
-                                                 read_context, doc_ids, error);
+  return lc_pouch_index_filter_eq_and_not_eq_term_doc_ids(
+      allocator, eq_terms, eq_term_count, not_eq_terms, not_eq_term_count,
+      read_exact, read_context, doc_ids, error);
 }
 
 int lc_pouch_index_collect_contains_term_doc_ids(
@@ -471,13 +517,7 @@ int lc_pouch_index_collect_contains_term_with_eq_and_not_eq_doc_ids(
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
-                                                eq_term_count, read_exact,
-                                                read_context, doc_ids, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  return lc_pouch_index_subtract_eq_term_doc_ids(allocator, not_eq_terms,
-                                                 not_eq_term_count, read_exact,
-                                                 read_context, doc_ids, error);
+  return lc_pouch_index_filter_eq_and_not_eq_term_doc_ids(
+      allocator, eq_terms, eq_term_count, not_eq_terms, not_eq_term_count,
+      read_exact, read_context, doc_ids, error);
 }

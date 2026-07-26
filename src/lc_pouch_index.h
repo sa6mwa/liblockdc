@@ -15,6 +15,11 @@ typedef struct lc_pouch_index_doc_id_set {
   size_t capacity;
 } lc_pouch_index_doc_id_set;
 
+typedef struct lc_pouch_index_doc_id_scratch {
+  lc_pouch_index_doc_id_set term;
+  lc_pouch_index_doc_id_set merge;
+} lc_pouch_index_doc_id_scratch;
+
 typedef struct lc_pouch_index_doc_entry {
   char *namespace_name;
   char *key;
@@ -125,6 +130,10 @@ typedef int (*lc_pouch_index_result_collect_doc_ids_fn)(
 
 void lc_pouch_index_doc_id_set_cleanup(const lc_pouch_allocator *allocator,
                                        lc_pouch_index_doc_id_set *set);
+void lc_pouch_index_doc_id_set_reset(lc_pouch_index_doc_id_set *set);
+void lc_pouch_index_doc_id_scratch_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_doc_id_scratch *scratch);
 void lc_pouch_index_doc_table_cleanup(const lc_pouch_allocator *allocator,
                                       lc_pouch_index_doc_table *table);
 int lc_pouch_index_doc_table_find(const lc_pouch_index_doc_table *table,

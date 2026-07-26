@@ -91,6 +91,46 @@ static void test_doc_id_set_sort_unique(void **state) {
   lc_pouch_index_doc_id_set_cleanup(NULL, &set);
 }
 
+static void test_doc_id_scratch_reuses_reset_buffers(void **state) {
+  lc_pouch_index_doc_id_scratch scratch;
+  size_t term_capacity;
+  size_t merge_capacity;
+  size_t index;
+
+  (void)state;
+  memset(&scratch, 0, sizeof(scratch));
+  for (index = 0U; index < 24U; ++index) {
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, &scratch.term,
+                                                 (lc_pouch_index_doc_id)index));
+  }
+  for (index = 0U; index < 9U; ++index) {
+    assert_true(lc_pouch_index_doc_id_set_append(
+        NULL, &scratch.merge, (lc_pouch_index_doc_id)(index + 100U)));
+  }
+  term_capacity = scratch.term.capacity;
+  merge_capacity = scratch.merge.capacity;
+  assert_true(term_capacity >= 24U);
+  assert_true(merge_capacity >= 9U);
+
+  lc_pouch_index_doc_id_set_reset(&scratch.term);
+  lc_pouch_index_doc_id_set_reset(&scratch.merge);
+  assert_int_equal(scratch.term.count, 0U);
+  assert_int_equal(scratch.merge.count, 0U);
+  assert_int_equal(scratch.term.capacity, term_capacity);
+  assert_int_equal(scratch.merge.capacity, merge_capacity);
+
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &scratch.term, 77U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, &scratch.merge, 88U));
+  assert_int_equal(scratch.term.capacity, term_capacity);
+  assert_int_equal(scratch.merge.capacity, merge_capacity);
+
+  lc_pouch_index_doc_id_scratch_cleanup(NULL, &scratch);
+  assert_null(scratch.term.items);
+  assert_null(scratch.merge.items);
+  assert_int_equal(scratch.term.capacity, 0U);
+  assert_int_equal(scratch.merge.capacity, 0U);
+}
+
 static void test_doc_id_set_algebra(void **state) {
   lc_pouch_index_doc_id_set left;
   lc_pouch_index_doc_id_set right;
@@ -1755,6 +1795,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_doc_table_assigns_dense_ids_by_namespace_key),
       cmocka_unit_test(test_doc_id_set_sort_unique),
+      cmocka_unit_test(test_doc_id_scratch_reuses_reset_buffers),
       cmocka_unit_test(test_doc_id_set_algebra),
       cmocka_unit_test(test_doc_id_set_algebra_allows_alias_destination),
       cmocka_unit_test(test_posting_sparse_decodes_sorted_unique_doc_ids),

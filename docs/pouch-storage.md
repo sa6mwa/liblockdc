@@ -1296,7 +1296,10 @@ private index primitives:
 - `src/lc_pouch_index_doc.c` owns the dense document table and docID set
   algebra. It maps namespace/key pairs to stable in-memory document IDs,
   resolves document IDs back to namespace/key pairs, and provides sorted
-  union/intersection/subtraction helpers.
+  union/intersection/subtraction helpers. Query-time equality
+  intersection/subtraction uses an internal docID scratch object so repeated
+  positive and negative equality terms can reuse temporary term and merge
+  buffers within one collector invocation.
 - `src/lc_pouch_index_posting.c` owns adaptive sparse/dense posting encoding.
   Sparse postings are delta-varint docID streams; dense postings are bitsets
   selected when density and encoded size justify them.
