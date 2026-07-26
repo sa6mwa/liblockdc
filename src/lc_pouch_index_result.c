@@ -1304,8 +1304,8 @@ static char *lc_pouch_index_date_after_result_plan_key(
     return NULL;
   }
   term = &req->document_date_after_terms[0];
-  return lc_pouch_index_text_result_plan_key(
-      allocator, req, "date_after", term->field, term->after, 0);
+  return lc_pouch_index_text_result_plan_key(allocator, req, "date_after",
+                                             term->field, term->after, 0);
 }
 
 char *lc_pouch_index_result_plan_key(const lc_pouch_allocator *allocator,
@@ -1697,5 +1697,89 @@ int lc_pouch_index_cached_result_page_identity(
   }
   lc_pouch_free(allocator, plan_key);
   lc_pouch_index_doc_id_set_cleanup(allocator, &doc_ids);
+  return LC_OK;
+}
+
+int lc_pouch_index_cached_remapped_result_page_identity(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_doc_table *doc_table,
+    lc_pouch_index_result_cache *cache, lc_pouch_index_identity identity,
+    const lc_pouch_query_index_scan_req *req,
+    lc_pouch_index_result_plan_kind kind,
+    lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
+    lc_pouch_index_result_remap_doc_ids_fn remap, void *remap_context,
+    lc_pouch_index_result_page *page, int *invalid_doc_id_out,
+    lc_error *error) {
+  lc_pouch_index_doc_id_set source_doc_ids;
+  lc_pouch_index_doc_id_set remapped_doc_ids;
+  char *plan_key;
+  int cacheable;
+  int cache_hit;
+  int invalid_doc_id;
+  int rc;
+
+  if (page == NULL || collect == NULL || remap == NULL) {
+    return LC_ERR_INVALID;
+  }
+  memset(page, 0, sizeof(*page));
+  memset(&source_doc_ids, 0, sizeof(source_doc_ids));
+  memset(&remapped_doc_ids, 0, sizeof(remapped_doc_ids));
+  if (invalid_doc_id_out != NULL) {
+    *invalid_doc_id_out = 0;
+  }
+
+  plan_key = lc_pouch_index_result_plan_key(allocator, req, kind);
+  cacheable = plan_key != NULL;
+  cache_hit =
+      cacheable && lc_pouch_index_result_cache_find_identity(
+                       allocator, cache, identity, plan_key, &remapped_doc_ids);
+  if (!cache_hit) {
+    rc = collect(collect_context, cacheable, &source_doc_ids, error);
+    if (rc != LC_OK) {
+      lc_pouch_free(allocator, plan_key);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &remapped_doc_ids);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &source_doc_ids);
+      return rc;
+    }
+    rc = remap(remap_context, &source_doc_ids, &remapped_doc_ids, error);
+    if (rc != LC_OK) {
+      lc_pouch_free(allocator, plan_key);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &remapped_doc_ids);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &source_doc_ids);
+      return rc;
+    }
+    if (cacheable &&
+        !lc_pouch_index_result_cache_put_identity(
+            allocator, cache, identity, plan_key, &remapped_doc_ids)) {
+      lc_pouch_free(allocator, plan_key);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &remapped_doc_ids);
+      lc_pouch_index_doc_id_set_cleanup(allocator, &source_doc_ids);
+      return LC_ERR_NOMEM;
+    }
+  }
+
+  invalid_doc_id = 0;
+  if (!lc_pouch_index_result_page_doc_ids(
+          allocator, doc_table, &remapped_doc_ids,
+          req != NULL ? req->namespace_name : NULL,
+          req != NULL ? req->start_after : NULL, req != NULL ? req->limit : 0U,
+          page, &invalid_doc_id)) {
+    lc_pouch_free(allocator, plan_key);
+    lc_pouch_index_doc_id_set_cleanup(allocator, &remapped_doc_ids);
+    lc_pouch_index_doc_id_set_cleanup(allocator, &source_doc_ids);
+    if (invalid_doc_id_out != NULL) {
+      *invalid_doc_id_out = invalid_doc_id;
+    }
+    if (invalid_doc_id) {
+      return LC_ERR_INVALID;
+    }
+    return LC_ERR_NOMEM;
+  }
+  if (invalid_doc_id_out != NULL) {
+    *invalid_doc_id_out = 0;
+  }
+  lc_pouch_free(allocator, plan_key);
+  lc_pouch_index_doc_id_set_cleanup(allocator, &remapped_doc_ids);
+  lc_pouch_index_doc_id_set_cleanup(allocator, &source_doc_ids);
   return LC_OK;
 }

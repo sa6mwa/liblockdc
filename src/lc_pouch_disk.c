@@ -8948,6 +8948,26 @@ static int lc_pouch_disk_remap_global_doc_ids_to_query_generation_doc_ids(
   return LC_OK;
 }
 
+typedef struct lc_pouch_disk_query_doc_generation_remap_context {
+  lc_pouch_disk_store *store;
+  const lc_pouch_index_doc_generation *docs;
+  const char *alloc_message;
+} lc_pouch_disk_query_doc_generation_remap_context;
+
+static int lc_pouch_disk_remap_query_generation_result_doc_ids(
+    void *context, const lc_pouch_index_doc_id_set *source_doc_ids,
+    lc_pouch_index_doc_id_set *remapped_doc_ids, lc_error *error) {
+  lc_pouch_disk_query_doc_generation_remap_context *remap;
+
+  remap = (lc_pouch_disk_query_doc_generation_remap_context *)context;
+  if (remap == NULL) {
+    return LC_OK;
+  }
+  return lc_pouch_disk_remap_global_doc_ids_to_query_generation_doc_ids(
+      remap->store, remap->docs, source_doc_ids, remapped_doc_ids, error,
+      remap->alloc_message);
+}
+
 static int lc_pouch_disk_read_current_query_doc_generation(
     lc_pouch_disk_store *store, const char *namespace_name,
     lc_pouch_index_identity identity, lc_pouch_index_doc_generation *docs,
@@ -8994,14 +9014,9 @@ static int lc_pouch_disk_query_cached_doc_generation_result_page(
     lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
     lc_pouch_index_result_page *page, lc_pouch_index_doc_generation *docs,
     int *invalid_doc_id_out, lc_error *error, const char *alloc_message) {
-  lc_pouch_index_doc_id_set global_doc_ids;
-  lc_pouch_index_doc_id_set local_doc_ids;
+  lc_pouch_disk_query_doc_generation_remap_context remap;
   lc_pouch_index_identity identity;
-  char *plan_key;
-  int cacheable;
-  int cache_hit;
   int found_docs;
-  int invalid_doc_id;
   int rc;
 
   if (page == NULL || docs == NULL || collect == NULL) {
@@ -9010,8 +9025,6 @@ static int lc_pouch_disk_query_cached_doc_generation_result_page(
   }
   memset(page, 0, sizeof(*page));
   memset(docs, 0, sizeof(*docs));
-  memset(&global_doc_ids, 0, sizeof(global_doc_ids));
-  memset(&local_doc_ids, 0, sizeof(local_doc_ids));
   if (invalid_doc_id_out != NULL) {
     *invalid_doc_id_out = 0;
   }
@@ -9026,60 +9039,23 @@ static int lc_pouch_disk_query_cached_doc_generation_result_page(
     return rc;
   }
 
-  plan_key = lc_pouch_index_result_plan_key(&store->allocator, req, kind);
-  cacheable = plan_key != NULL;
-  cache_hit = cacheable && lc_pouch_index_result_cache_find_identity(
-                               &store->allocator, &store->query_result_cache,
-                               identity, plan_key, &local_doc_ids);
-  if (!cache_hit) {
-    rc = collect(collect_context, cacheable, &global_doc_ids, error);
-    if (rc != LC_OK) {
-      lc_pouch_free(&store->allocator, plan_key);
-      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &local_doc_ids);
-      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &global_doc_ids);
-      return rc;
-    }
-    rc = lc_pouch_disk_remap_global_doc_ids_to_query_generation_doc_ids(
-        store, docs, &global_doc_ids, &local_doc_ids, error, alloc_message);
-    if (rc != LC_OK) {
-      lc_pouch_free(&store->allocator, plan_key);
-      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &local_doc_ids);
-      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &global_doc_ids);
-      return rc;
-    }
-    if (cacheable && !lc_pouch_index_result_cache_put_identity(
-                         &store->allocator, &store->query_result_cache,
-                         identity, plan_key, &local_doc_ids)) {
-      lc_pouch_free(&store->allocator, plan_key);
-      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &local_doc_ids);
-      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &global_doc_ids);
-      return lc_pouch_set_nomem(error, alloc_message);
-    }
+  remap.store = store;
+  remap.docs = docs;
+  remap.alloc_message = alloc_message;
+  rc = lc_pouch_index_cached_remapped_result_page_identity(
+      &store->allocator, &docs->docs, &store->query_result_cache, identity, req,
+      kind, collect, collect_context,
+      lc_pouch_disk_remap_query_generation_result_doc_ids, &remap, page,
+      invalid_doc_id_out, error);
+  if (rc == LC_ERR_INVALID && invalid_doc_id_out != NULL &&
+      *invalid_doc_id_out) {
+    return lc_pouch_set_invalid(
+        error, "pouch query doc generation is missing result docID");
   }
-
-  invalid_doc_id = 0;
-  if (!lc_pouch_index_result_page_doc_ids(
-          &store->allocator, &docs->docs, &local_doc_ids, req->namespace_name,
-          req->start_after, req->limit, page, &invalid_doc_id)) {
-    lc_pouch_free(&store->allocator, plan_key);
-    lc_pouch_index_doc_id_set_cleanup(&store->allocator, &local_doc_ids);
-    lc_pouch_index_doc_id_set_cleanup(&store->allocator, &global_doc_ids);
-    if (invalid_doc_id_out != NULL) {
-      *invalid_doc_id_out = invalid_doc_id;
-    }
-    if (invalid_doc_id) {
-      return lc_pouch_set_invalid(
-          error, "pouch query doc generation is missing result docID");
-    }
+  if (rc == LC_ERR_NOMEM) {
     return lc_pouch_set_nomem(error, alloc_message);
   }
-  if (invalid_doc_id_out != NULL) {
-    *invalid_doc_id_out = 0;
-  }
-  lc_pouch_free(&store->allocator, plan_key);
-  lc_pouch_index_doc_id_set_cleanup(&store->allocator, &local_doc_ids);
-  lc_pouch_index_doc_id_set_cleanup(&store->allocator, &global_doc_ids);
-  return LC_OK;
+  return rc;
 }
 
 static int lc_pouch_disk_query_field_collect_or_eq_terms_locked(

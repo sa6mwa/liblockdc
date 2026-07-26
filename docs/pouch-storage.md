@@ -1338,8 +1338,8 @@ private index primitives:
   keyed by an explicit private index identity containing the current index
   sequence and segmented manifest generation.
 - `src/lc_pouch_index_result.c` owns cacheable plan-key normalization,
-  identity-scoped result-cache lookup/insert, and docID page selection over the
-  document table.
+  identity-scoped result-cache lookup/insert, remapped generation-local result
+  caching, and docID page selection over the document table.
 - `src/lc_pouch_index_temporal.c` owns the typed temporal reader primitive for
   normalized date values. It stores per-field normalized temporal docID vectors,
   keeps residual postings for plausible temporal strings that must remain under
@@ -1523,14 +1523,17 @@ immutable-view key shape as prepared bridge readers.
 The first disk use is deliberately narrow: simple primary equality, positive
 `exists`, positive numeric `range`, non-wildcard positive `in`, prefix,
 contains, and `DateAfter` scans cache docIDs by the current index identity and
-a length-prefixed plan key, then ask the index layer to page the cached docIDs
-over the document table before disk converts the selected page back to summary
-entries or key snapshots. Updates advance the index sequence, so stale cached
-results miss the cache. DateAfter, simple equality, simple `exists`, simple
-numeric `range`, simple non-wildcard `in`, simple `prefix`, and simple
-`contains` now store namespace-local docIDs in the normalized result cache, page
-over the identity-matched document-table generation, and convert only the
-selected local page back to summaries or key snapshots.
+a length-prefixed plan key, then ask the index layer to collect, cache, and
+page the candidate docIDs. Disk supplies the identity-matched document-table
+generation and a global-to-local docID remap callback, but the index result
+layer owns local result-cache insertion and cursor page selection before disk
+converts the selected page back to summary entries or key snapshots. Updates
+advance the index sequence, so stale cached results miss the cache. DateAfter,
+simple equality, simple `exists`, simple numeric `range`, simple non-wildcard
+`in`, simple `prefix`, and simple `contains` now store namespace-local docIDs
+in the normalized result cache, page over the identity-matched document-table
+generation, and convert only the selected local page back to summaries or key
+snapshots.
 Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
 Residual selectors such as date predicates use the same identity-keyed result

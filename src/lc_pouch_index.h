@@ -241,6 +241,9 @@ typedef int (*lc_pouch_index_date_after_doc_ids_fn)(
 typedef int (*lc_pouch_index_result_collect_doc_ids_fn)(
     void *context, int cacheable, lc_pouch_index_doc_id_set *doc_ids,
     lc_error *error);
+typedef int (*lc_pouch_index_result_remap_doc_ids_fn)(
+    void *context, const lc_pouch_index_doc_id_set *source_doc_ids,
+    lc_pouch_index_doc_id_set *remapped_doc_ids, lc_error *error);
 
 void lc_pouch_index_doc_id_set_cleanup(const lc_pouch_allocator *allocator,
                                        lc_pouch_index_doc_id_set *set);
@@ -543,6 +546,15 @@ int lc_pouch_index_cached_result_page_identity(
     const lc_pouch_query_index_scan_req *req,
     lc_pouch_index_result_plan_kind kind,
     lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
+    lc_pouch_index_result_page *page, int *invalid_doc_id_out, lc_error *error);
+int lc_pouch_index_cached_remapped_result_page_identity(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_doc_table *doc_table,
+    lc_pouch_index_result_cache *cache, lc_pouch_index_identity identity,
+    const lc_pouch_query_index_scan_req *req,
+    lc_pouch_index_result_plan_kind kind,
+    lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
+    lc_pouch_index_result_remap_doc_ids_fn remap, void *remap_context,
     lc_pouch_index_result_page *page, int *invalid_doc_id_out, lc_error *error);
 int lc_pouch_index_collect_eq_term_doc_ids(
     const lc_pouch_allocator *allocator, const lc_pouch_document_eq_term *term,

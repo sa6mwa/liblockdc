@@ -482,6 +482,11 @@ Latest release targets confirmed on 2026-07-23:
         the same index-owned cached docID page helper; the disk bridge now
         adapts the authoritative temporal generation reader and translates the
         selected docID page back to summaries or key snapshots.
+      - [x] Move remapped document-generation result-cache/page orchestration
+        into `lc_pouch_index_result`: disk now reads/publishes the
+        identity-matched `.lcpdtg` and supplies a global-to-local docID remap
+        callback, while the index layer owns miss collection, local docID cache
+        insertion, and cursor page selection.
       - [x] Physically split result-cache/page planning into
         `src/lc_pouch_index_result.c`, leaving `lc_pouch_index.c` focused on
         document tables, docID algebra, term dictionaries, and adaptive
@@ -544,8 +549,8 @@ Latest release targets confirmed on 2026-07-23:
         readers require an identity-matched `.lcpdtg`, remap materialized
         temporal docIDs back into the current global in-memory doc table, and
         repair corrupt doc generation files through the temporal query path.
-        Result-page consumption still needs the same namespace-local doc table
-        cutover.
+        Result-page consumption also stores/pages namespace-local docIDs
+        through the matching document-table generation.
       - [x] Wire the disk query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
         namespace/key docIDs, candidate readers append table docIDs, and result

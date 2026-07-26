@@ -1818,6 +1818,41 @@ static int fake_collect_result_doc_ids(void *context, int cacheable,
   return LC_OK;
 }
 
+typedef struct fake_result_remapper {
+  lc_pouch_index_doc_id source_ids[8];
+  lc_pouch_index_doc_id remapped_ids[8];
+  size_t count;
+  size_t calls;
+} fake_result_remapper;
+
+static int fake_remap_result_doc_ids(void *context,
+                                     const lc_pouch_index_doc_id_set *source,
+                                     lc_pouch_index_doc_id_set *remapped,
+                                     lc_error *error) {
+  fake_result_remapper *mapper;
+  size_t index;
+  size_t map_index;
+
+  (void)error;
+  mapper = (fake_result_remapper *)context;
+  assert_non_null(mapper);
+  assert_non_null(source);
+  assert_non_null(remapped);
+  mapper->calls++;
+  for (index = 0U; index < source->count; ++index) {
+    for (map_index = 0U; map_index < mapper->count; ++map_index) {
+      if (mapper->source_ids[map_index] == source->items[index]) {
+        assert_true(lc_pouch_index_doc_id_set_append(
+            NULL, remapped, mapper->remapped_ids[map_index]));
+        break;
+      }
+    }
+    assert_true(map_index < mapper->count);
+  }
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(remapped));
+  return LC_OK;
+}
+
 static void
 test_cached_result_page_uses_cache_and_applies_cursor(void **state) {
   lc_pouch_index_doc_table table;
@@ -1916,6 +1951,101 @@ test_cached_result_page_uses_cache_and_applies_cursor(void **state) {
   assert_int_equal(collector.calls, 3U);
   assert_int_equal(cache.misses, 3U);
   assert_int_equal(cache.puts, 3U);
+
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+  lc_pouch_index_result_cache_cleanup(NULL, &cache);
+  lc_pouch_index_doc_table_cleanup(NULL, &table);
+}
+
+static void
+test_cached_remapped_result_page_caches_local_doc_ids(void **state) {
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_result_cache cache;
+  lc_pouch_index_result_page page;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_document_eq_term eq;
+  fake_result_collector collector;
+  fake_result_remapper remapper;
+  lc_pouch_index_identity identity;
+  lc_pouch_index_doc_id id_alpha;
+  lc_pouch_index_doc_id id_bravo;
+  lc_pouch_index_doc_id id_charlie;
+  lc_pouch_index_doc_id expected_bravo[] = {1U};
+  lc_pouch_index_doc_id expected_charlie[] = {2U};
+  int invalid_doc_id;
+  int rc;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&cache, 0, sizeof(cache));
+  memset(&page, 0, sizeof(page));
+  memset(&req, 0, sizeof(req));
+  memset(&eq, 0, sizeof(eq));
+  memset(&collector, 0, sizeof(collector));
+  memset(&remapper, 0, sizeof(remapper));
+  memset(&identity, 0, sizeof(identity));
+
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "alpha", &id_alpha));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "bravo", &id_bravo));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
+                                                   "charlie", &id_charlie));
+  collector.ids[0] = 102U;
+  collector.ids[1] = 100U;
+  collector.ids[2] = 101U;
+  collector.count = 3U;
+  remapper.source_ids[0] = 100U;
+  remapper.remapped_ids[0] = id_alpha;
+  remapper.source_ids[1] = 101U;
+  remapper.remapped_ids[1] = id_bravo;
+  remapper.source_ids[2] = 102U;
+  remapper.remapped_ids[2] = id_charlie;
+  remapper.count = 3U;
+
+  eq.field = "/region";
+  eq.value = "s:north";
+  req.namespace_name = "default";
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+  req.start_after = "alpha";
+  req.limit = 1U;
+  identity.sequence = 7U;
+  identity.manifest_generation = 3U;
+
+  invalid_doc_id = 0;
+  rc = lc_pouch_index_cached_remapped_result_page_identity(
+      NULL, &table, &cache, identity, &req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+      fake_collect_result_doc_ids, &collector, fake_remap_result_doc_ids,
+      &remapper, &page, &invalid_doc_id, NULL);
+  assert_int_equal(rc, LC_OK);
+  assert_false(invalid_doc_id);
+  assert_int_equal(collector.calls, 1U);
+  assert_int_equal(remapper.calls, 1U);
+  assert_true(collector.last_cacheable);
+  assert_int_equal(cache.misses, 1U);
+  assert_int_equal(cache.puts, 1U);
+  assert_doc_ids(&page.doc_ids, expected_bravo,
+                 sizeof(expected_bravo) / sizeof(expected_bravo[0]));
+  assert_true(page.truncated);
+  assert_string_equal(page.next_start_after, "bravo");
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+
+  req.start_after = "bravo";
+  invalid_doc_id = 0;
+  rc = lc_pouch_index_cached_remapped_result_page_identity(
+      NULL, &table, &cache, identity, &req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+      fake_collect_result_doc_ids, &collector, fake_remap_result_doc_ids,
+      &remapper, &page, &invalid_doc_id, NULL);
+  assert_int_equal(rc, LC_OK);
+  assert_false(invalid_doc_id);
+  assert_int_equal(collector.calls, 1U);
+  assert_int_equal(remapper.calls, 1U);
+  assert_int_equal(cache.hits, 1U);
+  assert_doc_ids(&page.doc_ids, expected_charlie,
+                 sizeof(expected_charlie) / sizeof(expected_charlie[0]));
+  assert_false(page.truncated);
+  assert_null(page.next_start_after);
 
   lc_pouch_index_result_page_cleanup(NULL, &page);
   lc_pouch_index_result_cache_cleanup(NULL, &cache);
@@ -2804,6 +2934,7 @@ int main(void) {
       cmocka_unit_test(test_result_page_doc_ids_does_not_truncate_at_exact_end),
       cmocka_unit_test(test_result_page_doc_ids_rejects_missing_doc_table_id),
       cmocka_unit_test(test_cached_result_page_uses_cache_and_applies_cursor),
+      cmocka_unit_test(test_cached_remapped_result_page_caches_local_doc_ids),
       cmocka_unit_test(test_cached_result_page_allows_uncacheable_collect),
       cmocka_unit_test(test_cached_result_page_reports_invalid_doc_id),
       cmocka_unit_test(
