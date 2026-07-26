@@ -8,6 +8,7 @@
 
 #include "lc_pouch_logstore.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -45,39 +46,45 @@ static int path_exists(const char *path) {
   return stat(path, &st) == 0;
 }
 
-static void cleanup_default_logstore(const char *root) {
-  char path[512];
+static void cleanup_logstore_tree(const char *path) {
+  DIR *dir;
+  struct dirent *entry;
 
-  (void)snprintf(path, sizeof(path),
-                 "%s/default/logstore/snapshots/snap-0000000000000001.log",
-                 root);
-  (void)unlink(path);
-  (void)snprintf(path, sizeof(path),
-                 "%s/default/logstore/segments/seg-0000000000000002.log",
-                 root);
-  (void)unlink(path);
-  (void)snprintf(path, sizeof(path),
-                 "%s/default/logstore/segments/seg-0000000000000001.log",
-                 root);
-  (void)unlink(path);
-  (void)snprintf(path, sizeof(path), "%s/default/logstore/manifest/manifest.log",
-                 root);
-  (void)unlink(path);
-  (void)snprintf(path, sizeof(path), "%s/default/logstore/queue-notify", root);
+  dir = opendir(path);
+  if (dir == NULL) {
+    (void)unlink(path);
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    char child[512];
+    struct stat st;
+    int written;
+
+    if (strcmp(entry->d_name, ".") == 0 ||
+        strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(child)) {
+      continue;
+    }
+    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+      cleanup_logstore_tree(child);
+    } else {
+      (void)unlink(child);
+    }
+  }
+  (void)closedir(dir);
   (void)rmdir(path);
-  (void)snprintf(path, sizeof(path), "%s/default/logstore/markers", root);
-  (void)rmdir(path);
-  (void)snprintf(path, sizeof(path), "%s/default/logstore/snapshots", root);
-  (void)rmdir(path);
-  (void)snprintf(path, sizeof(path), "%s/default/logstore/segments", root);
-  (void)rmdir(path);
-  (void)snprintf(path, sizeof(path), "%s/default/logstore/manifest", root);
-  (void)rmdir(path);
-  (void)snprintf(path, sizeof(path), "%s/default/logstore", root);
-  (void)rmdir(path);
-  (void)snprintf(path, sizeof(path), "%s/default", root);
-  (void)rmdir(path);
-  (void)rmdir(root);
+}
+
+static void cleanup_default_logstore(const char *root) {
+  static const char prefix[] = "/tmp/liblockdc-pouch-logstore-";
+
+  if (root == NULL || strncmp(root, prefix, sizeof(prefix) - 1U) != 0) {
+    return;
+  }
+  cleanup_logstore_tree(root);
 }
 
 static int write_full(int fd, const unsigned char *bytes, size_t count) {
@@ -328,6 +335,75 @@ static void test_logstore_collects_snapshot_and_generation(void **state) {
   cleanup_default_logstore(root);
 }
 
+static void test_logstore_compact_helpers_prepare_restore_and_snapshot(
+    void **state) {
+  char root[256];
+  char existing_snapshot[512];
+  char compact_snapshot_backup[512];
+  lc_pouch_logstore logstore;
+  lc_pouch_logstore_paths active_paths;
+  lc_pouch_logstore_paths backups;
+  fsync_capture fsyncs;
+  lc_error error;
+  char *segment_path;
+  char *snapshot_path;
+  char byte;
+  int fd;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "compact");
+  cleanup_default_logstore(root);
+  assert_int_equal(mkdir(root, 0777), 0);
+  memset(&active_paths, 0, sizeof(active_paths));
+  memset(&backups, 0, sizeof(backups));
+  memset(&fsyncs, 0, sizeof(fsyncs));
+  memset(&error, 0, sizeof(error));
+  lc_pouch_logstore_init(&logstore, NULL, root, capture_fsync, &fsyncs);
+  rc = lc_pouch_logstore_ensure_namespace(&logstore, "default", &error);
+  assert_int_equal(rc, LC_OK);
+
+  segment_path = lc_pouch_logstore_make_namespace_segment_path(
+      &logstore, "default", 1UL);
+  assert_non_null(segment_path);
+  write_text_file(segment_path, "active");
+  assert_true(lc_pouch_logstore_paths_add_take(&logstore, &active_paths,
+                                               segment_path));
+  rc = lc_pouch_logstore_prepare_compact_backups(&logstore, &active_paths,
+                                                 &backups, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(backups.count, 1U);
+  assert_false(path_exists(active_paths.items[0]));
+  assert_true(path_exists(backups.items[0]));
+  fd = lc_pouch_logstore_open_compact_body_fd(&logstore, active_paths.items[0],
+                                              &error);
+  assert_true(fd >= 0);
+  assert_int_equal(read(fd, &byte, 1U), 1);
+  assert_int_equal(byte, 'a');
+  assert_int_equal(close(fd), 0);
+  lc_pouch_logstore_compact_backups_cleanup(&logstore, &backups, 1);
+  assert_true(path_exists(active_paths.items[0]));
+
+  (void)snprintf(existing_snapshot, sizeof(existing_snapshot),
+                 "%s/default/logstore/snapshots/snap-0000000000000001.log",
+                 root);
+  (void)snprintf(compact_snapshot_backup, sizeof(compact_snapshot_backup),
+                 "%s/default/logstore/snapshots/snap-0000000000000002.log."
+                 "compact.bak",
+                 root);
+  write_text_file(existing_snapshot, "snapshot-1");
+  write_text_file(compact_snapshot_backup, "snapshot-2");
+  snapshot_path = lc_pouch_logstore_make_compact_snapshot_path(
+      &logstore, active_paths.items[0], &error);
+  assert_non_null(snapshot_path);
+  assert_non_null(strstr(snapshot_path, "snap-0000000000000003.log"));
+  lc_pouch_free(NULL, snapshot_path);
+
+  lc_pouch_logstore_paths_cleanup(&logstore, &active_paths);
+  lc_error_cleanup(&error);
+  cleanup_default_logstore(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_logstore_parses_segment_and_snapshot_names),
@@ -335,6 +411,8 @@ int main(void) {
       cmocka_unit_test(test_logstore_rolls_sealed_active_segment),
       cmocka_unit_test(test_logstore_collect_repairs_manifestless_segment),
       cmocka_unit_test(test_logstore_collects_snapshot_and_generation),
+      cmocka_unit_test(
+          test_logstore_compact_helpers_prepare_restore_and_snapshot),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

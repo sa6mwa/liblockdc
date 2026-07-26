@@ -370,6 +370,11 @@ static void bench_remove_tree(const char *path) {
 }
 
 static void bench_pouch_cleanup_root(const char *root) {
+  static const char prefix[] = "/tmp/liblockdc-pouch-bench-";
+
+  if (root == NULL || strncmp(root, prefix, sizeof(prefix) - 1U) != 0) {
+    return;
+  }
   bench_remove_tree(root);
 }
 

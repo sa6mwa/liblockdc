@@ -81,12 +81,6 @@ static void test_query_index_path(const char *root, char *path,
   snprintf(path, path_size, "%s/%%2elockd/logstore/query.index", root);
 }
 
-static void test_query_index_temp_path(const char *root, char *path,
-                                       size_t path_size) {
-  test_query_index_path(root, path, path_size);
-  strncat(path, ".compact.tmp", path_size - strlen(path) - 1U);
-}
-
 static void test_query_temporal_generation_path(const char *root,
                                                 const char *namespace_name,
                                                 char *path, size_t path_size) {
@@ -132,172 +126,45 @@ static void test_query_text_generation_path(const char *root,
            root, namespace_name);
 }
 
-static void test_cleanup_query_temporal_dir(const char *root) {
-  char dir_path[512];
+static void test_cleanup_tree(const char *path) {
   DIR *dir;
   struct dirent *entry;
 
-  snprintf(dir_path, sizeof(dir_path),
-           "%s/%%2elockd/logstore/query.index.temporal", root);
-  dir = opendir(dir_path);
-  if (dir != NULL) {
-    while ((entry = readdir(dir)) != NULL) {
-      char path[800];
-
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-        continue;
-      }
-      snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
-      unlink(path);
-    }
-    closedir(dir);
+  dir = opendir(path);
+  if (dir == NULL) {
+    (void)unlink(path);
+    return;
   }
-  rmdir(dir_path);
-}
+  while ((entry = readdir(dir)) != NULL) {
+    char child[512];
+    struct stat st;
+    int written;
 
-static void test_cleanup_query_doc_dir(const char *root) {
-  char dir_path[512];
-  DIR *dir;
-  struct dirent *entry;
-
-  snprintf(dir_path, sizeof(dir_path), "%s/%%2elockd/logstore/query.index.docs",
-           root);
-  dir = opendir(dir_path);
-  if (dir != NULL) {
-    while ((entry = readdir(dir)) != NULL) {
-      char path[800];
-
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-        continue;
-      }
-      snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
-      unlink(path);
+    if (strcmp(entry->d_name, ".") == 0 ||
+        strcmp(entry->d_name, "..") == 0) {
+      continue;
     }
-    closedir(dir);
-  }
-  rmdir(dir_path);
-}
-
-static void test_cleanup_query_exact_dir(const char *root) {
-  char dir_path[512];
-  DIR *dir;
-  struct dirent *entry;
-
-  snprintf(dir_path, sizeof(dir_path),
-           "%s/%%2elockd/logstore/query.index.exact", root);
-  dir = opendir(dir_path);
-  if (dir != NULL) {
-    while ((entry = readdir(dir)) != NULL) {
-      char path[800];
-
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-        continue;
-      }
-      snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
-      unlink(path);
+    written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(child)) {
+      continue;
     }
-    closedir(dir);
-  }
-  rmdir(dir_path);
-}
-
-static void test_cleanup_query_exists_dir(const char *root) {
-  char dir_path[512];
-  DIR *dir;
-  struct dirent *entry;
-
-  snprintf(dir_path, sizeof(dir_path),
-           "%s/%%2elockd/logstore/query.index.exists", root);
-  dir = opendir(dir_path);
-  if (dir != NULL) {
-    while ((entry = readdir(dir)) != NULL) {
-      char path[800];
-
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-        continue;
-      }
-      snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
-      unlink(path);
+    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+      test_cleanup_tree(child);
+    } else {
+      (void)unlink(child);
     }
-    closedir(dir);
   }
-  rmdir(dir_path);
-}
-
-static void test_cleanup_query_number_dir(const char *root) {
-  char dir_path[512];
-  DIR *dir;
-  struct dirent *entry;
-
-  snprintf(dir_path, sizeof(dir_path),
-           "%s/%%2elockd/logstore/query.index.number", root);
-  dir = opendir(dir_path);
-  if (dir != NULL) {
-    while ((entry = readdir(dir)) != NULL) {
-      char path[800];
-
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-        continue;
-      }
-      snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
-      unlink(path);
-    }
-    closedir(dir);
-  }
-  rmdir(dir_path);
-}
-
-static void test_cleanup_query_text_dir(const char *root) {
-  char dir_path[512];
-  DIR *dir;
-  struct dirent *entry;
-
-  snprintf(dir_path, sizeof(dir_path), "%s/%%2elockd/logstore/query.index.text",
-           root);
-  dir = opendir(dir_path);
-  if (dir != NULL) {
-    while ((entry = readdir(dir)) != NULL) {
-      char path[800];
-
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-        continue;
-      }
-      snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
-      unlink(path);
-    }
-    closedir(dir);
-  }
-  rmdir(dir_path);
+  (void)closedir(dir);
+  (void)rmdir(path);
 }
 
 static void test_cleanup_root(const char *root) {
-  char path[512];
+  static const char prefix[] = "/tmp/liblockdc-pouch-client-";
 
-  snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
-  unlink(path);
-  test_query_index_temp_path(root, path, sizeof(path));
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/store.log", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/query.index", root);
-  unlink(path);
-  test_query_index_path(root, path, sizeof(path));
-  unlink(path);
-  test_cleanup_query_temporal_dir(root);
-  test_cleanup_query_doc_dir(root);
-  test_cleanup_query_exact_dir(root);
-  test_cleanup_query_exists_dir(root);
-  test_cleanup_query_number_dir(root);
-  test_cleanup_query_text_dir(root);
-  snprintf(path, sizeof(path), "%s/%%2elockd/logstore", root);
-  rmdir(path);
-  snprintf(path, sizeof(path), "%s/%%2elockd", root);
-  rmdir(path);
-  snprintf(path, sizeof(path), "%s/writer.lock", root);
-  unlink(path);
-  rmdir(root);
+  if (root == NULL || strncmp(root, prefix, sizeof(prefix) - 1U) != 0) {
+    return;
+  }
+  test_cleanup_tree(root);
 }
 
 static off_t test_query_index_size(const char *root) {

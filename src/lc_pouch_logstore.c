@@ -1505,3 +1505,225 @@ int lc_pouch_logstore_active_generation(const lc_pouch_logstore *logstore,
   }
   return rc;
 }
+
+char *lc_pouch_logstore_make_compact_backup_path(
+    const lc_pouch_logstore *logstore, const char *path) {
+  static const char suffix[] = ".compact.bak";
+  size_t path_len;
+  size_t suffix_len;
+  char *backup_path;
+
+  path_len = strlen(path);
+  suffix_len = sizeof(suffix) - 1U;
+  backup_path =
+      (char *)lc_pouch_alloc(logstore->allocator,
+                             path_len + suffix_len + 1U);
+  if (backup_path == NULL) {
+    return NULL;
+  }
+  memcpy(backup_path, path, path_len);
+  memcpy(backup_path + path_len, suffix, suffix_len + 1U);
+  return backup_path;
+}
+
+void lc_pouch_logstore_compact_backups_cleanup(
+    const lc_pouch_logstore *logstore, lc_pouch_logstore_paths *backups,
+    int restore) {
+  static const char suffix[] = ".compact.bak";
+  size_t index;
+
+  for (index = 0U; index < backups->count; ++index) {
+    if (backups->items[index] != NULL) {
+      if (restore) {
+        size_t backup_len;
+        char *active_path;
+
+        backup_len = strlen(backups->items[index]);
+        active_path = backup_len >= sizeof(suffix) - 1U
+                          ? lc_pouch_logstore_dup_bytes(
+                                logstore->allocator, backups->items[index],
+                                backup_len - (sizeof(suffix) - 1U))
+                          : NULL;
+        if (active_path != NULL) {
+          (void)unlink(active_path);
+          (void)rename(backups->items[index], active_path);
+          lc_pouch_free(logstore->allocator, active_path);
+        }
+      } else {
+        (void)unlink(backups->items[index]);
+      }
+    }
+  }
+  lc_pouch_logstore_paths_cleanup(logstore, backups);
+}
+
+int lc_pouch_logstore_prepare_compact_backups(
+    const lc_pouch_logstore *logstore,
+    const lc_pouch_logstore_paths *active_paths,
+    lc_pouch_logstore_paths *backups, lc_error *error) {
+  size_t index;
+
+  memset(backups, 0, sizeof(*backups));
+  for (index = 0U; index < active_paths->count; ++index) {
+    char *backup_path;
+
+    backup_path = lc_pouch_logstore_make_compact_backup_path(
+        logstore, active_paths->items[index]);
+    if (backup_path == NULL) {
+      lc_pouch_logstore_compact_backups_cleanup(logstore, backups, 1);
+      return lc_pouch_logstore_set_nomem(
+          error, "failed to allocate pouch segment backup path");
+    }
+    (void)unlink(backup_path);
+    if (rename(active_paths->items[index], backup_path) != 0) {
+      lc_pouch_free(logstore->allocator, backup_path);
+      lc_pouch_logstore_compact_backups_cleanup(logstore, backups, 1);
+      return lc_pouch_logstore_set_errno(error,
+                                         "failed to backup pouch segment");
+    }
+    if (!lc_pouch_logstore_paths_add_take(logstore, backups, backup_path)) {
+      (void)rename(backup_path, active_paths->items[index]);
+      lc_pouch_free(logstore->allocator, backup_path);
+      lc_pouch_logstore_compact_backups_cleanup(logstore, backups, 1);
+      return lc_pouch_logstore_set_nomem(
+          error, "failed to track pouch segment backup");
+    }
+  }
+  return LC_OK;
+}
+
+int lc_pouch_logstore_open_compact_body_fd(
+    const lc_pouch_logstore *logstore, const char *path, lc_error *error) {
+  char *backup_path;
+  int fd;
+
+  backup_path = lc_pouch_logstore_make_compact_backup_path(logstore, path);
+  if (backup_path == NULL) {
+    (void)lc_pouch_logstore_set_nomem(
+        error, "failed to allocate pouch compact body path");
+    return -1;
+  }
+  fd = open(backup_path, O_RDONLY);
+  lc_pouch_free(logstore->allocator, backup_path);
+  if (fd >= 0) {
+    return fd;
+  }
+  if (errno != ENOENT) {
+    (void)lc_pouch_logstore_set_errno(error,
+                                      "failed to open pouch compact body");
+    return -1;
+  }
+  fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    (void)lc_pouch_logstore_set_errno(error,
+                                      "failed to open pouch compact body");
+  }
+  return fd;
+}
+
+char *lc_pouch_logstore_make_compact_snapshot_path(
+    const lc_pouch_logstore *logstore, const char *segment_path,
+    lc_error *error) {
+  const char marker[] = "/segments/";
+  const char *marker_at;
+  size_t logstore_len;
+  char *logstore_path;
+  char *snapshots_path;
+  char *snapshot_path;
+  DIR *dir;
+  struct dirent *entry;
+  unsigned long max_number;
+  unsigned long next_number;
+  char snapshot_name[32];
+
+  marker_at = strstr(segment_path, marker);
+  if (marker_at == NULL) {
+    (void)lc_pouch_logstore_set_invalid(
+        error, "pouch segment path is not snapshotable");
+    return NULL;
+  }
+  logstore_len = (size_t)(marker_at - segment_path);
+  logstore_path = lc_pouch_logstore_dup_bytes(logstore->allocator,
+                                              segment_path, logstore_len);
+  snapshots_path =
+      logstore_path != NULL
+          ? lc_pouch_logstore_join_path(logstore->allocator, logstore_path,
+                                        "snapshots")
+          : NULL;
+  if (logstore_path == NULL || snapshots_path == NULL) {
+    lc_pouch_free(logstore->allocator, logstore_path);
+    lc_pouch_free(logstore->allocator, snapshots_path);
+    (void)lc_pouch_logstore_set_nomem(error,
+                                      "failed to allocate pouch snapshot path");
+    return NULL;
+  }
+  if (lc_pouch_logstore_ensure_directory(
+          snapshots_path, "failed to create pouch snapshots directory",
+          error) != LC_OK) {
+    lc_pouch_free(logstore->allocator, logstore_path);
+    lc_pouch_free(logstore->allocator, snapshots_path);
+    return NULL;
+  }
+  max_number = 0UL;
+  dir = opendir(snapshots_path);
+  if (dir == NULL) {
+    lc_pouch_free(logstore->allocator, logstore_path);
+    lc_pouch_free(logstore->allocator, snapshots_path);
+    (void)lc_pouch_logstore_set_errno(error,
+                                      "failed to open pouch snapshots directory");
+    return NULL;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    unsigned long number;
+
+    if (!lc_pouch_logstore_snapshot_name_parse(entry->d_name, &number)) {
+      static const char compact_suffix[] = ".compact.bak";
+      size_t name_len;
+      size_t suffix_len;
+      char base_name[64];
+
+      name_len = strlen(entry->d_name);
+      suffix_len = sizeof(compact_suffix) - 1U;
+      if (name_len <= suffix_len ||
+          strcmp(entry->d_name + name_len - suffix_len, compact_suffix) != 0 ||
+          name_len - suffix_len >= sizeof(base_name)) {
+        continue;
+      }
+      memcpy(base_name, entry->d_name, name_len - suffix_len);
+      base_name[name_len - suffix_len] = '\0';
+      if (!lc_pouch_logstore_snapshot_name_parse(base_name, &number)) {
+        continue;
+      }
+    }
+    if (number > max_number) {
+      max_number = number;
+    }
+  }
+  if (closedir(dir) != 0) {
+    lc_pouch_free(logstore->allocator, logstore_path);
+    lc_pouch_free(logstore->allocator, snapshots_path);
+    (void)lc_pouch_logstore_set_errno(
+        error, "failed to close pouch snapshots directory");
+    return NULL;
+  }
+  if (max_number == (unsigned long)-1) {
+    lc_pouch_free(logstore->allocator, logstore_path);
+    lc_pouch_free(logstore->allocator, snapshots_path);
+    (void)lc_pouch_logstore_set_invalid(error,
+                                        "pouch snapshot number overflow");
+    return NULL;
+  }
+  next_number = max_number + 1UL;
+  (void)snprintf(snapshot_name, sizeof(snapshot_name), "snap-%016lu.log",
+                 next_number);
+  snapshot_path =
+      lc_pouch_logstore_join_path(logstore->allocator, snapshots_path,
+                                  snapshot_name);
+  if (snapshot_path == NULL) {
+    (void)lc_pouch_logstore_set_nomem(error,
+                                      "failed to allocate pouch snapshot path");
+  }
+  lc_pouch_free(logstore->allocator, logstore_path);
+  lc_pouch_free(logstore->allocator, snapshots_path);
+  return snapshot_path;
+}

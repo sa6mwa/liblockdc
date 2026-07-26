@@ -459,11 +459,15 @@ static void test_remove_lock_tree(const char *root) {
 }
 
 static void test_cleanup_root(const char *root) {
+  static const char prefix[] = "/tmp/liblockdc-pouch-";
   DIR *dir;
   struct dirent *entry;
   char path[512];
   struct stat st;
 
+  if (root == NULL || strncmp(root, prefix, sizeof(prefix) - 1U) != 0) {
+    return;
+  }
   dir = opendir(root);
   if (dir == NULL) {
     rmdir(root);
@@ -476,7 +480,7 @@ static void test_cleanup_root(const char *root) {
     if (!test_join_path_buf(path, sizeof(path), root, entry->d_name)) {
       continue;
     }
-    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+    if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
       test_cleanup_root(path);
     } else {
       unlink(path);

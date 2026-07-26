@@ -1385,10 +1385,11 @@ private index primitives:
   active segment selection, segment rollover, and segment/snapshot name
   parsing. It also owns manifest-derived active replay input discovery,
   manifestless segment repair, obsolete segment/snapshot cleanup, logstore
-  generation fingerprinting, and compaction-candidate counting. It uses a small
-  pouch-native context made from allocator, root path, fsync callback inputs,
-  and retention policy so these storage mechanics do not depend on the concrete
-  backend object.
+  generation fingerprinting, compaction-candidate counting, compaction backup
+  path/restore cleanup, backup-backed compact body opens, and next snapshot path
+  selection. It uses a small pouch-native context made from allocator, root
+  path, fsync callback inputs, and retention policy so these storage mechanics
+  do not depend on the concrete backend object.
 - `src/lc_pouch.c` still owns the higher-level pouch backend adapter: sidecar
   scan adapters, live/hidden/owner/generation visibility checks, final summary
   translation, concrete fsync policy, and final `liblql` acceptance. New

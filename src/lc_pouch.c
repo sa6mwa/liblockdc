@@ -618,9 +618,6 @@ static int lc_pouch_active_logstore_generation(lc_pouch_backend *store,
                                                int *found,
                                                unsigned long *generation,
                                                lc_error *error);
-static int lc_pouch_backend_logstore_paths_add_take(
-    lc_pouch_backend *store, lc_pouch_logstore_paths *paths,
-    char *path);
 static int lc_pouch_replay(lc_pouch_backend *store, lc_error *error);
 static size_t lc_pouch_file_source_read(lc_source *self, void *buffer,
                                         size_t count, lc_error *error);
@@ -1767,11 +1764,6 @@ static void lc_pouch_logstore_from_backend(lc_pouch_backend *store,
 static int lc_pouch_segment_name_parse(const char *name,
                                        unsigned long *number_out) {
   return lc_pouch_logstore_segment_name_parse(name, number_out);
-}
-
-static int lc_pouch_snapshot_name_parse(const char *name,
-                                        unsigned long *number_out) {
-  return lc_pouch_logstore_snapshot_name_parse(name, number_out);
 }
 
 static int lc_pouch_open_active_segment_for_append(
@@ -21054,211 +21046,40 @@ static int lc_pouch_fsync_root(lc_pouch_backend *store) {
   return rc;
 }
 
-static char *lc_pouch_make_compact_backup_path(lc_pouch_backend *store,
-                                                    const char *path) {
-  static const char suffix[] = ".compact.bak";
-  size_t path_len;
-  size_t suffix_len;
-  char *backup_path;
+static void lc_pouch_compact_logstore_backups_cleanup(
+    lc_pouch_backend *store, lc_pouch_logstore_paths *backups, int restore) {
+  lc_pouch_logstore logstore;
 
-  path_len = strlen(path);
-  suffix_len = sizeof(suffix) - 1U;
-  backup_path =
-      (char *)lc_pouch_alloc(&store->allocator, path_len + suffix_len + 1U);
-  if (backup_path == NULL) {
-    return NULL;
-  }
-  memcpy(backup_path, path, path_len);
-  memcpy(backup_path + path_len, suffix, suffix_len + 1U);
-  return backup_path;
+  lc_pouch_logstore_from_backend(store, &logstore);
+  lc_pouch_logstore_compact_backups_cleanup(&logstore, backups, restore);
 }
 
-static void lc_pouch_compact_segment_backups_cleanup(
-    lc_pouch_backend *store, lc_pouch_logstore_paths *backups,
-    int restore) {
-  size_t index;
-
-  for (index = 0U; index < backups->count; ++index) {
-    if (backups->items[index] != NULL) {
-      if (restore) {
-        size_t backup_len;
-        char *active_path;
-
-        backup_len = strlen(backups->items[index]);
-        active_path =
-            lc_pouch_dup_bytes(&store->allocator, backups->items[index],
-                               backup_len - strlen(".compact.bak"));
-        if (active_path != NULL) {
-          (void)unlink(active_path);
-          (void)rename(backups->items[index], active_path);
-          lc_pouch_free(&store->allocator, active_path);
-        }
-      } else {
-        (void)unlink(backups->items[index]);
-      }
-    }
-  }
-  lc_pouch_backend_logstore_paths_cleanup(store, backups);
-}
-
-static int lc_pouch_prepare_compact_segment_backups(
-    lc_pouch_backend *store,
-    lc_pouch_logstore_paths *active_paths,
+static int lc_pouch_prepare_compact_logstore_backups(
+    lc_pouch_backend *store, const lc_pouch_logstore_paths *active_paths,
     lc_pouch_logstore_paths *backups, lc_error *error) {
-  size_t index;
+  lc_pouch_logstore logstore;
 
-  memset(backups, 0, sizeof(*backups));
-  for (index = 0U; index < active_paths->count; ++index) {
-    char *backup_path;
-
-    backup_path = lc_pouch_make_compact_backup_path(
-        store, active_paths->items[index]);
-    if (backup_path == NULL) {
-      lc_pouch_compact_segment_backups_cleanup(store, backups, 1);
-      return lc_pouch_set_nomem(error,
-                                "failed to allocate pouch segment backup path");
-    }
-    (void)unlink(backup_path);
-    if (rename(active_paths->items[index], backup_path) != 0) {
-      lc_pouch_free(&store->allocator, backup_path);
-      lc_pouch_compact_segment_backups_cleanup(store, backups, 1);
-      return lc_pouch_set_errno(error, "failed to backup pouch segment");
-    }
-    if (!lc_pouch_backend_logstore_paths_add_take(store, backups, backup_path)) {
-      (void)rename(backup_path, active_paths->items[index]);
-      lc_pouch_free(&store->allocator, backup_path);
-      lc_pouch_compact_segment_backups_cleanup(store, backups, 1);
-      return lc_pouch_set_nomem(error, "failed to track pouch segment backup");
-    }
-  }
-  return LC_OK;
+  lc_pouch_logstore_from_backend(store, &logstore);
+  return lc_pouch_logstore_prepare_compact_backups(
+      &logstore, active_paths, backups, error);
 }
 
-static int lc_pouch_open_compact_body_fd(lc_pouch_backend *store,
-                                              const char *path,
-                                              lc_error *error) {
-  char *backup_path;
-  int fd;
+static int lc_pouch_open_compact_logstore_body_fd(lc_pouch_backend *store,
+                                                  const char *path,
+                                                  lc_error *error) {
+  lc_pouch_logstore logstore;
 
-  backup_path = lc_pouch_make_compact_backup_path(store, path);
-  if (backup_path == NULL) {
-    (void)lc_pouch_set_nomem(error,
-                             "failed to allocate pouch compact body path");
-    return -1;
-  }
-  fd = open(backup_path, O_RDONLY);
-  lc_pouch_free(&store->allocator, backup_path);
-  if (fd >= 0) {
-    return fd;
-  }
-  if (errno != ENOENT) {
-    (void)lc_pouch_set_errno(error, "failed to open pouch compact body");
-    return -1;
-  }
-  fd = open(path, O_RDONLY);
-  if (fd < 0) {
-    (void)lc_pouch_set_errno(error, "failed to open pouch compact body");
-  }
-  return fd;
+  lc_pouch_logstore_from_backend(store, &logstore);
+  return lc_pouch_logstore_open_compact_body_fd(&logstore, path, error);
 }
 
-static char *lc_pouch_make_compact_snapshot_path(
+static char *lc_pouch_make_compact_logstore_snapshot_path(
     lc_pouch_backend *store, const char *segment_path, lc_error *error) {
-  const char marker[] = "/segments/";
-  const char *marker_at;
-  size_t logstore_len;
-  char *logstore_path;
-  char *snapshots_path;
-  char *snapshot_path;
-  DIR *dir;
-  struct dirent *entry;
-  unsigned long max_number;
-  unsigned long next_number;
-  char snapshot_name[32];
+  lc_pouch_logstore logstore;
 
-  marker_at = strstr(segment_path, marker);
-  if (marker_at == NULL) {
-    (void)lc_pouch_set_invalid(error, "pouch segment path is not snapshotable");
-    return NULL;
-  }
-  logstore_len = (size_t)(marker_at - segment_path);
-  logstore_path =
-      lc_pouch_dup_bytes(&store->allocator, segment_path, logstore_len);
-  snapshots_path =
-      logstore_path != NULL
-          ? lc_pouch_join_path(&store->allocator, logstore_path, "snapshots")
-          : NULL;
-  if (logstore_path == NULL || snapshots_path == NULL) {
-    lc_pouch_free(&store->allocator, logstore_path);
-    lc_pouch_free(&store->allocator, snapshots_path);
-    (void)lc_pouch_set_nomem(error, "failed to allocate pouch snapshot path");
-    return NULL;
-  }
-  if (lc_pouch_ensure_directory(
-          snapshots_path, "failed to create pouch snapshots directory",
-          error) != LC_OK) {
-    lc_pouch_free(&store->allocator, logstore_path);
-    lc_pouch_free(&store->allocator, snapshots_path);
-    return NULL;
-  }
-  max_number = 0UL;
-  dir = opendir(snapshots_path);
-  if (dir == NULL) {
-    lc_pouch_free(&store->allocator, logstore_path);
-    lc_pouch_free(&store->allocator, snapshots_path);
-    (void)lc_pouch_set_errno(error, "failed to open pouch snapshots directory");
-    return NULL;
-  }
-  while ((entry = readdir(dir)) != NULL) {
-    unsigned long number;
-
-    if (!lc_pouch_snapshot_name_parse(entry->d_name, &number)) {
-      static const char compact_suffix[] = ".compact.bak";
-      size_t name_len;
-      size_t suffix_len;
-      char base_name[64];
-
-      name_len = strlen(entry->d_name);
-      suffix_len = sizeof(compact_suffix) - 1U;
-      if (name_len <= suffix_len ||
-          strcmp(entry->d_name + name_len - suffix_len, compact_suffix) != 0 ||
-          name_len - suffix_len >= sizeof(base_name)) {
-        continue;
-      }
-      memcpy(base_name, entry->d_name, name_len - suffix_len);
-      base_name[name_len - suffix_len] = '\0';
-      if (!lc_pouch_snapshot_name_parse(base_name, &number)) {
-        continue;
-      }
-    }
-    if (number > max_number) {
-      max_number = number;
-    }
-  }
-  if (closedir(dir) != 0) {
-    lc_pouch_free(&store->allocator, logstore_path);
-    lc_pouch_free(&store->allocator, snapshots_path);
-    (void)lc_pouch_set_errno(error,
-                             "failed to close pouch snapshots directory");
-    return NULL;
-  }
-  if (max_number == (unsigned long)-1) {
-    lc_pouch_free(&store->allocator, logstore_path);
-    lc_pouch_free(&store->allocator, snapshots_path);
-    (void)lc_pouch_set_invalid(error, "pouch snapshot number overflow");
-    return NULL;
-  }
-  next_number = max_number + 1UL;
-  (void)snprintf(snapshot_name, sizeof(snapshot_name), "snap-%016lu.log",
-                 next_number);
-  snapshot_path =
-      lc_pouch_join_path(&store->allocator, snapshots_path, snapshot_name);
-  if (snapshot_path == NULL) {
-    (void)lc_pouch_set_nomem(error, "failed to allocate pouch snapshot path");
-  }
-  lc_pouch_free(&store->allocator, logstore_path);
-  lc_pouch_free(&store->allocator, snapshots_path);
-  return snapshot_path;
+  lc_pouch_logstore_from_backend(store, &logstore);
+  return lc_pouch_logstore_make_compact_snapshot_path(
+      &logstore, segment_path, error);
 }
 
 static int lc_pouch_compact_locked(lc_pouch_backend *store,
@@ -21299,7 +21120,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
   rc = lc_pouch_collect_active_logstore_paths(store, &segment_active_paths,
                                                   error);
   if (rc == LC_OK) {
-    rc = lc_pouch_prepare_compact_segment_backups(
+    rc = lc_pouch_prepare_compact_logstore_backups(
         store, &segment_active_paths, &segment_backup_paths, error);
   }
   if (rc != LC_OK) {
@@ -21323,7 +21144,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
     if (entry->deleted) {
       continue;
     }
-    body_fd = lc_pouch_open_compact_body_fd(
+    body_fd = lc_pouch_open_compact_logstore_body_fd(
         store, entry->body_path != NULL ? entry->body_path : store->log_path,
         error);
     if (body_fd < 0) {
@@ -21385,7 +21206,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
     if (entry->deleted) {
       continue;
     }
-    body_fd = lc_pouch_open_compact_body_fd(
+    body_fd = lc_pouch_open_compact_logstore_body_fd(
         store, entry->body_path != NULL ? entry->body_path : store->log_path,
         error);
     if (body_fd < 0) {
@@ -21410,7 +21231,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
     if (entry->deleted) {
       continue;
     }
-    body_fd = lc_pouch_open_compact_body_fd(
+    body_fd = lc_pouch_open_compact_logstore_body_fd(
         store, entry->body_path != NULL ? entry->body_path : store->log_path,
         error);
     if (body_fd < 0) {
@@ -21452,7 +21273,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
     (void)lc_pouch_replay(store, NULL);
     close(temp_query_fd);
     unlink(temp_query_path);
-    lc_pouch_compact_segment_backups_cleanup(store, &segment_backup_paths,
+    lc_pouch_compact_logstore_backups_cleanup(store, &segment_backup_paths,
                                                   1);
     lc_pouch_backend_logstore_paths_cleanup(store, &segment_active_paths);
     lc_pouch_free(&store->allocator, temp_query_path);
@@ -21466,7 +21287,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
     (void)lc_pouch_replay(store, NULL);
     close(temp_query_fd);
     unlink(temp_query_path);
-    lc_pouch_compact_segment_backups_cleanup(store, &segment_backup_paths,
+    lc_pouch_compact_logstore_backups_cleanup(store, &segment_backup_paths,
                                                   1);
     lc_pouch_backend_logstore_paths_cleanup(store, &segment_active_paths);
     lc_pouch_free(&store->allocator, temp_query_path);
@@ -21479,7 +21300,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
   store->replayed_query_index_size = (unsigned long)-1;
   store->replayed_query_index_record_count = 0UL;
   if (!lc_pouch_fsync_root(store)) {
-    lc_pouch_compact_segment_backups_cleanup(store, &segment_backup_paths,
+    lc_pouch_compact_logstore_backups_cleanup(store, &segment_backup_paths,
                                                   0);
     lc_pouch_backend_logstore_paths_cleanup(store, &segment_active_paths);
     return lc_pouch_set_errno(error, "failed to fsync pouch root directory");
@@ -21490,7 +21311,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
        ++index) {
     char *snapshot_path;
 
-    snapshot_path = lc_pouch_make_compact_snapshot_path(
+    snapshot_path = lc_pouch_make_compact_logstore_snapshot_path(
         store, segment_compact_paths.items[index], error);
     if (snapshot_path == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -21509,7 +21330,7 @@ static int lc_pouch_compact_locked(lc_pouch_backend *store,
     rc = lc_pouch_append_manifest_event_for_segment_path(
         store, segment_active_paths.items[index], "obsolete", error);
   }
-  lc_pouch_compact_segment_backups_cleanup(store, &segment_backup_paths,
+  lc_pouch_compact_logstore_backups_cleanup(store, &segment_backup_paths,
                                                 0);
   lc_pouch_backend_logstore_paths_cleanup(store, &segment_compact_paths);
   lc_pouch_backend_logstore_paths_cleanup(store, &segment_active_paths);
@@ -23047,14 +22868,6 @@ static int lc_pouch_active_logstore_generation(lc_pouch_backend *store,
   lc_pouch_logstore_from_backend(store, &logstore);
   return lc_pouch_logstore_active_generation(&logstore, found, generation,
                                              error);
-}
-
-static int lc_pouch_backend_logstore_paths_add_take(
-    lc_pouch_backend *store, lc_pouch_logstore_paths *paths, char *path) {
-  lc_pouch_logstore logstore;
-
-  lc_pouch_logstore_from_backend(store, &logstore);
-  return lc_pouch_logstore_paths_add_take(&logstore, paths, path);
 }
 
 static int lc_pouch_replay_active_segments(lc_pouch_backend *store,

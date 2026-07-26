@@ -473,6 +473,10 @@ Latest release targets confirmed on 2026-07-23:
       obsolete manifest records under the configured grace policy, fingerprints
       active logstore generations, and counts compaction candidates outside the
       monolithic backend adapter.
+    - [x] Move compaction backup and snapshot path mechanics into
+      `lc_pouch_logstore`: compact backup naming, backup restore/delete
+      cleanup, backup-backed compact body opens, and next snapshot path
+      selection now sit with the segmented logstore owner.
     - [ ] Split the pouch search/index subsystem out of `lc_pouch.c` into
       an internal C index layer with explicit reader, writer, planner, posting,
       visibility, and result-cache boundaries.
@@ -1160,6 +1164,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Move active replay path collection, manifestless segment repair,
         obsolete path cleanup, active generation fingerprinting, and compaction
         candidate counting into `src/lc_pouch_logstore.c`.
+      - [x] Move compact backup path handling, backup restore/delete cleanup,
+        backup-backed compact body opens, and next snapshot path selection into
+        `src/lc_pouch_logstore.c`.
     - [x] Implement manifest append/replay for segment open, segment seal,
       snapshot install, obsolete segment, and obsolete snapshot records.
       - [x] Append text manifest lifecycle records for current active-segment

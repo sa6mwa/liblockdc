@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <dirent.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -462,42 +463,45 @@ static void make_pouch_root(const char *suffix, char *root,
   snprintf(endpoint, endpoint_capacity, "pouch://%s", root);
 }
 
-static void pouch_query_index_path(const char *root, char *path,
-                                   size_t path_size) {
-  snprintf(path, path_size, "%s/%%2elockd/logstore/query.index", root);
-}
+static void cleanup_pouch_tree(const char *path) {
+  DIR *dir;
+  struct dirent *entry;
 
-static void pouch_query_index_temp_path(const char *root, char *path,
-                                        size_t path_size) {
-  pouch_query_index_path(root, path, path_size);
-  strncat(path, ".compact.tmp", path_size - strlen(path) - 1U);
+  dir = opendir(path);
+  if (dir == NULL) {
+    (void)unlink(path);
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    char child[512];
+    struct stat st;
+    int written;
+
+    if (strcmp(entry->d_name, ".") == 0 ||
+        strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(child)) {
+      continue;
+    }
+    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+      cleanup_pouch_tree(child);
+    } else {
+      (void)unlink(child);
+    }
+  }
+  (void)closedir(dir);
+  (void)rmdir(path);
 }
 
 static void cleanup_pouch_root(const char *root) {
-  char path[512];
+  static const char prefix[] = "/tmp/liblockdc-e2e-pouch-";
 
-  if (root == NULL) {
+  if (root == NULL || strncmp(root, prefix, sizeof(prefix) - 1U) != 0) {
     return;
   }
-  snprintf(path, sizeof(path), "%s/store.compact.tmp", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/query.index.compact.tmp", root);
-  unlink(path);
-  pouch_query_index_temp_path(root, path, sizeof(path));
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/store.log", root);
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/query.index", root);
-  unlink(path);
-  pouch_query_index_path(root, path, sizeof(path));
-  unlink(path);
-  snprintf(path, sizeof(path), "%s/%%2elockd/logstore", root);
-  rmdir(path);
-  snprintf(path, sizeof(path), "%s/%%2elockd", root);
-  rmdir(path);
-  snprintf(path, sizeof(path), "%s/writer.lock", root);
-  unlink(path);
-  rmdir(root);
+  cleanup_pouch_tree(root);
 }
 
 static void open_tcp_client(const char *endpoint, const char *bundle_path,

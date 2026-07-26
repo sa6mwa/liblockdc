@@ -62,5 +62,19 @@ int lc_pouch_logstore_active_generation(const lc_pouch_logstore *logstore,
                                         int *found,
                                         unsigned long *generation,
                                         lc_error *error);
+char *lc_pouch_logstore_make_compact_backup_path(
+    const lc_pouch_logstore *logstore, const char *path);
+void lc_pouch_logstore_compact_backups_cleanup(
+    const lc_pouch_logstore *logstore, lc_pouch_logstore_paths *backups,
+    int restore);
+int lc_pouch_logstore_prepare_compact_backups(
+    const lc_pouch_logstore *logstore,
+    const lc_pouch_logstore_paths *active_paths,
+    lc_pouch_logstore_paths *backups, lc_error *error);
+int lc_pouch_logstore_open_compact_body_fd(
+    const lc_pouch_logstore *logstore, const char *path, lc_error *error);
+char *lc_pouch_logstore_make_compact_snapshot_path(
+    const lc_pouch_logstore *logstore, const char *segment_path,
+    lc_error *error);
 
 #endif
