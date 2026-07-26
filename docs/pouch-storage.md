@@ -1450,15 +1450,17 @@ sequence, so stale cached results miss the cache.
 Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
 Residual selectors such as date predicates use the same identity-keyed result
-cache for accepted candidate docIDs. The current disk bridge still scans
-sidecar field postings for DateAfter and narrows candidates by parsing supported
-temporal strings against the normalized bound while retaining plausible
-unsupported temporal strings as residual candidates. The typed temporal reader
-primitive exists for the immutable generation cutover, where supported temporal
-strings should be compiled before query time and DateAfter should read typed
-docID vectors newer than the bound plus residual postings. The client-level
-`liblql` filter remains authoritative for final acceptance and owns public
-cursor selection for residual pages.
+cache for accepted candidate docIDs. DateAfter now first tries an
+identity-matched per-namespace temporal generation file: supported temporal
+strings are read as typed docID vectors newer than the bound and plausible
+unsupported temporal strings remain residual docIDs. The disk bridge then
+applies its existing live-state, owner, hidden, key, and secondary-predicate
+guards before paging. If the generation file is absent, stale, or invalid for
+the current index identity, the current disk bridge still scans sidecar field
+postings and narrows candidates by parsing supported temporal strings against
+the normalized bound while retaining plausible unsupported temporal strings as
+residual candidates. The client-level `liblql` filter remains authoritative for
+final acceptance and owns public cursor selection for residual pages.
 The temporal reader codec is intentionally private to pouch index generations:
 it writes a fixed magic/version header, sorted fields, normalized temporal
 docID entries, and residual docIDs. Decode rejects wrong versions, truncated
@@ -1469,8 +1471,10 @@ can be tied to the same sequence plus segmented-manifest generation used by the
 prepared/result caches. During controlled query-index rebuild, the disk backend
 now compiles live per-namespace temporal postings and atomically publishes
 `<root>/%2elockd/logstore/query.index.temporal/<escaped-namespace>.lcptgn`
-files. Those files are rebuild artifacts for the upcoming immutable DateAfter
-reader; the current query path does not yet read them.
+files. Those files are rebuild artifacts for the immutable DateAfter reader;
+until ordinary writes and recovery can republish them for every new identity,
+the reader trusts only files whose encoded identity equals the current index
+identity.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every

@@ -6646,6 +6646,10 @@ typedef struct lc_pouch_disk_exact_term_doc_id_reader {
   const char *alloc_message;
 } lc_pouch_disk_exact_term_doc_id_reader;
 
+typedef struct lc_pouch_disk_temporal_generation_reader {
+  const lc_pouch_index_temporal_posting_table *postings;
+} lc_pouch_disk_temporal_generation_reader;
+
 static char *lc_pouch_disk_query_prepared_field_key(lc_pouch_disk_store *store,
                                                     const char *namespace_name,
                                                     const char *field) {
@@ -6685,6 +6689,199 @@ lc_pouch_disk_query_index_identity(lc_pouch_disk_store *store) {
     identity.manifest_generation = (uint64_t)store->replayed_segment_generation;
   }
   return identity;
+}
+
+static int lc_pouch_disk_query_index_identity_equal(
+    lc_pouch_index_identity left, lc_pouch_index_identity right) {
+  return left.sequence == right.sequence &&
+         left.manifest_generation == right.manifest_generation;
+}
+
+static int lc_pouch_disk_read_query_temporal_generation(
+    lc_pouch_disk_store *store, const char *namespace_name,
+    lc_pouch_index_identity identity,
+    lc_pouch_index_temporal_generation *generation, int *found_out,
+    lc_error *error) {
+  unsigned char *bytes;
+  char *path;
+  struct stat st;
+  size_t size;
+  int short_read;
+  int fd;
+
+  if (found_out != NULL) {
+    *found_out = 0;
+  }
+  if (generation == NULL || found_out == NULL) {
+    return lc_pouch_set_invalid(error,
+                                "pouch temporal query index output required");
+  }
+  memset(generation, 0, sizeof(*generation));
+  path = lc_pouch_disk_make_query_temporal_generation_path(store,
+                                                           namespace_name);
+  if (path == NULL) {
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch temporal query index path");
+  }
+  fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    int saved_errno;
+
+    saved_errno = errno;
+    lc_pouch_free(&store->allocator, path);
+    if (saved_errno == ENOENT) {
+      return LC_OK;
+    }
+    errno = saved_errno;
+    return lc_pouch_set_errno(error,
+                              "failed to open pouch temporal query index");
+  }
+  if (fstat(fd, &st) != 0) {
+    (void)close(fd);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_errno(error, "failed to stat pouch temporal query index");
+  }
+  if (st.st_size <= 0 || (uint64_t)st.st_size > (uint64_t)((size_t)-1)) {
+    (void)close(fd);
+    lc_pouch_free(&store->allocator, path);
+    return LC_OK;
+  }
+  size = (size_t)st.st_size;
+  bytes = (unsigned char *)lc_pouch_alloc(&store->allocator, size);
+  if (bytes == NULL) {
+    (void)close(fd);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch temporal query index bytes");
+  }
+  short_read = 0;
+  if (!lc_pouch_read_all(fd, bytes, size, &short_read)) {
+    lc_pouch_free(&store->allocator, bytes);
+    (void)close(fd);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_errno(error, "failed to read pouch temporal query index");
+  }
+  if (close(fd) != 0) {
+    lc_pouch_free(&store->allocator, bytes);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_errno(error, "failed to close pouch temporal query index");
+  }
+  lc_pouch_free(&store->allocator, path);
+  if (short_read ||
+      !lc_pouch_index_temporal_generation_decode(&store->allocator, generation,
+                                                 bytes, size) ||
+      generation->namespace_name == NULL ||
+      strcmp(generation->namespace_name, namespace_name) != 0 ||
+      !lc_pouch_disk_query_index_identity_equal(generation->identity,
+                                                identity)) {
+    lc_pouch_index_temporal_generation_cleanup(&store->allocator, generation);
+    lc_pouch_free(&store->allocator, bytes);
+    return LC_OK;
+  }
+  lc_pouch_free(&store->allocator, bytes);
+  *found_out = 1;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_query_read_temporal_generation_doc_ids(
+    void *context, const char *field, int64_t unix_seconds,
+    int32_t nanosecond, lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  lc_pouch_disk_temporal_generation_reader *reader;
+
+  (void)error;
+  reader = (lc_pouch_disk_temporal_generation_reader *)context;
+  if (reader == NULL || reader->postings == NULL || field == NULL ||
+      doc_ids == NULL) {
+    return LC_OK;
+  }
+  if (!lc_pouch_index_temporal_posting_table_append_after(
+          NULL, reader->postings, field, unix_seconds, nanosecond, doc_ids)) {
+    return LC_ERR_NOMEM;
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_query_filter_temporal_generation_doc_ids(
+    lc_pouch_disk_exact_term_doc_id_reader *reader,
+    const lc_pouch_index_doc_id_set *src, lc_pouch_index_doc_id_set *dst,
+    lc_error *error) {
+  size_t index;
+
+  if (reader == NULL || reader->store == NULL || reader->req == NULL ||
+      src == NULL || dst == NULL) {
+    return LC_OK;
+  }
+  for (index = 0U; index < src->count; ++index) {
+    lc_pouch_disk_query_summary_entry *entry;
+    const char *namespace_name;
+    const char *key;
+    size_t summary_index;
+
+    if (!lc_pouch_index_doc_table_lookup(&reader->store->query_doc_table,
+                                         src->items[index], &namespace_name,
+                                         &key)) {
+      return lc_pouch_set_invalid(
+          error, "pouch temporal query index references missing docID");
+    }
+    if (reader->req->key != NULL && strcmp(key, reader->req->key) != 0) {
+      continue;
+    }
+    if (!lc_pouch_disk_query_summary_find(reader->store, namespace_name, key,
+                                          &summary_index)) {
+      continue;
+    }
+    entry = &reader->store->query_summary_entries[summary_index];
+    if (!(reader->skip_not_eq_match
+              ? lc_pouch_disk_query_field_key_matches_positive_terms_from(
+                    reader->store, reader->req, key, reader->eq_from)
+              : lc_pouch_disk_query_field_key_matches_terms_from(
+                    reader->store, reader->req, key, reader->eq_from)) ||
+        !lc_pouch_disk_query_field_key_matches_ranges_from(
+            reader->store, reader->req, key, reader->range_from) ||
+        !lc_pouch_disk_query_field_key_matches_in_from(
+            reader->store, reader->req, key, reader->in_from) ||
+        !lc_pouch_disk_query_field_key_matches_not_in(reader->store,
+                                                      reader->req, key) ||
+        !lc_pouch_disk_query_field_key_matches_prefix_from(
+            reader->store, reader->req, key, 0U) ||
+        !lc_pouch_disk_query_field_key_matches_not_prefix(reader->store,
+                                                          reader->req, key) ||
+        !lc_pouch_disk_query_field_key_matches_contains_from(
+            reader->store, reader->req, key, 0U) ||
+        !lc_pouch_disk_query_field_key_matches_not_contains(reader->store,
+                                                            reader->req, key) ||
+        !lc_pouch_disk_query_field_key_matches_exists_from(
+            reader->store, reader->req, key, 0U) ||
+        !lc_pouch_disk_query_field_key_matches_not_exists(reader->store,
+                                                          reader->req, key) ||
+        !lc_pouch_disk_query_field_key_matches_path_patterns(reader->store,
+                                                             reader->req,
+                                                             key)) {
+      continue;
+    }
+    if (reader->require_positive_terms_summary_match &&
+        !(reader->skip_not_eq_match
+              ? lc_pouch_disk_query_field_key_matches_positive_terms_from_summary(
+                    reader->store, reader->req, entry, reader->eq_from)
+              : lc_pouch_disk_query_field_key_matches_terms_from_summary(
+                    reader->store, reader->req, entry, reader->eq_from))) {
+      continue;
+    }
+    if (entry->deleted || (entry->has_query_hidden && entry->query_hidden) ||
+        (reader->req->owner != NULL &&
+         (entry->owner == NULL ||
+          strcmp(entry->owner, reader->req->owner) != 0))) {
+      continue;
+    }
+    if (!lc_pouch_index_doc_id_set_append(&reader->store->allocator, dst,
+                                          src->items[index])) {
+      return lc_pouch_set_nomem(error, reader->alloc_message);
+    }
+  }
+  if (!lc_pouch_index_doc_id_set_sort_unique(dst)) {
+    return lc_pouch_set_nomem(error, reader->alloc_message);
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_disk_query_req_allows_prepared_term_cache(
@@ -7526,10 +7723,15 @@ static int lc_pouch_disk_query_compile_date_after_doc_ids(
     lc_pouch_disk_exact_term_doc_id_reader *reader,
     const lc_pouch_document_date_after_term *term,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  lc_pouch_disk_temporal_generation_reader generation_reader;
+  lc_pouch_index_temporal_generation generation;
+  lc_pouch_index_doc_id_set generation_doc_ids;
+  lc_pouch_index_identity identity;
   lc_pouch_temporal bound;
   size_t position;
   size_t index;
   int simple_primary;
+  int found_generation;
   int rc;
 
   if (reader == NULL || reader->store == NULL || reader->req == NULL ||
@@ -7539,6 +7741,33 @@ static int lc_pouch_disk_query_compile_date_after_doc_ids(
   }
   if (!lc_pouch_temporal_parse(term->after, &bound)) {
     return LC_OK;
+  }
+  memset(&generation, 0, sizeof(generation));
+  memset(&generation_doc_ids, 0, sizeof(generation_doc_ids));
+  memset(&generation_reader, 0, sizeof(generation_reader));
+  identity = lc_pouch_disk_query_index_identity(reader->store);
+  found_generation = 0;
+  rc = lc_pouch_disk_read_query_temporal_generation(
+      reader->store, reader->req->namespace_name, identity, &generation,
+      &found_generation, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (found_generation) {
+    generation_reader.postings = &generation.postings;
+    rc = lc_pouch_index_collect_date_after_doc_ids(
+        &reader->store->allocator, term,
+        lc_pouch_disk_query_read_temporal_generation_doc_ids,
+        &generation_reader, &generation_doc_ids, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_disk_query_filter_temporal_generation_doc_ids(
+          reader, &generation_doc_ids, doc_ids, error);
+    }
+    lc_pouch_index_doc_id_set_cleanup(&reader->store->allocator,
+                                      &generation_doc_ids);
+    lc_pouch_index_temporal_generation_cleanup(&reader->store->allocator,
+                                               &generation);
+    return rc;
   }
   simple_primary = lc_pouch_disk_query_req_only_primary_date_after(reader->req);
   (void)lc_pouch_disk_query_field_find(reader->store,

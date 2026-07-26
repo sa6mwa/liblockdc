@@ -892,11 +892,19 @@ Latest release targets confirmed on 2026-07-23:
           The rebuild pass now compiles live sidecar string postings into the
           generation container and installs the file atomically, with client
           coverage decoding the persisted artifact after reopen/rebuild.
-        - [ ] Move the DateAfter reader to those immutable compiled
-          generation files. A query-time disk bridge attempt was measured on
-          2026-07-26 and rejected because building the temporal table on the
-          hot path regressed 4096-document DateAfter page-one latency to
-          roughly 110-140 ms C-side.
+        - [x] Teach the DateAfter reader to consume identity-matched
+          per-namespace temporal generation files and then run the resulting
+          docIDs through the existing live-state, owner, hidden, key, and
+          secondary-predicate guards. Stale or absent generation files remain
+          ignored so incremental writes do not lose results before full
+          generation publication exists on all update paths.
+        - [ ] Make temporal generation files authoritative for DateAfter by
+          publishing or repairing them across ordinary state writes,
+          compaction, and recovery, removing the remaining sidecar-scan bridge.
+          A query-time disk bridge attempt was measured on 2026-07-26 and
+          rejected because building the temporal table on the hot path
+          regressed 4096-document DateAfter page-one latency to roughly
+          110-140 ms C-side.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not

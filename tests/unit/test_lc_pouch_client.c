@@ -10416,6 +10416,7 @@ test_pouch_endpoint_index_rebuild_writes_temporal_generation(void **state) {
   lc_lease *bravo;
   lc_lease *charlie;
   lc_lease *delta;
+  lc_lease *echo;
   lc_query_req req;
   lc_query_res res;
   lc_query_key_handler handler;
@@ -10491,6 +10492,26 @@ test_pouch_endpoint_index_rebuild_writes_temporal_generation(void **state) {
       NULL, &generation.postings, "/created_at", 1735689600, 0, &doc_ids));
   assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
   assert_int_equal(doc_ids.count, 2U);
+
+  client = open_pouch_client(endpoint);
+  echo = pouch_acquire_query_key(client, "echo", &error);
+  pouch_save_query_json(echo,
+                        "{\"created_at\":\"2025-01-01T00:00:03Z\","
+                        "\"value\":\"post-generation-write\"}",
+                        &error);
+  echo->close(echo);
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(capture.keys[1], "charlie");
+  assert_string_equal(capture.keys[2], "echo");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  lc_query_res_cleanup(&res);
+  client->close(client);
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
   lc_pouch_index_temporal_generation_cleanup(NULL, &generation);
