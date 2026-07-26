@@ -3,9 +3,80 @@
 
 #include "lc_internal.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef struct lc_pouch_acquire_for_update_file {
+  FILE *fp;
+} lc_pouch_acquire_for_update_file;
+
+static int lc_pouch_acquire_for_update_sink_write(lc_sink *self,
+                                                  const void *bytes,
+                                                  size_t count,
+                                                  lc_error *error) {
+  lc_pouch_acquire_for_update_file *file;
+
+  file = (lc_pouch_acquire_for_update_file *)self->impl;
+  if (file == NULL || file->fp == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch acquire_for_update sink is closed", NULL, NULL,
+                        NULL);
+  }
+  if (count > 0U && fwrite(bytes, 1U, count, file->fp) != count) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to write pouch acquire_for_update snapshot",
+                        strerror(errno), NULL, NULL);
+  }
+  return 1;
+}
+
+static void lc_pouch_acquire_for_update_sink_close(lc_sink *self) {
+  (void)self;
+}
+
+static size_t lc_pouch_acquire_for_update_source_read(void *context,
+                                                      void *buffer,
+                                                      size_t count,
+                                                      lc_error *error) {
+  lc_pouch_acquire_for_update_file *file;
+  size_t nread;
+
+  file = (lc_pouch_acquire_for_update_file *)context;
+  if (file == NULL || file->fp == NULL) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch acquire_for_update source is closed", NULL, NULL,
+                 NULL);
+    return 0U;
+  }
+  nread = fread(buffer, 1U, count, file->fp);
+  if (nread == 0U && ferror(file->fp)) {
+    lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                 "failed to read pouch acquire_for_update snapshot",
+                 strerror(errno), NULL, NULL);
+  }
+  return nread;
+}
+
+static int lc_pouch_acquire_for_update_source_reset(void *context,
+                                                    lc_error *error) {
+  lc_pouch_acquire_for_update_file *file;
+
+  file = (lc_pouch_acquire_for_update_file *)context;
+  if (file == NULL || file->fp == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch acquire_for_update source is closed", NULL,
+                        NULL, NULL);
+  }
+  clearerr(file->fp);
+  if (fseek(file->fp, 0L, SEEK_SET) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to rewind pouch acquire_for_update snapshot",
+                        strerror(errno), NULL, NULL);
+  }
+  return LC_OK;
+}
 
 static int lc_pouch_client_rebuilding(lc_error *error) {
   return lc_error_set(
@@ -286,11 +357,198 @@ int lc_pouch_client_acquire_for_update_method(
     lc_client *self, const lc_acquire_req *req,
     lc_acquire_for_update_handler_fn handler, void *context,
     lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)handler;
-  (void)context;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_lease *lease;
+  lc_lease_handle *lease_handle;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_release_req release_req;
+  lc_error handler_error;
+  lc_error release_error;
+  lc_error rollback_error;
+  lc_pouch_acquire_for_update_file file;
+  lc_sink sink;
+  lc_acquire_for_update_context update;
+  lc_source *restore_source;
+  lc_pouch_state_write_options restore_options;
+  lc_pouch_state_write_result rollback_result;
+  lc_pouch_state_read_result current;
+  FILE *fp;
+  int rc;
+  int release_rc;
+
+  if (self == NULL || req == NULL || handler == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch acquire_for_update requires self, req, and "
+                        "handler",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  lease = NULL;
+  fp = NULL;
+  restore_source = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  lc_get_opts_init(&get_opts);
+  lc_release_req_init(&release_req);
+  lc_error_init(&handler_error);
+  lc_error_init(&release_error);
+  lc_error_init(&rollback_error);
+  memset(&file, 0, sizeof(file));
+  memset(&sink, 0, sizeof(sink));
+  memset(&update, 0, sizeof(update));
+  memset(&restore_options, 0, sizeof(restore_options));
+  memset(&rollback_result, 0, sizeof(rollback_result));
+  memset(&current, 0, sizeof(current));
+
+  rc = lc_pouch_client_acquire_method(self, req, &lease, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  lease_handle = (lc_lease_handle *)lease;
+
+  fp = tmpfile();
+  if (fp == NULL) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to create pouch acquire_for_update snapshot",
+                      strerror(errno), NULL, NULL);
+    goto release_and_cleanup;
+  }
+  file.fp = fp;
+  sink.write = lc_pouch_acquire_for_update_sink_write;
+  sink.close = lc_pouch_acquire_for_update_sink_close;
+  sink.impl = &file;
+  rc = lease->get(lease, &sink, &get_opts, &get_res, error);
+  if (rc != LC_OK) {
+    goto release_and_cleanup;
+  }
+  if (fflush(fp) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to flush pouch acquire_for_update snapshot",
+                      strerror(errno), NULL, NULL);
+    goto release_and_cleanup;
+  }
+  if (fseek(fp, 0L, SEEK_SET) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to rewind pouch acquire_for_update snapshot",
+                      strerror(errno), NULL, NULL);
+    goto release_and_cleanup;
+  }
+
+  update.lease = lease;
+  update.state.has_state = !get_res.no_content;
+  update.state.content_type = get_res.content_type;
+  update.state.etag = get_res.etag;
+  update.state.version = get_res.version;
+  update.state.fencing_token = get_res.fencing_token;
+  update.state.correlation_id = get_res.correlation_id;
+  if (!get_res.no_content) {
+    rc = lc_source_from_callbacks(
+        lc_pouch_acquire_for_update_source_read,
+        lc_pouch_acquire_for_update_source_reset, NULL, &file,
+        &update.state.reader, error);
+    if (rc != LC_OK) {
+      goto release_and_cleanup;
+    }
+  }
+
+  rc = handler(context, &update, &handler_error);
+  if (update.state.reader != NULL) {
+    lc_source_close(update.state.reader);
+    update.state.reader = NULL;
+  }
+  if (rc != LC_OK) {
+    if (error != NULL) {
+      *error = handler_error;
+      lc_error_init(&handler_error);
+    }
+    release_req.rollback = 1;
+    if (!get_res.no_content) {
+      restore_options.content_type =
+          get_res.content_type != NULL ? get_res.content_type
+                                       : "application/octet-stream";
+      if (fseek(fp, 0L, SEEK_SET) != 0) {
+        if (error != NULL && error->code == LC_OK) {
+          lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                       "failed to rewind pouch rollback snapshot",
+                       strerror(errno), NULL, NULL);
+        }
+        goto release_and_cleanup;
+      }
+      rc = lc_source_from_callbacks(
+          lc_pouch_acquire_for_update_source_read,
+          lc_pouch_acquire_for_update_source_reset, NULL, &file,
+          &restore_source, &rollback_error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_state_write(client->pouch, lease_handle->namespace_name,
+                                  lease_handle->key, restore_source,
+                                  &restore_options, &rollback_result,
+                                  &rollback_error);
+      }
+      if (restore_source != NULL) {
+        lc_source_close(restore_source);
+        restore_source = NULL;
+      }
+      if (rc == LC_OK) {
+        (void)lc_pouch_lease_refresh_state(lease_handle, rollback_result.etag,
+                                           (long)rollback_result.version,
+                                           &rollback_error);
+      }
+    } else {
+      rc = lc_pouch_state_read(client->pouch, lease_handle->namespace_name,
+                               lease_handle->key, &current, &rollback_error);
+      if (rc == LC_OK && current.found) {
+        lc_pouch_state_read_result_cleanup(&client->allocator, &current);
+        rc = lc_pouch_state_delete(client->pouch, lease_handle->namespace_name,
+                                   lease_handle->key, NULL, &rollback_result,
+                                   &rollback_error);
+      }
+      if (rc == LC_OK) {
+        (void)lc_pouch_lease_refresh_state(lease_handle, NULL, 0L,
+                                           &rollback_error);
+      }
+    }
+    if (rc != LC_OK && error != NULL && error->code == LC_OK) {
+      *error = rollback_error;
+      lc_error_init(&rollback_error);
+    }
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_INVALID;
+  }
+
+release_and_cleanup:
+  release_rc = lease != NULL ? lc_pouch_lease_release_method(
+                                   lease, &release_req, &release_error)
+                             : LC_OK;
+  if (release_rc != LC_OK && rc == LC_OK) {
+    rc = release_rc;
+    if (error != NULL) {
+      *error = release_error;
+      lc_error_init(&release_error);
+    }
+  }
+  if (release_rc == LC_OK) {
+    lease = NULL;
+  } else if (lease != NULL) {
+    lc_lease_close(lease);
+    lease = NULL;
+  }
+
+cleanup:
+  if (update.state.reader != NULL) {
+    lc_source_close(update.state.reader);
+  }
+  if (restore_source != NULL) {
+    lc_source_close(restore_source);
+  }
+  if (fp != NULL) {
+    fclose(fp);
+  }
+  lc_pouch_state_read_result_cleanup(&client->allocator, &current);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &rollback_result);
+  lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&handler_error);
+  lc_error_cleanup(&release_error);
+  lc_error_cleanup(&rollback_error);
+  return rc;
 }
 
 int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,

@@ -64,6 +64,10 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
                          const char *key, lc_source *body,
                          const lc_pouch_state_write_options *options,
                          lc_pouch_state_write_result *out, lc_error *error);
+int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
+                          const char *key,
+                          const lc_pouch_state_write_options *options,
+                          lc_pouch_state_write_result *out, lc_error *error);
 void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
                                          lc_pouch_state_write_result *result);
 int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,

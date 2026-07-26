@@ -20,6 +20,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 - [ ] Rebuild the pouch storage write/read path on the new architecture:
   metadata, state payloads, objects, staged state, queues, transactions, and
   retention.
+  - [x] Add committed-state tombstones and pouch `acquire_for_update`
+    success/rollback over the segmented state log.
+  - [ ] Replace the interim committed-log rollback path with true staged-state
+    writes, promotion, discard, and transaction recovery.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

@@ -20,6 +20,13 @@ typedef struct pouch_value_doc {
   lonejson_int64 value;
 } pouch_value_doc;
 
+typedef struct pouch_acquire_for_update_state {
+  const char *expected_snapshot;
+  const char *replacement;
+  int saw_snapshot;
+  int fail;
+} pouch_acquire_for_update_state;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
@@ -227,6 +234,45 @@ static void write_client_state(lc_client *client, const char *key,
   rc = client->update(client, &update_req, source, out, error);
   source->close(source);
   assert_int_equal(rc, LC_OK);
+}
+
+static int pouch_acquire_for_update_handler(
+    void *context, lc_acquire_for_update_context *update, lc_error *error) {
+  pouch_acquire_for_update_state *state;
+  lc_source *source;
+  char snapshot[256];
+  int rc;
+
+  state = (pouch_acquire_for_update_state *)context;
+  source = NULL;
+  assert_non_null(update);
+  assert_non_null(update->lease);
+  if (state->expected_snapshot != NULL) {
+    assert_true(update->state.has_state);
+    assert_non_null(update->state.reader);
+    read_source_to_string(update->state.reader, snapshot, sizeof(snapshot));
+    assert_non_null(strstr(snapshot, state->expected_snapshot));
+    state->saw_snapshot = 1;
+  } else {
+    assert_false(update->state.has_state);
+    assert_null(update->state.reader);
+  }
+
+  rc = lc_source_from_memory(state->replacement, strlen(state->replacement),
+                             &source, error);
+  assert_int_equal(rc, LC_OK);
+  rc = update->lease->update(update->lease, source, NULL, error);
+  source->close(source);
+  assert_int_equal(rc, LC_OK);
+  if (state->fail) {
+    if (error != NULL) {
+      error->code = LC_ERR_INVALID;
+      error->message = strdup("intentional pouch acquire_for_update failure");
+      assert_non_null(error->message);
+    }
+    return LC_ERR_INVALID;
+  }
+  return LC_OK;
 }
 
 static void test_open_creates_segmented_root_layout(void **state) {
@@ -833,6 +879,150 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_acquire_for_update_success_and_rollback(void **state) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  pouch_acquire_for_update_state handler_state;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("acquire-for-update", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/afu/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{\"value\":1}", NULL, 0L, 0, &update_res,
+                     &error);
+  lc_update_res_cleanup(&update_res);
+
+  memset(&handler_state, 0, sizeof(handler_state));
+  handler_state.expected_snapshot = "\"value\":1";
+  handler_state.replacement = "{\"value\":2}";
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire_for_update(client, &acquire_req,
+                                  pouch_acquire_for_update_handler,
+                                  &handler_state, &error);
+  if (rc != LC_OK) {
+    fail_msg("acquire_for_update failed: %s",
+             error.message != NULL ? error.message : "(no message)");
+  }
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(handler_state.saw_snapshot, 1);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"value\":2}"));
+  assert_memory_equal(bytes, "{\"value\":2}", strlen("{\"value\":2}"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  memset(&handler_state, 0, sizeof(handler_state));
+  handler_state.expected_snapshot = "\"value\":2";
+  handler_state.replacement = "{\"value\":3}";
+  handler_state.fail = 1;
+  rc = client->acquire_for_update(client, &acquire_req,
+                                  pouch_acquire_for_update_handler,
+                                  &handler_state, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "intentional pouch acquire_for_update failure");
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  memset(&get_res, 0, sizeof(get_res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"value\":2}"));
+  assert_memory_equal(bytes, "{\"value\":2}", strlen("{\"value\":2}"));
+  sink->close(sink);
+
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_acquire_for_update_rollback_removes_new_state(void **state) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_get_res get_res;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  pouch_acquire_for_update_state handler_state;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("acquire-for-update-new-rollback", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/afu-new/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  memset(&handler_state, 0, sizeof(handler_state));
+  handler_state.replacement = "{\"value\":9}";
+  handler_state.fail = 1;
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire_for_update(client, &acquire_req,
+                                  pouch_acquire_for_update_handler,
+                                  &handler_state, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "intentional pouch acquire_for_update failure");
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  sink->close(sink);
+
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_open_creates_segmented_root_layout),
@@ -848,6 +1038,8 @@ int main(void) {
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
+      cmocka_unit_test(test_acquire_for_update_success_and_rollback),
+      cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
   };
 
   return cmocka_run_group_tests(tests, setup_pouch_unit_group,

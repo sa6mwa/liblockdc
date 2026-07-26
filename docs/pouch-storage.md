@@ -2121,10 +2121,10 @@ Promotion is intentionally link-based. It must not read the staged payload into
 memory, copy the payload into a new state record, or re-encrypt the bytes. The
 committed state head should point at the staged payload span, then compaction may
 later materialize it into a normal state-put record if doing so is safe.
-The current pouch backend implements this promotion path with sorted committed
-key and staged-key guards before the append-log lock. Staged writes are ordinary
-state writes against the generated staged key, and staged discard acquires the
-staged-key guard before deleting the staged record.
+The redesigned pouch backend currently has committed-state segment records,
+state tombstones, and client-level `acquire_for_update` rollback over the
+committed state log. The full staged-state promotion path above remains the
+target for transaction integration.
 
 The staging listing contract is narrower than generic object listing. It must
 include direct staged state objects only and exclude nested staged attachment
@@ -2133,13 +2133,15 @@ objects such as `.staging/<txn>/attachments/...`.
 Client `acquire_for_update` must route handler state writes through staged state
 instead of the ordinary update path. A release request with `rollback` is not
 itself a rollback mechanism if the handler has already committed visible state.
-The pouch client adapter therefore installs a staged update receiver only for
-the duration of the handler callback. Handler success promotes the staged state,
-then updates the active lease metadata to the promoted state version and ETag
-before release. Handler failure discards the staged key and releases with
+The target pouch client adapter therefore installs a staged update receiver only
+for the duration of the handler callback. Handler success promotes the staged
+state, then updates the active lease metadata to the promoted state version and
+ETag before release. Handler failure discards the staged key and releases with
 rollback. Reads by other clients must never observe a handler write before
 promotion, and a failing handler must leave the previous committed state
-reachable.
+reachable. Until staged state is implemented, pouch preserves this final
+committed-state outcome by restoring the pre-handler snapshot or appending a
+tombstone when a failing handler created a previously missing state.
 
 Transaction decision records live in the reserved transaction namespace as
 objects. Recovery must support:
