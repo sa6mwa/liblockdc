@@ -730,14 +730,17 @@ keys directly from the immutable document table, avoiding a summary-index
 translation layer when metadata rows are not needed. Prepared adaptive postings
 decode directly into caller-owned docID sets, so equality, `in`, exists, range,
 prefix, and contains readers avoid temporary decoded vectors on cache hits.
+Prepared term postings are shared only for request-independent plans; owner- or
+key-filtered requests still use the request-keyed result cache but do not
+populate or consume the shared prepared term cache.
 The generic docID candidate guard accepts per-predicate offsets for primary
 equality, range, `in`, prefix, contains, and exists readers, so a reader that
 has already proven its primary predicate does not rescan that same predicate for
 every candidate while secondary and negated predicates remain enforced. Simple
-primary `range`, `exists`, and `prefix` compilation also has a narrower docID
-append path for no-residual-filter queries; it still verifies live state,
-summary freshness, hidden state, owner filtering, and doc-table membership
-before accepting a candidate.
+primary equality, non-wildcard `in`, `range`, `exists`, and `prefix`
+compilation also has a narrower docID append path for no-residual-filter
+queries; it still verifies live state, summary freshness, hidden state, owner
+filtering, and doc-table membership before accepting a candidate.
 Contains compilation checks raw text postings for the substring directly;
 trigrams remain a zero-candidate fast reject until the compiled field dictionary
 can drive a docID-first text search path. The client planner also recognizes

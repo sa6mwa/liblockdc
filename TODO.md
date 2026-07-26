@@ -636,6 +636,14 @@ Latest release targets confirmed on 2026-07-23:
         Verified on 2026-07-26 with the focused 4096-doc indexed key
         `RangeHalf` benchmark: pouch measured about 5.14 ms and Go disk about
         47.8 ms in the same run.
+      - [x] Extend the simple-primary docID candidate helper to exact equality
+        and non-wildcard `in` compilation after the active exact-term reader
+        has already validated the field/value predicate, preserving the same
+        live-state, summary, hidden, owner, and doc-table checks.
+        Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
+        pouch `EqSparse` measured about 0.78 ms and Go disk about 49.3 ms;
+        pouch `InTags` measured about 4.73 ms and Go disk about 2.46 ms, so
+        `InTags` remains a persisted-dictionary/posting-union parity gap.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
@@ -644,6 +652,12 @@ Latest release targets confirmed on 2026-07-23:
         namespace-qualified adaptive exact postings across compatible query
         shapes, with tests covering namespace separation and generation miss
         after writes.
+      - [x] Keep prepared term caches request-independent: owner- and
+        key-filtered exact queries use the request-keyed result cache but do not
+        populate or consume namespace/field/value prepared exact postings.
+        Covered by a focused pouch disk regression that runs owner-filtered and
+        key-filtered exact queries before unfiltered exact queries on the same
+        indexed field/value generation.
       - [x] Extend the generation-scoped prepared bridge cache to simple
         positive `exists` plans: namespace-qualified field-presence postings
         are reused across compatible exists scans, with namespace separation
