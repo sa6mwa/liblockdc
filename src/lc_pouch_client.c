@@ -76,6 +76,7 @@ typedef struct lc_pouch_query_index_plan {
   char **values;
   size_t value_count;
   size_t value_capacity;
+  int exists;
 } lc_pouch_query_index_plan;
 
 typedef struct lc_pouch_query_index_key_set {
@@ -791,9 +792,33 @@ static int lc_pouch_query_index_plan_from_selector(
     }
     return LC_OK;
   }
+  if (root.kind == LQL_SELECTOR_NODE_EXISTS) {
+    lql_string_view path;
+
+    memset(&path, 0, sizeof(path));
+    status = runtime->selector_node_exists_path(runtime, root, &path,
+                                                &lql_error_value);
+    if (status != LQL_STATUS_OK) {
+      return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                      "failed to inspect pouch exists selector");
+    }
+    if (path.len == 0U) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query index engine supports non-empty exists "
+                          "selectors only",
+                          NULL, NULL, "pouch-redesign");
+    }
+    plan->field = lc_pouch_query_dup_lql_string(path, error);
+    if (plan->field == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    plan->exists = 1;
+    return LC_OK;
+  }
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch query index engine supports exact scalar "
-                      "equality and in selectors only",
+                      "equality, in, and exists selectors only",
                       NULL, NULL, "pouch-redesign");
 }
 
@@ -1007,6 +1032,15 @@ static int lc_pouch_query_run_index_predicate(
   if (rc == LC_OK) {
     rc = lc_pouch_query_flush_summary_index(scan->client, scan->namespace_name,
                                             &flushed_seq, error);
+  }
+  if (rc == LC_OK && plan.exists) {
+    value_seq = 0UL;
+    rc = lc_pouch_query_index_visit_exists(
+        scan->client->pouch, scan->namespace_name, plan.field,
+        lc_pouch_query_index_key_collect, &keys, &value_seq, error);
+    if (rc == LC_OK && value_seq > scan->index_seq) {
+      scan->index_seq = value_seq;
+    }
   }
   for (value_index = 0U; rc == LC_OK && value_index < plan.value_count;
        ++value_index) {

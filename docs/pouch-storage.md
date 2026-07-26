@@ -451,10 +451,11 @@ of rewritten JSON files.
   sidecar, and returns its storage high-water token, including tombstones and
   peer-writer marker invalidation. The sidecar now carries deterministic live
   summary rows with row-count/hash validation, query-hidden flags, and the
-  first durable scalar field postings. Selectorless `query_keys` can use the
+  first durable scalar field plus field-presence postings. Selectorless `query_keys` can use the
   validated summary as the first indexed path; explicit indexed `query_keys`
   and document `query` can use scalar equality and scalar `in` postings,
-  including `/tags[]` array membership, before final `liblql` acceptance.
+  including `/tags[]` array membership, and field `exists` postings before
+  final `liblql` acceptance.
   Broader typed/range/text postings and richer indexed selector plans remain to
   be implemented.
 - Avoid hidden memory allocation. Storage code must allocate only through a
@@ -1055,10 +1056,11 @@ default/index engines refresh the sidecar, validate its row count and hash,
 stream decoded keys from the sidecar, filter `query_hidden`, paginate by row
 offset, and report `engine=index-summary`. The first selector-bearing indexed
 paths for both `query_keys` and document `query` handle single-node scalar
-equality and scalar `in` selectors by looking up durable sidecar postings,
-sorting/de-duplicating candidate keys, then loading only candidate documents for
-final `liblql` acceptance and `query_hidden` suppression. Unsupported indexed
-selector shapes fail closed instead of falling back to scan.
+equality, scalar `in`, and field `exists` selectors by looking up durable
+sidecar postings, sorting/de-duplicating candidate keys, then loading only
+candidate documents for final `liblql` acceptance and `query_hidden`
+suppression. Unsupported indexed selector shapes fail closed instead of falling
+back to scan.
 Explicit scan mode remains available for full-log/full-summary scanning through
 the ordered metadata summary API, but it does not accept refresh hints because
 no durable query index is consulted.

@@ -116,6 +116,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     the same scalar posting candidates, preserving streamed document output,
     final `liblql` acceptance, refresh-wait, pagination, hidden/deleted
     suppression, and fail-closed unsupported selector shapes.
+  - [x] Add durable field-presence postings to `query.index` and route
+    explicit indexed `query_keys` and document `query` `exists` selectors
+    through posting candidates with final `liblql` acceptance, container
+    presence support, hidden/deleted suppression, and fail-closed unsupported
+    selector shapes.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
