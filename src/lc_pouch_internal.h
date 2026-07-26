@@ -10,6 +10,7 @@ struct lc_pouch {
   unsigned long compaction_min_segment_count;
   unsigned long compaction_min_reclaimable_bytes;
   unsigned long compaction_interval_seconds;
+  unsigned long marker_sequence;
   int background_compaction_enabled;
   int single_writer;
 };

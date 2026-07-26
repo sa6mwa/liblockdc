@@ -30,6 +30,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.
+  - [x] Touch per-namespace writer markers after committed segmented state
+    mutations, with monotonic sequence payloads that alternate size for
+    coarse-mtime filesystems.
+  - [ ] Add reader-side marker snapshots, marker-directory fast paths, periodic
+    forced refresh, snapshot creation, compaction scheduling, and obsolete-file
+    cleanup.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the

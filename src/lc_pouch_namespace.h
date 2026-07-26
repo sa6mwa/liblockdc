@@ -30,6 +30,9 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
                                        lc_pouch_namespace_manifest *manifest,
                                        unsigned long segment_id,
                                        lc_error *error);
+int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
+                                    const char *namespace_path,
+                                    unsigned long sequence, lc_error *error);
 void lc_pouch_namespace_manifest_cleanup(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest);
 

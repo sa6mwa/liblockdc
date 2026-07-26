@@ -123,6 +123,17 @@ static char *lc_pouch_state_child_path(const lc_allocator *allocator,
   return path;
 }
 
+static int lc_pouch_state_touch_marker(
+    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
+    lc_error *error) {
+  unsigned long sequence;
+
+  sequence = ++pouch->marker_sequence;
+  return lc_pouch_namespace_touch_marker(&pouch->allocator,
+                                         manifest->namespace_path, sequence,
+                                         error);
+}
+
 static int lc_pouch_state_write_all(int fd, const void *bytes, size_t count,
                                     lc_error *error) {
   const unsigned char *cursor;
@@ -638,6 +649,7 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   unsigned long max_version;
   unsigned long version;
   unsigned long bytes;
+  int record_appended;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -704,6 +716,7 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   }
 
   bytes = 0UL;
+  record_appended = 0;
   rc = lc_pouch_state_stream_payload(payload_path, body, &bytes, error);
   content_type = options != NULL && options->content_type != NULL
                      ? options->content_type
@@ -712,6 +725,12 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
     rc = lc_pouch_state_append_record(pouch, namespace_name, &manifest, 'S',
                                       key, content_type, etag, payload_leaf,
                                       version, bytes, error);
+    if (rc == LC_OK) {
+      record_appended = 1;
+    }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_touch_marker(pouch, &manifest, error);
   }
   if (rc == LC_OK) {
     out->etag = etag;
@@ -719,7 +738,9 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
     out->bytes = bytes;
     etag = NULL;
   } else {
-    unlink(payload_path);
+    if (!record_appended) {
+      unlink(payload_path);
+    }
   }
   lc_free_with_allocator(&pouch->allocator, etag);
   lc_free_with_allocator(&pouch->allocator, payload_leaf);
@@ -808,6 +829,9 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
   }
   rc = lc_pouch_state_append_tombstone(pouch, namespace_name, &manifest, key,
                                        etag, version, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_touch_marker(pouch, &manifest, error);
+  }
   if (rc == LC_OK) {
     out->etag = etag;
     out->version = version;
@@ -938,6 +962,10 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
   if (rc != LC_OK) {
     goto cleanup;
   }
+  rc = lc_pouch_state_touch_marker(pouch, &manifest, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
   out->etag = lc_strdup_with_allocator(&pouch->allocator, staged.etag);
   if (out->etag == NULL) {
     rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -1011,6 +1039,9 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
       rc = lc_pouch_state_append_tombstone(pouch, namespace_name, &manifest,
                                            staged_key, etag, max_version + 1UL,
                                            error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_state_touch_marker(pouch, &manifest, error);
+      }
       if (rc == LC_OK && discarded != NULL) {
         *discarded = 1;
       }

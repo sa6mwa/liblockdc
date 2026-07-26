@@ -1751,6 +1751,13 @@ directory scans, stats cached peer markers when directory metadata is unchanged,
 and periodically falls back to full marker scans plus segment validation so
 marker hints cannot hide external rewrites indefinitely.
 
+The redesigned pouch backend currently writes per-namespace
+`markers/writer-<pid>.marker` files after segmented state mutations. Marker
+payloads include a monotonic writer sequence and alternate payload size across
+adjacent writes. Reader-side peer-marker snapshots, marker-directory fast paths,
+and periodic forced refresh remain to be rebuilt on top of that write-side
+primitive.
+
 Refresh needs two modes:
 
 - normal refresh may skip segment scans when peer markers and marker directory

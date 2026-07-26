@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define LC_POUCH_SEGMENT_PREFIX "seg-"
 #define LC_POUCH_SEGMENT_SUFFIX ".log"
@@ -289,6 +290,40 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
   if (rc == LC_OK) {
     manifest->repaired = 0;
   }
+  return rc;
+}
+
+int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
+                                    const char *namespace_path,
+                                    unsigned long sequence, lc_error *error) {
+  char leaf[96];
+  char text[192];
+  char *markers_path;
+  char *marker_path;
+  int rc;
+
+  if (namespace_path == NULL || sequence == 0UL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch marker touch requires namespace path and "
+                        "non-zero sequence",
+                        NULL, NULL, NULL);
+  }
+  snprintf(leaf, sizeof(leaf), "writer-%ld.marker", (long)getpid());
+  snprintf(text, sizeof(text), "writer_pid=%ld\nsequence=%020lu\n%s",
+           (long)getpid(), sequence,
+           (sequence % 2UL) == 0UL ? "pad=x\n" : "");
+  markers_path = lc_pouch_path_join(allocator, namespace_path, "markers");
+  marker_path = markers_path != NULL ? lc_pouch_path_join(allocator,
+                                                          markers_path, leaf)
+                                     : NULL;
+  lc_free_with_allocator(allocator, markers_path);
+  if (marker_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch marker path", NULL, NULL,
+                        NULL);
+  }
+  rc = lc_pouch_path_write_text_file(marker_path, text, error);
+  lc_free_with_allocator(allocator, marker_path);
   return rc;
 }
 

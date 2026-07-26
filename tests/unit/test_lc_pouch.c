@@ -188,6 +188,49 @@ static void assert_path_file_contains(const char *root, const char *leaf,
   assert_file_contains(path, needle);
 }
 
+static void make_marker_path(const char *root, const char *namespace_name,
+                             char *path, size_t path_size) {
+  char *namespace_path;
+  int written;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
+  assert_non_null(namespace_path);
+  written = snprintf(path, path_size, "%s/markers/writer-%ld.marker",
+                     namespace_path, (long)getpid());
+  assert_true(written > 0 && (size_t)written < path_size);
+  free(namespace_path);
+}
+
+static unsigned long read_marker_sequence(const char *path, size_t *size) {
+  FILE *fp;
+  struct stat st;
+  char line[256];
+  unsigned long sequence;
+  int found;
+
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(S_ISREG(st.st_mode));
+  if (size != NULL) {
+    *size = (size_t)st.st_size;
+  }
+  fp = fopen(path, "rb");
+  assert_non_null(fp);
+  sequence = 0UL;
+  found = 0;
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    unsigned long parsed;
+
+    if (sscanf(line, "sequence=%lu", &parsed) == 1) {
+      sequence = parsed;
+      found = 1;
+      break;
+    }
+  }
+  assert_int_equal(fclose(fp), 0);
+  assert_true(found);
+  return sequence;
+}
+
 static void read_source_to_string(lc_source *source, char *buffer,
                                   size_t buffer_size) {
   lc_error error;
@@ -916,6 +959,129 @@ static void test_client_remove_tombstones_state_and_enforces_preconditions(
   lc_error_cleanup(&error);
 }
 
+static void test_state_mutations_touch_writer_marker(void **state) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_remove_op remove_op;
+  lc_remove_res remove_res;
+  lc_get_res get_res;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  pouch_acquire_for_update_state handler_state;
+  const void *bytes;
+  size_t length;
+  size_t size1;
+  size_t size2;
+  size_t size3;
+  char root[512];
+  char key[96];
+  char marker_path[1024];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  size1 = 0U;
+  size2 = 0U;
+  size3 = 0U;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&remove_res, 0, sizeof(remove_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_remove_op_init(&remove_op);
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("state-marker", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/marker/%ld", (long)getpid());
+  make_marker_path(root, "default", marker_path, sizeof(marker_path));
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{\"value\":1}", NULL, 0L, 0, &update_res,
+                     &error);
+  assert_int_equal(read_marker_sequence(marker_path, &size1), 1UL);
+  lc_update_res_cleanup(&update_res);
+
+  memset(&update_res, 0, sizeof(update_res));
+  write_client_state(client, key, "{\"value\":2}", NULL, 0L, 0, &update_res,
+                     &error);
+  assert_int_equal(read_marker_sequence(marker_path, &size2), 2UL);
+  assert_true(size1 != size2);
+  lc_update_res_cleanup(&update_res);
+
+  remove_op.lease.key = key;
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(remove_res.removed, 1);
+  assert_int_equal(read_marker_sequence(marker_path, &size3), 3UL);
+  assert_true(size2 != size3);
+  lc_remove_res_cleanup(&remove_res);
+
+  memset(&handler_state, 0, sizeof(handler_state));
+  handler_state.replacement = "{\"value\":4}";
+  handler_state.observer = client;
+  handler_state.key = key;
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire_for_update(client, &acquire_req,
+                                  pouch_acquire_for_update_handler,
+                                  &handler_state, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(handler_state.saw_staged_invisible, 1);
+  assert_int_equal(read_marker_sequence(marker_path, NULL), 5UL);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"value\":4}"));
+  assert_memory_equal(bytes, "{\"value\":4}", strlen("{\"value\":4}"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  memset(&handler_state, 0, sizeof(handler_state));
+  handler_state.expected_snapshot = "\"value\":4";
+  handler_state.expected_visible_during_update = "{\"value\":4}";
+  handler_state.replacement = "{\"value\":5}";
+  handler_state.observer = client;
+  handler_state.key = key;
+  handler_state.fail = 1;
+  rc = client->acquire_for_update(client, &acquire_req,
+                                  pouch_acquire_for_update_handler,
+                                  &handler_state, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(handler_state.saw_staged_invisible, 1);
+  assert_int_equal(read_marker_sequence(marker_path, NULL), 7UL);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  memset(&get_res, 0, sizeof(get_res));
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"value\":4}"));
+  assert_memory_equal(bytes, "{\"value\":4}", strlen("{\"value\":4}"));
+  sink->close(sink);
+
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_lease_bound_state_update_get_and_release(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -1255,6 +1421,7 @@ int main(void) {
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
+      cmocka_unit_test(test_state_mutations_touch_writer_marker),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
