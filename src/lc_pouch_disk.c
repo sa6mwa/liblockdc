@@ -4959,13 +4959,13 @@ static int lc_pouch_disk_query_field_key_matches_not_eq(
 
 static int lc_pouch_disk_query_field_key_matches_terms_from_summary(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
-    const lc_pouch_disk_query_summary_entry *entry) {
+    const lc_pouch_disk_query_summary_entry *entry, size_t first_term) {
   size_t index;
 
   if (req == NULL || entry == NULL || entry->key == NULL) {
     return 1;
   }
-  for (index = 0U; index < req->document_eq_term_count; ++index) {
+  for (index = first_term; index < req->document_eq_term_count; ++index) {
     const lc_pouch_document_eq_term *term;
     lc_pouch_disk_query_field_posting *posting;
     size_t position;
@@ -6112,8 +6112,8 @@ static int lc_pouch_disk_query_field_add_candidate_summary_index(
 static int lc_pouch_disk_query_field_add_candidate_doc_id_from(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const lc_pouch_disk_query_field_posting *posting,
-    lc_pouch_index_doc_id_set *doc_ids, size_t range_from, size_t in_from,
-    size_t contains_from, int require_summary_match,
+    lc_pouch_index_doc_id_set *doc_ids, size_t eq_from, size_t range_from,
+    size_t in_from, size_t contains_from, int require_summary_match,
     int require_positive_terms_summary_match, lc_error *error,
     const char *alloc_message) {
   lc_pouch_disk_query_summary_entry *entry;
@@ -6127,7 +6127,8 @@ static int lc_pouch_disk_query_field_add_candidate_doc_id_from(
     return LC_OK;
   }
   if (!lc_pouch_disk_query_field_posting_has_live_state(store, posting) ||
-      !lc_pouch_disk_query_field_key_matches_terms(store, req, posting->key) ||
+      !lc_pouch_disk_query_field_key_matches_terms_from(
+          store, req, posting->key, eq_from) ||
       !lc_pouch_disk_query_field_key_matches_ranges_from(
           store, req, posting->key, range_from) ||
       !lc_pouch_disk_query_field_key_matches_in_from(store, req, posting->key,
@@ -6149,8 +6150,8 @@ static int lc_pouch_disk_query_field_add_candidate_doc_id_from(
     return LC_OK;
   }
   if (require_positive_terms_summary_match &&
-      !lc_pouch_disk_query_field_key_matches_terms_from_summary(store, req,
-                                                                entry)) {
+      !lc_pouch_disk_query_field_key_matches_terms_from_summary(
+          store, req, entry, eq_from)) {
     return LC_OK;
   }
   if (entry->deleted || (entry->has_query_hidden && entry->query_hidden) ||
@@ -6183,6 +6184,7 @@ typedef struct lc_pouch_disk_exact_term_doc_id_reader {
   lc_pouch_index_term_posting_table prefix_postings;
   lc_pouch_index_term_table contains_terms;
   lc_pouch_index_term_posting_table contains_postings;
+  size_t eq_from;
   size_t range_from;
   size_t in_from;
   int require_summary_match;
@@ -6288,8 +6290,8 @@ static int lc_pouch_disk_query_compile_exact_term_doc_ids(
       continue;
     }
     rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
-        reader->store, reader->req, posting, &compiled, reader->range_from,
-        reader->in_from, 0U, reader->require_summary_match,
+        reader->store, reader->req, posting, &compiled, reader->eq_from,
+        reader->range_from, reader->in_from, 0U, reader->require_summary_match,
         reader->require_positive_terms_summary_match, error,
         reader->alloc_message);
     if (rc != LC_OK) {
@@ -6424,8 +6426,8 @@ static int lc_pouch_disk_query_compile_exists_term_doc_ids(
       continue;
     }
     rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
-        reader->store, reader->req, posting, &compiled, reader->range_from,
-        reader->in_from, 0U, reader->require_summary_match,
+        reader->store, reader->req, posting, &compiled, reader->eq_from,
+        reader->range_from, reader->in_from, 0U, reader->require_summary_match,
         reader->require_positive_terms_summary_match, error,
         reader->alloc_message);
     if (rc != LC_OK) {
@@ -6615,8 +6617,8 @@ static int lc_pouch_disk_query_compile_range_term_doc_ids(
       continue;
     }
     rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
-        reader->store, reader->req, posting, &compiled, reader->range_from,
-        reader->in_from, 0U, reader->require_summary_match,
+        reader->store, reader->req, posting, &compiled, reader->eq_from,
+        reader->range_from, reader->in_from, 0U, reader->require_summary_match,
         reader->require_positive_terms_summary_match, error,
         reader->alloc_message);
     if (rc != LC_OK) {
@@ -6795,8 +6797,8 @@ static int lc_pouch_disk_query_compile_prefix_term_doc_ids(
       continue;
     }
     rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
-        reader->store, reader->req, posting, &compiled, reader->range_from,
-        reader->in_from, 0U, reader->require_summary_match,
+        reader->store, reader->req, posting, &compiled, reader->eq_from,
+        reader->range_from, reader->in_from, 0U, reader->require_summary_match,
         reader->require_positive_terms_summary_match, error,
         reader->alloc_message);
     if (rc != LC_OK) {
@@ -7130,6 +7132,7 @@ lc_pouch_disk_collect_eq_result_doc_ids(void *context, int cacheable,
   if (collect == NULL) {
     return LC_OK;
   }
+  collect->reader.eq_from = 1U;
   collect->reader.use_prepared_exact_cache = cacheable;
   return lc_pouch_index_collect_eq_term_doc_ids(
       &collect->reader.store->allocator, collect->primary,
@@ -7147,9 +7150,22 @@ lc_pouch_disk_collect_range_result_doc_ids(void *context, int cacheable,
   if (collect == NULL) {
     return LC_OK;
   }
+  collect->reader.eq_from = collect->reader.req != NULL
+                                ? collect->reader.req->document_eq_term_count
+                                : 0U;
   collect->reader.use_prepared_range_cache =
       cacheable && collect->reader.req != NULL &&
       collect->reader.req->document_eq_term_count == 0U;
+  if (collect->reader.req != NULL &&
+      collect->reader.req->document_eq_term_count > 0U) {
+    return lc_pouch_index_collect_range_term_with_eq_doc_ids(
+        &collect->reader.store->allocator, collect->primary,
+        collect->reader.req->document_eq_terms,
+        collect->reader.req->document_eq_term_count,
+        lc_pouch_disk_query_read_range_term_doc_ids,
+        lc_pouch_disk_query_read_exact_term_doc_ids, &collect->reader, doc_ids,
+        error);
+  }
   return lc_pouch_index_collect_range_term_doc_ids(
       &collect->reader.store->allocator, collect->primary,
       lc_pouch_disk_query_read_range_term_doc_ids, &collect->reader, doc_ids,
@@ -10393,8 +10409,8 @@ static int lc_pouch_disk_query_compile_contains_term_doc_ids(
       continue;
     }
     rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
-        reader->store, reader->req, posting, &compiled, reader->range_from,
-        reader->in_from, 1U, reader->require_summary_match,
+        reader->store, reader->req, posting, &compiled, reader->eq_from,
+        reader->range_from, reader->in_from, 1U, reader->require_summary_match,
         reader->require_positive_terms_summary_match, error,
         reader->alloc_message);
     if (rc != LC_OK) {

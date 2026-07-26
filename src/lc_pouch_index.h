@@ -248,6 +248,13 @@ int lc_pouch_index_collect_range_term_doc_ids(
     const lc_pouch_document_range_term *term,
     lc_pouch_index_range_term_doc_ids_fn read_range, void *read_context,
     lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
+int lc_pouch_index_collect_range_term_with_eq_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_range_term *range_term,
+    const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
+    lc_pouch_index_range_term_doc_ids_fn read_range,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error);
 int lc_pouch_index_collect_prefix_term_doc_ids(
     const lc_pouch_allocator *allocator,
     const lc_pouch_document_prefix_term *term,

@@ -520,6 +520,11 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Route primary numeric range candidate collection through a range
         docID reader callback and remove the obsolete disk-local equality-span
         range optimization helpers.
+      - [x] Move positive equality filtering for primary numeric range
+        candidates into the private index collector: the disk adapter now
+        supplies range and exact docID readers, while `lc_pouch_index`
+        intersects the primary range docID set with secondary equality
+        postings before result-cache paging.
     - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
       delta-varint docID streams and dense bitsets selected by posting
       density/encoded size.

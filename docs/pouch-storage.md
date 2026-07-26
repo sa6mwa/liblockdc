@@ -1347,6 +1347,12 @@ adaptive docID postings per request before decoding through the index layer.
 The range term dictionary key records bound presence separately from bound
 values so open, closed, and absent bounds stay distinct inside the compiled
 reader bridge.
+When a primary numeric range plan has positive equality filters, the disk
+adapter now supplies separate range and exact-term docID readers and
+`lc_pouch_index` intersects the resulting sorted docID sets. The disk bridge
+still owns live-state, hidden, owner, generation, and residual predicate
+guards, but the repeated candidate-set algebra is no longer embedded in the
+range posting scan loop.
 Primary positive `prefix` plans now use the same reader/planner bridge: the
 disk adapter filters text sidecar postings with visibility and secondary
 predicate checks, compiles the matching summary docIDs into adaptive postings,
