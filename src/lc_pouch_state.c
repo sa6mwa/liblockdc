@@ -18,6 +18,7 @@
 #define LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS 64UL
 #define LC_POUCH_STATE_DECISION_COMMITTED "committed"
 #define LC_POUCH_STATE_DECISION_DISCARDED "discarded"
+#define LC_POUCH_STATE_HIGH_WATER_KEY ".lockd/high-water"
 
 typedef struct lc_pouch_state_entry {
   char *key;
@@ -624,6 +625,24 @@ static int lc_pouch_state_parse_record(const lc_allocator *allocator,
   char tag;
   int matched;
 
+  matched = sscanf(line, "%c %lu", &tag, &version);
+  if (matched == 2 && tag == 'H') {
+    lc_pouch_state_entry_cleanup(allocator, entry);
+    entry->key =
+        lc_strdup_with_allocator(allocator, LC_POUCH_STATE_HIGH_WATER_KEY);
+    if (entry->key == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to decode pouch high-water record", NULL,
+                          NULL, NULL);
+    }
+    entry->version = version;
+    entry->bytes = 0UL;
+    entry->seen = 1;
+    entry->found = 0;
+    entry->control = 1;
+    return LC_OK;
+  }
+
   matched = sscanf(line, "%c %lu %8191s %8191s %8191s", &tag, &version,
                    key_hex, etag_hex, decision_hex);
   if (matched == 5 && tag == 'T') {
@@ -1175,6 +1194,20 @@ static int lc_pouch_state_snapshot_write_record(
   return rc;
 }
 
+static int lc_pouch_state_snapshot_write_high_water(
+    int fd, unsigned long high_water_version, lc_error *error) {
+  char line[128];
+  int len;
+
+  len = snprintf(line, sizeof(line), "H %lu\n", high_water_version);
+  if (len < 0 || (size_t)len >= sizeof(line)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state high-water record exceeds line limit",
+                        NULL, NULL, NULL);
+  }
+  return lc_pouch_state_write_all(fd, line, (size_t)len, error);
+}
+
 static int lc_pouch_state_write_snapshot(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
     const char *snapshot_leaf, lc_pouch_state_cache_namespace *cache,
@@ -1217,11 +1250,12 @@ static int lc_pouch_state_write_snapshot(
                         strerror(errno), NULL, NULL);
   }
   rc = LC_OK;
+  rc = lc_pouch_state_snapshot_write_high_water(fd, cache->max_version, error);
   for (record = cache->records; record != NULL; record = record->next) {
-    rc = lc_pouch_state_snapshot_write_record(pouch, fd, record, error);
     if (rc != LC_OK) {
       break;
     }
+    rc = lc_pouch_state_snapshot_write_record(pouch, fd, record, error);
   }
   if (rc == LC_OK && fsync(fd) != 0) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,

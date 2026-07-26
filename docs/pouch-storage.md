@@ -711,8 +711,10 @@ obsolete entries. Obsolete cleanup is retryable: post-compaction cleanup and
 later namespace manifest opens attempt to delete the tracked file and prune the
 manifest entry only after the file is gone or already missing. The root
 `store.log` file is a non-authoritative placeholder and is not replaced during
-compaction. Durable high-water lifecycle records are still tracked as follow-on
-work.
+compaction. Each compacted state snapshot starts with a private high-water
+control record, so replayed state/index sequence cannot move backwards after
+older segment history has been removed; that record participates in replay
+metadata but is not projected as user state.
 Idle read descriptors are cached separately from active read sources. The cache
 is a performance artifact only: entries are bounded, allocator-backed, reusable
 across state/object/queue payload reads, and discarded when their descriptor no
@@ -731,9 +733,8 @@ candidate bytes, compacted segment id, and a concrete diagnostic such as
 `disabled`, `no-candidates`, `below-segment-threshold`,
 `below-reclaimable-threshold`, `interval-not-elapsed`, or `compacted`. This
 keeps lifecycle work observable without introducing hidden worker threads or
-background I/O. Cleanup-only maintenance, delete-grace retry accounting,
-durable high-water records, and validation-drift abort diagnostics remain part
-of the open lifecycle work.
+background I/O. Cleanup-only maintenance, delete-grace retry accounting, and
+validation-drift abort diagnostics remain part of the open lifecycle work.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query

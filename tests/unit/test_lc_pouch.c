@@ -1695,6 +1695,101 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   lc_error_cleanup(&error);
 }
 
+static int count_state_visit_entries(const lc_pouch_state_visit_entry *entry,
+                                     void *context, lc_error *error) {
+  int *count;
+
+  (void)entry;
+  (void)error;
+  count = (int *)context;
+  ++*count;
+  return LC_OK;
+}
+
+static void test_snapshot_high_water_survives_compaction_reopen(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_a;
+  lc_pouch_state_write_result delete_a;
+  lc_pouch_state_write_result write_b;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  unsigned long index_seq;
+  int visit_count;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_a, 0, sizeof(write_a));
+  memset(&delete_a, 0, sizeof(delete_a));
+  memset(&write_b, 0, sizeof(write_b));
+  make_root("snapshot-high-water", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &write_a, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  rc = lc_pouch_state_delete(pouch, "team/alpha", "state/a", NULL, &delete_a,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
+                            &write_b, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "compacted");
+  assert_int_equal(maintenance_result.compacted_segment_id, 3UL);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  assert_path_file_contains(namespace_path,
+                            "snapshots/snapshot-00000000000000000003.log",
+                            "H 3\n");
+  lc_pouch_close(pouch);
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_index_seq(pouch, "team/alpha", &index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(index_seq, 3UL);
+
+  visit_count = 0;
+  rc = lc_pouch_state_visit(pouch, "team/alpha", count_state_visit_entries,
+                            &visit_count, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(visit_count, 1);
+
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_a);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_a);
+  lc_pouch_state_write_result_cleanup(NULL, &write_b);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_state_metadata_survives_snapshot_compaction(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -6918,6 +7013,7 @@ int main(void) {
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
       cmocka_unit_test(test_maintenance_reports_interval_skip),
       cmocka_unit_test(test_compaction_retries_manifest_obsolete_cleanup),
+      cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(
           test_namespace_manifest_repairs_from_existing_segments),
