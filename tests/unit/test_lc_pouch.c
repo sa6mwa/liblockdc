@@ -1678,6 +1678,87 @@ static void test_maintenance_force_installs_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_maintenance_reports_snapshot_write_abort(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *snapshots_path;
+  char *snapshot_path;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  namespace_path = NULL;
+  snapshots_path = NULL;
+  snapshot_path = NULL;
+  make_root("maintenance-snapshot-abort", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &first, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
+                            &second, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  snapshots_path = lc_pouch_path_join(NULL, namespace_path, "snapshots");
+  assert_non_null(snapshots_path);
+  snapshot_path =
+      lc_pouch_path_join(NULL, snapshots_path,
+                         "snapshot-00000000000000000002.log");
+  assert_non_null(snapshot_path);
+  assert_int_equal(chmod(snapshots_path, 0555), 0);
+
+  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(chmod(snapshots_path, 0755), 0);
+  assert_true(rc != LC_OK);
+  assert_string_equal(maintenance_result.namespace_name, "team/alpha");
+  assert_string_equal(maintenance_result.diagnostic, "snapshot-write-aborted");
+  assert_true(maintenance_result.aborted);
+  assert_false(maintenance_result.compacted);
+  assert_false(maintenance_result.skipped);
+  assert_int_equal(maintenance_result.candidate_segment_count, 2UL);
+  assert_true(maintenance_result.candidate_bytes > 0UL);
+  assert_false(path_is_file(snapshot_path));
+
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
+  free(snapshot_path);
+  free(snapshots_path);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_maintenance_reports_interval_skip(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -7474,6 +7555,7 @@ int main(void) {
           test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
+      cmocka_unit_test(test_maintenance_reports_snapshot_write_abort),
       cmocka_unit_test(test_maintenance_reports_interval_skip),
       cmocka_unit_test(test_compaction_retries_manifest_obsolete_cleanup),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),

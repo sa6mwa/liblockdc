@@ -731,13 +731,16 @@ compaction, minimum compactable segment count, minimum reclaimable bytes, and
 interval throttling. The result reports the namespace, candidate segment count,
 candidate bytes, compacted segment id, and a concrete diagnostic such as
 `disabled`, `no-candidates`, `below-segment-threshold`,
-`below-reclaimable-threshold`, `interval-not-elapsed`, or `compacted`. This
-keeps lifecycle work observable without introducing hidden worker threads or
-background I/O. Cleanup-only maintenance can retry manifest-obsolete
-segment/snapshot deletion without running compaction and reports both deleted
-and still-pending cleanup counts so operators can distinguish completed cleanup
-from retryable filesystem failures. Validation-drift abort diagnostics and
-broader compaction diagnostics remain part of the open lifecycle work.
+`below-reclaimable-threshold`, `interval-not-elapsed`, or `compacted`. Failed
+foreground compaction attempts leave the original operation error intact while
+marking the result as `aborted` with the stage that failed, for example
+`candidate-read-aborted`, `snapshot-refresh-aborted`,
+`snapshot-write-aborted`, `snapshot-install-aborted`, or
+`obsolete-cleanup-aborted`. This keeps lifecycle work observable without
+introducing hidden worker threads or background I/O. Cleanup-only maintenance
+can retry manifest-obsolete segment/snapshot deletion without running
+compaction and reports both deleted and still-pending cleanup counts so
+operators can distinguish completed cleanup from retryable filesystem failures.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query

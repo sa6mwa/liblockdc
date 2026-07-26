@@ -48,6 +48,7 @@ typedef struct lc_pouch_maintenance_result {
   unsigned long cleanup_pending_count;
   int compacted;
   int skipped;
+  int aborted;
 } lc_pouch_maintenance_result;
 
 typedef struct lc_pouch_state_write_options {

@@ -1346,6 +1346,36 @@ static int lc_pouch_maintenance_set_diagnostic(
                                          error);
 }
 
+static void lc_pouch_maintenance_set_diagnostic_best_effort(
+    lc_pouch *pouch, lc_pouch_maintenance_result *out,
+    const char *diagnostic) {
+  char *copy;
+
+  if (out == NULL) {
+    return;
+  }
+  copy = lc_strdup_with_allocator(&pouch->allocator,
+                                  diagnostic != NULL ? diagnostic : "");
+  if (copy == NULL) {
+    return;
+  }
+  lc_free_with_allocator(&pouch->allocator, out->diagnostic);
+  out->diagnostic = copy;
+}
+
+static void lc_pouch_maintenance_mark_aborted(
+    lc_pouch *pouch, lc_pouch_maintenance_result *out,
+    const char *diagnostic) {
+  if (out == NULL) {
+    return;
+  }
+  out->aborted = 1;
+  out->compacted = 0;
+  out->skipped = 0;
+  lc_pouch_maintenance_set_diagnostic_best_effort(
+      pouch, out, diagnostic != NULL ? diagnostic : "compaction-aborted");
+}
+
 static unsigned long lc_pouch_maintenance_now_seconds(void) {
   time_t now;
 
@@ -1356,7 +1386,8 @@ static unsigned long lc_pouch_maintenance_now_seconds(void) {
 static int lc_pouch_state_compact_namespace(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, unsigned long *cleanup_deleted_count,
-    unsigned long *cleanup_pending_count, lc_error *error);
+    unsigned long *cleanup_pending_count, const char **abort_diagnostic,
+    lc_error *error);
 
 static int lc_pouch_state_queue_compacted_files(
     lc_pouch *pouch, lc_pouch_namespace_manifest *manifest,
@@ -1445,6 +1476,7 @@ static int lc_pouch_state_compact_namespace_if_needed(
   rc = lc_pouch_state_compaction_candidate_bytes(pouch, manifest,
                                                  &candidate_bytes, error);
   if (rc != LC_OK) {
+    lc_pouch_maintenance_mark_aborted(pouch, out, "candidate-read-aborted");
     return rc;
   }
   if (out != NULL) {
@@ -1484,11 +1516,17 @@ static int lc_pouch_state_compact_namespace_if_needed(
   if (!force && now_seconds != 0UL) {
     pouch->last_compaction_check_seconds = now_seconds;
   }
-  rc = lc_pouch_state_compact_namespace(
-      pouch, namespace_name, manifest, &cleanup_deleted_count,
-      &cleanup_pending_count, error);
-  if (rc != LC_OK) {
-    return rc;
+  {
+    const char *abort_diagnostic;
+
+    abort_diagnostic = NULL;
+    rc = lc_pouch_state_compact_namespace(
+        pouch, namespace_name, manifest, &cleanup_deleted_count,
+        &cleanup_pending_count, &abort_diagnostic, error);
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_mark_aborted(pouch, out, abort_diagnostic);
+      return rc;
+    }
   }
   if (out != NULL) {
     out->compacted = 1;
@@ -1502,7 +1540,8 @@ static int lc_pouch_state_compact_namespace_if_needed(
 static int lc_pouch_state_compact_namespace(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, unsigned long *cleanup_deleted_count,
-    unsigned long *cleanup_pending_count, lc_error *error) {
+    unsigned long *cleanup_pending_count, const char **abort_diagnostic,
+    lc_error *error) {
   lc_pouch_state_cache_namespace snapshot_cache;
   char *snapshot_leaf;
   char *old_snapshot;
@@ -1511,6 +1550,9 @@ static int lc_pouch_state_compact_namespace(
   int rc;
 
   snapshot_installed = 0;
+  if (abort_diagnostic != NULL) {
+    *abort_diagnostic = NULL;
+  }
   if (manifest->max_segment_id <= manifest->latest_snapshot_segment_id) {
     return LC_OK;
   }
@@ -1518,6 +1560,9 @@ static int lc_pouch_state_compact_namespace(
   rc = lc_pouch_state_cache_refresh(pouch, &snapshot_cache, manifest, 1,
                                     error);
   if (rc != LC_OK) {
+    if (abort_diagnostic != NULL) {
+      *abort_diagnostic = "snapshot-refresh-aborted";
+    }
     lc_pouch_state_cache_records_cleanup(&pouch->allocator,
                                          snapshot_cache.records);
     return rc;
@@ -1535,6 +1580,9 @@ static int lc_pouch_state_compact_namespace(
     lc_free_with_allocator(&pouch->allocator, old_snapshot);
     lc_pouch_state_cache_records_cleanup(&pouch->allocator,
                                          snapshot_cache.records);
+    if (abort_diagnostic != NULL) {
+      *abort_diagnostic = "snapshot-prepare-aborted";
+    }
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch state snapshot name", NULL,
                         NULL, NULL);
@@ -1547,12 +1595,19 @@ static int lc_pouch_state_compact_namespace(
         compacted_segment_id, compacted_segment_id + 1UL, error);
     if (rc == LC_OK) {
       snapshot_installed = 1;
+    } else if (abort_diagnostic != NULL) {
+      *abort_diagnostic = "snapshot-install-aborted";
     }
+  } else if (abort_diagnostic != NULL) {
+    *abort_diagnostic = "snapshot-write-aborted";
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_queue_compacted_files(
         pouch, manifest, namespace_name, compacted_segment_id, old_snapshot,
         cleanup_deleted_count, cleanup_pending_count, error);
+    if (rc != LC_OK && abort_diagnostic != NULL) {
+      *abort_diagnostic = "obsolete-cleanup-aborted";
+    }
   }
   if (rc == LC_OK) {
     (void)lc_pouch_state_touch_marker(pouch, manifest, error);

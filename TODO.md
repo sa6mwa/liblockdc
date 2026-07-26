@@ -163,6 +163,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     retryable manifest obsolete entries until deletion succeeds.
   - [ ] Extend snapshot compaction to the full storage surface with durable
     validation-drift abort diagnostics and expanded compaction diagnostics.
+    - [x] Report foreground maintenance compaction aborts through the
+      maintenance result without hiding the original error: candidate read,
+      snapshot refresh/prepare/write/install, and obsolete cleanup stages now
+      set `aborted` plus a stage-specific diagnostic.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
   - [x] Add the first redesigned pouch `query_keys` scan path over the
