@@ -1096,15 +1096,19 @@ Latest release targets confirmed on 2026-07-23:
         timeout after the 2026-07-26 acceptance run exceeded the intended
         envelope without producing final results; a focused 64-document
         indexed `EqSparse` smoke run proved the wrapper path.
+      - [x] Move live query-field posting maintenance from sorted insertion to
+        append-plus-lazy-sort, matching the append-first direction of the
+        segmented redesign. Disk regression coverage now proves updates before
+        the first query discard stale field values and duplicate wildcard array
+        postings produce one key result after the lazy sort barrier.
       - [ ] Re-run `make benchmark-pouch-go-acceptance` after timeout
-        hardening and use the completed output as acceptance evidence.
-      - [ ] Remove the remaining nonlinear 4096-document `DateAfter` setup
-        cost from the live query-index mutation path. After lazy temporal
-        generation publication, `pouch-index-lql-keys-date-after` improved
-        enough for 1024 documents to complete in about 18 seconds, but 2048
-        and 4096 documents still exceeded 30/60 second focused native probes;
-        the next redesign slice should replace or bulk-build the sorted
-        mutable `query_field_postings` maintenance used during ingest.
+        hardening and use the completed output as acceptance evidence. After
+        lazy temporal publication and lazy field-posting sorting,
+        `pouch-index-lql-keys-date-after` now completes focused native probes
+        at 2048 documents in about 42 seconds and 4096 documents in about
+        190 seconds after the fresh-key clear-scan skip, so the full matrix
+        still needs more margin or a narrower bounded acceptance split before
+        it can be treated as a reliable 3-minute iteration gate.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

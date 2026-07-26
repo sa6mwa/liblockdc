@@ -733,6 +733,14 @@ prefix, and contains readers avoid temporary decoded vectors on cache hits.
 Prepared term postings are shared only for request-independent plans; owner- or
 key-filtered requests still use the request-keyed result cache but do not
 populate or consume the shared prepared term cache.
+As an interim step toward append-oriented segmented indexes, live field posting
+mutations append into an unordered in-memory buffer and mark it dirty. Readers
+that require ordered postings pass through a single lazy sort/deduplicate
+barrier before binary search or range walking, so bulk ingest does not shift the
+posting array for every field value while query semantics still observe sorted,
+unique postings. Fresh-key writes also skip the in-memory field clear scan;
+rewrites, replay, rebuild, compaction, and explicit removes still clear existing
+key postings before appending replacement values.
 The generic docID candidate guard accepts per-predicate offsets for primary
 equality, range, `in`, prefix, contains, and exists readers, so a reader that
 has already proven its primary predicate does not rescan that same predicate for

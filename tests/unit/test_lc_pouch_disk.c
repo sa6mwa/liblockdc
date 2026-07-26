@@ -4290,6 +4290,119 @@ static void test_query_index_temporal_generation_is_lazy_after_writes(
   test_cleanup_root(root);
 }
 
+static void test_query_field_lazy_sort_preserves_update_and_dedupes(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_source *source;
+  lc_pouch_put_state_opts opts;
+  lc_pouch_put_state_res first;
+  lc_pouch_put_state_res second;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
+  lc_pouch_document_eq_term eq;
+  const char *values[1];
+  lc_pouch_document_in_term in;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-field-lazy-sort-update");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&opts, 0, sizeof(opts));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&meta, 0, sizeof(meta));
+  memset(&meta_res, 0, sizeof(meta_res));
+  memset(&eq, 0, sizeof(eq));
+  memset(&in, 0, sizeof(in));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+
+  opts.content_type = "application/json";
+  source = source_from_text(
+      "{\"kind\":\"cold\",\"tags\":[\"planning\",\"planning\"]}");
+  rc = store->write_state(store, "default", "alpha", source, &opts, &first,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.owner = "owner";
+  meta.state_etag = first.new_state_etag;
+  meta.version = first.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  source = source_from_text(
+      "{\"kind\":\"hot\",\"tags\":[\"planning\",\"planning\"]}");
+  rc = store->write_state(store, "default", "alpha", source, &opts, &second,
+                          &error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  meta.state_etag = second.new_state_etag;
+  meta.version = second.new_version;
+  rc = store->store_meta(store, "default", "alpha", &meta, NULL, &meta_res,
+                         &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+
+  eq.field = "/kind";
+  eq.value = "s:cold";
+  req.namespace_name = "default";
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 0U);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  eq.value = "s:hot";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "alpha");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  memset(&req, 0, sizeof(req));
+  values[0] = "s:planning";
+  in.field = "/tags/*";
+  in.values = values;
+  in.value_count = 1U;
+  req.namespace_name = "default";
+  req.document_in_terms = &in;
+  req.document_in_term_count = 1U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "alpha");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  lc_pouch_put_state_res_cleanup(&allocator, &second);
+  lc_pouch_put_state_res_cleanup(&allocator, &first);
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void test_cas_and_remove_semantics(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -19737,6 +19850,8 @@ int main(void) {
           test_query_index_prepared_temporal_cache_reuses_generation_after_file_corrupt),
       cmocka_unit_test(
           test_query_index_temporal_generation_is_lazy_after_writes),
+      cmocka_unit_test(
+          test_query_field_lazy_sort_preserves_update_and_dedupes),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_state_lookup_index_orders_updates_and_replays),
       cmocka_unit_test(

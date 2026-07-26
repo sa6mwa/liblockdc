@@ -267,6 +267,7 @@ typedef struct lc_pouch_disk_store {
   lc_pouch_disk_query_field_posting *query_field_postings;
   size_t query_field_posting_count;
   size_t query_field_posting_capacity;
+  int query_field_postings_sorted;
   lc_pouch_index_prepared_term_cache query_prepared_exact_cache;
   lc_pouch_index_prepared_term_cache query_prepared_exists_cache;
   lc_pouch_index_prepared_term_cache query_prepared_range_cache;
@@ -541,7 +542,7 @@ static int lc_pouch_disk_update_query_field_index_from_fd(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *content_type, const char *state_etag, long version, int fd,
     unsigned long body_offset, unsigned long body_length, int append_records,
-    int update_memory, lc_error *error);
+    int update_memory, int clear_existing_memory, lc_error *error);
 static int lc_pouch_disk_append_meta_remove_locked(lc_pouch_disk_store *store,
                                                    const char *namespace_name,
                                                    const char *key,
@@ -5300,6 +5301,79 @@ static int lc_pouch_disk_query_field_compare_key(
       namespace_name, field, value, key);
 }
 
+static int lc_pouch_disk_query_field_compare_postings_for_qsort(
+    const void *left, const void *right) {
+  const lc_pouch_disk_query_field_posting *left_posting;
+  const lc_pouch_disk_query_field_posting *right_posting;
+
+  left_posting = (const lc_pouch_disk_query_field_posting *)left;
+  right_posting = (const lc_pouch_disk_query_field_posting *)right;
+  return lc_pouch_disk_query_field_compare_values(
+      left_posting->namespace_name, left_posting->field, left_posting->value,
+      left_posting->key, right_posting->namespace_name, right_posting->field,
+      right_posting->value, right_posting->key);
+}
+
+static int lc_pouch_disk_query_field_postings_compare_identity(
+    const lc_pouch_disk_query_field_posting *left,
+    const lc_pouch_disk_query_field_posting *right) {
+  if (left == NULL || right == NULL) {
+    return left == right ? 0 : (left == NULL ? -1 : 1);
+  }
+  return lc_pouch_disk_query_field_compare_values(
+      left->namespace_name, left->field, left->value, left->key,
+      right->namespace_name, right->field, right->value, right->key);
+}
+
+static void
+lc_pouch_disk_query_field_sort_unique(lc_pouch_disk_store *store) {
+  size_t read_index;
+  size_t write_index;
+
+  if (store == NULL || store->query_field_postings_sorted) {
+    return;
+  }
+  if (store->query_field_posting_count > 1U) {
+    qsort(store->query_field_postings, store->query_field_posting_count,
+          sizeof(store->query_field_postings[0]),
+          lc_pouch_disk_query_field_compare_postings_for_qsort);
+  }
+  write_index = 0U;
+  for (read_index = 0U; read_index < store->query_field_posting_count;
+       ++read_index) {
+    lc_pouch_disk_query_field_posting *current;
+    lc_pouch_disk_query_field_posting *candidate;
+
+    candidate = &store->query_field_postings[read_index];
+    if (write_index == 0U ||
+        lc_pouch_disk_query_field_postings_compare_identity(
+            &store->query_field_postings[write_index - 1U], candidate) != 0) {
+      if (write_index != read_index) {
+        store->query_field_postings[write_index] = *candidate;
+        memset(candidate, 0, sizeof(*candidate));
+      }
+      write_index++;
+      continue;
+    }
+
+    current = &store->query_field_postings[write_index - 1U];
+    if (candidate->version >= current->version) {
+      lc_pouch_disk_query_field_posting_cleanup(store, current);
+      *current = *candidate;
+      memset(candidate, 0, sizeof(*candidate));
+    } else {
+      lc_pouch_disk_query_field_posting_cleanup(store, candidate);
+    }
+  }
+  if (write_index < store->query_field_posting_count) {
+    memset(store->query_field_postings + write_index, 0,
+           (store->query_field_posting_count - write_index) *
+               sizeof(store->query_field_postings[0]));
+  }
+  store->query_field_posting_count = write_index;
+  store->query_field_postings_sorted = 1;
+}
+
 static int lc_pouch_disk_query_field_find(lc_pouch_disk_store *store,
                                           const char *namespace_name,
                                           const char *field, const char *value,
@@ -5307,6 +5381,7 @@ static int lc_pouch_disk_query_field_find(lc_pouch_disk_store *store,
   size_t low;
   size_t high;
 
+  lc_pouch_disk_query_field_sort_unique(store);
   low = 0U;
   high = store->query_field_posting_count;
   while (low < high) {
@@ -5394,20 +5469,10 @@ static int lc_pouch_disk_query_field_insert(lc_pouch_disk_store *store,
                                             const char *state_etag,
                                             long version) {
   lc_pouch_disk_query_field_posting staged;
-  lc_pouch_disk_query_field_posting *posting;
-  size_t position;
 
   if (namespace_name == NULL || key == NULL || field == NULL || value == NULL ||
       state_etag == NULL) {
     return 1;
-  }
-  if (lc_pouch_disk_query_field_find(store, namespace_name, field, value, key,
-                                     &position)) {
-    posting = &store->query_field_postings[position];
-    lc_pouch_free(&store->allocator, posting->state_etag);
-    posting->state_etag = lc_pouch_strdup(&store->allocator, state_etag);
-    posting->version = version;
-    return posting->state_etag != NULL;
   }
   if (!lc_pouch_disk_query_field_reserve(
           store, store->query_field_posting_count + 1U)) {
@@ -5425,14 +5490,9 @@ static int lc_pouch_disk_query_field_insert(lc_pouch_disk_store *store,
     return 0;
   }
   staged.version = version;
-  if (position < store->query_field_posting_count) {
-    memmove(store->query_field_postings + position + 1U,
-            store->query_field_postings + position,
-            (store->query_field_posting_count - position) *
-                sizeof(store->query_field_postings[0]));
-  }
-  store->query_field_postings[position] = staged;
+  store->query_field_postings[store->query_field_posting_count] = staged;
   store->query_field_posting_count++;
+  store->query_field_postings_sorted = 0;
   return 1;
 }
 
@@ -16295,7 +16355,7 @@ static int lc_pouch_disk_rebuild_query_index(lc_pouch_disk_store *store,
     rc = lc_pouch_disk_update_query_field_index_from_fd(
         store, entry->namespace_name, entry->key, entry->content_type,
         entry->etag, entry->version, body_fd, entry->body_offset,
-        entry->body_length, 1, 1, error);
+        entry->body_length, 1, 1, 1, error);
     if (close(body_fd) != 0 && rc == LC_OK) {
       rc = lc_pouch_set_errno(error,
                               "failed to close pouch state for index rebuild");
@@ -20896,7 +20956,7 @@ static int lc_pouch_disk_update_query_field_index_from_fd(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *content_type, const char *state_etag, long version, int fd,
     unsigned long body_offset, unsigned long body_length, int append_records,
-    int update_memory, lc_error *error) {
+    int update_memory, int clear_existing_memory, lc_error *error) {
   lc_pouch_disk_bounded_json_reader reader;
   lc_pouch_disk_field_index_visit visit;
   lonejson_path_value_visitor visitor;
@@ -20913,7 +20973,7 @@ static int lc_pouch_disk_update_query_field_index_from_fd(
   if (rc != LC_OK) {
     return rc;
   }
-  if (update_memory) {
+  if (update_memory && clear_existing_memory) {
     lc_pouch_disk_query_field_remove_key(store, namespace_name, key);
   }
   if (content_type == NULL ||
@@ -21585,7 +21645,7 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
       rc = lc_pouch_disk_update_query_field_index_from_fd(
           store, entry->namespace_name, entry->key, entry->content_type,
           entry->etag, entry->version, body_fd, entry->body_offset,
-          entry->body_length, 1, 1, error);
+          entry->body_length, 1, 1, 1, error);
     }
     if (close(body_fd) != 0 && rc == LC_OK) {
       rc =
@@ -24071,6 +24131,7 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
   unsigned long body_offset;
   long version;
   int index;
+  int existing_entry;
   int temp_fd;
   int rc;
 
@@ -24101,6 +24162,7 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
   }
   index = lc_pouch_disk_find_entry(store, namespace_name, key);
   entry = index >= 0 ? &store->state_entries[index] : NULL;
+  existing_entry = entry != NULL && !entry->deleted;
   rc = lc_pouch_check_cas(entry, opts != NULL ? opts->if_state_etag : NULL,
                           opts != NULL ? opts->if_version : 0L,
                           opts != NULL ? opts->has_if_version : 0, error);
@@ -24131,7 +24193,7 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
                      : "application/json";
   rc = lc_pouch_disk_update_query_field_index_from_fd(
       store, namespace_name, key, content_type, etag, version, temp_fd, 0UL,
-      payload_length, 1, 0, error);
+      payload_length, 1, 0, 0, error);
   if (rc == LC_OK) {
     rc = lc_pouch_disk_append_fd_record(store, LC_POUCH_RECORD_STATE_PUT,
                                         namespace_name, key, content_type, etag,
@@ -24146,7 +24208,7 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
   if (rc == LC_OK) {
     rc = lc_pouch_disk_update_query_field_index_from_fd(
         store, namespace_name, key, content_type, etag, version, temp_fd, 0UL,
-        payload_length, 0, 1, error);
+        payload_length, 0, 1, existing_entry, error);
   }
   close(temp_fd);
   if (rc == LC_OK) {

@@ -350,7 +350,8 @@ __benchmark-pouch-go: __build-x86_64-linux-gnu-release
 	    $(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)' -timeout '$(POUCH_GO_TEST_TIMEOUT)'
 
 benchmark-pouch-go-fast:
-	$(TIMED) benchmark-pouch-go-fast $(MAKE) __benchmark-pouch-go-fast
+	$(TIMED) benchmark-pouch-go-fast timeout --kill-after=5s \
+	  '$(POUCH_GO_FAST_TIMEOUT)' $(MAKE) __benchmark-pouch-go-fast
 
 __benchmark-pouch-go-fast:
 	$(MAKE) __benchmark-pouch-go \
@@ -360,7 +361,8 @@ __benchmark-pouch-go-fast:
 	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_FAST_TIMEOUT)'
 
 benchmark-pouch-go-medium:
-	$(TIMED) benchmark-pouch-go-medium $(MAKE) __benchmark-pouch-go-medium
+	$(TIMED) benchmark-pouch-go-medium timeout --kill-after=5s \
+	  '$(POUCH_GO_MEDIUM_TIMEOUT)' $(MAKE) __benchmark-pouch-go-medium
 
 __benchmark-pouch-go-medium:
 	$(MAKE) __benchmark-pouch-go \
@@ -372,7 +374,8 @@ __benchmark-pouch-go-medium:
 	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_MEDIUM_TIMEOUT)'
 
 benchmark-pouch-go-acceptance:
-	$(TIMED) benchmark-pouch-go-acceptance $(MAKE) __benchmark-pouch-go-acceptance
+	$(TIMED) benchmark-pouch-go-acceptance timeout --kill-after=5s \
+	  '$(POUCH_GO_ACCEPTANCE_TIMEOUT)' $(MAKE) __benchmark-pouch-go-acceptance
 
 __benchmark-pouch-go-acceptance:
 	$(MAKE) __benchmark-pouch-go \

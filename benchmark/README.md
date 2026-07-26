@@ -20,21 +20,19 @@ Run from the repository root:
 make benchmark-pouch-go
 ```
 
-Fast iteration suite, capped by an outer Go benchmark process timeout at 30
-seconds:
+Fast iteration suite, capped by a whole-target timeout at 30 seconds:
 
 ```sh
 make benchmark-pouch-go-fast
 ```
 
-Medium comparison suite, capped by an outer Go benchmark process timeout at 3
-minutes:
+Medium comparison suite, capped by a whole-target timeout at 3 minutes:
 
 ```sh
 make benchmark-pouch-go-medium
 ```
 
-Bounded 4096-document acceptance matrix, also capped at 3 minutes:
+Bounded 4096-document acceptance matrix, capped as a whole target at 3 minutes:
 
 ```sh
 make benchmark-pouch-go-acceptance
