@@ -827,6 +827,15 @@ and `single_writer` is disabled by default. Scan mode is useful for tiny stores,
 diagnostics, index rebuild validation, and early deployments before a particular
 index feature exists.
 
+Current implementation milestone: the pouch handle stores preferred and
+fallback query engines from `lc_pouch_open` options and from `pouch://`
+endpoint query parameters. Implicit `query` and `query_keys` requests use
+indexed mode by default, scan-preferred endpoints route implicit requests
+through scan mode, explicit request-level `engine` still overrides endpoint
+configuration, and scan-preferred endpoints with
+`query_fallback_engine=index` route implicit `refresh=wait_for` requests
+through the indexed path.
+
 This configuration is part of pouch setup, not just a per-request hint. A pouch
 instance opened with scan as the preferred engine must route ordinary match-all
 `query` and `query_keys` calls through scan mode when the request does not name

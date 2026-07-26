@@ -16,6 +16,8 @@ struct lc_pouch {
   unsigned long marker_sequence;
   int background_compaction_enabled;
   int single_writer;
+  char *query_engine;
+  char *query_fallback_engine;
   char *writer_marker_leaf;
   lc_pouch_state_cache_namespace *state_cache_namespaces;
 };

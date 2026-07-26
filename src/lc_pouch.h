@@ -14,6 +14,8 @@ typedef struct lc_pouch_open_options {
   unsigned long compaction_interval_seconds;
   int background_compaction_enabled;
   int single_writer;
+  const char *query_engine;
+  const char *query_fallback_engine;
 } lc_pouch_open_options;
 
 typedef struct lc_pouch_status {
@@ -26,6 +28,8 @@ typedef struct lc_pouch_status {
   unsigned long compaction_interval_seconds;
   int background_compaction_enabled;
   int single_writer;
+  char *query_engine;
+  char *query_fallback_engine;
 } lc_pouch_status;
 
 typedef struct lc_pouch_maintenance_options {

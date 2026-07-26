@@ -952,6 +952,8 @@ void lc_allocator_init(lc_allocator *allocator) {
 
 typedef struct lc_pouch_endpoint_options {
   char *root_path;
+  char *query_engine;
+  char *query_fallback_engine;
   int single_writer;
 } lc_pouch_endpoint_options;
 
@@ -961,6 +963,8 @@ static void lc_pouch_endpoint_options_cleanup(
     return;
   }
   lc_free_with_allocator(allocator, options->root_path);
+  lc_free_with_allocator(allocator, options->query_engine);
+  lc_free_with_allocator(allocator, options->query_fallback_engine);
   memset(options, 0, sizeof(*options));
 }
 
@@ -1081,6 +1085,43 @@ static int lc_pouch_endpoint_parse_option(
           NULL);
     }
     lc_free_with_allocator(allocator, copy);
+    lc_free_with_allocator(allocator, decoded_key);
+    return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "query_engine") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_query_engine") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "query_fallback_engine") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_query_fallback_engine")) {
+    int fallback;
+
+    fallback = strstr(decoded_key, "fallback") != NULL ? 1 : 0;
+    copy = lc_pouch_endpoint_decode_component(
+        allocator, value, value_len,
+        fallback ? "query_fallback_engine" : "query_engine", error);
+    if (copy == NULL) {
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    if (strcmp(copy, "index") != 0 && strcmp(copy, "scan") != 0) {
+      lc_free_with_allocator(allocator, copy);
+      lc_free_with_allocator(allocator, decoded_key);
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          fallback ? "pouch endpoint query_fallback_engine must be index or scan"
+                   : "pouch endpoint query_engine must be index or scan",
+          NULL, NULL, "pouch-redesign");
+    }
+    if (fallback) {
+      lc_free_with_allocator(allocator, options->query_fallback_engine);
+      options->query_fallback_engine = copy;
+    } else {
+      lc_free_with_allocator(allocator, options->query_engine);
+      options->query_engine = copy;
+    }
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
@@ -1377,6 +1418,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     }
     memset(&pouch_open_options, 0, sizeof(pouch_open_options));
     pouch_open_options.single_writer = pouch_endpoint_options.single_writer;
+    pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
+    pouch_open_options.query_fallback_engine =
+        pouch_endpoint_options.query_fallback_engine;
     rc = lc_pouch_open(pouch_endpoint_options.root_path, &config->allocator,
                        &pouch_open_options, &client->pouch, error);
     if (rc != LC_OK) {

@@ -319,6 +319,30 @@ static const char *lc_pouch_client_namespace(lc_client_handle *client,
   return "default";
 }
 
+static const char *lc_pouch_client_query_engine(lc_client_handle *client,
+                                                const char *request_engine) {
+  if (request_engine != NULL && request_engine[0] != '\0') {
+    return request_engine;
+  }
+  if (client != NULL && client->pouch != NULL &&
+      client->pouch->query_engine != NULL &&
+      client->pouch->query_engine[0] != '\0') {
+    return client->pouch->query_engine;
+  }
+  return "index";
+}
+
+static int lc_pouch_client_can_use_query_fallback(lc_client_handle *client,
+                                                  const char *request_engine,
+                                                  const char *fallback) {
+  if (request_engine != NULL && request_engine[0] != '\0') {
+    return 0;
+  }
+  return client != NULL && client->pouch != NULL &&
+         client->pouch->query_fallback_engine != NULL &&
+         strcmp(client->pouch->query_fallback_engine, fallback) == 0;
+}
+
 static int lc_pouch_client_public_read_unsupported(lc_error *error) {
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch public state reads are not implemented yet", NULL,
@@ -6084,6 +6108,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   lql_selector *selector;
   lql_error lql_error_value;
   lql_status status;
+  const char *effective_engine;
   int use_index_predicate;
   int rc;
 
@@ -6116,8 +6141,14 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                         "pouch query engine must be scan or index",
                         NULL, NULL, "pouch-redesign");
   }
-  use_index_predicate =
-      req->engine != NULL && strcmp(req->engine, "index") == 0;
+  client = (lc_client_handle *)self;
+  effective_engine = lc_pouch_client_query_engine(client, req->engine);
+  if (req->refresh != NULL && req->refresh[0] != '\0' &&
+      strcmp(effective_engine, "scan") == 0 &&
+      lc_pouch_client_can_use_query_fallback(client, req->engine, "index")) {
+    effective_engine = "index";
+  }
+  use_index_predicate = strcmp(effective_engine, "index") == 0;
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       (!use_index_predicate || strcmp(req->refresh, "wait_for") != 0)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -6125,7 +6156,6 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                         "indexed queries",
                         NULL, NULL, "pouch-redesign");
   }
-  client = (lc_client_handle *)self;
   runtime = NULL;
   selector = NULL;
   lql_error_init(&lql_error_value);
@@ -6203,6 +6233,7 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   lql_selector *selector;
   lql_error lql_error_value;
   lql_status status;
+  const char *effective_engine;
   int has_selector;
   int use_index_summary;
   int use_index_predicate;
@@ -6229,11 +6260,17 @@ int lc_pouch_client_query_keys_method(lc_client *self,
                         "pouch query_keys engine must be scan or index",
                         NULL, NULL, "pouch-redesign");
   }
-  if (!has_selector && (req->engine == NULL || req->engine[0] == '\0' ||
-                        strcmp(req->engine, "index") == 0)) {
+  client = (lc_client_handle *)self;
+  effective_engine = lc_pouch_client_query_engine(client, req->engine);
+  if (req->refresh != NULL && req->refresh[0] != '\0' &&
+      strcmp(effective_engine, "scan") == 0 &&
+      lc_pouch_client_can_use_query_fallback(client, req->engine, "index")) {
+    effective_engine = "index";
+  }
+  if (!has_selector && strcmp(effective_engine, "index") == 0) {
     use_index_summary = 1;
   }
-  if (has_selector && req->engine != NULL && strcmp(req->engine, "index") == 0) {
+  if (has_selector && strcmp(effective_engine, "index") == 0) {
     use_index_predicate = 1;
   }
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
@@ -6244,7 +6281,6 @@ int lc_pouch_client_query_keys_method(lc_client *self,
                         "wait_for on indexed queries",
                         NULL, NULL, "pouch-redesign");
   }
-  client = (lc_client_handle *)self;
   memset(&scan, 0, sizeof(scan));
   scan.client = client;
   scan.namespace_name = lc_pouch_client_namespace(client, req->namespace_name);

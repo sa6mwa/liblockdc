@@ -219,6 +219,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     pagination, and fail-closed unsupported selector shapes.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
+    - [x] Add pouch query-engine configuration to `lc_pouch_open` options and
+      `pouch://` endpoint query parameters: `query_engine=index` is the
+      default, `query_engine=scan` forces implicit scan routing, explicit
+      request `engine` overrides configuration, and
+      `query_fallback_engine=index` handles implicit `refresh=wait_for`
+      requests from scan-preferred endpoints.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
   new pouch API and restore the comparison scenarios only when they measure the
   redesigned implementation.

@@ -12,6 +12,14 @@
 
 static unsigned long lc_pouch_next_writer_marker_id;
 
+static const char *lc_pouch_option_string(const char *value,
+                                          const char *fallback) {
+  if (value != NULL && value[0] != '\0') {
+    return value;
+  }
+  return fallback;
+}
+
 static void lc_pouch_init_options(lc_pouch *pouch,
                                   const lc_pouch_open_options *options) {
   pouch->segment_target_bytes =
@@ -31,6 +39,14 @@ static void lc_pouch_init_options(lc_pouch *pouch,
   pouch->background_compaction_enabled =
       options != NULL ? options->background_compaction_enabled : 0;
   pouch->single_writer = options != NULL ? options->single_writer : 0;
+  pouch->query_engine = lc_strdup_with_allocator(
+      &pouch->allocator,
+      lc_pouch_option_string(options != NULL ? options->query_engine : NULL,
+                             "index"));
+  pouch->query_fallback_engine = lc_strdup_with_allocator(
+      &pouch->allocator,
+      lc_pouch_option_string(
+          options != NULL ? options->query_fallback_engine : NULL, ""));
 }
 
 static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
@@ -128,6 +144,27 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         "failed to copy pouch root path", NULL, NULL, NULL);
   }
   lc_pouch_init_options(pouch, options);
+  if (pouch->query_engine == NULL || pouch->query_fallback_engine == NULL) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query options", NULL, NULL,
+                        NULL);
+  }
+  if (strcmp(pouch->query_engine, "index") != 0 &&
+      strcmp(pouch->query_engine, "scan") != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query_engine must be index or scan", NULL,
+                        NULL, "pouch-redesign");
+  }
+  if (pouch->query_fallback_engine[0] != '\0' &&
+      strcmp(pouch->query_fallback_engine, "index") != 0 &&
+      strcmp(pouch->query_fallback_engine, "scan") != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query_fallback_engine must be index or scan",
+                        NULL, NULL, "pouch-redesign");
+  }
   rc = lc_pouch_init_writer_marker(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
@@ -151,6 +188,8 @@ void lc_pouch_close(lc_pouch *pouch) {
   allocator = pouch->allocator;
   lc_pouch_state_cache_cleanup(pouch);
   lc_free_with_allocator(&allocator, pouch->writer_marker_leaf);
+  lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
+  lc_free_with_allocator(&allocator, pouch->query_engine);
   lc_free_with_allocator(&allocator, pouch->root_path);
   lc_free_with_allocator(&allocator, pouch);
 }
@@ -180,6 +219,16 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   out->compaction_interval_seconds = pouch->compaction_interval_seconds;
   out->background_compaction_enabled = pouch->background_compaction_enabled;
   out->single_writer = pouch->single_writer;
+  out->query_engine =
+      lc_strdup_with_allocator(&pouch->allocator, pouch->query_engine);
+  out->query_fallback_engine = lc_strdup_with_allocator(
+      &pouch->allocator, pouch->query_fallback_engine);
+  if (out->query_engine == NULL || out->query_fallback_engine == NULL) {
+    lc_pouch_status_cleanup(&pouch->allocator, out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch query status", NULL, NULL,
+                        NULL);
+  }
   return LC_OK;
 }
 
@@ -190,6 +239,8 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
   }
   lc_free_with_allocator(allocator, status->root_path);
   lc_free_with_allocator(allocator, status->layout_name);
+  lc_free_with_allocator(allocator, status->query_engine);
+  lc_free_with_allocator(allocator, status->query_fallback_engine);
   memset(status, 0, sizeof(*status));
 }
 

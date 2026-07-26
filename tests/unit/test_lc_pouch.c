@@ -828,6 +828,21 @@ static void open_pouch_client(const char *root, lc_client **out,
   assert_non_null(*out);
 }
 
+static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
+                                       lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  int rc;
+
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  rc = lc_client_open(&config, out, error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(*out);
+}
+
 static void write_client_state(lc_client *client, const char *key,
                                const char *json,
                                const char *expected_etag,
@@ -1046,6 +1061,109 @@ static void test_pouch_endpoint_opens_new_backend_without_http_engine(
   assert_non_null(client);
   assert_path_file(root, "manifest");
 
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_endpoint_query_engine_routes_implicit_queries(
+    void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  lc_update_res update_res;
+  pouch_query_key_capture capture;
+  lc_error error;
+  char root[512];
+  char endpoint[640];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+
+  make_root("client-query-engine-index", root, sizeof(root));
+  cleanup_root(root);
+  make_endpoint(root, endpoint, sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  write_client_state(client, "doc/a", "{\"category\":\"planning\"}", NULL, 0L,
+                     0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_true(pouch_query_capture_has(&capture, "doc/a"));
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  client = NULL;
+  cleanup_root(root);
+
+  memset(&capture, 0, sizeof(capture));
+  make_root("client-query-engine-scan", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(endpoint, sizeof(endpoint),
+           "pouch://%s?query_engine=scan&query_fallback_engine=index", root);
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  memset(&update_res, 0, sizeof(update_res));
+  write_client_state(client, "doc/a", "{\"category\":\"planning\"}", NULL, 0L,
+                     0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+
+  lc_query_req_init(&query_req);
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
+  lc_query_res_cleanup(&query_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json = selector;
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+
+  lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -5007,6 +5125,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
   query_req.namespace_name = "docs/query";
+  query_req.engine = "scan";
   query_req.selector_json = selector;
   query_req.limit = 1L;
   rc = client->query_keys(client, &query_req, &handler, &first_page,
@@ -7344,6 +7463,8 @@ int main(void) {
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(
           test_pouch_endpoint_opens_new_backend_without_http_engine),
+      cmocka_unit_test(
+          test_pouch_endpoint_query_engine_routes_implicit_queries),
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
