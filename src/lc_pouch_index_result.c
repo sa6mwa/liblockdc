@@ -51,8 +51,7 @@ static int lc_pouch_index_result_plan_has_cacheable_eq_filters(
     const lc_pouch_query_index_scan_req *req) {
   size_t index;
 
-  if (req->document_not_eq_term_count != 0U ||
-      req->document_or_eq_term_count != 0U) {
+  if (req->document_or_eq_term_count != 0U) {
     return 0;
   }
   if (req->document_eq_term_count == 0U) {
@@ -68,6 +67,12 @@ static int lc_pouch_index_result_plan_has_cacheable_eq_filters(
     }
   }
   return 1;
+}
+
+static int lc_pouch_index_result_plan_has_cacheable_eq_filters_only(
+    const lc_pouch_query_index_scan_req *req) {
+  return lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         req->document_not_eq_term_count == 0U;
 }
 
 static int lc_pouch_index_result_plan_has_cacheable_not_eq_filters(
@@ -99,6 +104,7 @@ static int lc_pouch_index_result_plan_eq_cacheable(
          req->document_eq_terms[0].field != NULL &&
          req->document_eq_terms[0].value != NULL &&
          req->document_or_eq_term_count == 0U &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
          lc_pouch_index_result_plan_has_cacheable_not_eq_filters(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
@@ -113,7 +119,7 @@ static int lc_pouch_index_result_plan_exists_cacheable(
          req->document_exists_terms != NULL &&
          req->document_exists_term_count == 1U &&
          req->document_exists_terms[0].field != NULL &&
-         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters_only(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
          lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
@@ -133,6 +139,7 @@ static int lc_pouch_index_result_plan_in_cacheable(
          req->document_in_terms[0].value_count > 0U &&
          strchr(req->document_in_terms[0].field, '*') == NULL &&
          lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_not_eq_filters(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          req->document_not_in_term_count == 0U &&
          req->document_or_in_term_count == 0U &&
@@ -154,7 +161,7 @@ static int lc_pouch_index_result_plan_range_cacheable(
   term = &req->document_range_terms[0];
   return (term->gt != NULL || term->gte != NULL || term->lt != NULL ||
           term->lte != NULL) &&
-         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters_only(req) &&
          req->document_not_range_term_count == 0U &&
          req->document_or_range_term_count == 0U &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
@@ -170,7 +177,7 @@ static int lc_pouch_index_result_plan_prefix_cacheable(
          req->document_prefix_term_count == 1U &&
          req->document_prefix_terms[0].field != NULL &&
          req->document_prefix_terms[0].value != NULL &&
-         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters_only(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
          req->document_not_prefix_term_count == 0U &&
@@ -186,7 +193,7 @@ static int lc_pouch_index_result_plan_contains_cacheable(
          req->document_contains_term_count == 1U &&
          req->document_contains_terms[0].field != NULL &&
          req->document_contains_terms[0].value != NULL &&
-         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters_only(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
          lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
@@ -505,12 +512,58 @@ lc_pouch_index_result_sorted_eq_terms(const lc_pouch_allocator *allocator,
   return terms;
 }
 
+static lc_pouch_index_eq_result_plan_key_term *
+lc_pouch_index_result_sorted_not_eq_terms(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_query_index_scan_req *req, size_t *unique_count_out) {
+  lc_pouch_index_eq_result_plan_key_term *terms;
+  size_t count;
+  size_t index;
+  size_t unique_count;
+
+  if (unique_count_out != NULL) {
+    *unique_count_out = 0U;
+  }
+  if (req == NULL || req->document_not_eq_term_count == 0U) {
+    return NULL;
+  }
+  count = req->document_not_eq_term_count;
+  if (count > ((size_t)-1) / sizeof(terms[0])) {
+    return NULL;
+  }
+  terms = (lc_pouch_index_eq_result_plan_key_term *)lc_pouch_alloc(
+      allocator, count * sizeof(terms[0]));
+  if (terms == NULL) {
+    return NULL;
+  }
+  for (index = 0U; index < count; ++index) {
+    terms[index].field = req->document_not_eq_terms[index].field;
+    terms[index].value = req->document_not_eq_terms[index].value;
+  }
+  qsort(terms, count, sizeof(terms[0]),
+        lc_pouch_index_eq_result_plan_key_term_compare);
+  unique_count = 0U;
+  for (index = 0U; index < count; ++index) {
+    if (unique_count > 0U &&
+        strcmp(terms[index].field, terms[unique_count - 1U].field) == 0 &&
+        strcmp(terms[index].value, terms[unique_count - 1U].value) == 0) {
+      continue;
+    }
+    terms[unique_count++] = terms[index];
+  }
+  if (unique_count_out != NULL) {
+    *unique_count_out = unique_count;
+  }
+  return terms;
+}
+
 static char *
 lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
                                   const lc_pouch_query_index_scan_req *req) {
   const lc_pouch_document_in_term *term;
   const char **values;
   lc_pouch_index_eq_result_plan_key_term *eq_terms;
+  lc_pouch_index_eq_result_plan_key_term *not_eq_terms;
   size_t namespace_len;
   size_t field_len;
   size_t value_count;
@@ -518,6 +571,8 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
   size_t unique_count;
   size_t eq_unique_count;
   size_t eq_index;
+  size_t not_eq_unique_count;
+  size_t not_eq_index;
   size_t total_len;
   int written;
   char *key;
@@ -566,11 +621,19 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
     lc_pouch_free(allocator, values);
     return NULL;
   }
+  not_eq_terms = lc_pouch_index_result_sorted_not_eq_terms(
+      allocator, req, &not_eq_unique_count);
+  if (req->document_not_eq_term_count > 0U && not_eq_terms == NULL) {
+    lc_pouch_free(allocator, eq_terms);
+    lc_pouch_free(allocator, values);
+    return NULL;
+  }
   written =
       snprintf(NULL, 0, "in:%lu:%s:%lu:%s:%lu", (unsigned long)namespace_len,
                req->namespace_name, (unsigned long)field_len, term->field,
                (unsigned long)unique_count);
   if (written < 0) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     lc_pouch_free(allocator, values);
     return NULL;
@@ -583,6 +646,7 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
     written = snprintf(NULL, 0, ":%lu:%s", (unsigned long)value_len,
                        values[value_index]);
     if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, not_eq_terms);
       lc_pouch_free(allocator, eq_terms);
       lc_pouch_free(allocator, values);
       return NULL;
@@ -592,6 +656,7 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
   if (eq_unique_count > 0U) {
     written = snprintf(NULL, 0, ":eq:%lu", (unsigned long)eq_unique_count);
     if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, not_eq_terms);
       lc_pouch_free(allocator, eq_terms);
       lc_pouch_free(allocator, values);
       return NULL;
@@ -607,6 +672,37 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
                          eq_terms[eq_index].field, (unsigned long)eq_value_len,
                          eq_terms[eq_index].value);
       if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+        lc_pouch_free(allocator, not_eq_terms);
+        lc_pouch_free(allocator, eq_terms);
+        lc_pouch_free(allocator, values);
+        return NULL;
+      }
+      total_len += (size_t)written;
+    }
+  }
+  if (not_eq_unique_count > 0U) {
+    written =
+        snprintf(NULL, 0, ":not_eq:%lu", (unsigned long)not_eq_unique_count);
+    if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, not_eq_terms);
+      lc_pouch_free(allocator, eq_terms);
+      lc_pouch_free(allocator, values);
+      return NULL;
+    }
+    total_len += (size_t)written;
+    for (not_eq_index = 0U; not_eq_index < not_eq_unique_count;
+         ++not_eq_index) {
+      size_t not_eq_field_len;
+      size_t not_eq_value_len;
+
+      not_eq_field_len = strlen(not_eq_terms[not_eq_index].field);
+      not_eq_value_len = strlen(not_eq_terms[not_eq_index].value);
+      written = snprintf(
+          NULL, 0, ":%lu:%s:%lu:%s", (unsigned long)not_eq_field_len,
+          not_eq_terms[not_eq_index].field, (unsigned long)not_eq_value_len,
+          not_eq_terms[not_eq_index].value);
+      if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+        lc_pouch_free(allocator, not_eq_terms);
         lc_pouch_free(allocator, eq_terms);
         lc_pouch_free(allocator, values);
         return NULL;
@@ -615,12 +711,14 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
     }
   }
   if (total_len == (size_t)-1) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     lc_pouch_free(allocator, values);
     return NULL;
   }
   key = (char *)lc_pouch_alloc(allocator, total_len + 1U);
   if (key == NULL) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     lc_pouch_free(allocator, values);
     return NULL;
@@ -660,6 +758,27 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
       cursor = key + offset;
     }
   }
+  if (not_eq_unique_count > 0U) {
+    written = snprintf(cursor, (total_len + 1U) - offset, ":not_eq:%lu",
+                       (unsigned long)not_eq_unique_count);
+    offset += (size_t)written;
+    cursor = key + offset;
+    for (not_eq_index = 0U; not_eq_index < not_eq_unique_count;
+         ++not_eq_index) {
+      size_t not_eq_field_len;
+      size_t not_eq_value_len;
+
+      not_eq_field_len = strlen(not_eq_terms[not_eq_index].field);
+      not_eq_value_len = strlen(not_eq_terms[not_eq_index].value);
+      written = snprintf(
+          cursor, (total_len + 1U) - offset, ":%lu:%s:%lu:%s",
+          (unsigned long)not_eq_field_len, not_eq_terms[not_eq_index].field,
+          (unsigned long)not_eq_value_len, not_eq_terms[not_eq_index].value);
+      offset += (size_t)written;
+      cursor = key + offset;
+    }
+  }
+  lc_pouch_free(allocator, not_eq_terms);
   lc_pouch_free(allocator, eq_terms);
   lc_pouch_free(allocator, values);
   return key;

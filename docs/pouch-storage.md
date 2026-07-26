@@ -1361,6 +1361,9 @@ When a primary non-wildcard `in` plan has positive equality filters, the disk
 adapter supplies exact-term docID readers for both the `in` value set and the
 equality filters. `lc_pouch_index` unions the `in` values, intersects the
 positive equality docID sets, and then pages the filtered result.
+When a primary non-wildcard `in` plan has negative equality filters, the same
+index-owned algebra subtracts the negative exact-term docID sets after the
+`in` value union and any positive equality intersections.
 Primary positive `prefix` plans now use the same reader/planner bridge: the
 disk adapter filters text sidecar postings with visibility and secondary
 predicate checks, compiles the matching summary docIDs into adaptive postings,
@@ -1418,6 +1421,10 @@ Primary equality/not-equality scans use a normalized equality key with a
 sorted/deduplicated `not_eq` suffix. The cached docID vector is the primary
 equality candidate set after index-owned subtraction, so document scans and key
 scans reuse the same filtered result until the index sequence advances.
+Primary non-wildcard `in`/not-equality scans append that same normalized
+`not_eq` suffix after the sorted/deduplicated `in` value list and any positive
+equality suffix. The cached docID vector is the unioned `in` value set after
+index-owned intersection/subtraction.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,
 simple positive numeric `range`, simple non-wildcard positive `in`, simple

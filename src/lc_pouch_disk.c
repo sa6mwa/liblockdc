@@ -9301,12 +9301,16 @@ static int lc_pouch_disk_query_field_collect_in_summary_indices_locked(
       reader.req = req;
       reader.eq_from = req != NULL ? req->document_eq_term_count : (size_t)0U;
       reader.in_from = 1U;
+      reader.skip_not_eq_match =
+          req != NULL && req->document_not_eq_term_count > 0U;
       reader.use_prepared_exact_cache = cache_key != NULL;
       reader.alloc_message = "failed to allocate pouch in query docIDs";
-      if (req != NULL && req->document_eq_term_count > 0U) {
-        rc = lc_pouch_index_collect_in_term_with_eq_doc_ids(
+      if (req != NULL && (req->document_eq_term_count > 0U ||
+                          req->document_not_eq_term_count > 0U)) {
+        rc = lc_pouch_index_collect_in_term_with_eq_and_not_eq_doc_ids(
             &store->allocator, primary, req->document_eq_terms,
-            req->document_eq_term_count,
+            req->document_eq_term_count, req->document_not_eq_terms,
+            req->document_not_eq_term_count,
             lc_pouch_disk_query_read_exact_term_doc_ids, &reader, &doc_ids,
             error);
       } else {

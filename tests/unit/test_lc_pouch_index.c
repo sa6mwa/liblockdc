@@ -501,6 +501,20 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
       "in:7:default:6:/value:2:7:s:alpha:6:s:beta:eq:2:7:/bucket:5:s:"
       "hot:5:/kind:9:s:include");
 
+  not_equal[0].field = "/kind";
+  not_equal[0].value = "s:block";
+  not_equal[1].field = "/bucket";
+  not_equal[1].value = "s:cold";
+  not_equal[2].field = "/kind";
+  not_equal[2].value = "s:block";
+  req.document_not_eq_terms = not_equal;
+  req.document_not_eq_term_count = sizeof(not_equal) / sizeof(not_equal[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_IN,
+      "in:7:default:6:/value:2:7:s:alpha:6:s:beta:eq:2:7:/bucket:5:s:"
+      "hot:5:/kind:9:s:include:not_eq:2:7:/bucket:6:s:cold:5:/kind:7:s:"
+      "block");
+
   memset(&req, 0, sizeof(req));
   req.namespace_name = "default";
   range.field = "/n";
@@ -1194,6 +1208,46 @@ test_collect_in_term_with_eq_doc_ids_intersects_in_index(void **state) {
 }
 
 static void
+test_collect_in_term_with_eq_and_not_eq_doc_ids_filters_in_index(void **state) {
+  const char *values[2];
+  lc_pouch_document_in_term in;
+  lc_pouch_document_eq_term eq;
+  lc_pouch_document_eq_term not_equal;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {5U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&in, 0, sizeof(in));
+  memset(&eq, 0, sizeof(eq));
+  memset(&not_equal, 0, sizeof(not_equal));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  values[0] = "s:north";
+  values[1] = "s:south";
+  in.field = "/region";
+  in.values = values;
+  in.value_count = sizeof(values) / sizeof(values[0]);
+  eq.field = "/status";
+  eq.value = "s:paid";
+  not_equal.field = "/region";
+  not_equal.value = "s:south";
+  rc = lc_pouch_index_collect_in_term_with_eq_and_not_eq_doc_ids(
+      NULL, &in, &eq, 1U, &not_equal, 1U, fake_read_exact_doc_ids, &reader,
+      &doc_ids, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 4U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_collect_eq_term_doc_ids_uses_reader_and_deduplicates(void **state) {
   lc_pouch_document_eq_term term;
   lc_pouch_index_doc_id_set doc_ids;
@@ -1529,6 +1583,8 @@ int main(void) {
           test_collect_in_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
           test_collect_in_term_with_eq_doc_ids_intersects_in_index),
+      cmocka_unit_test(
+          test_collect_in_term_with_eq_and_not_eq_doc_ids_filters_in_index),
       cmocka_unit_test(
           test_collect_eq_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
