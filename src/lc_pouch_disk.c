@@ -297,6 +297,8 @@ typedef struct lc_pouch_disk_store {
   unsigned long marker_snapshot_clean_checks;
   lc_pouch_fsync_stats fsync_stats;
   int defer_record_fsync;
+  int defer_query_index_fsync;
+  int deferred_query_index_fsync_dirty;
   int query_index_rebuild_needed;
   int background_compaction;
   unsigned long compaction_min_log_bytes;
@@ -3385,6 +3387,45 @@ static int lc_pouch_disk_fsync(lc_pouch_disk_store *store, int fd, int kind) {
     break;
   }
   return rc;
+}
+
+static void lc_pouch_disk_query_index_fsync_batch_begin(
+    lc_pouch_disk_store *store) {
+  if (store == NULL) {
+    return;
+  }
+  store->defer_query_index_fsync++;
+}
+
+static int lc_pouch_disk_query_index_fsync_batch_end(
+    lc_pouch_disk_store *store, lc_error *error, const char *message) {
+  if (store == NULL || store->defer_query_index_fsync <= 0) {
+    return LC_OK;
+  }
+  store->defer_query_index_fsync--;
+  if (store->defer_query_index_fsync != 0 ||
+      !store->deferred_query_index_fsync_dirty) {
+    return LC_OK;
+  }
+  if (lc_pouch_disk_fsync(store, store->query_index_fd,
+                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
+    return lc_pouch_set_errno(error, message);
+  }
+  store->deferred_query_index_fsync_dirty = 0;
+  return LC_OK;
+}
+
+static int lc_pouch_disk_query_index_fsync_after_append(
+    lc_pouch_disk_store *store, lc_error *error, const char *message) {
+  if (store != NULL && store->defer_query_index_fsync > 0) {
+    store->deferred_query_index_fsync_dirty = 1;
+    return LC_OK;
+  }
+  if (lc_pouch_disk_fsync(store, store->query_index_fd,
+                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
+    return lc_pouch_set_errno(error, message);
+  }
+  return LC_OK;
 }
 
 static char *lc_pouch_join_path(const lc_pouch_allocator *allocator,
@@ -14510,9 +14551,9 @@ static int lc_pouch_disk_append_query_field_record(
     return lc_pouch_set_errno(error,
                               "failed to append pouch query field record");
   }
-  if (lc_pouch_disk_fsync(store, store->query_index_fd,
-                          LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
-    return lc_pouch_set_errno(error, "failed to fsync pouch query index");
+  if (lc_pouch_disk_query_index_fsync_after_append(
+          store, error, "failed to fsync pouch query field index") != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
   }
   record_size = LC_POUCH_QUERY_INDEX_HEADER_SIZE + payload_len;
   if (record_offset != (unsigned long)-1 &&
@@ -20963,15 +21004,19 @@ static int lc_pouch_disk_update_query_field_index_from_fd(
   lonejson_error lj_error;
   lonejson_status status;
   lonejson *runtime;
+  int batching_query_index;
   int rc;
 
   rc = LC_OK;
+  batching_query_index = 0;
   if (append_records) {
+    lc_pouch_disk_query_index_fsync_batch_begin(store);
+    batching_query_index = 1;
     rc = lc_pouch_disk_append_query_field_clear_record(
         store, namespace_name, key, state_etag, version, 0, error);
   }
   if (rc != LC_OK) {
-    return rc;
+    goto done;
   }
   if (update_memory && clear_existing_memory) {
     lc_pouch_disk_query_field_remove_key(store, namespace_name, key);
@@ -20981,18 +21026,22 @@ static int lc_pouch_disk_update_query_field_index_from_fd(
           0 ||
       (content_type[strlen("application/json")] != '\0' &&
        content_type[strlen("application/json")] != ';')) {
-    return LC_OK;
+    rc = LC_OK;
+    goto done;
   }
   if (body_length == 0UL) {
-    return LC_OK;
+    rc = LC_OK;
+    goto done;
   }
   runtime = lc_thread_lonejson_runtime();
   if (runtime == NULL) {
-    return lc_pouch_set_nomem(error,
-                              "failed to allocate pouch field index parser");
+    rc = lc_pouch_set_nomem(error,
+                            "failed to allocate pouch field index parser");
+    goto done;
   }
   if (lseek(fd, (off_t)body_offset, SEEK_SET) < 0) {
-    return lc_pouch_set_errno(error, "failed to seek pouch state for index");
+    rc = lc_pouch_set_errno(error, "failed to seek pouch state for index");
+    goto done;
   }
   memset(&reader, 0, sizeof(reader));
   reader.fd = fd;
@@ -21024,12 +21073,26 @@ static int lc_pouch_disk_update_query_field_index_from_fd(
   lc_pouch_free(&store->allocator, visit.value);
   lc_pouch_free(&store->allocator, visit.text_value);
   if (visit.failed) {
-    return lc_pouch_set_nomem(error, "failed to update pouch field index");
+    rc = lc_pouch_set_nomem(error, "failed to update pouch field index");
+    goto done;
   }
   if (status != LONEJSON_STATUS_OK) {
-    return LC_OK;
+    rc = LC_OK;
+    goto done;
   }
-  return LC_OK;
+  rc = LC_OK;
+
+done:
+  if (batching_query_index) {
+    int fsync_rc;
+
+    fsync_rc = lc_pouch_disk_query_index_fsync_batch_end(
+        store, error, "failed to fsync pouch query field index");
+    if (rc == LC_OK && fsync_rc != LC_OK) {
+      rc = fsync_rc;
+    }
+  }
+  return rc;
 }
 
 static unsigned long

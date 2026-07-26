@@ -647,7 +647,7 @@ static int bench_pouch_seed_query_rows_by_owner_with_removed(
   long i;
   int rc;
 
-  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s?single_writer=true", root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
@@ -1056,7 +1056,7 @@ static int bench_pouch_seed_public_lql_rows(const char *root, long rows,
   int rc;
 
   target = bench_pouch_target_row(rows);
-  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s?single_writer=true", root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
@@ -3366,7 +3366,9 @@ static int bench_pouch_query_lql_scenario(long iterations,
   }
 
   snprintf(endpoint, sizeof(endpoint),
-           scan_mode ? "pouch://%s?query_engine=scan" : "pouch://%s", root);
+           scan_mode ? "pouch://%s?query_engine=scan&single_writer=true"
+                     : "pouch://%s?single_writer=true",
+           root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;

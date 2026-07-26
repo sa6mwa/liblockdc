@@ -1864,6 +1864,12 @@ The append path should distinguish:
 - streaming records for large payloads
 - commit groups so multiple records can share one fsync result
 
+The current query-field sidecar append path batches all clear/value records
+emitted while indexing one JSON state body and performs one query-index fsync at
+the end of that body. Metadata query-index records, generation files, and the
+authoritative segmented state log keep their existing fsync boundaries until the
+broader commit-group batcher is implemented.
+
 For inline records, the backend can encode the complete record into a bounded
 buffer and batch contiguous appends into one write. For large payloads, it should
 write the prefix, stream the payload while computing CRC and content hash, then

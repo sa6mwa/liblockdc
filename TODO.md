@@ -1101,14 +1101,22 @@ Latest release targets confirmed on 2026-07-23:
         segmented redesign. Disk regression coverage now proves updates before
         the first query discard stale field values and duplicate wildcard array
         postings produce one key result after the lazy sort barrier.
+      - [x] Batch query-field sidecar fsyncs per indexed JSON body and make
+        the Go pouch-vs-disk harness seed pouch through direct C disk-store
+        writes before querying through the public client LQL path. Disk fsync
+        regression coverage proves a multi-field state write emits one
+        query-index fsync after the format record exists, and a 64-document
+        focused Go `DateAfter` smoke passes with result-cache/page metrics.
       - [ ] Re-run `make benchmark-pouch-go-acceptance` after timeout
         hardening and use the completed output as acceptance evidence. After
         lazy temporal publication and lazy field-posting sorting,
         `pouch-index-lql-keys-date-after` now completes focused native probes
         at 2048 documents in about 42 seconds and 4096 documents in about
-        190 seconds after the fresh-key clear-scan skip, so the full matrix
-        still needs more margin or a narrower bounded acceptance split before
-        it can be treated as a reliable 3-minute iteration gate.
+        185 seconds after the fresh-key clear-scan skip and single-writer
+        benchmark endpoint mode; a focused Go pouch `DateAfter` 4096-doc run
+        still timed out under the 3-minute Go timeout, so the full matrix still
+        needs real commit/fsync grouping or a narrower bounded acceptance split
+        before it can be treated as a reliable 3-minute iteration gate.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

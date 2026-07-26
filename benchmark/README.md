@@ -47,11 +47,13 @@ make benchmark-pouch-go-medium POUCH_GO_MEDIUM_SCALE_SCENARIOS=EqSparse,InTags,O
 make benchmark-pouch-go POUCH_GO_BENCH='PouchCMediumLQLKeys/Docs1024/index/RangeHalf' POUCH_GO_MEDIUM_SCALE_ROWS=1024 POUCH_GO_MEDIUM_SCALE_SCENARIOS=RangeHalf
 ```
 
-The query cases seed a local `pouch://` namespace, then run full-form LQL
-selectors through the public client-facing query API. The paired lockd disk
-cases seed a real lockd disk server with the same document shape and equivalent
-public LQL selector. `POUCH_GO_SEED_ROWS` defaults to `10000`; use a smaller
-value for build/smoke validation and a larger value for stress/perf runs.
+The pouch query cases seed a local disk-store namespace directly through the C
+pouch backend, then run full-form LQL selectors through the public
+client-facing `pouch://` query API with `single_writer=true`. The paired lockd
+disk cases seed a real lockd disk server with the same document shape and
+equivalent public LQL selector. `POUCH_GO_SEED_ROWS` defaults to `10000`; use a
+smaller value for build/smoke validation and a larger value for stress/perf
+runs.
 
 - `BenchmarkPouchCIndexedLQLDocuments10k`
 - `BenchmarkPouchCIndexedLQLKeys10k`

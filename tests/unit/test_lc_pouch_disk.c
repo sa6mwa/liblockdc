@@ -16042,6 +16042,8 @@ static void test_fsync_stats_report_disk_sync_targets(void **state) {
   lc_pouch_fsync_stats after;
   lc_pouch_meta meta;
   lc_pouch_store_meta_res meta_res;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res put_res;
   lc_pouch_enqueue_opts enqueue_opts;
   lc_pouch_queue_message_info enqueued;
   lc_pouch_compaction_res compacted;
@@ -16058,6 +16060,8 @@ static void test_fsync_stats_report_disk_sync_targets(void **state) {
   memset(&after, 0, sizeof(after));
   memset(&meta, 0, sizeof(meta));
   memset(&meta_res, 0, sizeof(meta_res));
+  memset(&put_opts, 0, sizeof(put_opts));
+  memset(&put_res, 0, sizeof(put_res));
   memset(&enqueue_opts, 0, sizeof(enqueue_opts));
   memset(&enqueued, 0, sizeof(enqueued));
   memset(&compacted, 0, sizeof(compacted));
@@ -16089,6 +16093,23 @@ static void test_fsync_stats_report_disk_sync_targets(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(after.log_fsyncs > before.log_fsyncs);
   assert_true(after.query_index_fsyncs > before.query_index_fsyncs);
+  assert_true(after.writer_marker_fsyncs > before.writer_marker_fsyncs);
+  assert_int_equal(after.failed_fsyncs, 0UL);
+  before = after;
+
+  put_opts.content_type = "application/json";
+  source = source_from_text("{\"a\":1,\"b\":2,\"c\":[\"x\",\"y\",\"z\"]}");
+  rc = store->write_state(store, "default", "state-key", source, &put_opts,
+                          &put_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_put_state_res_cleanup(&allocator, &put_res);
+
+  rc = store->fsync_stats(store, &after, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(after.log_fsyncs > before.log_fsyncs);
+  assert_int_equal(after.query_index_fsyncs, before.query_index_fsyncs + 1UL);
   assert_true(after.writer_marker_fsyncs > before.writer_marker_fsyncs);
   assert_int_equal(after.failed_fsyncs, 0UL);
   before = after;

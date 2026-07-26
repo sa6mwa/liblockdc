@@ -1,6 +1,7 @@
 #include "pouchbench.h"
 
 #include "../src/lc_api_internal.h"
+#include "../src/lc_pouch_store.h"
 #include "lc/lc.h"
 
 #include <stdio.h>
@@ -317,28 +318,40 @@ static lc_source *source_from_text(const char *text, lc_error *error) {
   return source;
 }
 
-static int seed_field_rows(lc_client *client, uint64_t rows, lc_error *error) {
+static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
   char key[96];
   char owner[32];
   char json[512];
   char flag_json[32];
   const char *created_at;
-  lc_acquire_req acquire;
-  lc_update_opts update_opts;
-  lc_lease *lease;
+  lc_pouch_allocator allocator;
+  lc_pouch_disk_open_opts open_opts;
+  lc_pouch_store *store;
+  lc_pouch_put_state_opts put_opts;
+  lc_pouch_put_state_res put_res;
+  lc_pouch_meta meta;
+  lc_pouch_store_meta_res meta_res;
   lc_source *source;
   uint64_t target;
   uint64_t i;
   int rc;
 
-  if (client == NULL) {
+  if (root == NULL || root[0] == '\0') {
     return LC_ERR_INVALID;
   }
   target = rows > 1U ? rows / 2U : 0U;
-  lc_acquire_req_init(&acquire);
-  lc_update_opts_init(&update_opts);
-  acquire.ttl_seconds = 3600L;
-  update_opts.content_type = "application/json";
+  memset(&allocator, 0, sizeof(allocator));
+  memset(&open_opts, 0, sizeof(open_opts));
+  open_opts.query_engine = "index";
+  open_opts.single_writer = 1;
+  store = NULL;
+  rc = lc_pouch_disk_open_with_options(root, &allocator, &open_opts, &store,
+                                       error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&put_opts, 0, sizeof(put_opts));
+  put_opts.content_type = "application/json";
 
   for (i = 0U; i < rows; ++i) {
     (void)snprintf(key, sizeof(key), "bench/query/%08llu",
@@ -369,32 +382,39 @@ static int seed_field_rows(lc_client *client, uint64_t rows, lc_error *error) {
         (i % 5U) == 0U ? "finance" : "runtime",
         (i % 8U) == 0U ? "timeout" : "normal", (unsigned long long)i,
         flag_json);
-    lease = NULL;
     source = NULL;
-    acquire.key = key;
-    acquire.owner = owner;
-    rc = client->acquire(client, &acquire, &lease, error);
-    if (rc == LC_OK) {
-      source = source_from_text(json, error);
-      if (source == NULL) {
-        rc = LC_ERR_NOMEM;
-      }
+    memset(&put_res, 0, sizeof(put_res));
+    memset(&meta, 0, sizeof(meta));
+    memset(&meta_res, 0, sizeof(meta_res));
+    source = source_from_text(json, error);
+    if (source == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    } else {
+      rc = LC_OK;
     }
     if (rc == LC_OK) {
-      rc = lease->update(lease, source, &update_opts, error);
+      rc = store->write_state(store, "bench", key, source, &put_opts, &put_res,
+                              error);
+    }
+    if (rc == LC_OK) {
+      meta.owner = owner;
+      meta.state_etag = put_res.new_state_etag;
+      meta.version = put_res.new_version;
+      rc = store->store_meta(store, "bench", key, &meta, NULL, &meta_res,
+                             error);
     }
     if (source != NULL) {
       lc_source_close(source);
     }
-    if (lease != NULL) {
-      lease->close(lease);
-    }
+    lc_pouch_store_meta_res_cleanup(&allocator, &meta_res);
+    lc_pouch_put_state_res_cleanup(&allocator, &put_res);
     if (rc != LC_OK) {
+      (void)store->close(store, error);
       return rc;
     }
   }
 
-  return LC_OK;
+  return store->close(store, error);
 }
 
 static int flush_field_row_index(lc_client *client, lc_error *error) {
@@ -420,7 +440,8 @@ static int open_pouch_client(const char *root, lc_client **out,
   lc_client_config config;
   const char *endpoints[1];
 
-  (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s?single_writer=true",
+                 root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
@@ -693,6 +714,18 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
 
   lc_error_init(&error);
   client = NULL;
+  if (seeded_documents == 0U) {
+    seeded_documents = 1U;
+  }
+  if (seed_rows) {
+    rc = seed_field_rows(root, seeded_documents, &error);
+    if (rc != LC_OK) {
+      memset(out, 0, sizeof(*out));
+      set_error(out, "seed", &error, rc);
+      lc_error_cleanup(&error);
+      return rc;
+    }
+  }
   rc = open_pouch_client(root, &client, &error);
   if (rc != LC_OK) {
     memset(out, 0, sizeof(*out));
@@ -700,14 +733,8 @@ static int run_lql_scenario(const char *root, const char *scenario_name,
     lc_error_cleanup(&error);
     return rc;
   }
-  if (seeded_documents == 0U) {
-    seeded_documents = 1U;
-  }
   if (seed_rows) {
-    rc = seed_field_rows(client, seeded_documents, &error);
-    if (rc == LC_OK) {
-      rc = flush_field_row_index(client, &error);
-    }
+    rc = flush_field_row_index(client, &error);
     if (rc != LC_OK) {
       memset(out, 0, sizeof(*out));
       set_error(out, "seed", &error, rc);
@@ -801,9 +828,9 @@ int lockdc_pouch_bench_open_lql_env(const char *root, uint64_t seeded_documents,
     return LC_ERR_NOMEM;
   }
   lc_error_init(&error);
-  rc = open_pouch_client(root, &env->client, &error);
+  rc = seed_field_rows(root, seeded_documents, &error);
   if (rc == LC_OK) {
-    rc = seed_field_rows(env->client, seeded_documents, &error);
+    rc = open_pouch_client(root, &env->client, &error);
   }
   if (rc == LC_OK) {
     rc = flush_field_row_index(env->client, &error);
