@@ -44,6 +44,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       recover decided staged participants whose tombstone was interrupted.
     - [ ] Add full transaction participant records and expired undecided staged
       cleanup policy on reopen.
+      - [x] Persist pouch transaction coordinator prepare/commit/rollback
+        records with participant namespace/key/backend tuples in the internal
+        segmented `.lockd/txn` namespace and replay them after reopen.
+      - [ ] Apply committed/rolled-back transaction participant records to
+        staged state promotion/discard and add expired undecided staged-state
+        cleanup on reopen.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

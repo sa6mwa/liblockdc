@@ -2344,6 +2344,129 @@ static void test_client_metadata_enforces_version_precondition(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_txn_decisions_persist_participant_records(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_pouch *pouch;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char txn_record[1024];
+  char namespace_hex[128];
+  char key_hex[128];
+  char backend_hex[128];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  pouch = NULL;
+  memset(participants, 0, sizeof(participants));
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&replay_res, 0, sizeof(replay_res));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_txn_decision_req_init(&decision_req);
+  lc_txn_replay_req_init(&replay_req);
+  lc_error_init(&error);
+  make_root("txn-records", root, sizeof(root));
+  cleanup_root(root);
+
+  participants[0].namespace_name = "orders/eu";
+  participants[0].key = "state/order-1";
+  participants[0].backend_hash = "backend-a";
+  participants[1].namespace_name = "orders/us";
+  participants[1].key = "state/order-2";
+  participants[1].backend_hash = "backend-b";
+  decision_req.txn_id = "txn-pouch-records";
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
+  decision_req.expires_at_unix = 123456789L;
+  decision_req.tc_term = 7UL;
+  decision_req.target_backend_hash = "target-backend";
+
+  open_pouch_client(root, &client, &error);
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.txn_id, "txn-pouch-records");
+  assert_string_equal(decision_res.state, "prepare");
+  assert_string_equal(decision_res.correlation_id,
+                      "pouch-txn-00000000000000000001");
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_client_close(client);
+  client = NULL;
+
+  open_pouch_client(root, &reader, &error);
+  replay_req.txn_id = "txn-pouch-records";
+  rc = reader->txn_replay(reader, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(replay_res.txn_id, "txn-pouch-records");
+  assert_string_equal(replay_res.state, "prepare");
+  assert_string_equal(replay_res.correlation_id,
+                      "pouch-txn-00000000000000000001");
+  lc_txn_replay_res_cleanup(&replay_res);
+
+  rc = reader->txn_commit(reader, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "commit");
+  assert_string_equal(decision_res.correlation_id,
+                      "pouch-txn-00000000000000000002");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = reader->txn_replay(reader, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(replay_res.state, "commit");
+  assert_string_equal(replay_res.correlation_id,
+                      "pouch-txn-00000000000000000002");
+  lc_txn_replay_res_cleanup(&replay_res);
+
+  decision_req.txn_id = "txn-pouch-rollback";
+  rc = reader->txn_rollback(reader, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.txn_id, "txn-pouch-rollback");
+  assert_string_equal(decision_res.state, "rollback");
+  assert_string_equal(decision_res.correlation_id,
+                      "pouch-txn-00000000000000000003");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  replay_req.txn_id = "txn-pouch-rollback";
+  rc = reader->txn_replay(reader, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(replay_res.txn_id, "txn-pouch-rollback");
+  assert_string_equal(replay_res.state, "rollback");
+  assert_string_equal(replay_res.correlation_id,
+                      "pouch-txn-00000000000000000003");
+  lc_txn_replay_res_cleanup(&replay_res);
+  lc_client_close(reader);
+  reader = NULL;
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-pouch-records",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_string_equal(read_result.content_type,
+                      "application/x-lockdc-pouch-txn");
+  read_source_to_string(read_result.body, txn_record, sizeof(txn_record));
+  hex_encode_string("orders/eu", namespace_hex, sizeof(namespace_hex));
+  hex_encode_string("state/order-1", key_hex, sizeof(key_hex));
+  hex_encode_string("backend-a", backend_hex, sizeof(backend_hex));
+  assert_non_null(strstr(txn_record, "state 636f6d6d6974\n"));
+  assert_non_null(strstr(txn_record, namespace_hex));
+  assert_non_null(strstr(txn_record, key_hex));
+  assert_non_null(strstr(txn_record, backend_hex));
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_lease_remove_tombstones_state_and_refreshes_view(
     void **state) {
   lc_client *client;
@@ -2599,6 +2722,7 @@ int main(void) {
       cmocka_unit_test(test_acquire_rejects_non_positive_ttl),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
+      cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
