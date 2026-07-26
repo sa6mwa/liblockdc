@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "lc/lc.h"
+#include "lc_pouch.h"
 #include "../support/lc_test_tmp.h"
 
 #define FUZZ_POUCH_LQL_TMP_PREFIX "/tmp/liblockdc-pouch-lql-fuzz-"
@@ -154,6 +155,31 @@ static int fuzz_seed_store(lc_client *client, lc_error *error) {
   return rc;
 }
 
+static int fuzz_install_snapshot(const char *root, lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  if (rc == LC_OK) {
+    maintenance_options.namespace_name = "fuzz";
+    maintenance_options.force = 1;
+    rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                  &maintenance_result, error);
+  }
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  if (pouch != NULL) {
+    lc_pouch_close(pouch);
+  }
+  return rc;
+}
+
 static int fuzz_namespace_path(char *path, size_t path_size, const char *root,
                                const char *leaf) {
   int written;
@@ -254,6 +280,36 @@ static void fuzz_damage_query_index(const char *root, unsigned int mode) {
   (void)fclose(fp);
 }
 
+static void fuzz_damage_snapshot(const char *root, unsigned int mode) {
+  char path[768];
+  FILE *fp;
+
+  if (mode == 0U ||
+      !fuzz_namespace_path(path, sizeof(path), root,
+                           "snapshots/snapshot-00000000000000000001.log")) {
+    return;
+  }
+  if (mode == 1U) {
+    (void)remove(path);
+    return;
+  }
+  fp = fopen(path, mode == 2U ? "ab" : "wb");
+  if (fp == NULL) {
+    return;
+  }
+  if (mode == 2U) {
+    static const char garbage_tail[] = "\nnot-a-state-record\n";
+    (void)fwrite(garbage_tail, 1U, sizeof(garbage_tail) - 1U, fp);
+  } else {
+    static const char corrupt_snapshot[] =
+        "H 999999\n"
+        "S fuzz/doc/broken text/plain pouch-state-999 1 0 0 3\n"
+        "bad\n";
+    (void)fwrite(corrupt_snapshot, 1U, sizeof(corrupt_snapshot) - 1U, fp);
+  }
+  (void)fclose(fp);
+}
+
 static int fuzz_query_keys(lc_client *client, const char *selector,
                            size_t *rows_out, lc_error *error) {
   lc_query_key_handler handler;
@@ -342,7 +398,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (index_rc == LC_OK) {
       index_client->close(index_client);
       index_client = NULL;
+      index_rc = fuzz_install_snapshot(root, &index_error);
+    }
+    if (index_rc == LC_OK) {
       damage = (unsigned int)size;
+      fuzz_damage_snapshot(root, (damage / 64U) % 4U);
       fuzz_damage_namespace_manifest(root, (damage / 4U) % 4U);
       fuzz_damage_marker(root, (damage / 16U) % 4U);
       fuzz_damage_query_index(root, damage % 4U);

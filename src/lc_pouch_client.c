@@ -763,6 +763,22 @@ static char *lc_pouch_query_dup_lql_string(lql_string_view view,
   return out;
 }
 
+static char *lc_pouch_query_dup_exists_candidate_path(lql_string_view path,
+                                                     lc_error *error) {
+  if (path.len >= 3U &&
+      memcmp(path.data + path.len - 3U, "/**", 3U) == 0) {
+    path.len -= 3U;
+    if (path.len == 0U) {
+      lc_error_set(error, LC_ERR_INVALID, 0L,
+                   "pouch query index engine does not support root recursive "
+                   "exists selectors",
+                   NULL, NULL, "pouch-redesign");
+      return NULL;
+    }
+  }
+  return lc_pouch_query_dup_lql_string(path, error);
+}
+
 static int lc_pouch_query_index_plan_add_value(
     lc_pouch_query_index_plan *plan, lql_string_view value, lc_error *error) {
   char **next_values;
@@ -1032,7 +1048,7 @@ static int lc_pouch_query_index_plan_from_selector(
                           "selectors only",
                           NULL, NULL, "pouch-redesign");
     }
-    plan->field = lc_pouch_query_dup_lql_string(path, error);
+    plan->field = lc_pouch_query_dup_exists_candidate_path(path, error);
     if (plan->field == NULL) {
       return error != NULL && error->code != LC_OK ? error->code
                                                    : LC_ERR_NOMEM;

@@ -1638,3 +1638,7 @@ Latest release targets confirmed on 2026-07-23:
       the durable `query.index` sidecar, covering missing, corrupt, and
       future-version query-index replay/repair modes while asserting
       scan/index row-count parity against the same selector corpus.
+    - [x] Extend the same fuzz harness to force a namespace snapshot before
+      damage injection, then remove, append garbage to, or replace that
+      snapshot before reopening scan and index clients so snapshot lifecycle
+      replay/repair stays covered by scan/index parity checks.

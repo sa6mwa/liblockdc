@@ -5713,6 +5713,95 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_query_keys_index_recursive_exists_uses_container_presence(
+    void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture page;
+  lc_pouch_state_write_result write_result;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&page, 0, sizeof(page));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-recursive-exists", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("{\"details\":{\"message\":\"alpha\"}}",
+                             strlen("{\"details\":{\"message\":\"alpha\"}}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-recursive", "doc/a",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"details\":{\"other\":1}}",
+                             strlen("{\"details\":{\"other\":1}}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-recursive", "doc/b",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"other\":true}", strlen("{\"other\":true}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-recursive", "doc/c",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/query-index-recursive";
+  query_req.selector_json = "{\"exists\":\"/details/**\"}";
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &page, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(page.count, 2);
+  assert_true(pouch_query_capture_has(&page, "doc/a"));
+  assert_true(pouch_query_capture_has(&page, "doc/b"));
+  assert_false(pouch_query_capture_has(&page, "doc/c"));
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_documents_scan_streams_rows(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
@@ -7611,6 +7700,8 @@ int main(void) {
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
+      cmocka_unit_test(
+          test_query_keys_index_recursive_exists_uses_container_presence),
       cmocka_unit_test(test_query_documents_scan_streams_rows),
       cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),

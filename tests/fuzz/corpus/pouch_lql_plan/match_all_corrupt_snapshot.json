@@ -1,0 +1,1 @@
+{"and":[{"range":{"field":"/value","gte":2}},{"or":[{"exists":"/flag"},{"contains":{"field":"/details/message","value":"timeout"}}]}]}
