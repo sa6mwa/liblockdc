@@ -478,6 +478,11 @@ Latest release targets confirmed on 2026-07-23:
         orchestration through the same index-owned cached docID page helper;
         the disk bridge now only adapts sidecar text/trigram readers and
         translates selected docID pages to summaries for these predicates.
+      - [x] Physically split result-cache/page planning into
+        `src/lc_pouch_index_result.c`, leaving `lc_pouch_index.c` focused on
+        document tables, docID algebra, term dictionaries, and adaptive
+        postings while preserving the same private `lc_pouch_index.h`
+        boundary.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.

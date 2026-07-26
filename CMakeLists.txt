@@ -353,6 +353,7 @@ set(lc_sources
     src/lc_pouch_client.c
     src/lc_pouch_disk.c
     src/lc_pouch_index.c
+    src/lc_pouch_index_result.c
     src/lc_pouch_number.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
