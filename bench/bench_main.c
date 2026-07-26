@@ -87,26 +87,30 @@ static int bench_pouch_open(long iterations) {
   lc_error error;
   char root[512];
   long i;
+  int rc;
 
   lc_error_init(&error);
+  root[0] = '\0';
+  rc = 0;
   if (bench_pouch_root_path(root, sizeof(root), "open") != 0) {
-    lc_error_cleanup(&error);
-    return 1;
+    rc = 1;
+    goto done;
   }
   for (i = 0; i < iterations; ++i) {
     lc_pouch *pouch;
 
     pouch = NULL;
     if (lc_pouch_open(root, NULL, NULL, &pouch, &error) != LC_OK) {
-      lc_error_cleanup(&error);
-      bench_pouch_cleanup_root(root);
-      return 1;
+      rc = 1;
+      goto done;
     }
     lc_pouch_close(pouch);
   }
+
+done:
   bench_pouch_cleanup_root(root);
   lc_error_cleanup(&error);
-  return 0;
+  return rc;
 }
 
 static int bench_pouch_namespace(long iterations) {
@@ -114,33 +118,37 @@ static int bench_pouch_namespace(long iterations) {
   lc_pouch *pouch;
   char root[512];
   long i;
+  int rc;
 
   lc_error_init(&error);
-  if (bench_pouch_root_path(root, sizeof(root), "namespace") != 0) {
-    lc_error_cleanup(&error);
-    return 1;
-  }
   pouch = NULL;
+  root[0] = '\0';
+  rc = 0;
+  if (bench_pouch_root_path(root, sizeof(root), "namespace") != 0) {
+    rc = 1;
+    goto done;
+  }
   if (lc_pouch_open(root, NULL, NULL, &pouch, &error) != LC_OK) {
-    lc_error_cleanup(&error);
-    bench_pouch_cleanup_root(root);
-    return 1;
+    rc = 1;
+    goto done;
   }
   for (i = 0; i < iterations; ++i) {
     char namespace_name[64];
 
     snprintf(namespace_name, sizeof(namespace_name), "bench/%ld", i);
     if (lc_pouch_ensure_namespace(pouch, namespace_name, &error) != LC_OK) {
-      lc_pouch_close(pouch);
-      lc_error_cleanup(&error);
-      bench_pouch_cleanup_root(root);
-      return 1;
+      rc = 1;
+      goto done;
     }
   }
-  lc_pouch_close(pouch);
+
+done:
+  if (pouch != NULL) {
+    lc_pouch_close(pouch);
+  }
   bench_pouch_cleanup_root(root);
   lc_error_cleanup(&error);
-  return 0;
+  return rc;
 }
 
 static const bench_case *bench_cases(void) {
