@@ -1,6 +1,7 @@
 #include "lc_test_tmp.h"
 
 #include <dirent.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,7 @@
 static char lc_test_tmp_tracked[LC_TEST_TMP_MAX_TRACKED][LC_TEST_TMP_PATH_MAX];
 static size_t lc_test_tmp_tracked_count;
 static int lc_test_tmp_atexit_installed;
+static int lc_test_tmp_signal_handlers_installed;
 
 static int lc_test_tmp_has_prefix(const char *value, const char *prefix) {
   return value != NULL && prefix != NULL &&
@@ -70,6 +72,35 @@ static void lc_test_tmp_cleanup_tracked(void) {
   lc_test_tmp_tracked_count = 0U;
 }
 
+static void lc_test_tmp_signal_cleanup(int signo) {
+  lc_test_tmp_cleanup_tracked();
+  (void)signal(signo, SIG_DFL);
+  (void)raise(signo);
+}
+
+static void lc_test_tmp_install_one_signal_handler(int signo) {
+  (void)signal(signo, lc_test_tmp_signal_cleanup);
+}
+
+static void lc_test_tmp_install_signal_handlers(void) {
+  if (lc_test_tmp_signal_handlers_installed) {
+    return;
+  }
+#ifdef SIGHUP
+  lc_test_tmp_install_one_signal_handler(SIGHUP);
+#endif
+#ifdef SIGINT
+  lc_test_tmp_install_one_signal_handler(SIGINT);
+#endif
+#ifdef SIGQUIT
+  lc_test_tmp_install_one_signal_handler(SIGQUIT);
+#endif
+#ifdef SIGTERM
+  lc_test_tmp_install_one_signal_handler(SIGTERM);
+#endif
+  lc_test_tmp_signal_handlers_installed = 1;
+}
+
 static int lc_test_tmp_install_atexit(void) {
   if (lc_test_tmp_atexit_installed) {
     return 1;
@@ -78,6 +109,7 @@ static int lc_test_tmp_install_atexit(void) {
     return 0;
   }
   lc_test_tmp_atexit_installed = 1;
+  lc_test_tmp_install_signal_handlers();
   return 1;
 }
 

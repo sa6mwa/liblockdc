@@ -66,6 +66,21 @@ function(lc_add_https_unit_test_case target_name case_macro)
 endfunction()
 
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)
+add_executable(lc_unit_tmp_cleanup_probe
+  test_lc_tmp_cleanup.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
+lc_configure_c_test_target(lc_unit_tmp_cleanup_probe)
+add_test(NAME lc_unit_tmp_cleanup_signal
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_TMP_CLEANUP_PROBE=$<TARGET_FILE:lc_unit_tmp_cleanup_probe>
+    -DLOCKDC_TMP_PATH_FILE=${CMAKE_BINARY_DIR}/tmp-cleanup-signal.path
+    -P "${CMAKE_SOURCE_DIR}/tests/tmp_cleanup_signal_test.cmake"
+)
+set_tests_properties(lc_unit_tmp_cleanup_signal PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
 lc_add_unit_test(lc_unit_engine_allocator test_lc_engine_allocator.c)
 lc_add_unit_test(lc_unit_contracts test_lc_contracts.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_public.c)
