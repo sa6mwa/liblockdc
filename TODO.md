@@ -618,6 +618,17 @@ Latest release targets confirmed on 2026-07-23:
         `PrefixOwner` from about 3.83 ms to about 1.76 ms. Go disk measured
         about 1.49 ms and 1.30 ms respectively, so persisted compiled
         dictionaries remain the next required parity step.
+      - [x] Add a simple-primary docID candidate helper for `exists` and
+        `prefix` compilation: when there are no residual indexed predicates,
+        the reader still checks live state, summary freshness, hidden state,
+        owner, and doc-table membership, but skips dispatch through the empty
+        secondary predicate families.
+        Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
+        pouch `ExistsFlag` measured about 4.38 ms and `PrefixOwner` about
+        1.61 ms. The matching Go disk run measured about 41.5 ms for
+        `ExistsFlag` and about 1.05 ms for `PrefixOwner`; the Go exists number
+        was noisy relative to earlier runs, so this records pouch improvement
+        without closing the persisted-dictionary parity gap.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
