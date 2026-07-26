@@ -1391,12 +1391,12 @@ generation files under
 `<root>/%2elockd/logstore/query.index.docs/<escaped-namespace>.lcpdtg`
 during full query-index rebuilds and after successful compaction replay. The
 current query path still rebuilds the live in-memory global document table from
-summary refresh state; exact-term and field-presence generations are the first
-reader families cut over to namespace-local persisted docIDs and remap through
-these document-table files when loading prepared postings. The remaining
-reader families and result-page selection still need the same namespace-local
-doc table cutover before compiled reader files can stop depending on the
-global docID table.
+summary refresh state; exact-term, field-presence, and numeric range
+generations are the first reader families cut over to namespace-local
+persisted docIDs and remap through these document-table files when loading
+prepared postings. The remaining reader families and result-page selection
+still need the same namespace-local doc table cutover before compiled reader
+files can stop depending on the global docID table.
 Even before that cutover, the query path no longer depends on direct
 summary-array-position casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
@@ -1443,10 +1443,12 @@ level validation. Disk publishes these files under
 `<root>/%2elockd/logstore/query.index.number/<escaped-namespace>.lcpngn`
 during full query-index rebuilds and after successful compaction replay.
 Prepared simple primary `range` readers load identity-matched numeric
-generations, materialize the requested open/closed bounds into query-bound
-adaptive postings, and repair absent, stale, or corrupt files on the simple
-range query path. Compound range paths still use the sidecar compiler so
-secondary predicate filtering stays explicit.
+generations, materialize the requested open/closed bounds into namespace-local
+docIDs, remap those IDs through the identity-matched document-table generation
+into query-bound adaptive postings over the current global doc table, and
+repair absent, stale, or corrupt files on the simple range query path. Compound
+range paths still use the sidecar compiler so secondary predicate filtering
+stays explicit.
 Text prefix/contains now have the corresponding private index-layer generation
 foundation: `lc_pouch_index` can encode a namespace-scoped field dictionary of
 raw text values, rebuild deterministic lowercase ASCII trigram postings on

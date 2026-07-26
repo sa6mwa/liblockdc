@@ -11550,18 +11550,22 @@ test_pouch_endpoint_index_rebuild_writes_number_generation(void **state) {
   char endpoint[320];
   char query_path[512];
   char generation_path[512];
+  char doc_generation_path[512];
   lc_client *client;
+  lc_client *other_client;
   lc_lease *alpha;
   lc_lease *bravo;
   lc_lease *charlie;
   lc_lease *delta;
   lc_lease *echo;
   lc_lease *foxtrot;
+  lc_lease *other_doc;
   lc_query_req req;
   lc_query_res res;
   lc_query_key_handler handler;
   query_key_capture_state capture;
   lc_pouch_index_number_generation generation;
+  lc_pouch_index_doc_generation doc_generation;
   lc_pouch_index_doc_id_set doc_ids;
   lc_error error;
   int rc;
@@ -11575,6 +11579,7 @@ test_pouch_endpoint_index_rebuild_writes_number_generation(void **state) {
   memset(&handler, 0, sizeof(handler));
   memset(&capture, 0, sizeof(capture));
   memset(&generation, 0, sizeof(generation));
+  memset(&doc_generation, 0, sizeof(doc_generation));
   memset(&doc_ids, 0, sizeof(doc_ids));
 
   client = open_pouch_client(endpoint);
@@ -11594,6 +11599,12 @@ test_pouch_endpoint_index_rebuild_writes_number_generation(void **state) {
   delta->close(delta);
   echo->close(echo);
   client->close(client);
+
+  other_client = open_pouch_client_with_namespace(endpoint, "other");
+  other_doc = pouch_acquire_query_key(other_client, "aardvark", &error);
+  pouch_save_query_json(other_doc, "{\"amount\":5}", &error);
+  other_doc->close(other_doc);
+  other_client->close(other_client);
 
   test_query_index_path(root, query_path, sizeof(query_path));
   assert_int_equal(unlink(query_path), 0);
@@ -11631,6 +11642,25 @@ test_pouch_endpoint_index_rebuild_writes_number_generation(void **state) {
   memset(&doc_ids, 0, sizeof(doc_ids));
   memset(&generation, 0, sizeof(generation));
 
+  test_query_number_generation_path(root, "other", generation_path,
+                                    sizeof(generation_path));
+  test_read_number_generation_file(generation_path, &generation);
+  assert_string_equal(generation.namespace_name, "other");
+  assert_true(lc_pouch_index_number_posting_table_append_range(
+      NULL, &generation.postings, "/amount", NULL, "n:+:2:0", "n:+:1:1", NULL,
+      &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_int_equal(doc_ids.count, 1U);
+  assert_int_equal(doc_ids.items[0], 0U);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_number_generation_cleanup(NULL, &generation);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&generation, 0, sizeof(generation));
+
+  test_query_number_generation_path(root, "default", generation_path,
+                                    sizeof(generation_path));
+  test_query_doc_generation_path(root, "default", doc_generation_path,
+                                 sizeof(doc_generation_path));
   client = open_pouch_client(endpoint);
   foxtrot = pouch_acquire_query_key(client, "foxtrot", &error);
   pouch_save_query_json(foxtrot, "{\"amount\":7}", &error);
@@ -11658,6 +11688,23 @@ test_pouch_endpoint_index_rebuild_writes_number_generation(void **state) {
   lc_pouch_index_number_generation_cleanup(NULL, &generation);
   memset(&doc_ids, 0, sizeof(doc_ids));
   memset(&generation, 0, sizeof(generation));
+
+  test_corrupt_doc_generation_file(doc_generation_path);
+  client = open_pouch_client(endpoint);
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(capture.keys[1], "charlie");
+  assert_string_equal(capture.keys[2], "foxtrot");
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  test_read_doc_generation_file(doc_generation_path, &doc_generation);
+  assert_string_equal(doc_generation.namespace_name, "default");
+  assert_true(doc_generation.identity.sequence > 0U);
+  lc_pouch_index_doc_generation_cleanup(NULL, &doc_generation);
 
   test_corrupt_number_generation_file(generation_path);
   client = open_pouch_client(endpoint);
@@ -11703,6 +11750,7 @@ test_pouch_endpoint_index_rebuild_writes_number_generation(void **state) {
   assert_int_equal(doc_ids.count, 3U);
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_doc_generation_cleanup(NULL, &doc_generation);
   lc_pouch_index_number_generation_cleanup(NULL, &generation);
   lc_error_cleanup(&error);
   test_cleanup_root(root);

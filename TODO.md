@@ -525,8 +525,14 @@ Latest release targets confirmed on 2026-07-23:
         exists generation build now stores postings by the matching
         per-namespace document-table generation, prepared exists readers
         require and remap through identity-matched `.lcpdtg` files, and corrupt
-        doc generation files repair through the exists query path. Numeric,
-        text, temporal, and result-page consumption still need the same
+        doc generation files repair through the exists query path.
+      - [x] Cut numeric-range generation files over to namespace-local docIDs:
+        numeric generation build stores value postings by the matching
+        per-namespace document-table generation, prepared range readers require
+        an identity-matched `.lcpdtg`, remap materialized range docIDs back into
+        the current global in-memory doc table, and repair corrupt doc
+        generation files through the range query path. Text, temporal, and
+        result-page consumption still need the same
         namespace-local doc table cutover.
       - [x] Wire the disk query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
