@@ -9,9 +9,9 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-#define LC_POUCH_STATE_SEGMENT "seg-0000000000000001.log"
 #define LC_POUCH_STATE_COPY_CHUNK 16384U
 #define LC_POUCH_STATE_LINE_LIMIT 8192U
 
@@ -222,6 +222,28 @@ static int lc_pouch_state_read_line(FILE *fp, char *line, size_t line_size,
   return 1;
 }
 
+static int lc_pouch_state_file_size(const char *path, unsigned long *size,
+                                    lc_error *error) {
+  struct stat st;
+
+  if (stat(path, &st) != 0) {
+    if (errno == ENOENT) {
+      *size = 0UL;
+      return LC_OK;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to stat pouch state segment", strerror(errno),
+                        NULL, NULL);
+  }
+  if (!S_ISREG(st.st_mode)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state segment path is not a file", NULL, NULL,
+                        NULL);
+  }
+  *size = (unsigned long)st.st_size;
+  return LC_OK;
+}
+
 static int lc_pouch_state_parse_record(const lc_allocator *allocator,
                                        const char *line,
                                        lc_pouch_state_entry *entry,
@@ -260,31 +282,18 @@ static int lc_pouch_state_parse_record(const lc_allocator *allocator,
   return LC_OK;
 }
 
-static int lc_pouch_state_scan(lc_pouch *pouch, const char *namespace_path,
-                               const char *key,
-                               lc_pouch_state_entry *current,
-                               unsigned long *max_version, lc_error *error) {
+static int lc_pouch_state_scan_file(lc_pouch *pouch, const char *segment_path,
+                                    const char *key,
+                                    lc_pouch_state_entry *current,
+                                    unsigned long *max_version,
+                                    lc_error *error) {
   char line[LC_POUCH_STATE_LINE_LIMIT];
   lc_pouch_state_entry entry;
-  char *segment_path;
   FILE *fp;
   int truncated;
   int rc;
 
-  memset(current, 0, sizeof(*current));
-  if (max_version != NULL) {
-    *max_version = 0UL;
-  }
-  segment_path =
-      lc_pouch_state_child_path(&pouch->allocator, namespace_path, "segments",
-                                LC_POUCH_STATE_SEGMENT);
-  if (segment_path == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch state segment path", NULL,
-                        NULL, NULL);
-  }
   fp = fopen(segment_path, "rb");
-  lc_free_with_allocator(&pouch->allocator, segment_path);
   if (fp == NULL) {
     if (errno == ENOENT) {
       return LC_OK;
@@ -329,8 +338,51 @@ static int lc_pouch_state_scan(lc_pouch *pouch, const char *namespace_path,
   return rc;
 }
 
+static int lc_pouch_state_scan(lc_pouch *pouch,
+                               const lc_pouch_namespace_manifest *manifest,
+                               const char *key,
+                               lc_pouch_state_entry *current,
+                               unsigned long *max_version, lc_error *error) {
+  unsigned long segment_id;
+  int rc;
+
+  memset(current, 0, sizeof(*current));
+  if (max_version != NULL) {
+    *max_version = 0UL;
+  }
+  rc = LC_OK;
+  for (segment_id = 1UL; segment_id <= manifest->max_segment_id;
+       ++segment_id) {
+    char *segment_leaf;
+    char *segment_path;
+
+    segment_leaf =
+        lc_pouch_namespace_segment_leaf(&pouch->allocator, segment_id);
+    segment_path =
+        segment_leaf != NULL
+            ? lc_pouch_state_child_path(&pouch->allocator,
+                                        manifest->namespace_path, "segments",
+                                        segment_leaf)
+            : NULL;
+    lc_free_with_allocator(&pouch->allocator, segment_leaf);
+    if (segment_path == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch state segment path", NULL,
+                          NULL, NULL);
+    }
+    rc = lc_pouch_state_scan_file(pouch, segment_path, key, current,
+                                  max_version, error);
+    lc_free_with_allocator(&pouch->allocator, segment_path);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  return rc;
+}
+
 static int lc_pouch_state_append_record(lc_pouch *pouch,
-                                        const char *namespace_path,
+                                        const char *namespace_name,
+                                        lc_pouch_namespace_manifest *manifest,
                                         const char *key,
                                         const char *content_type,
                                         const char *etag,
@@ -346,6 +398,7 @@ static int lc_pouch_state_append_record(lc_pouch *pouch,
   int fd;
   int rc;
   int len;
+  unsigned long segment_size;
 
   key_hex = lc_pouch_state_hex_encode(&pouch->allocator, key);
   content_type_hex = lc_pouch_state_hex_encode(&pouch->allocator,
@@ -371,12 +424,36 @@ static int lc_pouch_state_append_record(lc_pouch *pouch,
   }
 
   segment_path =
-      lc_pouch_state_child_path(&pouch->allocator, namespace_path, "segments",
-                                LC_POUCH_STATE_SEGMENT);
+      lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
+                                "segments", manifest->active_segment);
   if (segment_path == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch state segment path", NULL,
                         NULL, NULL);
+  }
+  rc = lc_pouch_state_file_size(segment_path, &segment_size, error);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, segment_path);
+    return rc;
+  }
+  if (segment_size > 0UL &&
+      segment_size + (unsigned long)len > pouch->segment_target_bytes) {
+    lc_free_with_allocator(&pouch->allocator, segment_path);
+    rc = lc_pouch_namespace_manifest_rotate(&pouch->allocator, namespace_name,
+                                            manifest,
+                                            manifest->active_segment_id + 1UL,
+                                            error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    segment_path =
+        lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
+                                  "segments", manifest->active_segment);
+    if (segment_path == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch state segment path", NULL,
+                          NULL, NULL);
+    }
   }
   fd = open(segment_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
   lc_free_with_allocator(&pouch->allocator, segment_path);
@@ -420,8 +497,8 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
                          const lc_pouch_state_write_options *options,
                          lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_state_entry current;
+  lc_pouch_namespace_manifest manifest;
   const char *content_type;
-  char *namespace_path;
   char *payload_leaf;
   char *payload_path;
   char *etag;
@@ -442,26 +519,24 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   if (rc != LC_OK) {
     return rc;
   }
-  namespace_path =
-      lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
-                              namespace_name);
-  if (namespace_path == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch namespace path", NULL, NULL,
-                        NULL);
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, error);
+  if (rc != LC_OK) {
+    return rc;
   }
 
   memset(&current, 0, sizeof(current));
-  rc = lc_pouch_state_scan(pouch, namespace_path, key, &current, &max_version,
+  rc = lc_pouch_state_scan(pouch, &manifest, key, &current, &max_version,
                            error);
   if (rc != LC_OK) {
-    lc_free_with_allocator(&pouch->allocator, namespace_path);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return rc;
   }
   if (options != NULL && options->expected_etag != NULL) {
     if (!current.found || strcmp(current.etag, options->expected_etag) != 0) {
       lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-      lc_free_with_allocator(&pouch->allocator, namespace_path);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch state etag precondition failed", NULL, NULL,
                           NULL);
@@ -472,7 +547,7 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   payload_leaf = lc_pouch_state_payload_leaf(&pouch->allocator, version);
   payload_path =
       payload_leaf != NULL
-          ? lc_pouch_state_child_path(&pouch->allocator, namespace_path,
+          ? lc_pouch_state_child_path(&pouch->allocator, manifest.namespace_path,
                                       "payloads", payload_leaf)
           : NULL;
   if (etag == NULL || payload_leaf == NULL || payload_path == NULL) {
@@ -480,7 +555,7 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
     lc_free_with_allocator(&pouch->allocator, payload_leaf);
     lc_free_with_allocator(&pouch->allocator, payload_path);
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    lc_free_with_allocator(&pouch->allocator, namespace_path);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch state write paths", NULL,
                         NULL, NULL);
@@ -492,9 +567,9 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
                      ? options->content_type
                      : "application/octet-stream";
   if (rc == LC_OK) {
-    rc = lc_pouch_state_append_record(pouch, namespace_path, key, content_type,
-                                      etag, payload_leaf, version, bytes,
-                                      error);
+    rc = lc_pouch_state_append_record(pouch, namespace_name, &manifest, key,
+                                      content_type, etag, payload_leaf,
+                                      version, bytes, error);
   }
   if (rc == LC_OK) {
     out->etag = etag;
@@ -508,7 +583,7 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   lc_free_with_allocator(&pouch->allocator, payload_leaf);
   lc_free_with_allocator(&pouch->allocator, payload_path);
   lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-  lc_free_with_allocator(&pouch->allocator, namespace_path);
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;
 }
 
@@ -525,7 +600,7 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                         const char *key, lc_pouch_state_read_result *out,
                         lc_error *error) {
   lc_pouch_state_entry current;
-  char *namespace_path;
+  lc_pouch_namespace_manifest manifest;
   char *payload_path;
   int rc;
 
@@ -541,27 +616,25 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
   if (rc != LC_OK) {
     return rc;
   }
-  namespace_path =
-      lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
-                              namespace_name);
-  if (namespace_path == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch namespace path", NULL, NULL,
-                        NULL);
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, error);
+  if (rc != LC_OK) {
+    return rc;
   }
   memset(&current, 0, sizeof(current));
-  rc = lc_pouch_state_scan(pouch, namespace_path, key, &current, NULL, error);
+  rc = lc_pouch_state_scan(pouch, &manifest, key, &current, NULL, error);
   if (rc != LC_OK || !current.found) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    lc_free_with_allocator(&pouch->allocator, namespace_path);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return rc;
   }
   payload_path =
-      lc_pouch_state_child_path(&pouch->allocator, namespace_path, "payloads",
-                                current.payload_leaf);
+      lc_pouch_state_child_path(&pouch->allocator, manifest.namespace_path,
+                                "payloads", current.payload_leaf);
   if (payload_path == NULL) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    lc_free_with_allocator(&pouch->allocator, namespace_path);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch state payload path", NULL,
                         NULL, NULL);
@@ -578,7 +651,7 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
     current.etag = NULL;
   }
   lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-  lc_free_with_allocator(&pouch->allocator, namespace_path);
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;
 }
 

@@ -81,6 +81,36 @@ static void assert_path_file(const char *root, const char *leaf) {
   assert_true(path_is_file(path));
 }
 
+static void write_text_file(const char *path, const char *text) {
+  FILE *fp;
+
+  fp = fopen(path, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fputs(text, fp) < 0 ? -1 : 0, 0);
+  assert_int_equal(fclose(fp), 0);
+}
+
+static void assert_file_contains(const char *path, const char *needle) {
+  FILE *fp;
+  char bytes[1024];
+  size_t nread;
+
+  fp = fopen(path, "rb");
+  assert_non_null(fp);
+  nread = fread(bytes, 1U, sizeof(bytes) - 1U, fp);
+  assert_int_equal(fclose(fp), 0);
+  bytes[nread] = '\0';
+  assert_non_null(strstr(bytes, needle));
+}
+
+static void assert_path_file_contains(const char *root, const char *leaf,
+                                      const char *needle) {
+  char path[1024];
+
+  snprintf(path, sizeof(path), "%s/%s", root, leaf);
+  assert_file_contains(path, needle);
+}
+
 static void read_source_to_string(lc_source *source, char *buffer,
                                   size_t buffer_size) {
   lc_error error;
@@ -169,6 +199,8 @@ static void test_ensure_namespace_creates_per_namespace_layout(void **state) {
   assert_path_dir(namespace_path, "markers");
   assert_path_dir(namespace_path, "index");
   assert_path_file(namespace_path, "manifest");
+  assert_path_file_contains(namespace_path, "manifest",
+                            "active_segment=seg-00000000000000000001.log");
 
   free(namespace_path);
   lc_pouch_close(pouch);
@@ -317,6 +349,127 @@ static void test_state_write_enforces_expected_etag(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_state_writes_roll_active_manifest_segment(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char bytes[64];
+  char *namespace_path;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&read_result, 0, sizeof(read_result));
+  make_root("state-rollover", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 128UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body, NULL,
+                            &first, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body, NULL,
+                            &second, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  assert_path_file(namespace_path, "segments/seg-00000000000000000001.log");
+  assert_path_file(namespace_path, "segments/seg-00000000000000000002.log");
+  assert_path_file_contains(namespace_path, "manifest",
+                            "active_segment=seg-00000000000000000002.log");
+
+  lc_pouch_close(pouch);
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/current", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_string_equal(read_result.etag, "pouch-state-2");
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "two");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_namespace_manifest_repairs_from_existing_segments(
+    void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char manifest_path[1024];
+  char bytes[64];
+  char *namespace_path;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  make_root("manifest-repair", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("repair-me", strlen("repair-me"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  lc_pouch_close(pouch);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
+           namespace_path);
+  write_text_file(manifest_path, "broken=true\nactive_segment=bad\n");
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/current", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "repair-me");
+  assert_path_file_contains(namespace_path, "manifest",
+                            "active_segment=seg-00000000000000000001.log");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_open_creates_segmented_root_layout),
@@ -325,6 +478,9 @@ int main(void) {
           test_pouch_endpoint_opens_new_backend_without_http_engine),
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
       cmocka_unit_test(test_state_write_enforces_expected_etag),
+      cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
+      cmocka_unit_test(
+          test_namespace_manifest_repairs_from_existing_segments),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
