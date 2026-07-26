@@ -3051,6 +3051,180 @@ static void test_query_documents_scan_streams_rows(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_query_documents_index_uses_scalar_postings(void **state) {
+  static const char selector[] =
+      "{\"in\":{\"field\":\"/tags[]\",\"any\":[\"planning\",\"finance\"]}}";
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_sink *first_sink;
+  lc_sink *second_sink;
+  lc_sink *unsupported_sink;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_pouch_state_write_options hidden_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_error error;
+  const void *first_bytes;
+  const void *second_bytes;
+  size_t first_length;
+  size_t second_length;
+  char root[512];
+  char cursor[64];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  first_sink = NULL;
+  second_sink = NULL;
+  unsupported_sink = NULL;
+  first_bytes = NULL;
+  second_bytes = NULL;
+  first_length = 0U;
+  second_length = 0U;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&hidden_options, 0, sizeof(hidden_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-documents-index", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory(
+      "{\"tags\":[\"planning\",\"finance\"],\"n\":1}",
+      strlen("{\"tags\":[\"planning\",\"finance\"],\"n\":1}"), &source,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs-index", "doc/a", source,
+                            NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"tags\":[\"ops\"],\"n\":2}",
+                             strlen("{\"tags\":[\"ops\"],\"n\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs-index", "doc/b", source,
+                            NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"tags\":[\"finance\"],\"n\":3}",
+                             strlen("{\"tags\":[\"finance\"],\"n\":3}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs-index", "doc/c", source,
+                            NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  hidden_options.has_query_hidden = 1;
+  hidden_options.query_hidden = 1;
+  rc = lc_source_from_memory("{\"tags\":[\"planning\"],\"n\":4}",
+                             strlen("{\"tags\":[\"planning\"],\"n\":4}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs-index", "doc/hidden",
+                            source, &hidden_options, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"tags\":[\"finance\"],\"n\":5}",
+                             strlen("{\"tags\":[\"finance\"],\"n\":5}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs-index", "doc/deleted",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_pouch_state_delete(pouch, "docs/query-docs-index", "doc/deleted",
+                             NULL, &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  rc = lc_sink_to_memory(&first_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  query_req.namespace_name = "docs/query-docs-index";
+  query_req.selector_json = selector;
+  query_req.limit = 1L;
+  query_req.return_mode = "documents";
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query(client, &query_req, first_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(first_sink, &first_bytes, &first_length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(first_length > 0U);
+  assert_non_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+
+  snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
+  query_req.cursor = cursor;
+  lc_query_res_cleanup(&query_res);
+  rc = lc_sink_to_memory(&second_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, second_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(second_sink, &second_bytes, &second_length,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(second_length > 0U);
+  assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(first_bytes, first_length, "\"n\":1") ||
+              bytes_contain_text(second_bytes, second_length, "\"n\":1"));
+  assert_true(bytes_contain_text(first_bytes, first_length, "\"n\":3") ||
+              bytes_contain_text(second_bytes, second_length, "\"n\":3"));
+  assert_false(bytes_contain_text(first_bytes, first_length, "\"n\":2"));
+  assert_false(bytes_contain_text(second_bytes, second_length, "\"n\":2"));
+  assert_false(bytes_contain_text(first_bytes, first_length, "\"n\":4"));
+  assert_false(bytes_contain_text(second_bytes, second_length, "\"n\":4"));
+  assert_false(bytes_contain_text(first_bytes, first_length, "\"n\":5"));
+  assert_false(bytes_contain_text(second_bytes, second_length, "\"n\":5"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
+      "{\"and\":[{\"eq\":{\"field\":\"/n\",\"value\":\"1\"}}]}";
+  rc = lc_sink_to_memory(&unsupported_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, unsupported_sink, &query_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_true(bytes_contain_text(error.message, strlen(error.message),
+                                 "supports exact scalar equality and in"));
+
+  lc_sink_close(first_sink);
+  lc_sink_close(second_sink);
+  lc_sink_close(unsupported_sink);
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_flush_index_reports_projection_high_water(void **state) {
   lc_client *client;
   lc_pouch *writer;
@@ -3810,6 +3984,7 @@ int main(void) {
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
       cmocka_unit_test(test_query_documents_scan_streams_rows),
+      cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),

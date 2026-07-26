@@ -453,9 +453,10 @@ of rewritten JSON files.
   summary rows with row-count/hash validation, query-hidden flags, and the
   first durable scalar field postings. Selectorless `query_keys` can use the
   validated summary as the first indexed path; explicit indexed `query_keys`
-  can use scalar equality and scalar `in` postings, including `/tags[]` array
-  membership, before final `liblql` acceptance. Broader typed/range/text
-  postings and indexed document queries remain to be implemented.
+  and document `query` can use scalar equality and scalar `in` postings,
+  including `/tags[]` array membership, before final `liblql` acceptance.
+  Broader typed/range/text postings and richer indexed selector plans remain to
+  be implemented.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
@@ -1053,11 +1054,11 @@ validated `query.index` live-row summary for selectorless `query_keys`:
 default/index engines refresh the sidecar, validate its row count and hash,
 stream decoded keys from the sidecar, filter `query_hidden`, paginate by row
 offset, and report `engine=index-summary`. The first selector-bearing indexed
-key path handles single-node scalar equality and scalar `in` selectors by
-looking up durable sidecar postings, sorting/de-duplicating candidate keys, then
-loading only candidate documents for final `liblql` acceptance and
-`query_hidden` suppression. Unsupported indexed selector shapes fail closed
-instead of falling back to scan.
+paths for both `query_keys` and document `query` handle single-node scalar
+equality and scalar `in` selectors by looking up durable sidecar postings,
+sorting/de-duplicating candidate keys, then loading only candidate documents for
+final `liblql` acceptance and `query_hidden` suppression. Unsupported indexed
+selector shapes fail closed instead of falling back to scan.
 Explicit scan mode remains available for full-log/full-summary scanning through
 the ordered metadata summary API, but it does not accept refresh hints because
 no durable query index is consulted.

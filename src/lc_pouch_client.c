@@ -744,7 +744,7 @@ static int lc_pouch_query_index_plan_from_selector(
     if (!string_term.value_present || string_term.any_count != 0U ||
         string_term.field.len == 0U) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch query_keys index engine supports exact "
+                          "pouch query index engine supports exact "
                           "scalar equality selectors only",
                           NULL, NULL, "pouch-redesign");
     }
@@ -765,7 +765,7 @@ static int lc_pouch_query_index_plan_from_selector(
     }
     if (in_term.field.len == 0U || in_term.any_count == 0U) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch query_keys index engine supports non-empty "
+                          "pouch query index engine supports non-empty "
                           "scalar in selectors only",
                           NULL, NULL, "pouch-redesign");
     }
@@ -792,7 +792,7 @@ static int lc_pouch_query_index_plan_from_selector(
     return LC_OK;
   }
   return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch query_keys index engine supports exact scalar "
+                      "pouch query index engine supports exact scalar "
                       "equality and in selectors only",
                       NULL, NULL, "pouch-redesign");
 }
@@ -883,6 +883,33 @@ static int lc_pouch_query_index_key_collect(
       error);
 }
 
+static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
+                                              const char *namespace_name,
+                                              unsigned long *index_seq,
+                                              lc_error *error) {
+  lc_pouch_query_index_flush_result flush_result;
+  int rc;
+
+  if (index_seq == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index flush requires index_seq output",
+                        NULL, NULL, NULL);
+  }
+  *index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(client->pouch, namespace_name, index_seq,
+                                error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_flush(client->pouch, namespace_name, *index_seq,
+                                  &flush_result, error);
+  if (rc == LC_OK) {
+    *index_seq = flush_result.index_seq;
+  }
+  return rc;
+}
+
 static int lc_pouch_query_index_process_keys(
     lc_pouch_query_scan_context *context, lc_pouch_query_index_key_set *keys,
     lc_error *error) {
@@ -937,9 +964,13 @@ static int lc_pouch_query_index_process_keys(
           context->next_offset = context->seen - 1U;
         }
       } else {
-        rc = lc_pouch_query_emit_key(context->handler,
-                                     context->handler_context,
-                                     keys->keys[index], error);
+        if (context->emit_documents) {
+          rc = lc_pouch_query_emit_document(context, read_result.body, error);
+        } else {
+          rc = lc_pouch_query_emit_key(context->handler,
+                                       context->handler_context,
+                                       keys->keys[index], error);
+        }
         if (rc == LC_OK && context->next_offset == 0U) {
           ++context->emitted;
         }
@@ -951,30 +982,54 @@ static int lc_pouch_query_index_process_keys(
   return rc;
 }
 
-static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
-                                              const char *namespace_name,
-                                              unsigned long *index_seq,
-                                              lc_error *error) {
-  lc_pouch_query_index_flush_result flush_result;
+static int lc_pouch_query_run_index_predicate(
+    lc_pouch_query_scan_context *scan, unsigned long *flushed_seq_out,
+    lc_error *error) {
+  lc_pouch_query_index_plan plan;
+  lc_pouch_query_index_key_set keys;
+  unsigned long flushed_seq;
+  unsigned long value_seq;
+  size_t value_index;
   int rc;
 
-  if (index_seq == NULL) {
+  if (scan == NULL || flushed_seq_out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index flush requires index_seq output",
+                        "pouch indexed query requires scan context and flush "
+                        "output",
                         NULL, NULL, NULL);
   }
-  *index_seq = 0UL;
-  rc = lc_pouch_state_index_seq(client->pouch, namespace_name, index_seq,
-                                error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  memset(&flush_result, 0, sizeof(flush_result));
-  rc = lc_pouch_query_index_flush(client->pouch, namespace_name, *index_seq,
-                                  &flush_result, error);
+  memset(&plan, 0, sizeof(plan));
+  memset(&keys, 0, sizeof(keys));
+  flushed_seq = 0UL;
+  *flushed_seq_out = 0UL;
+  rc = lc_pouch_query_index_plan_from_selector(scan->runtime, scan->selector,
+                                               &plan, error);
   if (rc == LC_OK) {
-    *index_seq = flush_result.index_seq;
+    rc = lc_pouch_query_flush_summary_index(scan->client, scan->namespace_name,
+                                            &flushed_seq, error);
   }
+  for (value_index = 0U; rc == LC_OK && value_index < plan.value_count;
+       ++value_index) {
+    value_seq = 0UL;
+    rc = lc_pouch_query_index_visit_scalar(
+        scan->client->pouch, scan->namespace_name, plan.field,
+        plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
+        &value_seq, error);
+    if (rc == LC_OK && value_seq > scan->index_seq) {
+      scan->index_seq = value_seq;
+    }
+  }
+  if (rc == LC_OK && scan->index_seq < flushed_seq) {
+    scan->index_seq = flushed_seq;
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_process_keys(scan, &keys, error);
+  }
+  if (rc == LC_OK) {
+    *flushed_seq_out = flushed_seq;
+  }
+  lc_pouch_query_index_key_set_cleanup(&keys);
+  lc_pouch_query_index_plan_cleanup(&plan);
   return rc;
 }
 
@@ -2659,6 +2714,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   lql_selector *selector;
   lql_error lql_error_value;
   lql_status status;
+  int use_index_predicate;
   int rc;
 
   if (self == NULL || req == NULL || dst == NULL || out == NULL) {
@@ -2685,14 +2741,18 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                         NULL, NULL, "pouch-redesign");
   }
   if (req->engine != NULL && req->engine[0] != '\0' &&
-      strcmp(req->engine, "scan") != 0) {
+      strcmp(req->engine, "scan") != 0 && strcmp(req->engine, "index") != 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query currently supports only the scan engine",
+                        "pouch query engine must be scan or index",
                         NULL, NULL, "pouch-redesign");
   }
-  if (req->refresh != NULL && req->refresh[0] != '\0') {
+  use_index_predicate =
+      req->engine != NULL && strcmp(req->engine, "index") == 0;
+  if (req->refresh != NULL && req->refresh[0] != '\0' &&
+      (!use_index_predicate || strcmp(req->refresh, "wait_for") != 0)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query refresh modes are not implemented yet",
+                        "pouch query refresh is only supported as wait_for on "
+                        "indexed queries",
                         NULL, NULL, "pouch-redesign");
   }
   client = (lc_client_handle *)self;
@@ -2723,13 +2783,24 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   scan.emit_documents = 1;
   rc = lc_pouch_query_parse_cursor(req->cursor, &scan.offset, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_state_visit(client->pouch, scan.namespace_name,
-                              lc_pouch_query_scan_visit, &scan, error);
+    if (use_index_predicate) {
+      unsigned long flushed_seq;
+
+      flushed_seq = 0UL;
+      rc = lc_pouch_query_run_index_predicate(&scan, &flushed_seq, error);
+    } else {
+      rc = lc_pouch_state_visit(client->pouch, scan.namespace_name,
+                                lc_pouch_query_scan_visit, &scan, error);
+    }
   }
   if (rc == LC_OK) {
     out->return_mode = lc_strdup_local("documents");
     out->metadata_json =
-        lc_pouch_query_scan_metadata_string(scan.seen, scan.matched, error);
+        use_index_predicate
+            ? lc_pouch_query_index_metadata_string(scan.seen, scan.matched,
+                                                   error)
+            : lc_pouch_query_scan_metadata_string(scan.seen, scan.matched,
+                                                  error);
     out->correlation_id = lc_strdup_local("pouch-query");
     out->index_seq = scan.index_seq;
     if (scan.next_offset != 0U) {
@@ -2871,40 +2942,10 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   scan.runtime = runtime;
   scan.selector = selector;
   if (use_index_predicate) {
-    lc_pouch_query_index_plan plan;
-    lc_pouch_query_index_key_set keys;
     unsigned long flushed_seq;
-    unsigned long value_seq;
-    size_t value_index;
 
-    memset(&plan, 0, sizeof(plan));
-    memset(&keys, 0, sizeof(keys));
     flushed_seq = 0UL;
-    rc = lc_pouch_query_index_plan_from_selector(runtime, selector, &plan,
-                                                 error);
-    if (rc == LC_OK) {
-      rc = lc_pouch_query_flush_summary_index(client, scan.namespace_name,
-                                              &flushed_seq, error);
-    }
-    for (value_index = 0U; rc == LC_OK && value_index < plan.value_count;
-         ++value_index) {
-      value_seq = 0UL;
-      rc = lc_pouch_query_index_visit_scalar(
-          client->pouch, scan.namespace_name, plan.field,
-          plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
-          &value_seq, error);
-      if (rc == LC_OK && value_seq > scan.index_seq) {
-        scan.index_seq = value_seq;
-      }
-    }
-    if (rc == LC_OK && scan.index_seq < flushed_seq) {
-      scan.index_seq = flushed_seq;
-    }
-    if (rc == LC_OK) {
-      rc = lc_pouch_query_index_process_keys(&scan, &keys, error);
-    }
-    lc_pouch_query_index_key_set_cleanup(&keys);
-    lc_pouch_query_index_plan_cleanup(&plan);
+    rc = lc_pouch_query_run_index_predicate(&scan, &flushed_seq, error);
   } else {
     rc = lc_pouch_state_visit(client->pouch, scan.namespace_name,
                               lc_pouch_query_scan_visit, &scan, error);

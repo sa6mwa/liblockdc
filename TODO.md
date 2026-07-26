@@ -112,6 +112,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     candidates with final `liblql` acceptance, including `/tags[]` array
     membership, hidden/deleted suppression, pagination, and fail-closed
     unsupported selector shapes.
+  - [x] Route explicit indexed document `query` equality/`in` selectors through
+    the same scalar posting candidates, preserving streamed document output,
+    final `liblql` acceptance, refresh-wait, pagination, hidden/deleted
+    suppression, and fail-closed unsupported selector shapes.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
