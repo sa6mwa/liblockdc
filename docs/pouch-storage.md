@@ -1308,8 +1308,8 @@ private index primitives:
   keyed by an explicit private index identity containing the current index
   sequence and segmented manifest generation.
 - `src/lc_pouch_index_result.c` owns cacheable plan-key normalization,
-  generation-scoped result-cache lookup/insert, and docID page selection over
-  the document table.
+  identity-scoped result-cache lookup/insert, and docID page selection over the
+  document table.
 - `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
   those primitives. It invokes disk-supplied reader callbacks and normalizes
   the resulting candidate docID sets.
@@ -1395,29 +1395,32 @@ Primary numeric `range`, `prefix`, and `contains` plans with negative equality
 filters now follow that same pattern: the primary candidate docIDs are
 intersected with optional positive equality docIDs, then the negative
 exact-term docID sets are subtracted before result paging.
-The index layer also owns the first result-cache primitive: a generation plus
-normalized-plan key maps to a sorted docID vector. The simple result-cache plan
-key constructors now live in `lc_pouch_index`, and disk supplies only the known
-simple-plan kind, current index generation, and storage sidecar readers.
+The index layer also owns the first result-cache primitive: a private index
+identity plus normalized-plan key maps to a sorted docID vector. The simple
+result-cache plan key constructors now live in `lc_pouch_index`, and disk
+supplies only the known simple-plan kind, current index identity, and storage
+sidecar readers. Disk lookups include both the index sequence and segmented
+manifest generation, so the normalized-result cache follows the same
+immutable-view key shape as prepared bridge readers.
 The first disk use is deliberately narrow: simple primary equality, positive
 `exists`, positive numeric `range`, and non-wildcard positive `in` scans cache
-docIDs by the current index sequence and a length-prefixed plan key, then ask
+docIDs by the current index identity and a length-prefixed plan key, then ask
 the index layer to page the cached docIDs over the document table before disk
 converts the selected page back to summary entries. Updates advance the index
 sequence, so stale cached results miss the cache.
-Simple positive `exists` scans use the same generation-keyed cache with a
+Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
 Simple non-wildcard positive `in` scans also use the result cache; their plan
 key sorts and deduplicates typed values before key construction, so duplicate
 or reordered value lists reuse the same cached docID vector.
-Simple positive numeric `range` scans use a bound-aware generation-keyed cache
+Simple positive numeric `range` scans use a bound-aware identity-keyed cache
 with explicit `gt`/`gte`/`lt`/`lte` presence bits and length-prefixed typed
 bound values. This keeps open, closed, and absent bounds distinct while still
 reusing the full matching docID vector across repeated range pages.
 Simple positive `prefix` and `contains` scans use the same result cache. Their
 plan keys include namespace, field, case-sensitivity, and length-prefixed text
 values, so repeated text pages can reuse the matching docID vector until the
-index sequence advances.
+index identity advances.
 Compound `prefix`/equality and `contains`/equality scans now route through the
 text primary collectors before the generic equality path. Their normalized
 plan keys append the same sorted/deduplicated equality suffix used by compound

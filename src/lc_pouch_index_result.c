@@ -1274,17 +1274,31 @@ char *lc_pouch_index_result_plan_key(const lc_pouch_allocator *allocator,
   return NULL;
 }
 
-static int lc_pouch_index_result_cache_compare(uint64_t left_generation,
-                                               const char *left_plan_key,
-                                               uint64_t right_generation,
-                                               const char *right_plan_key) {
-  int cmp;
-
-  if (left_generation < right_generation) {
+static int lc_pouch_index_identity_compare(lc_pouch_index_identity left,
+                                           lc_pouch_index_identity right) {
+  if (left.sequence < right.sequence) {
     return -1;
   }
-  if (left_generation > right_generation) {
+  if (left.sequence > right.sequence) {
     return 1;
+  }
+  if (left.manifest_generation < right.manifest_generation) {
+    return -1;
+  }
+  if (left.manifest_generation > right.manifest_generation) {
+    return 1;
+  }
+  return 0;
+}
+
+static int lc_pouch_index_result_cache_compare(
+    lc_pouch_index_identity left_identity, const char *left_plan_key,
+    lc_pouch_index_identity right_identity, const char *right_plan_key) {
+  int cmp;
+
+  cmp = lc_pouch_index_identity_compare(left_identity, right_identity);
+  if (cmp != 0) {
+    return cmp;
   }
   cmp = strcmp(left_plan_key, right_plan_key);
   if (cmp < 0) {
@@ -1297,7 +1311,7 @@ static int lc_pouch_index_result_cache_compare(uint64_t left_generation,
 }
 
 static int lc_pouch_index_result_cache_find_position(
-    const lc_pouch_index_result_cache *cache, uint64_t generation,
+    const lc_pouch_index_result_cache *cache, lc_pouch_index_identity identity,
     const char *plan_key, size_t *position_out) {
   size_t low;
   size_t high;
@@ -1315,9 +1329,9 @@ static int lc_pouch_index_result_cache_find_position(
     int cmp;
 
     mid = low + ((high - low) / 2U);
-    cmp = lc_pouch_index_result_cache_compare(cache->entries[mid].generation,
+    cmp = lc_pouch_index_result_cache_compare(cache->entries[mid].identity,
                                               cache->entries[mid].plan_key,
-                                              generation, plan_key);
+                                              identity, plan_key);
     if (cmp < 0) {
       low = mid + 1U;
     } else {
@@ -1328,9 +1342,9 @@ static int lc_pouch_index_result_cache_find_position(
     *position_out = low;
   }
   return low < cache->count &&
-         lc_pouch_index_result_cache_compare(cache->entries[low].generation,
+         lc_pouch_index_result_cache_compare(cache->entries[low].identity,
                                              cache->entries[low].plan_key,
-                                             generation, plan_key) == 0;
+                                             identity, plan_key) == 0;
 }
 
 static int
@@ -1453,13 +1467,25 @@ int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
                                      lc_pouch_index_result_cache *cache,
                                      uint64_t generation, const char *plan_key,
                                      lc_pouch_index_doc_id_set *dst) {
+  lc_pouch_index_identity identity;
+
+  memset(&identity, 0, sizeof(identity));
+  identity.sequence = generation;
+  return lc_pouch_index_result_cache_find_identity(allocator, cache, identity,
+                                                   plan_key, dst);
+}
+
+int lc_pouch_index_result_cache_find_identity(
+    const lc_pouch_allocator *allocator, lc_pouch_index_result_cache *cache,
+    lc_pouch_index_identity identity, const char *plan_key,
+    lc_pouch_index_doc_id_set *dst) {
   size_t position;
 
   if (dst == NULL) {
     return 0;
   }
   dst->count = 0U;
-  if (!lc_pouch_index_result_cache_find_position(cache, generation, plan_key,
+  if (!lc_pouch_index_result_cache_find_position(cache, identity, plan_key,
                                                  &position)) {
     if (cache != NULL && plan_key != NULL) {
       cache->misses++;
@@ -1478,6 +1504,18 @@ int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
                                     lc_pouch_index_result_cache *cache,
                                     uint64_t generation, const char *plan_key,
                                     const lc_pouch_index_doc_id_set *doc_ids) {
+  lc_pouch_index_identity identity;
+
+  memset(&identity, 0, sizeof(identity));
+  identity.sequence = generation;
+  return lc_pouch_index_result_cache_put_identity(allocator, cache, identity,
+                                                  plan_key, doc_ids);
+}
+
+int lc_pouch_index_result_cache_put_identity(
+    const lc_pouch_allocator *allocator, lc_pouch_index_result_cache *cache,
+    lc_pouch_index_identity identity, const char *plan_key,
+    const lc_pouch_index_doc_id_set *doc_ids) {
   lc_pouch_index_doc_id_set copy;
   char *plan_key_copy;
   size_t position;
@@ -1491,7 +1529,7 @@ int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
     lc_pouch_index_doc_id_set_cleanup(allocator, &copy);
     return 0;
   }
-  if (lc_pouch_index_result_cache_find_position(cache, generation, plan_key,
+  if (lc_pouch_index_result_cache_find_position(cache, identity, plan_key,
                                                 &position)) {
     lc_pouch_index_doc_id_set_cleanup(allocator,
                                       &cache->entries[position].doc_ids);
@@ -1515,7 +1553,8 @@ int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
     memmove(&cache->entries[position + 1U], &cache->entries[position],
             (cache->count - position) * sizeof(cache->entries[0]));
   }
-  cache->entries[position].generation = generation;
+  cache->entries[position].generation = identity.sequence;
+  cache->entries[position].identity = identity;
   cache->entries[position].plan_key = plan_key_copy;
   cache->entries[position].doc_ids = copy;
   cache->count++;
@@ -1527,6 +1566,24 @@ int lc_pouch_index_cached_result_page(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_doc_table *doc_table,
     lc_pouch_index_result_cache *cache, uint64_t generation,
+    const lc_pouch_query_index_scan_req *req,
+    lc_pouch_index_result_plan_kind kind,
+    lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
+    lc_pouch_index_result_page *page, int *invalid_doc_id_out,
+    lc_error *error) {
+  lc_pouch_index_identity identity;
+
+  memset(&identity, 0, sizeof(identity));
+  identity.sequence = generation;
+  return lc_pouch_index_cached_result_page_identity(
+      allocator, doc_table, cache, identity, req, kind, collect,
+      collect_context, page, invalid_doc_id_out, error);
+}
+
+int lc_pouch_index_cached_result_page_identity(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_doc_table *doc_table,
+    lc_pouch_index_result_cache *cache, lc_pouch_index_identity identity,
     const lc_pouch_query_index_scan_req *req,
     lc_pouch_index_result_plan_kind kind,
     lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
@@ -1546,9 +1603,8 @@ int lc_pouch_index_cached_result_page(
   invalid_doc_id = 0;
   plan_key = lc_pouch_index_result_plan_key(allocator, req, kind);
   cacheable = plan_key != NULL;
-  cache_hit = cacheable &&
-              lc_pouch_index_result_cache_find(allocator, cache, generation,
-                                               plan_key, &doc_ids);
+  cache_hit = cacheable && lc_pouch_index_result_cache_find_identity(
+                               allocator, cache, identity, plan_key, &doc_ids);
   if (!cache_hit) {
     rc = collect(collect_context, cacheable, &doc_ids, error);
     if (rc != LC_OK) {
@@ -1556,8 +1612,8 @@ int lc_pouch_index_cached_result_page(
       lc_pouch_index_doc_id_set_cleanup(allocator, &doc_ids);
       return rc;
     }
-    if (cacheable && !lc_pouch_index_result_cache_put(
-                         allocator, cache, generation, plan_key, &doc_ids)) {
+    if (cacheable && !lc_pouch_index_result_cache_put_identity(
+                         allocator, cache, identity, plan_key, &doc_ids)) {
       lc_pouch_free(allocator, plan_key);
       lc_pouch_index_doc_id_set_cleanup(allocator, &doc_ids);
       return LC_ERR_NOMEM;

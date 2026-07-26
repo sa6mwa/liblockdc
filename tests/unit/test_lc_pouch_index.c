@@ -418,6 +418,8 @@ static void test_result_cache_keys_by_generation_and_plan(void **state) {
   lc_pouch_index_result_cache cache;
   lc_pouch_index_doc_id_set source;
   lc_pouch_index_doc_id_set found;
+  lc_pouch_index_identity identity;
+  lc_pouch_index_identity other_identity;
   lc_pouch_index_doc_id source_values[] = {8U, 2U, 8U, 5U};
   lc_pouch_index_doc_id expected[] = {2U, 5U, 8U};
 
@@ -425,6 +427,8 @@ static void test_result_cache_keys_by_generation_and_plan(void **state) {
   memset(&cache, 0, sizeof(cache));
   memset(&source, 0, sizeof(source));
   memset(&found, 0, sizeof(found));
+  memset(&identity, 0, sizeof(identity));
+  memset(&other_identity, 0, sizeof(other_identity));
   assert_true(
       set_from_values(&source, source_values,
                       sizeof(source_values) / sizeof(source_values[0])));
@@ -445,6 +449,22 @@ static void test_result_cache_keys_by_generation_and_plan(void **state) {
                                                 "eq:/region=s:south", &found));
   assert_int_equal(cache.hits, 1U);
   assert_int_equal(cache.misses, 2U);
+
+  identity.sequence = 11U;
+  identity.manifest_generation = 99U;
+  other_identity.sequence = 11U;
+  other_identity.manifest_generation = 100U;
+  assert_true(lc_pouch_index_result_cache_put_identity(
+      NULL, &cache, identity, "eq:/region=s:north", &source));
+  assert_true(lc_pouch_index_result_cache_find_identity(
+      NULL, &cache, identity, "eq:/region=s:north", &found));
+  assert_doc_ids(&found, expected, sizeof(expected) / sizeof(expected[0]));
+  assert_false(lc_pouch_index_result_cache_find_identity(
+      NULL, &cache, other_identity, "eq:/region=s:north", &found));
+  assert_false(lc_pouch_index_result_cache_find_identity(
+      NULL, &cache, identity, "eq:/region=s:south", &found));
+  assert_int_equal(cache.hits, 2U);
+  assert_int_equal(cache.misses, 4U);
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &found);
   lc_pouch_index_doc_id_set_cleanup(NULL, &source);
@@ -938,6 +958,7 @@ test_cached_result_page_uses_cache_and_applies_cursor(void **state) {
   lc_pouch_query_index_scan_req req;
   lc_pouch_document_eq_term eq;
   fake_result_collector collector;
+  lc_pouch_index_identity identity;
   lc_pouch_index_doc_id id_alpha;
   lc_pouch_index_doc_id id_bravo;
   lc_pouch_index_doc_id id_charlie;
@@ -953,6 +974,7 @@ test_cached_result_page_uses_cache_and_applies_cursor(void **state) {
   memset(&req, 0, sizeof(req));
   memset(&eq, 0, sizeof(eq));
   memset(&collector, 0, sizeof(collector));
+  memset(&identity, 0, sizeof(identity));
 
   assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &table, "default",
                                                    "alpha", &id_alpha));
@@ -1014,6 +1036,18 @@ test_cached_result_page_uses_cache_and_applies_cursor(void **state) {
   assert_int_equal(collector.calls, 2U);
   assert_int_equal(cache.misses, 2U);
   assert_int_equal(cache.puts, 2U);
+  lc_pouch_index_result_page_cleanup(NULL, &page);
+
+  identity.sequence = 8U;
+  identity.manifest_generation = 1U;
+  rc = lc_pouch_index_cached_result_page_identity(
+      NULL, &table, &cache, identity, &req, LC_POUCH_INDEX_RESULT_PLAN_EQ,
+      fake_collect_result_doc_ids, &collector, &page, &invalid_doc_id, NULL);
+  assert_int_equal(rc, LC_OK);
+  assert_false(invalid_doc_id);
+  assert_int_equal(collector.calls, 3U);
+  assert_int_equal(cache.misses, 3U);
+  assert_int_equal(cache.puts, 3U);
 
   lc_pouch_index_result_page_cleanup(NULL, &page);
   lc_pouch_index_result_cache_cleanup(NULL, &cache);

@@ -95,6 +95,7 @@ typedef struct lc_pouch_index_prepared_term_cache {
 
 typedef struct lc_pouch_index_result_cache_entry {
   uint64_t generation;
+  lc_pouch_index_identity identity;
   char *plan_key;
   lc_pouch_index_doc_id_set doc_ids;
 } lc_pouch_index_result_cache_entry;
@@ -237,14 +238,30 @@ int lc_pouch_index_result_cache_find(const lc_pouch_allocator *allocator,
                                      lc_pouch_index_result_cache *cache,
                                      uint64_t generation, const char *plan_key,
                                      lc_pouch_index_doc_id_set *dst);
+int lc_pouch_index_result_cache_find_identity(
+    const lc_pouch_allocator *allocator, lc_pouch_index_result_cache *cache,
+    lc_pouch_index_identity identity, const char *plan_key,
+    lc_pouch_index_doc_id_set *dst);
 int lc_pouch_index_result_cache_put(const lc_pouch_allocator *allocator,
                                     lc_pouch_index_result_cache *cache,
                                     uint64_t generation, const char *plan_key,
                                     const lc_pouch_index_doc_id_set *doc_ids);
+int lc_pouch_index_result_cache_put_identity(
+    const lc_pouch_allocator *allocator, lc_pouch_index_result_cache *cache,
+    lc_pouch_index_identity identity, const char *plan_key,
+    const lc_pouch_index_doc_id_set *doc_ids);
 int lc_pouch_index_cached_result_page(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_doc_table *doc_table,
     lc_pouch_index_result_cache *cache, uint64_t generation,
+    const lc_pouch_query_index_scan_req *req,
+    lc_pouch_index_result_plan_kind kind,
+    lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
+    lc_pouch_index_result_page *page, int *invalid_doc_id_out, lc_error *error);
+int lc_pouch_index_cached_result_page_identity(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_doc_table *doc_table,
+    lc_pouch_index_result_cache *cache, lc_pouch_index_identity identity,
     const lc_pouch_query_index_scan_req *req,
     lc_pouch_index_result_plan_kind kind,
     lc_pouch_index_result_collect_doc_ids_fn collect, void *collect_context,
