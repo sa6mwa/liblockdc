@@ -21073,7 +21073,15 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
   scan_context.output_limit = (size_t)req->limit;
 
   if (selector_kind == LC_POUCH_QUERY_SELECTOR_OWNER) {
-    if (client->pouch_store->query_owner_keys_scan == NULL) {
+    if (residual_filter) {
+      if (client->pouch_store->query_owner_scan == NULL) {
+        lc_client_free(client, key_selector);
+        lc_client_free(client, owner_selector);
+        lc_pouch_lql_document_filter_cleanup(&filter);
+        return lc_pouch_client_unsupported(
+            error, "pouch indexed owner query is not available");
+      }
+    } else if (client->pouch_store->query_owner_keys_scan == NULL) {
       lc_client_free(client, key_selector);
       lc_client_free(client, owner_selector);
       lc_pouch_lql_document_filter_cleanup(&filter);
@@ -21084,13 +21092,32 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     owner_req.owner = owner_selector;
     owner_req.start_after = req->cursor;
     owner_req.limit = residual_filter ? 0U : (size_t)req->limit;
-    rc = client->pouch_store->query_owner_keys_scan(
-        client->pouch_store, &owner_req, lc_pouch_query_keys_index_visit,
-        &scan_context, &scan_res, error);
+    if (residual_filter) {
+      rc = client->pouch_store->query_owner_scan(
+          client->pouch_store, &owner_req, lc_pouch_query_keys_scan_visit,
+          &scan_context, &scan_res, error);
+    } else {
+      rc = client->pouch_store->query_owner_keys_scan(
+          client->pouch_store, &owner_req, lc_pouch_query_keys_index_visit,
+          &scan_context, &scan_res, error);
+    }
   } else {
-    rc = client->pouch_store->query_index_keys_scan(
-        client->pouch_store, &scan_req, lc_pouch_query_keys_index_visit,
-        &scan_context, &scan_res, error);
+    if (residual_filter) {
+      if (client->pouch_store->query_index_scan == NULL) {
+        lc_client_free(client, key_selector);
+        lc_client_free(client, owner_selector);
+        lc_pouch_lql_document_filter_cleanup(&filter);
+        return lc_pouch_client_unsupported(
+            error, "pouch indexed query is not available");
+      }
+      rc = client->pouch_store->query_index_scan(
+          client->pouch_store, &scan_req, lc_pouch_query_keys_scan_visit,
+          &scan_context, &scan_res, error);
+    } else {
+      rc = client->pouch_store->query_index_keys_scan(
+          client->pouch_store, &scan_req, lc_pouch_query_keys_index_visit,
+          &scan_context, &scan_res, error);
+    }
   }
   if (rc != LC_OK) {
     lc_client_free(client, key_selector);

@@ -69,10 +69,11 @@ The default dataset sizes are `64,1024`; `POUCH_GO_MEDIUM_SCALE_ROWS` and
 The default scenario list is a representative bounded subset; pass the full
 scenario list explicitly when doing exhaustive perf characterization.
 `benchmark-pouch-go-acceptance` pins the scale suite to 4096 documents and the
-`EqSparse`, `RangeHalf`, `InTags`, and `ContainsMessage` scenarios across
-document-return, key-return, indexed, and scan engines. This keeps the default
-gate inside the intended short iteration envelope while covering representative
-low-match, broad-match, array-membership, and text-search cases.
+`EqSparse`, `RangeHalf`, `InTags`, `ContainsMessage`, and `DateAfter` scenarios
+across document-return, key-return, indexed, and scan engines. This keeps the
+default gate inside the intended short iteration envelope while covering
+representative low-match, broad-match, array-membership, text-search, and
+residual date-filter cases.
 
 - `BenchmarkPouchCMediumLQLDocuments`
 - `BenchmarkPouchCMediumLQLKeys`

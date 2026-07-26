@@ -1435,6 +1435,10 @@ field-presence cache as a candidate-superset cache. The cached vector contains
 documents with the field, including values that are invalid or outside the
 requested date window; the client-level `liblql` filter remains authoritative
 for final acceptance and owns public cursor selection for residual pages.
+Key-return residual queries still use the row-scan path internally so the
+filter can evaluate the candidate body already surfaced by the index scan; they
+emit only keys after acceptance. This avoids reopening state by key for every
+candidate while preserving the public key-only result shape.
 Simple non-wildcard positive `in` scans also use the result cache; their plan
 key sorts and deduplicates typed values before key construction, so duplicate
 or reordered value lists reuse the same cached docID vector.

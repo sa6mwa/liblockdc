@@ -848,6 +848,11 @@ Latest release targets confirmed on 2026-07-23:
         normalized result cache, resumed key pages and document pages reuse the
         cached candidate vector, and final visible rows still come only from
         `liblql` acceptance.
+      - [x] Route indexed key-return residual filters through the row-scan
+        visitor so `liblql` evaluates the already-surfaced candidate body
+        instead of reopening state by key for every candidate. Focused
+        4096-document `DateAfter` key-return timing improved from about
+        1.73 s to about 91.6 ms C-side while preserving key-only output.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not
@@ -878,6 +883,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Replace the current broad 4096/full-scenario run with a bounded
         acceptance matrix that completes inside the intended 3-minute envelope
         while still covering the slow/representative indexed and scan cases.
+      - [x] Add the `DateAfter` residual-filter scenario to the bounded
+        4096-document pouch-vs-Go acceptance matrix so the opt-in comparison
+        gate covers candidate-superset date planning plus final `liblql`
+        acceptance across document/key and scan/index paths.
         - [x] Add and verify `make benchmark-pouch-go-acceptance`, a 4096-doc
           matrix over document/key returns, indexed/scan engines, and
           `EqSparse`, `RangeHalf`, `InTags`, and the known slower
