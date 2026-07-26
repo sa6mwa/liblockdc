@@ -12,5 +12,9 @@ void lc_test_tmp_cleanup_path(const char *path, const char *allowed_prefix);
 void lc_test_tmp_cleanup_stale(const char *parent_dir,
                                const char *name_prefix,
                                const char *allowed_prefix);
+void lc_test_tmp_cleanup_stale_older_than(const char *parent_dir,
+                                          const char *name_prefix,
+                                          const char *allowed_prefix,
+                                          long min_age_seconds);
 
 #endif
