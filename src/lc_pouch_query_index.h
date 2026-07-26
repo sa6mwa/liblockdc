@@ -23,6 +23,17 @@ typedef struct lc_pouch_query_index_key_view {
   const char *key;
 } lc_pouch_query_index_key_view;
 
+typedef struct lc_pouch_query_index_range_bounds {
+  int has_gt;
+  int has_gte;
+  int has_lt;
+  int has_lte;
+  double gt;
+  double gte;
+  double lt;
+  double lte;
+} lc_pouch_query_index_range_bounds;
+
 typedef int (*lc_pouch_query_index_key_visit_fn)(
     const lc_pouch_query_index_key_view *key, void *context, lc_error *error);
 
@@ -53,6 +64,11 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
 int lc_pouch_query_index_visit_contains(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *needle, lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error);
+int lc_pouch_query_index_visit_range(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const lc_pouch_query_index_range_bounds *bounds,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_exists(lc_pouch *pouch,
                                       const char *namespace_name,

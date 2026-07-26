@@ -140,6 +140,8 @@ typedef struct lc_pouch_query_index_plan {
   int exists;
   int prefix;
   int contains;
+  int range;
+  lc_pouch_query_index_range_bounds range_bounds;
 } lc_pouch_query_index_plan;
 
 typedef struct lc_pouch_query_index_key_set {
@@ -773,11 +775,36 @@ static int lc_pouch_query_index_plan_add_value(
   return LC_OK;
 }
 
+static int lc_pouch_query_index_plan_set_range_bound(
+    lc_pouch_query_index_range_bounds *bounds,
+    const lql_selector_range_bound *bound, int *has_bound, double *value,
+    const char *label, lc_error *error) {
+  (void)bounds;
+  if (bound == NULL || has_bound == NULL || value == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query range planning requires bound outputs",
+                        NULL, NULL, NULL);
+  }
+  if (bound->kind == LQL_SELECTOR_BOUND_ABSENT) {
+    return LC_OK;
+  }
+  if (bound->kind != LQL_SELECTOR_BOUND_NUMBER) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query index engine supports numeric range "
+                        "selectors only",
+                        NULL, label, "pouch-redesign");
+  }
+  *has_bound = 1;
+  *value = bound->number;
+  return LC_OK;
+}
+
 static int lc_pouch_query_index_plan_from_selector(
     lql *runtime, const lql_selector *selector,
     lc_pouch_query_index_plan *plan, lc_error *error) {
   lql_selector_node root;
   lql_selector_string_term string_term;
+  lql_selector_range_term range_term;
   lql_selector_in_term in_term;
   lql_error lql_error_value;
   lql_status status;
@@ -868,6 +895,58 @@ static int lc_pouch_query_index_plan_from_selector(
     plan->contains = 1;
     return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
   }
+  if (root.kind == LQL_SELECTOR_NODE_RANGE) {
+    int rc;
+
+    memset(&range_term, 0, sizeof(range_term));
+    status = runtime->selector_node_range_term(runtime, root, &range_term,
+                                               &lql_error_value);
+    if (status != LQL_STATUS_OK) {
+      return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                      "failed to inspect pouch range selector");
+    }
+    if (range_term.field.len == 0U) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query index engine supports non-empty range "
+                          "selectors only",
+                          NULL, NULL, "pouch-redesign");
+    }
+    rc = lc_pouch_query_index_plan_set_range_bound(
+        &plan->range_bounds, &range_term.gt, &plan->range_bounds.has_gt,
+        &plan->range_bounds.gt, "gt", error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_range_bound(
+          &plan->range_bounds, &range_term.gte, &plan->range_bounds.has_gte,
+          &plan->range_bounds.gte, "gte", error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_range_bound(
+          &plan->range_bounds, &range_term.lt, &plan->range_bounds.has_lt,
+          &plan->range_bounds.lt, "lt", error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_range_bound(
+          &plan->range_bounds, &range_term.lte, &plan->range_bounds.has_lte,
+          &plan->range_bounds.lte, "lte", error);
+    }
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (!plan->range_bounds.has_gt && !plan->range_bounds.has_gte &&
+        !plan->range_bounds.has_lt && !plan->range_bounds.has_lte) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query index engine supports bounded range "
+                          "selectors only",
+                          NULL, NULL, "pouch-redesign");
+    }
+    plan->field = lc_pouch_query_dup_lql_string(range_term.field, error);
+    if (plan->field == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    plan->range = 1;
+    return LC_OK;
+  }
   if (root.kind == LQL_SELECTOR_NODE_IN) {
     memset(&in_term, 0, sizeof(in_term));
     status = runtime->selector_node_in_term(runtime, root, &in_term,
@@ -930,8 +1009,8 @@ static int lc_pouch_query_index_plan_from_selector(
   }
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch query index engine supports exact scalar "
-                      "equality, in, exists, prefix, and contains selectors "
-                      "only",
+                      "equality, in, exists, prefix, contains, and range "
+                      "selectors only",
                       NULL, NULL, "pouch-redesign");
 }
 
@@ -1151,6 +1230,16 @@ static int lc_pouch_query_run_index_predicate(
     rc = lc_pouch_query_index_visit_exists(
         scan->client->pouch, scan->namespace_name, plan.field,
         lc_pouch_query_index_key_collect, &keys, &value_seq, error);
+    if (rc == LC_OK && value_seq > scan->index_seq) {
+      scan->index_seq = value_seq;
+    }
+  }
+  if (rc == LC_OK && plan.range) {
+    value_seq = 0UL;
+    rc = lc_pouch_query_index_visit_range(
+        scan->client->pouch, scan->namespace_name, plan.field,
+        &plan.range_bounds, lc_pouch_query_index_key_collect, &keys,
+        &value_seq, error);
     if (rc == LC_OK && value_seq > scan->index_seq) {
       scan->index_seq = value_seq;
     }

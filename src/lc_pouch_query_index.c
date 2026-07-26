@@ -6,6 +6,7 @@
 #include "lc_pouch_path.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,6 +89,8 @@ typedef struct lc_pouch_query_index_term_reader {
   const char *value_hex;
   int prefix_match;
   int contains_match;
+  int range_match;
+  lc_pouch_query_index_range_bounds range_bounds;
   lc_pouch_query_index_key_visit_fn visit;
   void *context;
 } lc_pouch_query_index_term_reader;
@@ -1229,6 +1232,87 @@ static int lc_pouch_query_index_parse_and_visit_row(
   return rc;
 }
 
+static int lc_pouch_query_index_parse_number_value(const char *text,
+                                                   double *out) {
+  char *endptr;
+  double value;
+
+  if (text == NULL || text[0] == '\0' || out == NULL) {
+    return 0;
+  }
+  errno = 0;
+  value = strtod(text, &endptr);
+  if (errno != 0 || endptr == text || *endptr != '\0' || !isfinite(value)) {
+    return 0;
+  }
+  *out = value;
+  return 1;
+}
+
+static int lc_pouch_query_index_range_contains_value(
+    const lc_pouch_query_index_range_bounds *bounds, double value) {
+  if (bounds == NULL ||
+      (!bounds->has_gt && !bounds->has_gte && !bounds->has_lt &&
+       !bounds->has_lte)) {
+    return 0;
+  }
+  if (bounds->has_gt && !(value > bounds->gt)) {
+    return 0;
+  }
+  if (bounds->has_gte && !(value >= bounds->gte)) {
+    return 0;
+  }
+  if (bounds->has_lt && !(value < bounds->lt)) {
+    return 0;
+  }
+  if (bounds->has_lte && !(value <= bounds->lte)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int lc_pouch_query_index_term_reader_matches_value(
+    lc_pouch_query_index_term_reader *reader, const char *value_hex,
+    int *matched, lc_error *error) {
+  char *value_text;
+  double number;
+
+  if (matched == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index term match requires output", NULL,
+                        NULL, NULL);
+  }
+  *matched = 0;
+  if (reader == NULL || value_hex == NULL) {
+    return LC_OK;
+  }
+  if (reader->prefix_match) {
+    *matched = strncmp(value_hex, reader->value_hex,
+                       strlen(reader->value_hex)) == 0;
+    return LC_OK;
+  }
+  if (reader->contains_match) {
+    *matched = strstr(value_hex, reader->value_hex) != NULL;
+    return LC_OK;
+  }
+  if (reader->range_match) {
+    value_text =
+        lc_pouch_query_index_hex_decode(reader->allocator, value_hex, error);
+    if (value_text == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    if (lc_pouch_query_index_parse_number_value(value_text, &number)) {
+      *matched = lc_pouch_query_index_range_contains_value(
+          &reader->range_bounds, number);
+    }
+    lc_free_with_allocator(reader->allocator, value_text);
+    return LC_OK;
+  }
+  *matched = strcmp(value_hex, reader->value_hex) == 0;
+  return LC_OK;
+}
+
 static int lc_pouch_query_index_parse_and_visit_term(
     const char *line_bytes, lc_pouch_query_index_term_reader *reader,
     lc_error *error) {
@@ -1240,6 +1324,7 @@ static int lc_pouch_query_index_parse_and_visit_term(
   char *key_hex;
   char *key;
   size_t line_len;
+  int matched;
   int rc;
 
   if (line_bytes == NULL || reader == NULL || reader->visit == NULL) {
@@ -1275,12 +1360,12 @@ static int lc_pouch_query_index_parse_and_visit_term(
                         NULL, NULL);
   }
   rc = LC_OK;
-  if (strcmp(field_hex, reader->field_hex) == 0 &&
-      ((reader->prefix_match &&
-        strncmp(value_hex, reader->value_hex, strlen(reader->value_hex)) ==
-            0) ||
-       (reader->contains_match && strstr(value_hex, reader->value_hex) != NULL) ||
-       (!reader->prefix_match && strcmp(value_hex, reader->value_hex) == 0))) {
+  matched = 0;
+  if (strcmp(field_hex, reader->field_hex) == 0) {
+    rc = lc_pouch_query_index_term_reader_matches_value(reader, value_hex,
+                                                        &matched, error);
+  }
+  if (rc == LC_OK && matched) {
     key = lc_pouch_query_index_hex_decode(reader->allocator, key_hex, error);
     if (key == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -2081,6 +2166,7 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
 static int lc_pouch_query_index_visit_term_match(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *value, int prefix_match, int contains_match,
+    const lc_pouch_query_index_range_bounds *range_bounds,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
@@ -2091,7 +2177,8 @@ static int lc_pouch_query_index_visit_term_match(
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      field == NULL || field[0] == '\0' || value == NULL || visit == NULL ||
+      field == NULL || field[0] == '\0' ||
+      (value == NULL && range_bounds == NULL) || visit == NULL ||
       index_seq == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index term lookup requires pouch, "
@@ -2104,7 +2191,9 @@ static int lc_pouch_query_index_visit_term_match(
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   field_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, field);
-  value_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, value);
+  value_hex = range_bounds == NULL
+                  ? lc_pouch_query_index_hex_encode(&pouch->allocator, value)
+                  : lc_strdup_with_allocator(&pouch->allocator, "");
   if (field_hex == NULL || value_hex == NULL) {
     lc_free_with_allocator(&pouch->allocator, field_hex);
     lc_free_with_allocator(&pouch->allocator, value_hex);
@@ -2119,6 +2208,10 @@ static int lc_pouch_query_index_visit_term_match(
   reader.value_hex = value_hex;
   reader.prefix_match = prefix_match;
   reader.contains_match = contains_match;
+  if (range_bounds != NULL) {
+    reader.range_match = 1;
+    reader.range_bounds = *range_bounds;
+  }
   reader.visit = visit;
   reader.context = context;
   rc = lc_pouch_query_index_read(sidecar_path, &sidecar, error);
@@ -2154,8 +2247,8 @@ int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
                                       unsigned long *index_seq,
                                       lc_error *error) {
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, value, 0, 0, visit, context, index_seq,
-      error);
+      pouch, namespace_name, field, value, 0, 0, NULL, visit, context,
+      index_seq, error);
 }
 
 int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
@@ -2173,8 +2266,8 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, prefix, 1, 0, visit, context, index_seq,
-      error);
+      pouch, namespace_name, field, prefix, 1, 0, NULL, visit, context,
+      index_seq, error);
 }
 
 int lc_pouch_query_index_visit_contains(
@@ -2188,8 +2281,26 @@ int lc_pouch_query_index_visit_contains(
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, needle, 0, 1, visit, context, index_seq,
-      error);
+      pouch, namespace_name, field, needle, 0, 1, NULL, visit, context,
+      index_seq, error);
+}
+
+int lc_pouch_query_index_visit_range(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const lc_pouch_query_index_range_bounds *bounds,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error) {
+  if (bounds == NULL ||
+      (!bounds->has_gt && !bounds->has_gte && !bounds->has_lt &&
+       !bounds->has_lte)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index range lookup requires numeric "
+                        "bounds",
+                        NULL, NULL, NULL);
+  }
+  return lc_pouch_query_index_visit_term_match(
+      pouch, namespace_name, field, NULL, 0, 0, bounds, visit, context,
+      index_seq, error);
 }
 
 int lc_pouch_query_index_visit_exists(lc_pouch *pouch,
