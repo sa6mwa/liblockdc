@@ -1588,6 +1588,103 @@ static char *lc_pouch_staged_storage_key(const char *key, const char *txn_id,
   return staged_key;
 }
 
+static int lc_pouch_client_prepare_txn_stage_options(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *txn_id, lc_pouch_state_write_options *options,
+    lc_error *error) {
+  lc_pouch_state_read_result committed;
+  lc_pouch_state_read_result staged;
+  const lc_pouch_state_read_result *precondition_source;
+  char *staged_key;
+  int rc;
+
+  if (client == NULL || namespace_name == NULL || key == NULL ||
+      !lc_pouch_txn_id_present(txn_id) || options == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction stage options require client, "
+                        "namespace, key, txn_id, and options",
+                        NULL, NULL, NULL);
+  }
+  memset(&committed, 0, sizeof(committed));
+  memset(&staged, 0, sizeof(staged));
+  staged_key = lc_pouch_staged_storage_key(key, txn_id, error);
+  if (staged_key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  rc = lc_pouch_state_read(client->pouch, namespace_name, key, &committed,
+                           error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_read(client->pouch, namespace_name, staged_key,
+                             &staged, error);
+  }
+  precondition_source = staged.found ? &staged : &committed;
+  if (rc == LC_OK && options->expected_etag != NULL) {
+    if (!precondition_source->found ||
+        strcmp(precondition_source->etag, options->expected_etag) != 0) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state etag precondition failed", NULL, NULL,
+                        NULL);
+    }
+  }
+  if (rc == LC_OK && options->has_expected_version) {
+    if (!precondition_source->found ||
+        precondition_source->version != options->expected_version) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state version precondition failed", NULL, NULL,
+                        NULL);
+    }
+  }
+  if (rc == LC_OK && !options->has_query_hidden &&
+      precondition_source->found && precondition_source->has_query_hidden) {
+    options->has_query_hidden = 1;
+    options->query_hidden = precondition_source->query_hidden;
+  }
+  if (rc == LC_OK && !staged.found) {
+    options->expected_etag = NULL;
+    options->has_expected_version = 0;
+    options->expected_version = 0UL;
+  }
+  free(staged_key);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &staged);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &committed);
+  return rc;
+}
+
+static int lc_pouch_client_prepare_txn_mutation_file(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *txn_id, const char *const *mutations, size_t mutation_count,
+    const lc_mutation_parse_options *parse_options,
+    lc_pouch_mutate_file *out, lc_error *error) {
+  lc_pouch_state_read_result staged;
+  char *staged_key;
+  const char *mutation_key;
+  int rc;
+
+  if (client == NULL || namespace_name == NULL || key == NULL ||
+      !lc_pouch_txn_id_present(txn_id) || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction mutation requires client, "
+                        "namespace, key, txn_id, and out",
+                        NULL, NULL, NULL);
+  }
+  memset(&staged, 0, sizeof(staged));
+  staged_key = lc_pouch_staged_storage_key(key, txn_id, error);
+  if (staged_key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  rc = lc_pouch_state_read(client->pouch, namespace_name, staged_key, &staged,
+                           error);
+  if (rc == LC_OK) {
+    mutation_key = staged.found ? staged_key : key;
+    rc = lc_pouch_prepare_mutation_file(client, namespace_name, mutation_key,
+                                        mutations, mutation_count,
+                                        parse_options, out, error);
+  }
+  lc_pouch_state_read_result_cleanup(&client->allocator, &staged);
+  free(staged_key);
+  return rc;
+}
+
 static int lc_pouch_storage_key_has_staging_suffix(const char *key) {
   return key != NULL && strstr(key, "/.staging/") != NULL;
 }
@@ -4239,6 +4336,7 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   lc_client_handle *client;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
+  const char *namespace_name;
   int rc;
 
   if (self == NULL || req == NULL || src == NULL || out == NULL) {
@@ -4255,6 +4353,7 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   memset(out, 0, sizeof(*out));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
   options.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
   options.expected_etag = req->if_state_etag;
@@ -4267,10 +4366,19 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
     options.expected_version = (unsigned long)req->if_version;
     options.has_expected_version = 1;
   }
-  rc = lc_pouch_state_write(
-      client->pouch,
-      lc_pouch_client_namespace(client, req->lease.namespace_name),
-      req->lease.key, src, &options, &write_result, error);
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    rc = lc_pouch_client_prepare_txn_stage_options(
+        client, namespace_name, req->lease.key, req->lease.txn_id, &options,
+        error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_stage_write(client->pouch, namespace_name,
+                                      req->lease.key, req->lease.txn_id, src,
+                                      &options, &write_result, error);
+    }
+  } else {
+    rc = lc_pouch_state_write(client->pouch, namespace_name, req->lease.key,
+                              src, &options, &write_result, error);
+  }
   if (rc == LC_OK) {
     rc = lc_pouch_client_copy_update_metadata(&write_result, out, error);
   }
@@ -4305,9 +4413,15 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   source = NULL;
   namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
 
-  rc = lc_pouch_prepare_mutation_file(client, namespace_name, req->lease.key,
-                                      req->mutations, req->mutation_count,
-                                      NULL, &mutated, error);
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    rc = lc_pouch_client_prepare_txn_mutation_file(
+        client, namespace_name, req->lease.key, req->lease.txn_id,
+        req->mutations, req->mutation_count, NULL, &mutated, error);
+  } else {
+    rc = lc_pouch_prepare_mutation_file(client, namespace_name, req->lease.key,
+                                        req->mutations, req->mutation_count,
+                                        NULL, &mutated, error);
+  }
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -4330,8 +4444,19 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
     options.expected_version = (unsigned long)req->if_version;
     options.has_expected_version = 1;
   }
-  rc = lc_pouch_state_write(client->pouch, namespace_name, req->lease.key,
-                            source, &options, &write_result, error);
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    rc = lc_pouch_client_prepare_txn_stage_options(
+        client, namespace_name, req->lease.key, req->lease.txn_id, &options,
+        error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_stage_write(client->pouch, namespace_name,
+                                      req->lease.key, req->lease.txn_id,
+                                      source, &options, &write_result, error);
+    }
+  } else {
+    rc = lc_pouch_state_write(client->pouch, namespace_name, req->lease.key,
+                              source, &options, &write_result, error);
+  }
   if (rc == LC_OK) {
     rc = lc_pouch_client_copy_mutate_metadata(&write_result, out, error);
   }
@@ -6835,10 +6960,16 @@ static int lc_pouch_lease_mutate_method(lc_lease *self,
   lc_update_opts_init(&opts);
   source = NULL;
 
-  rc = lc_pouch_prepare_mutation_file(lease->client, lease->namespace_name,
-                                      lease->key, req->mutations,
-                                      req->mutation_count, NULL, &mutated,
-                                      error);
+  if (lc_pouch_txn_id_present(lease->txn_id)) {
+    rc = lc_pouch_client_prepare_txn_mutation_file(
+        lease->client, lease->namespace_name, lease->key, lease->txn_id,
+        req->mutations, req->mutation_count, NULL, &mutated, error);
+  } else {
+    rc = lc_pouch_prepare_mutation_file(lease->client, lease->namespace_name,
+                                        lease->key, req->mutations,
+                                        req->mutation_count, NULL, &mutated,
+                                        error);
+  }
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -6893,9 +7024,15 @@ static int lc_pouch_lease_mutate_local_method(lc_lease *self,
   if (clock_gettime(CLOCK_REALTIME, &parse_options.now) == 0) {
     parse_options.has_now = 1;
   }
-  rc = lc_pouch_prepare_mutation_file(
-      lease->client, lease->namespace_name, lease->key, req->mutations,
-      req->mutation_count, &parse_options, &mutated, error);
+  if (lc_pouch_txn_id_present(lease->txn_id)) {
+    rc = lc_pouch_client_prepare_txn_mutation_file(
+        lease->client, lease->namespace_name, lease->key, lease->txn_id,
+        req->mutations, req->mutation_count, &parse_options, &mutated, error);
+  } else {
+    rc = lc_pouch_prepare_mutation_file(
+        lease->client, lease->namespace_name, lease->key, req->mutations,
+        req->mutation_count, &parse_options, &mutated, error);
+  }
   if (rc != LC_OK) {
     goto cleanup;
   }

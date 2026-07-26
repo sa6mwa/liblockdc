@@ -2277,6 +2277,228 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_txn_decisions_stage_state_update_mutate_and_index_refresh(
+    void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  const char *mutations[2];
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_mutate_op mutate_op;
+  lc_mutate_res mutate_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture before_commit;
+  pouch_query_key_capture after_commit;
+  pouch_query_key_capture after_rollback;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_ack_op ack_op;
+  lc_ack_res ack_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_pouch_state_read_result read_result;
+  lc_message *message;
+  lc_error error;
+  char root[512];
+  char state_bytes[256];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  message = NULL;
+  lc_update_req_init(&update_req);
+  memset(&update_res, 0, sizeof(update_res));
+  lc_mutate_op_init(&mutate_op);
+  memset(&mutate_res, 0, sizeof(mutate_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&before_commit, 0, sizeof(before_commit));
+  memset(&after_commit, 0, sizeof(after_commit));
+  memset(&after_rollback, 0, sizeof(after_rollback));
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  memset(&ack_op, 0, sizeof(ack_op));
+  memset(&ack_res, 0, sizeof(ack_res));
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-state-index-mixed", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  update_req.lease.namespace_name = "docs/txn-index";
+  update_req.lease.key = "doc/txn";
+  update_req.lease.txn_id = "txn-state-index";
+  update_req.content_type = "application/json";
+  rc = lc_source_from_memory(
+      "{\"category\":\"planning\",\"counter\":41,\"kind\":\"txn\"}",
+      strlen("{\"category\":\"planning\",\"counter\":41,\"kind\":\"txn\"}"),
+      &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  mutations[0] = "/counter++";
+  mutations[1] = "/status=\"mutated\"";
+  mutate_op.lease.namespace_name = "docs/txn-index";
+  mutate_op.lease.key = "doc/txn";
+  mutate_op.lease.txn_id = "txn-state-index";
+  mutate_op.mutations = mutations;
+  mutate_op.mutation_count = 2U;
+  mutate_op.if_version = update_res.new_version;
+  mutate_op.has_if_version = 1;
+  rc = client->mutate(client, &mutate_op, &mutate_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
+  lc_mutate_res_cleanup(&mutate_res);
+
+  enqueue_req.namespace_name = "docs/txn-index";
+  enqueue_req.queue = "txn-mixed";
+  enqueue_req.visibility_timeout_seconds = 120L;
+  rc = lc_source_from_memory("mixed-job", strlen("mixed-job"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  dequeue_req.namespace_name = "docs/txn-index";
+  dequeue_req.queue = "txn-mixed";
+  dequeue_req.owner = "worker-mixed";
+  dequeue_req.txn_id = "txn-state-index";
+  dequeue_req.visibility_timeout_seconds = 120L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->txn_id, "txn-state-index");
+  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.queue = message->queue;
+  ack_op.message.message_id = message->message_id;
+  ack_op.message.lease_id = message->lease_id;
+  ack_op.message.txn_id = message->txn_id;
+  ack_op.message.fencing_token = message->fencing_token;
+  ack_op.message.meta_etag = message->meta_etag;
+  rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(ack_res.acked, 1);
+  lc_ack_res_cleanup(&ack_res);
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/txn-index";
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &before_commit,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(before_commit.count, 0);
+  lc_query_res_cleanup(&query_res);
+
+  stats_req.namespace_name = "docs/txn-index";
+  stats_req.queue = "txn-mixed";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.pending_candidates, 1);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  participant.namespace_name = "docs/txn-index";
+  participant.key = "doc/txn";
+  participant.backend_hash = "backend-state";
+  decision_req.txn_id = "txn-state-index";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  rc = client->query_keys(client, &query_req, &handler, &after_commit,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(after_commit.count, 1);
+  assert_true(pouch_query_capture_has(&after_commit, "doc/txn"));
+  lc_query_res_cleanup(&query_res);
+
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "docs/txn-index", "doc/txn", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, state_bytes, sizeof(state_bytes));
+  assert_true(bytes_contain_text(state_bytes, strlen(state_bytes),
+                                 "\"counter\":42"));
+  assert_true(bytes_contain_text(state_bytes, strlen(state_bytes),
+                                 "\"status\":\"mutated\""));
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  message->close(message);
+  message = NULL;
+
+  lc_update_req_init(&update_req);
+  update_req.lease.namespace_name = "docs/txn-index";
+  update_req.lease.key = "doc/rollback";
+  update_req.lease.txn_id = "txn-state-rollback";
+  update_req.content_type = "application/json";
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"counter\":7}",
+                             strlen("{\"category\":\"planning\",\"counter\":7}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
+
+  participant.key = "doc/rollback";
+  decision_req.txn_id = "txn-state-rollback";
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  rc = client->query_keys(client, &query_req, &handler, &after_rollback,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(after_rollback.count, 1);
+  assert_true(pouch_query_capture_has(&after_rollback, "doc/txn"));
+  assert_false(pouch_query_capture_has(&after_rollback, "doc/rollback"));
+  lc_query_res_cleanup(&query_res);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_recovery_applies_queue_side_effects(void **state) {
   lc_client *client;
   lc_pouch *pouch;
@@ -5786,6 +6008,8 @@ int main(void) {
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
       cmocka_unit_test(test_txn_decisions_apply_queue_side_effects),
+      cmocka_unit_test(
+          test_txn_decisions_stage_state_update_mutate_and_index_refresh),
       cmocka_unit_test(test_txn_recovery_applies_queue_side_effects),
       cmocka_unit_test(
           test_client_queue_mutations_touch_notification_marker),

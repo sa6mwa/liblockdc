@@ -99,8 +99,14 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
         message, ack/nack/extend write hidden staged queue records, commit
         promotes them, rollback discards them, and open-time decision replay
         applies the same queued side effects.
-      - [ ] Extend transaction participant replay to remaining query/index
-        refresh wakeups and mixed object/queue integration coverage.
+      - [x] Route public transaction-bound state `update`, `save`, and
+        `mutate` through hidden staged state; indexed `refresh=wait_for`
+        queries skip staged state before commit, see it after participant
+        commit, discard rollback state, and a mixed state-plus-queue ack
+        transaction commits both side effects together.
+      - [ ] Extend transaction participant replay to remaining watcher wakeups,
+        restart query/index refresh coupling, and broader mixed object/queue
+        integration coverage.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.
