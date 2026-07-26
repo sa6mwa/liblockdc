@@ -71,8 +71,8 @@ scenario list explicitly when doing exhaustive perf characterization.
 `benchmark-pouch-go-acceptance` pins the scale suite to 4096 documents and the
 `EqSparse`, `RangeHalf`, `InTags`, and `ContainsMessage` scenarios across
 document-return, key-return, indexed, and scan engines. This keeps the default
-gate inside the intended short iteration envelope while covering the current
-known text-search gap.
+gate inside the intended short iteration envelope while covering representative
+low-match, broad-match, array-membership, and text-search cases.
 
 - `BenchmarkPouchCMediumLQLDocuments`
 - `BenchmarkPouchCMediumLQLKeys`

@@ -642,8 +642,11 @@ Latest release targets confirmed on 2026-07-23:
         live-state, summary, hidden, owner, and doc-table checks.
         Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
         pouch `EqSparse` measured about 0.78 ms and Go disk about 49.3 ms;
-        pouch `InTags` measured about 4.73 ms and Go disk about 2.46 ms, so
-        `InTags` remains a persisted-dictionary/posting-union parity gap.
+        pouch `InTags` measured about 4.73 ms and Go disk about 2.46 ms in
+        that run. A later focused `benchmark-pouch-go-acceptance` sample on
+        2026-07-26 measured pouch `InTags` at about 7.23 ms C-side and Go disk
+        at about 46.9 ms, so this is now treated as a benchmark-noise watch
+        item rather than a confirmed persisted-dictionary/posting-union gap.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
@@ -1086,8 +1089,12 @@ Latest release targets confirmed on 2026-07-23:
     `pouch://` client instance with the same full-form LQL selector shape.
   - [ ] Mirror more of the Go lockd disk benchmark suite shape in the Go/cgo
     module so pouch and Go disk backend results can be compared case by case.
-  - [ ] Keep pouch timing on the C side and report C-measured operation time
+  - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
+    Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`
+    acceptance run: the Go benchmark reported pouch `c-ns/op`,
+    `page1-c-ns/op`, and `pageN-c-ns/op` metrics from the live C benchmark
+    helper while the paired Go lockd disk case reported Go-client page timing.
 - [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
   introduced.
   - [ ] Add pouch fuzz targets/corpora for segmented manifest repair, snapshot
