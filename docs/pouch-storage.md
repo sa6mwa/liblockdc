@@ -1391,11 +1391,12 @@ generation files under
 `<root>/%2elockd/logstore/query.index.docs/<escaped-namespace>.lcpdtg`
 during full query-index rebuilds and after successful compaction replay. The
 current query path still rebuilds the live in-memory global document table from
-summary refresh state; exact-term generations are the first reader family cut
-over to namespace-local persisted docIDs and remap through these document-table
-files when loading prepared exact postings. The remaining reader families and
-result-page selection still need the same namespace-local doc table cutover
-before compiled reader files can stop depending on the global docID table.
+summary refresh state; exact-term and field-presence generations are the first
+reader families cut over to namespace-local persisted docIDs and remap through
+these document-table files when loading prepared postings. The remaining
+reader families and result-page selection still need the same namespace-local
+doc table cutover before compiled reader files can stop depending on the
+global docID table.
 Even before that cutover, the query path no longer depends on direct
 summary-array-position casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
@@ -1427,8 +1428,11 @@ The term field is the namespace-qualified JSON Pointer and the term value is
 empty, so positive `exists` readers can merge identity-matched per-namespace
 files into the prepared exists cache before compiling from sidecar postings.
 Absent, stale, or corrupt exists generation files trigger the same namespace
-refresh and republish path; sidecar compilation remains the fallback when a
-current generation does not contain the requested field-presence term.
+refresh and republish path. Exists generation postings are also stored with
+namespace-local docIDs and remapped through the identity-matched document-table
+generation before entering the prepared exists cache. Sidecar compilation
+remains the fallback when a current generation does not contain the requested
+field-presence term.
 Numeric ranges now have the corresponding index-layer generation foundation:
 `lc_pouch_index` can encode a namespace-scoped field dictionary whose entries
 are sorted canonical `n:` values plus residual docID postings under the same

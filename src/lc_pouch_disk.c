@@ -7564,14 +7564,17 @@ static int lc_pouch_disk_read_query_exists_generation(
 static int lc_pouch_disk_merge_query_exists_generation(
     lc_pouch_disk_store *store,
     const lc_pouch_index_term_generation *generation,
+    const lc_pouch_index_doc_generation *docs,
     lc_pouch_index_prepared_term_cache *cache, lc_error *error) {
   lc_pouch_index_doc_id_set decoded;
+  lc_pouch_index_doc_id_set remapped;
   size_t index;
 
-  if (store == NULL || generation == NULL || cache == NULL) {
+  if (store == NULL || generation == NULL || docs == NULL || cache == NULL) {
     return LC_OK;
   }
   memset(&decoded, 0, sizeof(decoded));
+  memset(&remapped, 0, sizeof(remapped));
   for (index = 0U; index < generation->terms.count; ++index) {
     const lc_pouch_index_term_entry *term;
     lc_pouch_index_term_id cache_term_id;
@@ -7585,15 +7588,25 @@ static int lc_pouch_disk_merge_query_exists_generation(
                                 "failed to allocate pouch exists query index");
     }
     if (!lc_pouch_index_term_posting_table_decode(
-            &store->allocator, &generation->postings, term->id, &decoded) ||
-        !lc_pouch_index_term_posting_table_put(&store->allocator,
-                                               &cache->postings, cache_term_id,
-                                               decoded.items, decoded.count)) {
+            &store->allocator, &generation->postings, term->id, &decoded)) {
+      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &remapped);
+      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &decoded);
+      return lc_pouch_set_nomem(error,
+                                "failed to load pouch exists query index");
+    }
+    if (lc_pouch_disk_remap_query_generation_doc_ids(
+            store, docs, &decoded, &remapped, error,
+            "failed to load pouch exists query index") != LC_OK ||
+        !lc_pouch_index_term_posting_table_put(
+            &store->allocator, &cache->postings, cache_term_id, remapped.items,
+            remapped.count)) {
+      lc_pouch_index_doc_id_set_cleanup(&store->allocator, &remapped);
       lc_pouch_index_doc_id_set_cleanup(&store->allocator, &decoded);
       return lc_pouch_set_nomem(error,
                                 "failed to load pouch exists query index");
     }
   }
+  lc_pouch_index_doc_id_set_cleanup(&store->allocator, &remapped);
   lc_pouch_index_doc_id_set_cleanup(&store->allocator, &decoded);
   return LC_OK;
 }
@@ -7603,8 +7616,10 @@ static int lc_pouch_disk_load_query_exists_generation_into_cache(
     lc_pouch_index_prepared_term_cache *cache, int *found_out,
     lc_error *error) {
   lc_pouch_index_term_generation generation;
+  lc_pouch_index_doc_generation docs;
   lc_pouch_index_identity identity;
   int found;
+  int docs_found;
   int rc;
 
   if (found_out != NULL) {
@@ -7614,13 +7629,21 @@ static int lc_pouch_disk_load_query_exists_generation_into_cache(
     return LC_OK;
   }
   memset(&generation, 0, sizeof(generation));
+  memset(&docs, 0, sizeof(docs));
   identity = lc_pouch_disk_query_index_identity(store);
   rc = lc_pouch_disk_read_query_exists_generation(
       store, namespace_name, identity, &generation, &found, error);
   if (rc == LC_OK && found) {
-    rc = lc_pouch_disk_merge_query_exists_generation(store, &generation, cache,
-                                                     error);
+    rc = lc_pouch_disk_read_query_doc_generation(
+        store, namespace_name, identity, &docs, &docs_found, error);
+    if (rc == LC_OK && docs_found) {
+      rc = lc_pouch_disk_merge_query_exists_generation(store, &generation,
+                                                       &docs, cache, error);
+    } else if (rc == LC_OK) {
+      found = 0;
+    }
   }
+  lc_pouch_index_doc_generation_cleanup(&store->allocator, &docs);
   lc_pouch_index_term_generation_cleanup(&store->allocator, &generation);
   if (rc == LC_OK && found_out != NULL) {
     *found_out = found;
@@ -15197,6 +15220,7 @@ done:
 static int lc_pouch_disk_build_query_exists_generation(
     lc_pouch_disk_store *store, const char *namespace_name,
     lc_pouch_index_term_generation *generation, lc_error *error) {
+  lc_pouch_index_doc_generation docs;
   lc_pouch_index_doc_id_set *term_doc_ids;
   size_t term_doc_id_capacity;
   size_t position;
@@ -15204,6 +15228,7 @@ static int lc_pouch_disk_build_query_exists_generation(
   int rc;
 
   memset(generation, 0, sizeof(*generation));
+  memset(&docs, 0, sizeof(docs));
   term_doc_ids = NULL;
   term_doc_id_capacity = 0U;
   generation->identity = lc_pouch_disk_query_index_identity(store);
@@ -15212,6 +15237,11 @@ static int lc_pouch_disk_build_query_exists_generation(
   if (generation->namespace_name == NULL) {
     return lc_pouch_set_nomem(
         error, "failed to allocate pouch exists query index namespace");
+  }
+  rc = lc_pouch_disk_build_query_doc_generation(store, namespace_name, &docs,
+                                                error);
+  if (rc != LC_OK) {
+    goto done;
   }
 
   (void)lc_pouch_disk_query_field_find(store, namespace_name, "", "", "",
@@ -15244,9 +15274,8 @@ static int lc_pouch_disk_build_query_exists_generation(
         (summary->has_query_hidden && summary->query_hidden)) {
       continue;
     }
-    if (!lc_pouch_index_doc_table_find(&store->query_doc_table,
-                                       posting->namespace_name, posting->key,
-                                       &doc_id)) {
+    if (!lc_pouch_index_doc_table_find(&docs.docs, posting->namespace_name,
+                                       posting->key, &doc_id)) {
       rc = lc_pouch_set_invalid(
           error, "pouch exists query index references missing docID");
       goto done;
@@ -15295,6 +15324,7 @@ static int lc_pouch_disk_build_query_exists_generation(
   rc = LC_OK;
 
 done:
+  lc_pouch_index_doc_generation_cleanup(&store->allocator, &docs);
   lc_pouch_disk_query_term_doc_id_sets_cleanup(store, term_doc_ids,
                                                term_doc_id_capacity);
   return rc;
@@ -15743,6 +15773,10 @@ static int lc_pouch_disk_refresh_and_publish_query_exists_generation(
   store->replayed_query_index_size = (unsigned long)-1;
   store->replayed_query_index_record_count = 0UL;
   rc = lc_pouch_disk_replay_query_index(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_disk_publish_query_doc_generation(store, namespace_name, error);
   if (rc != LC_OK) {
     return rc;
   }

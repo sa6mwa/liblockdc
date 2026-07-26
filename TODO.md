@@ -520,9 +520,14 @@ Latest release targets confirmed on 2026-07-23:
         document-table generation, prepared exact readers require an
         identity-matched `.lcpdtg`, remap local docIDs back into the current
         global in-memory doc table, and repair corrupt/missing doc generation
-        files through the exact query path. Other reader families and
-        result-page consumption still need the same namespace-local doc table
-        cutover.
+        files through the exact query path.
+      - [x] Cut field-presence generation files over to namespace-local docIDs:
+        exists generation build now stores postings by the matching
+        per-namespace document-table generation, prepared exists readers
+        require and remap through identity-matched `.lcpdtg` files, and corrupt
+        doc generation files repair through the exists query path. Numeric,
+        text, temporal, and result-page consumption still need the same
+        namespace-local doc table cutover.
       - [x] Wire the disk query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
         namespace/key docIDs, candidate readers append table docIDs, and result
