@@ -712,6 +712,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add simple non-wildcard `in` key pagination coverage after
         duplicate-value de-duplication, proving `limit`, `next_start_after`,
         and resumed key-only scans preserve stable key order.
+      - [x] Add disk-level result-cache status coverage for simple
+        non-wildcard `in` key pagination, proving the first page after an
+        index-generation change populates the normalized docID result cache and
+        the resumed cursor page reuses it.
       - [x] Wire the result cache into simple positive numeric `range` scans
         using a length-prefixed bound-aware plan key, with post-write
         generation-miss coverage.
