@@ -611,8 +611,15 @@ Latest release targets confirmed on 2026-07-23:
         docID vectors, rebuild lowercase ASCII `g:` trigram term postings on
         build/decode, preserve existing prefix/contains case-folding semantics,
         and round-trip under index sequence plus segmented manifest identity
-        with corruption/truncation rejection coverage. Disk publication and
-        prepared-reader consumption are still pending.
+        with corruption/truncation rejection coverage.
+      - [x] Publish and consume immutable text/trigram generation files from
+        the disk bridge for simple primary `prefix` and `contains` plans: full
+        query-index rebuilds and compaction publish per-namespace text
+        generations, prepared simple text readers materialize identity-matched
+        files into query-bound adaptive postings, and missing/stale/corrupt
+        files repair on the simple text query path. Compound text paths still
+        use the sidecar compiler so secondary predicate filtering remains
+        explicit.
       - [x] Compile filtered exact sidecar candidates into a per-request
         term-ID posting table for equality and `in` docID readers, preserving
         existing live-state and secondary predicate guards while exercising
