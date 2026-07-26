@@ -33,9 +33,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Touch per-namespace writer markers after committed segmented state
     mutations, with monotonic sequence payloads that alternate size for
     coarse-mtime filesystems.
-  - [ ] Add reader-side marker snapshots, marker-directory fast paths, periodic
-    forced refresh, snapshot creation, compaction scheduling, and obsolete-file
-    cleanup.
+  - [x] Add reader-side peer marker snapshots that ignore the current writer
+    marker and compare peers by deterministic name, size, and modification-time
+    fingerprints.
+  - [ ] Add marker-directory fast paths, periodic forced refresh, snapshot
+    creation, compaction scheduling, and obsolete-file cleanup.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the

@@ -1,5 +1,6 @@
 #include "lc_pouch_namespace.h"
 
+#include "lc_api_internal.h"
 #include "lc_pouch_format.h"
 #include "lc_pouch_path.h"
 
@@ -7,10 +8,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define LC_POUCH_SEGMENT_PREFIX "seg-"
 #define LC_POUCH_SEGMENT_SUFFIX ".log"
+
+typedef struct lc_pouch_marker_entry {
+  char *name;
+  long size;
+  long mtime;
+} lc_pouch_marker_entry;
 
 char *lc_pouch_namespace_path(const lc_allocator *allocator,
                               const char *root_path,
@@ -187,6 +195,152 @@ static int lc_pouch_namespace_manifest_write(
   return rc;
 }
 
+static int lc_pouch_marker_entry_compare(const void *left,
+                                         const void *right) {
+  const lc_pouch_marker_entry *a;
+  const lc_pouch_marker_entry *b;
+
+  a = (const lc_pouch_marker_entry *)left;
+  b = (const lc_pouch_marker_entry *)right;
+  return strcmp(a->name, b->name);
+}
+
+static void lc_pouch_marker_entries_cleanup(
+    const lc_allocator *allocator, lc_pouch_marker_entry *entries,
+    size_t count) {
+  size_t i;
+
+  if (entries == NULL) {
+    return;
+  }
+  for (i = 0U; i < count; ++i) {
+    lc_free_with_allocator(allocator, entries[i].name);
+  }
+  lc_free_with_allocator(allocator, entries);
+}
+
+static int lc_pouch_marker_entries_append(
+    const lc_allocator *allocator, lc_pouch_marker_entry **entries,
+    size_t *count, size_t *capacity, const char *name, long size, long mtime,
+    lc_error *error) {
+  lc_pouch_marker_entry *grown;
+  char *name_copy;
+  size_t next_capacity;
+
+  if (*count == *capacity) {
+    next_capacity = *capacity == 0U ? 8U : *capacity * 2U;
+    if (next_capacity < *capacity ||
+        next_capacity > ((size_t)-1) / sizeof(**entries)) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch marker snapshot", NULL,
+                          NULL, NULL);
+    }
+    grown = (lc_pouch_marker_entry *)lc_realloc_with_allocator(
+        allocator, *entries, next_capacity * sizeof(**entries));
+    if (grown == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch marker snapshot", NULL,
+                          NULL, NULL);
+    }
+    memset(grown + *capacity, 0,
+           (next_capacity - *capacity) * sizeof(**entries));
+    *entries = grown;
+    *capacity = next_capacity;
+  }
+  name_copy = lc_strdup_with_allocator(allocator, name);
+  if (name_copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch marker name", NULL, NULL,
+                        NULL);
+  }
+  (*entries)[*count].name = name_copy;
+  (*entries)[*count].size = size;
+  (*entries)[*count].mtime = mtime;
+  ++*count;
+  return LC_OK;
+}
+
+static int lc_pouch_marker_fingerprint_append(
+    const lc_allocator *allocator, char **fingerprint, size_t *length,
+    size_t *capacity, const char *text, lc_error *error) {
+  char *grown;
+  size_t text_len;
+  size_t required;
+  size_t next_capacity;
+
+  text_len = strlen(text);
+  required = *length + text_len + 1U;
+  if (required < *length) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch marker fingerprint", NULL,
+                        NULL, NULL);
+  }
+  if (required > *capacity) {
+    next_capacity = *capacity == 0U ? 128U : *capacity;
+    while (next_capacity < required) {
+      if (next_capacity > ((size_t)-1) / 2U) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch marker fingerprint", NULL,
+                            NULL, NULL);
+      }
+      next_capacity *= 2U;
+    }
+    grown = (char *)lc_realloc_with_allocator(allocator, *fingerprint,
+                                              next_capacity);
+    if (grown == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch marker fingerprint", NULL,
+                          NULL, NULL);
+    }
+    *fingerprint = grown;
+    *capacity = next_capacity;
+  }
+  memcpy(*fingerprint + *length, text, text_len);
+  *length += text_len;
+  (*fingerprint)[*length] = '\0';
+  return LC_OK;
+}
+
+static int lc_pouch_marker_snapshot_build_fingerprint(
+    const lc_allocator *allocator, lc_pouch_marker_entry *entries,
+    size_t count, char **out, lc_error *error) {
+  char *fingerprint;
+  size_t length;
+  size_t capacity;
+  size_t i;
+  int rc;
+
+  fingerprint = NULL;
+  length = 0U;
+  capacity = 0U;
+  rc = lc_pouch_marker_fingerprint_append(allocator, &fingerprint, &length,
+                                          &capacity, "", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  for (i = 0U; i < count; ++i) {
+    char line[512];
+    int written;
+
+    written = snprintf(line, sizeof(line), "%s size=%ld mtime=%ld\n",
+                       entries[i].name, entries[i].size, entries[i].mtime);
+    if (written < 0 || (size_t)written >= sizeof(line)) {
+      lc_free_with_allocator(allocator, fingerprint);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to format pouch marker fingerprint", NULL,
+                          NULL, NULL);
+    }
+    rc = lc_pouch_marker_fingerprint_append(allocator, &fingerprint, &length,
+                                            &capacity, line, error);
+    if (rc != LC_OK) {
+      lc_free_with_allocator(allocator, fingerprint);
+      return rc;
+    }
+  }
+  *out = fingerprint;
+  return LC_OK;
+}
+
 int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
                                      const char *root_path,
                                      const char *namespace_name,
@@ -325,6 +479,118 @@ int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
   rc = lc_pouch_path_write_text_file(marker_path, text, error);
   lc_free_with_allocator(allocator, marker_path);
   return rc;
+}
+
+int lc_pouch_namespace_marker_snapshot_read(
+    const lc_allocator *allocator, const char *namespace_path,
+    lc_pouch_namespace_marker_snapshot *out, lc_error *error) {
+  lc_pouch_marker_entry *entries;
+  char *markers_path;
+  char self_leaf[96];
+  DIR *dir;
+  struct dirent *entry;
+  size_t count;
+  size_t capacity;
+  int rc;
+
+  if (namespace_path == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch marker snapshot requires namespace path and "
+                        "out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  entries = NULL;
+  markers_path = lc_pouch_path_join(allocator, namespace_path, "markers");
+  if (markers_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch markers path", NULL, NULL,
+                        NULL);
+  }
+  dir = opendir(markers_path);
+  if (dir == NULL) {
+    lc_free_with_allocator(allocator, markers_path);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open pouch marker directory", NULL, NULL,
+                        NULL);
+  }
+  snprintf(self_leaf, sizeof(self_leaf), "writer-%ld.marker", (long)getpid());
+  count = 0U;
+  capacity = 0U;
+  rc = LC_OK;
+  while ((entry = readdir(dir)) != NULL) {
+    char *marker_path;
+    struct stat st;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
+        strcmp(entry->d_name, self_leaf) == 0) {
+      continue;
+    }
+    marker_path = lc_pouch_path_join(allocator, markers_path, entry->d_name);
+    if (marker_path == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch marker path", NULL, NULL,
+                        NULL);
+      break;
+    }
+    if (stat(marker_path, &st) == 0 && S_ISREG(st.st_mode)) {
+      rc = lc_pouch_marker_entries_append(allocator, &entries, &count,
+                                          &capacity, entry->d_name,
+                                          (long)st.st_size, (long)st.st_mtime,
+                                          error);
+      if (rc != LC_OK) {
+        lc_free_with_allocator(allocator, marker_path);
+        break;
+      }
+    }
+    lc_free_with_allocator(allocator, marker_path);
+  }
+  closedir(dir);
+  lc_free_with_allocator(allocator, markers_path);
+  if (rc != LC_OK) {
+    lc_pouch_marker_entries_cleanup(allocator, entries, count);
+    return rc;
+  }
+  if (count > 1U) {
+    qsort(entries, count, sizeof(*entries), lc_pouch_marker_entry_compare);
+  }
+  rc = lc_pouch_marker_snapshot_build_fingerprint(allocator, entries, count,
+                                                  &out->fingerprint, error);
+  if (rc != LC_OK) {
+    lc_pouch_marker_entries_cleanup(allocator, entries, count);
+    return rc;
+  }
+  out->marker_count = (unsigned long)count;
+  lc_pouch_marker_entries_cleanup(allocator, entries, count);
+  return LC_OK;
+}
+
+int lc_pouch_namespace_marker_snapshot_changed(
+    const lc_pouch_namespace_marker_snapshot *before,
+    const lc_pouch_namespace_marker_snapshot *after) {
+  const char *before_fingerprint;
+  const char *after_fingerprint;
+
+  if (before == NULL || after == NULL) {
+    return 1;
+  }
+  if (before->marker_count != after->marker_count) {
+    return 1;
+  }
+  before_fingerprint =
+      before->fingerprint != NULL ? before->fingerprint : "";
+  after_fingerprint = after->fingerprint != NULL ? after->fingerprint : "";
+  return strcmp(before_fingerprint, after_fingerprint) != 0;
+}
+
+void lc_pouch_namespace_marker_snapshot_cleanup(
+    const lc_allocator *allocator,
+    lc_pouch_namespace_marker_snapshot *snapshot) {
+  if (snapshot == NULL) {
+    return;
+  }
+  lc_free_with_allocator(allocator, snapshot->fingerprint);
+  memset(snapshot, 0, sizeof(*snapshot));
 }
 
 void lc_pouch_namespace_manifest_cleanup(

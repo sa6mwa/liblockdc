@@ -1754,9 +1754,10 @@ marker hints cannot hide external rewrites indefinitely.
 The redesigned pouch backend currently writes per-namespace
 `markers/writer-<pid>.marker` files after segmented state mutations. Marker
 payloads include a monotonic writer sequence and alternate payload size across
-adjacent writes. Reader-side peer-marker snapshots, marker-directory fast paths,
-and periodic forced refresh remain to be rebuilt on top of that write-side
-primitive.
+adjacent writes. It also has deterministic reader-side peer-marker snapshots
+that ignore the current writer marker and compare peer markers by name, size,
+and modification time. Marker-directory fast paths and periodic forced refresh
+remain to be rebuilt on top of these primitives.
 
 Refresh needs two modes:
 
