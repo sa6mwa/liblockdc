@@ -1405,7 +1405,15 @@ files into the prepared exists cache before compiling from sidecar postings.
 Absent, stale, or corrupt exists generation files trigger the same namespace
 refresh and republish path; sidecar compilation remains the fallback when a
 current generation does not contain the requested field-presence term.
-Range/text generations are still pending.
+Numeric ranges now have the corresponding index-layer generation foundation:
+`lc_pouch_index` can encode a namespace-scoped field dictionary whose entries
+are sorted canonical `n:` values plus residual docID postings under the same
+index sequence and segmented manifest identity. Range lookup uses canonical
+open/closed lower and upper bounds over the ordered value table, while residual
+docIDs preserve a conservative superset for values that still require higher
+level validation. Disk publication and prepared `range` reader consumption of
+that numeric generation are still pending, and text generations are still
+pending.
 For primary equality plans with negative equality filters, the disk adapter can
 now ask exact-term readers for unfiltered primary and negative term docIDs,
 then lets `lc_pouch_index` subtract sorted negative docID sets from the primary

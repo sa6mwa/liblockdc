@@ -594,6 +594,12 @@ Latest release targets confirmed on 2026-07-23:
         per-namespace exists generations, prepared `exists` readers merge
         identity-matched files before compiling sidecar fallbacks, and
         missing/stale/corrupt files repair on the exists query path.
+      - [x] Add the first immutable numeric-range generation codec in
+        `lc_pouch_index`: namespace-scoped field dictionaries store sorted
+        canonical `n:` values plus residual docID postings under index sequence
+        and segmented manifest identity, with range-bound lookup and
+        corruption/truncation rejection coverage. Disk publication and
+        prepared `range` reader consumption are still pending.
       - [x] Compile filtered exact sidecar candidates into a per-request
         term-ID posting table for equality and `in` docID readers, preserving
         existing live-state and secondary predicate guards while exercising

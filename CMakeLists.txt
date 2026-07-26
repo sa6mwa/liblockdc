@@ -354,6 +354,7 @@ set(lc_sources
     src/lc_pouch_disk.c
     src/lc_pouch_index.c
     src/lc_pouch_index_doc.c
+    src/lc_pouch_index_number.c
     src/lc_pouch_index_posting.c
     src/lc_pouch_index_result.c
     src/lc_pouch_index_temporal.c

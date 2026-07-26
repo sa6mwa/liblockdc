@@ -232,10 +232,10 @@ test_temporal_posting_table_appends_after_bound_and_residuals(void **state) {
       NULL, &table, "/other", 1300, 0, 8U));
   assert_true(lc_pouch_index_temporal_posting_table_add_residual_doc_id(
       NULL, &table, "/created_at", 4U));
-  assert_true(lc_pouch_index_temporal_posting_table_build_postings(NULL,
-                                                                   &table));
-  assert_true(lc_pouch_index_temporal_posting_table_has_field(
-      &table, "/created_at"));
+  assert_true(
+      lc_pouch_index_temporal_posting_table_build_postings(NULL, &table));
+  assert_true(
+      lc_pouch_index_temporal_posting_table_has_field(&table, "/created_at"));
 
   assert_true(lc_pouch_index_temporal_posting_table_append_after(
       NULL, &table, "/created_at", 1100, 0, &doc_ids));
@@ -272,8 +272,8 @@ static void test_temporal_posting_table_codec_round_trips(void **state) {
       NULL, &table, "/other", 1300, 0, 8U));
   assert_true(lc_pouch_index_temporal_posting_table_add_residual_doc_id(
       NULL, &table, "/created_at", 4U));
-  assert_true(lc_pouch_index_temporal_posting_table_build_postings(NULL,
-                                                                   &table));
+  assert_true(
+      lc_pouch_index_temporal_posting_table_build_postings(NULL, &table));
   assert_true(lc_pouch_index_temporal_posting_table_encoded_size(
       &table, &encoded_size));
   encoded = (unsigned char *)malloc(encoded_size);
@@ -307,8 +307,8 @@ static void test_temporal_posting_table_codec_rejects_corruption(void **state) {
 
   assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
       NULL, &table, "/created_at", 1000, 0, 9U));
-  assert_true(lc_pouch_index_temporal_posting_table_build_postings(NULL,
-                                                                   &table));
+  assert_true(
+      lc_pouch_index_temporal_posting_table_build_postings(NULL, &table));
   assert_true(lc_pouch_index_temporal_posting_table_encoded_size(
       &table, &encoded_size));
   encoded = (unsigned char *)malloc(encoded_size);
@@ -355,16 +355,16 @@ static void test_temporal_generation_codec_round_trips(void **state) {
       NULL, &generation.postings, "/created_at", 4U));
   assert_true(lc_pouch_index_temporal_posting_table_build_postings(
       NULL, &generation.postings));
-  assert_true(lc_pouch_index_temporal_generation_encoded_size(
-      &generation, &encoded_size));
+  assert_true(lc_pouch_index_temporal_generation_encoded_size(&generation,
+                                                              &encoded_size));
   encoded = (unsigned char *)malloc(encoded_size);
   assert_non_null(encoded);
   assert_true(lc_pouch_index_temporal_generation_encode(
       &generation, encoded, encoded_size, &written));
   assert_int_equal(written, encoded_size);
 
-  assert_true(lc_pouch_index_temporal_generation_decode(
-      NULL, &decoded, encoded, encoded_size));
+  assert_true(lc_pouch_index_temporal_generation_decode(NULL, &decoded, encoded,
+                                                        encoded_size));
   assert_int_equal(decoded.identity.sequence, 123U);
   assert_int_equal(decoded.identity.manifest_generation, 456U);
   assert_string_equal(decoded.namespace_name, "default");
@@ -397,8 +397,8 @@ static void test_temporal_generation_codec_rejects_corruption(void **state) {
       NULL, &generation.postings, "/created_at", 1000, 0, 9U));
   assert_true(lc_pouch_index_temporal_posting_table_build_postings(
       NULL, &generation.postings));
-  assert_true(lc_pouch_index_temporal_generation_encoded_size(
-      &generation, &encoded_size));
+  assert_true(lc_pouch_index_temporal_generation_encoded_size(&generation,
+                                                              &encoded_size));
   encoded = (unsigned char *)malloc(encoded_size);
   assert_non_null(encoded);
   assert_true(lc_pouch_index_temporal_generation_encode(
@@ -760,6 +760,148 @@ static void test_term_generation_codec_rejects_corruption(void **state) {
   free(bytes);
   lc_pouch_index_term_generation_cleanup(NULL, &decoded);
   lc_pouch_index_term_generation_cleanup(NULL, &generation);
+}
+
+static void
+test_number_posting_table_appends_range_and_residuals(void **state) {
+  lc_pouch_index_number_posting_table table;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {4U, 8U, 99U};
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &table, "/amount", "n:+:15:0", 8U));
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &table, "/amount", "n:-:5:0", 1U));
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &table, "/amount", "n:+:2:0", 2U));
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &table, "/amount", "n:+:1:1", 4U));
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &table, "/amount", "n:+:1:1", 4U));
+  assert_true(lc_pouch_index_number_posting_table_add_residual_doc_id(
+      NULL, &table, "/amount", 99U));
+  assert_true(lc_pouch_index_number_posting_table_build_postings(NULL, &table));
+
+  assert_true(lc_pouch_index_number_posting_table_has_field(&table, "/amount"));
+  assert_true(lc_pouch_index_number_posting_table_append_range(
+      NULL, &table, "/amount", "n:+:2:0", NULL, NULL, "n:+:15:0", &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_number_posting_table_cleanup(NULL, &table);
+}
+
+static void test_number_generation_codec_round_trips(void **state) {
+  lc_pouch_index_number_generation generation;
+  lc_pouch_index_number_generation decoded;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {2U, 3U, 99U};
+  unsigned char *bytes;
+  size_t size;
+  size_t written;
+
+  (void)state;
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  bytes = NULL;
+
+  generation.identity.sequence = 55U;
+  generation.identity.manifest_generation = 66U;
+  generation.namespace_name = lc_pouch_strdup(NULL, "default");
+  assert_non_null(generation.namespace_name);
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/amount", "n:-:5:0", 1U));
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/amount", "n:0", 2U));
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/amount", "n:+:2:0", 3U));
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/amount", "n:+:1:1", 4U));
+  assert_true(lc_pouch_index_number_posting_table_add_residual_doc_id(
+      NULL, &generation.postings, "/amount", 99U));
+  assert_true(lc_pouch_index_number_posting_table_build_postings(
+      NULL, &generation.postings));
+
+  assert_true(
+      lc_pouch_index_number_generation_encoded_size(&generation, &size));
+  bytes = (unsigned char *)malloc(size);
+  assert_non_null(bytes);
+  assert_true(lc_pouch_index_number_generation_encode(&generation, bytes, size,
+                                                      &written));
+  assert_int_equal(written, size);
+  assert_true(
+      lc_pouch_index_number_generation_decode(NULL, &decoded, bytes, size));
+
+  assert_int_equal(decoded.identity.sequence, 55U);
+  assert_int_equal(decoded.identity.manifest_generation, 66U);
+  assert_string_equal(decoded.namespace_name, "default");
+  assert_true(lc_pouch_index_number_posting_table_append_range(
+      NULL, &decoded.postings, "/amount", NULL, "n:0", "n:+:1:1", NULL,
+      &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  free(bytes);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_number_generation_cleanup(NULL, &decoded);
+  lc_pouch_index_number_generation_cleanup(NULL, &generation);
+}
+
+static void test_number_generation_codec_rejects_corruption(void **state) {
+  lc_pouch_index_number_generation generation;
+  lc_pouch_index_number_generation decoded;
+  unsigned char *bytes;
+  size_t size;
+  size_t written;
+  size_t index;
+
+  (void)state;
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  bytes = NULL;
+
+  generation.identity.sequence = 55U;
+  generation.identity.manifest_generation = 66U;
+  generation.namespace_name = lc_pouch_strdup(NULL, "default");
+  assert_non_null(generation.namespace_name);
+  assert_true(lc_pouch_index_number_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/amount", "n:+:2:0", 3U));
+  assert_true(lc_pouch_index_number_posting_table_build_postings(
+      NULL, &generation.postings));
+  assert_true(
+      lc_pouch_index_number_generation_encoded_size(&generation, &size));
+  bytes = (unsigned char *)malloc(size);
+  assert_non_null(bytes);
+  assert_true(lc_pouch_index_number_generation_encode(&generation, bytes, size,
+                                                      &written));
+  assert_int_equal(written, size);
+
+  bytes[0] ^= 0xffU;
+  assert_false(
+      lc_pouch_index_number_generation_decode(NULL, &decoded, bytes, size));
+  bytes[0] ^= 0xffU;
+  assert_false(lc_pouch_index_number_generation_decode(NULL, &decoded, bytes,
+                                                       size - 1U));
+  for (index = 0U; index + 2U < size; ++index) {
+    if (bytes[index] == 'n' && bytes[index + 1U] == ':' &&
+        bytes[index + 2U] == '+') {
+      bytes[index] = 'x';
+      break;
+    }
+  }
+  assert_true(index + 2U < size);
+  assert_false(
+      lc_pouch_index_number_generation_decode(NULL, &decoded, bytes, size));
+
+  free(bytes);
+  lc_pouch_index_number_generation_cleanup(NULL, &decoded);
+  lc_pouch_index_number_generation_cleanup(NULL, &generation);
 }
 
 static void test_result_cache_keys_by_generation_and_plan(void **state) {
@@ -1703,9 +1845,11 @@ static int fake_read_contains_doc_ids(
   return LC_OK;
 }
 
-static int fake_read_date_after_doc_ids(
-    void *context, const char *field, int64_t unix_seconds,
-    int32_t nanosecond, lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+static int fake_read_date_after_doc_ids(void *context, const char *field,
+                                        int64_t unix_seconds,
+                                        int32_t nanosecond,
+                                        lc_pouch_index_doc_id_set *doc_ids,
+                                        lc_error *error) {
   fake_exact_reader *reader;
 
   (void)error;
@@ -2299,8 +2443,8 @@ test_collect_contains_term_with_eq_doc_ids_intersects_in_index(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_collect_date_after_doc_ids_uses_reader_and_deduplicates(
-    void **state) {
+static void
+test_collect_date_after_doc_ids_uses_reader_and_deduplicates(void **state) {
   lc_pouch_document_date_after_term term;
   lc_pouch_index_doc_id_set doc_ids;
   lc_pouch_index_doc_id expected[] = {3U, 5U, 11U};
@@ -2348,6 +2492,9 @@ int main(void) {
       cmocka_unit_test(test_term_posting_table_replaces_existing_posting),
       cmocka_unit_test(test_term_generation_codec_round_trips),
       cmocka_unit_test(test_term_generation_codec_rejects_corruption),
+      cmocka_unit_test(test_number_posting_table_appends_range_and_residuals),
+      cmocka_unit_test(test_number_generation_codec_round_trips),
+      cmocka_unit_test(test_number_generation_codec_rejects_corruption),
       cmocka_unit_test(test_result_cache_keys_by_generation_and_plan),
       cmocka_unit_test(test_result_plan_keys_are_normalized_by_index),
       cmocka_unit_test(test_result_plan_keys_reject_filtered_compound_views),
