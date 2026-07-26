@@ -47,6 +47,11 @@ typedef enum lc_pouch_index_result_plan_kind {
   LC_POUCH_INDEX_RESULT_PLAN_CONTAINS = 6
 } lc_pouch_index_result_plan_kind;
 
+typedef struct lc_pouch_index_identity {
+  uint64_t sequence;
+  uint64_t manifest_generation;
+} lc_pouch_index_identity;
+
 typedef struct lc_pouch_index_posting {
   lc_pouch_index_posting_encoding encoding;
   size_t count;
@@ -83,6 +88,7 @@ typedef struct lc_pouch_index_term_posting_table {
 
 typedef struct lc_pouch_index_prepared_term_cache {
   uint64_t generation;
+  lc_pouch_index_identity identity;
   lc_pouch_index_term_table terms;
   lc_pouch_index_term_posting_table postings;
 } lc_pouch_index_prepared_term_cache;
@@ -210,6 +216,10 @@ void lc_pouch_index_prepared_term_cache_cleanup(
 void lc_pouch_index_prepared_term_cache_refresh(
     const lc_pouch_allocator *allocator,
     lc_pouch_index_prepared_term_cache *cache, uint64_t generation);
+void lc_pouch_index_prepared_term_cache_refresh_identity(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_prepared_term_cache *cache,
+    lc_pouch_index_identity identity);
 void lc_pouch_index_result_cache_cleanup(const lc_pouch_allocator *allocator,
                                          lc_pouch_index_result_cache *cache);
 void lc_pouch_index_result_page_cleanup(const lc_pouch_allocator *allocator,

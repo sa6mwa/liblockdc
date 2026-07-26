@@ -1304,7 +1304,9 @@ private index primitives:
   Sparse postings are delta-varint docID streams; dense postings are bitsets
   selected when density and encoded size justify them.
 - `src/lc_pouch_index_terms.c` owns term dictionaries, term-ID posting tables,
-  and prepared-term cache generation refresh/cleanup.
+  and prepared-term cache identity refresh/cleanup. Prepared bridge caches are
+  keyed by an explicit private index identity containing the current index
+  sequence and segmented manifest generation.
 - `src/lc_pouch_index_result.c` owns cacheable plan-key normalization,
   generation-scoped result-cache lookup/insert, and docID page selection over
   the document table.
@@ -1322,6 +1324,10 @@ docID reader callbacks: `lc_pouch_index` owns primary equality, `in`, exact
 `exists`, and numeric range planning, while `lc_pouch_disk.c` adapts the
 current sidecar postings into docID candidates. This is a migration bridge
 toward immutable compiled readers, not the final reader-cache architecture.
+Prepared bridge readers refresh against the same private identity shape the
+final compiled readers should use: an index sequence plus segmented manifest
+generation. That prevents the bridge contract from depending on a naked write
+counter while persisted immutable reader files are still pending.
 The index layer now has the first private document table primitive:
 namespace/key pairs are sorted into dense docIDs with forward and reverse
 lookup. The document table is the cutover target for immutable compiled

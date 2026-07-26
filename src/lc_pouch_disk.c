@@ -6272,11 +6272,16 @@ static char *lc_pouch_disk_query_prepared_field_key(lc_pouch_disk_store *store,
 
 static void lc_pouch_disk_prepared_term_cache_refresh(
     lc_pouch_disk_store *store, lc_pouch_index_prepared_term_cache *cache) {
+  lc_pouch_index_identity identity;
+
   if (store == NULL) {
     return;
   }
-  lc_pouch_index_prepared_term_cache_refresh(
-      &store->allocator, cache, (uint64_t)lc_pouch_disk_index_sequence(store));
+  memset(&identity, 0, sizeof(identity));
+  identity.sequence = (uint64_t)lc_pouch_disk_index_sequence(store);
+  identity.manifest_generation = (uint64_t)store->replayed_segment_generation;
+  lc_pouch_index_prepared_term_cache_refresh_identity(&store->allocator, cache,
+                                                      identity);
 }
 
 static void lc_pouch_disk_exact_term_doc_id_reader_cleanup(

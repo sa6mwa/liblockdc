@@ -638,6 +638,11 @@ Latest release targets confirmed on 2026-07-23:
         bridge postings from sidecars, but generation refresh and cleanup now
         use one index-owned cache primitive instead of per-predicate disk-local
         structs.
+      - [x] Introduce an explicit private index identity for prepared-term
+        caches: the disk bridge now refreshes prepared readers by index
+        sequence plus segmented manifest generation instead of a bare sequence
+        counter, while the compiled reader contents still come from current
+        sidecar scans.
     - [ ] Add sorted matched-key result caching keyed by index generation plus
       normalized selector plan, so multi-page queries reuse the full matching
       key vector instead of recomputing candidates for every page.

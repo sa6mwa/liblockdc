@@ -307,14 +307,30 @@ void lc_pouch_index_prepared_term_cache_cleanup(
   lc_pouch_index_term_posting_table_cleanup(allocator, &cache->postings);
   lc_pouch_index_term_table_cleanup(allocator, &cache->terms);
   cache->generation = 0U;
+  memset(&cache->identity, 0, sizeof(cache->identity));
 }
 
 void lc_pouch_index_prepared_term_cache_refresh(
     const lc_pouch_allocator *allocator,
     lc_pouch_index_prepared_term_cache *cache, uint64_t generation) {
-  if (cache == NULL || cache->generation == generation) {
+  lc_pouch_index_identity identity;
+
+  memset(&identity, 0, sizeof(identity));
+  identity.sequence = generation;
+  lc_pouch_index_prepared_term_cache_refresh_identity(allocator, cache,
+                                                      identity);
+}
+
+void lc_pouch_index_prepared_term_cache_refresh_identity(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_prepared_term_cache *cache,
+    lc_pouch_index_identity identity) {
+  if (cache == NULL ||
+      (cache->identity.sequence == identity.sequence &&
+       cache->identity.manifest_generation == identity.manifest_generation)) {
     return;
   }
   lc_pouch_index_prepared_term_cache_cleanup(allocator, cache);
-  cache->generation = generation;
+  cache->identity = identity;
+  cache->generation = identity.sequence;
 }

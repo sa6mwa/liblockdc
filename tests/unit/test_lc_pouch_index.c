@@ -706,14 +706,18 @@ static void test_prepared_term_cache_refreshes_by_generation(void **state) {
   lc_pouch_index_doc_id_set decoded;
   lc_pouch_index_doc_id ids[] = {9U, 1U};
   lc_pouch_index_doc_id expected[] = {1U, 9U};
+  lc_pouch_index_identity identity;
   lc_pouch_index_term_id term_id;
 
   (void)state;
   memset(&cache, 0, sizeof(cache));
   memset(&decoded, 0, sizeof(decoded));
+  memset(&identity, 0, sizeof(identity));
 
   lc_pouch_index_prepared_term_cache_refresh(NULL, &cache, 7U);
   assert_int_equal(cache.generation, 7U);
+  assert_int_equal(cache.identity.sequence, 7U);
+  assert_int_equal(cache.identity.manifest_generation, 0U);
   assert_true(lc_pouch_index_term_table_find_or_add(
       NULL, &cache.terms, "default:/field", "s:value", &term_id));
   assert_true(lc_pouch_index_term_posting_table_put(
@@ -721,6 +725,8 @@ static void test_prepared_term_cache_refreshes_by_generation(void **state) {
 
   lc_pouch_index_prepared_term_cache_refresh(NULL, &cache, 7U);
   assert_int_equal(cache.generation, 7U);
+  assert_int_equal(cache.identity.sequence, 7U);
+  assert_int_equal(cache.identity.manifest_generation, 0U);
   assert_int_equal(cache.terms.count, 1U);
   assert_true(lc_pouch_index_term_posting_table_decode(NULL, &cache.postings,
                                                        term_id, &decoded));
@@ -729,6 +735,21 @@ static void test_prepared_term_cache_refreshes_by_generation(void **state) {
 
   lc_pouch_index_prepared_term_cache_refresh(NULL, &cache, 8U);
   assert_int_equal(cache.generation, 8U);
+  assert_int_equal(cache.identity.sequence, 8U);
+  assert_int_equal(cache.identity.manifest_generation, 0U);
+  assert_int_equal(cache.terms.count, 0U);
+  assert_int_equal(cache.postings.count, 0U);
+
+  identity.sequence = 8U;
+  identity.manifest_generation = 99U;
+  assert_true(lc_pouch_index_term_table_find_or_add(
+      NULL, &cache.terms, "default:/field", "s:value", &term_id));
+  assert_true(lc_pouch_index_term_posting_table_put(
+      NULL, &cache.postings, term_id, ids, sizeof(ids) / sizeof(ids[0])));
+  lc_pouch_index_prepared_term_cache_refresh_identity(NULL, &cache, identity);
+  assert_int_equal(cache.generation, 8U);
+  assert_int_equal(cache.identity.sequence, 8U);
+  assert_int_equal(cache.identity.manifest_generation, 99U);
   assert_int_equal(cache.terms.count, 0U);
   assert_int_equal(cache.postings.count, 0U);
 
