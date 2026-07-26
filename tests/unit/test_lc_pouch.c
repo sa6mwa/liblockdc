@@ -5221,6 +5221,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   pouch_query_key_capture exists_page;
   pouch_query_key_capture prefix_page;
   pouch_query_key_capture contains_page;
+  pouch_query_key_capture iprefix_page;
+  pouch_query_key_capture icontains_page;
   pouch_query_key_capture range_page;
   pouch_query_key_capture unsupported_page;
   lc_pouch_state_write_options hidden_options;
@@ -5244,6 +5246,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   memset(&exists_page, 0, sizeof(exists_page));
   memset(&prefix_page, 0, sizeof(prefix_page));
   memset(&contains_page, 0, sizeof(contains_page));
+  memset(&iprefix_page, 0, sizeof(iprefix_page));
+  memset(&icontains_page, 0, sizeof(icontains_page));
   memset(&range_page, 0, sizeof(range_page));
   memset(&unsupported_page, 0, sizeof(unsupported_page));
   memset(&hidden_options, 0, sizeof(hidden_options));
@@ -5414,6 +5418,26 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
   query_req.selector_json =
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}";
+  query_req.limit = 0L;
+  rc = client->query_keys(client, &query_req, &handler, &iprefix_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(iprefix_page.count, 2);
+  assert_null(query_res.cursor);
+  assert_true(pouch_query_capture_has(&iprefix_page, "doc/a"));
+  assert_true(pouch_query_capture_has(&iprefix_page, "doc/c"));
+  assert_false(pouch_query_capture_has(&iprefix_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&iprefix_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&iprefix_page, "doc/deleted"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
       "{\"contains\":{\"field\":\"/tags[]\",\"value\":\"nan\"}}";
   query_req.limit = 0L;
   rc = client->query_keys(client, &query_req, &handler, &contains_page,
@@ -5426,6 +5450,26 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_false(pouch_query_capture_has(&contains_page, "doc/b"));
   assert_false(pouch_query_capture_has(&contains_page, "doc/hidden"));
   assert_false(pouch_query_capture_has(&contains_page, "doc/deleted"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}";
+  query_req.limit = 0L;
+  rc = client->query_keys(client, &query_req, &handler, &icontains_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(icontains_page.count, 2);
+  assert_null(query_res.cursor);
+  assert_true(pouch_query_capture_has(&icontains_page, "doc/a"));
+  assert_true(pouch_query_capture_has(&icontains_page, "doc/c"));
+  assert_false(pouch_query_capture_has(&icontains_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&icontains_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&icontains_page, "doc/deleted"));
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
@@ -5637,6 +5681,8 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   lc_sink *exists_sink;
   lc_sink *prefix_sink;
   lc_sink *contains_sink;
+  lc_sink *iprefix_sink;
+  lc_sink *icontains_sink;
   lc_sink *range_sink;
   lc_sink *unsupported_sink;
   lc_query_req query_req;
@@ -5650,12 +5696,16 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   const void *exists_bytes;
   const void *prefix_bytes;
   const void *contains_bytes;
+  const void *iprefix_bytes;
+  const void *icontains_bytes;
   const void *range_bytes;
   size_t first_length;
   size_t second_length;
   size_t exists_length;
   size_t prefix_length;
   size_t contains_length;
+  size_t iprefix_length;
+  size_t icontains_length;
   size_t range_length;
   char root[512];
   char cursor[64];
@@ -5670,6 +5720,8 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   exists_sink = NULL;
   prefix_sink = NULL;
   contains_sink = NULL;
+  iprefix_sink = NULL;
+  icontains_sink = NULL;
   range_sink = NULL;
   unsupported_sink = NULL;
   first_bytes = NULL;
@@ -5677,12 +5729,16 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   exists_bytes = NULL;
   prefix_bytes = NULL;
   contains_bytes = NULL;
+  iprefix_bytes = NULL;
+  icontains_bytes = NULL;
   range_bytes = NULL;
   first_length = 0U;
   second_length = 0U;
   exists_length = 0U;
   prefix_length = 0U;
   contains_length = 0U;
+  iprefix_length = 0U;
+  icontains_length = 0U;
   range_length = 0U;
   memset(&query_res, 0, sizeof(query_res));
   memset(&hidden_options, 0, sizeof(hidden_options));
@@ -5853,6 +5909,30 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
   query_req.selector_json =
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}";
+  query_req.limit = 0L;
+  rc = lc_sink_to_memory(&iprefix_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, iprefix_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(iprefix_sink, &iprefix_bytes, &iprefix_length,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(iprefix_length > 0U);
+  assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(iprefix_bytes, iprefix_length, "\"n\":1"));
+  assert_true(bytes_contain_text(iprefix_bytes, iprefix_length, "\"n\":3"));
+  assert_false(bytes_contain_text(iprefix_bytes, iprefix_length, "\"n\":2"));
+  assert_false(bytes_contain_text(iprefix_bytes, iprefix_length, "\"n\":4"));
+  assert_false(bytes_contain_text(iprefix_bytes, iprefix_length, "\"n\":5"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
       "{\"contains\":{\"field\":\"/tags[]\",\"value\":\"nan\"}}";
   query_req.limit = 0L;
   rc = lc_sink_to_memory(&contains_sink, &error);
@@ -5869,6 +5949,30 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_false(bytes_contain_text(contains_bytes, contains_length, "\"n\":2"));
   assert_false(bytes_contain_text(contains_bytes, contains_length, "\"n\":4"));
   assert_false(bytes_contain_text(contains_bytes, contains_length, "\"n\":5"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}";
+  query_req.limit = 0L;
+  rc = lc_sink_to_memory(&icontains_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, icontains_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(icontains_sink, &icontains_bytes,
+                            &icontains_length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(icontains_length > 0U);
+  assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":1"));
+  assert_true(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":3"));
+  assert_false(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":2"));
+  assert_false(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":4"));
+  assert_false(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":5"));
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
@@ -5915,6 +6019,8 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   lc_sink_close(exists_sink);
   lc_sink_close(prefix_sink);
   lc_sink_close(contains_sink);
+  lc_sink_close(iprefix_sink);
+  lc_sink_close(icontains_sink);
   lc_sink_close(range_sink);
   lc_sink_close(unsupported_sink);
   lc_query_res_cleanup(&query_res);

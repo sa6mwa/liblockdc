@@ -140,6 +140,7 @@ typedef struct lc_pouch_query_index_plan {
   int exists;
   int prefix;
   int contains;
+  int ignore_case;
   int range;
   lc_pouch_query_index_range_bounds range_bounds;
 } lc_pouch_query_index_plan;
@@ -846,7 +847,8 @@ static int lc_pouch_query_index_plan_from_selector(
     }
     return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
   }
-  if (root.kind == LQL_SELECTOR_NODE_PREFIX) {
+  if (root.kind == LQL_SELECTOR_NODE_PREFIX ||
+      root.kind == LQL_SELECTOR_NODE_IPREFIX) {
     memset(&string_term, 0, sizeof(string_term));
     status = runtime->selector_node_string_term(runtime, root, &string_term,
                                                 &lql_error_value);
@@ -855,11 +857,10 @@ static int lc_pouch_query_index_plan_from_selector(
                                       "failed to inspect pouch prefix selector");
     }
     if (!string_term.value_present || string_term.any_count != 0U ||
-        string_term.field.len == 0U || string_term.value.len == 0U ||
-        string_term.ignore_case) {
+        string_term.field.len == 0U || string_term.value.len == 0U) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch query index engine supports non-empty "
-                          "case-sensitive prefix selectors only",
+                          "prefix selectors only",
                           NULL, NULL, "pouch-redesign");
     }
     plan->field = lc_pouch_query_dup_lql_string(string_term.field, error);
@@ -868,9 +869,14 @@ static int lc_pouch_query_index_plan_from_selector(
                                                    : LC_ERR_NOMEM;
     }
     plan->prefix = 1;
+    plan->ignore_case = string_term.ignore_case ||
+                                root.kind == LQL_SELECTOR_NODE_IPREFIX
+                            ? 1
+                            : 0;
     return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
   }
-  if (root.kind == LQL_SELECTOR_NODE_CONTAINS) {
+  if (root.kind == LQL_SELECTOR_NODE_CONTAINS ||
+      root.kind == LQL_SELECTOR_NODE_ICONTAINS) {
     memset(&string_term, 0, sizeof(string_term));
     status = runtime->selector_node_string_term(runtime, root, &string_term,
                                                 &lql_error_value);
@@ -880,11 +886,10 @@ static int lc_pouch_query_index_plan_from_selector(
           "failed to inspect pouch contains selector");
     }
     if (!string_term.value_present || string_term.any_count != 0U ||
-        string_term.field.len == 0U || string_term.value.len == 0U ||
-        string_term.ignore_case) {
+        string_term.field.len == 0U || string_term.value.len == 0U) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch query index engine supports non-empty "
-                          "case-sensitive contains selectors only",
+                          "contains selectors only",
                           NULL, NULL, "pouch-redesign");
     }
     plan->field = lc_pouch_query_dup_lql_string(string_term.field, error);
@@ -893,6 +898,10 @@ static int lc_pouch_query_index_plan_from_selector(
                                                    : LC_ERR_NOMEM;
     }
     plan->contains = 1;
+    plan->ignore_case = string_term.ignore_case ||
+                                root.kind == LQL_SELECTOR_NODE_ICONTAINS
+                            ? 1
+                            : 0;
     return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
   }
   if (root.kind == LQL_SELECTOR_NODE_RANGE) {
@@ -1250,13 +1259,13 @@ static int lc_pouch_query_run_index_predicate(
     if (plan.prefix) {
       rc = lc_pouch_query_index_visit_prefix(
           scan->client->pouch, scan->namespace_name, plan.field,
-          plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
-          &value_seq, error);
+          plan.values[value_index], plan.ignore_case,
+          lc_pouch_query_index_key_collect, &keys, &value_seq, error);
     } else if (plan.contains) {
       rc = lc_pouch_query_index_visit_contains(
           scan->client->pouch, scan->namespace_name, plan.field,
-          plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
-          &value_seq, error);
+          plan.values[value_index], plan.ignore_case,
+          lc_pouch_query_index_key_collect, &keys, &value_seq, error);
     } else {
       rc = lc_pouch_query_index_visit_scalar(
           scan->client->pouch, scan->namespace_name, plan.field,

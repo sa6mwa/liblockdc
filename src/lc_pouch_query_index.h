@@ -57,13 +57,15 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                                       const char *namespace_name,
                                       const char *field,
                                       const char *prefix,
+                                      int ignore_case,
                                       lc_pouch_query_index_key_visit_fn visit,
                                       void *context,
                                       unsigned long *index_seq,
                                       lc_error *error);
 int lc_pouch_query_index_visit_contains(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *needle, lc_pouch_query_index_key_visit_fn visit, void *context,
+    const char *needle, int ignore_case,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_range(
     lc_pouch *pouch, const char *namespace_name, const char *field,

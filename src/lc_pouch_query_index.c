@@ -87,8 +87,10 @@ typedef struct lc_pouch_query_index_term_reader {
   const lc_allocator *allocator;
   const char *field_hex;
   const char *value_hex;
+  const char *value_text;
   int prefix_match;
   int contains_match;
+  int ignore_case;
   int range_match;
   lc_pouch_query_index_range_bounds range_bounds;
   lc_pouch_query_index_key_visit_fn visit;
@@ -1271,6 +1273,66 @@ static int lc_pouch_query_index_range_contains_value(
   return 1;
 }
 
+static unsigned char lc_pouch_query_index_ascii_lower(unsigned char ch) {
+  if (ch >= 'A' && ch <= 'Z') {
+    return (unsigned char)(ch - 'A' + 'a');
+  }
+  return ch;
+}
+
+static int lc_pouch_query_index_text_has_prefix(const char *value,
+                                                const char *prefix,
+                                                int ignore_case) {
+  size_t index;
+
+  if (value == NULL || prefix == NULL) {
+    return 0;
+  }
+  for (index = 0U; prefix[index] != '\0'; ++index) {
+    unsigned char a;
+    unsigned char b;
+
+    if (value[index] == '\0') {
+      return 0;
+    }
+    a = (unsigned char)value[index];
+    b = (unsigned char)prefix[index];
+    if (ignore_case) {
+      a = lc_pouch_query_index_ascii_lower(a);
+      b = lc_pouch_query_index_ascii_lower(b);
+    }
+    if (a != b) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_query_index_text_contains(const char *value,
+                                              const char *needle,
+                                              int ignore_case) {
+  size_t value_index;
+  size_t needle_len;
+
+  if (value == NULL || needle == NULL) {
+    return 0;
+  }
+  if (!ignore_case) {
+    return strstr(value, needle) != NULL;
+  }
+  needle_len = strlen(needle);
+  if (needle_len == 0U) {
+    return 1;
+  }
+  for (value_index = 0U; value[value_index] != '\0'; ++value_index) {
+    if (lc_pouch_query_index_text_has_prefix(value + value_index, needle,
+                                             1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int lc_pouch_query_index_term_reader_matches_value(
     lc_pouch_query_index_term_reader *reader, const char *value_hex,
     int *matched, lc_error *error) {
@@ -1287,12 +1349,36 @@ static int lc_pouch_query_index_term_reader_matches_value(
     return LC_OK;
   }
   if (reader->prefix_match) {
-    *matched = strncmp(value_hex, reader->value_hex,
-                       strlen(reader->value_hex)) == 0;
+    if (reader->ignore_case) {
+      value_text =
+          lc_pouch_query_index_hex_decode(reader->allocator, value_hex, error);
+      if (value_text == NULL) {
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_NOMEM;
+      }
+      *matched = lc_pouch_query_index_text_has_prefix(
+          value_text, reader->value_text, 1);
+      lc_free_with_allocator(reader->allocator, value_text);
+    } else {
+      *matched = strncmp(value_hex, reader->value_hex,
+                         strlen(reader->value_hex)) == 0;
+    }
     return LC_OK;
   }
   if (reader->contains_match) {
-    *matched = strstr(value_hex, reader->value_hex) != NULL;
+    if (reader->ignore_case) {
+      value_text =
+          lc_pouch_query_index_hex_decode(reader->allocator, value_hex, error);
+      if (value_text == NULL) {
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_NOMEM;
+      }
+      *matched = lc_pouch_query_index_text_contains(value_text,
+                                                    reader->value_text, 1);
+      lc_free_with_allocator(reader->allocator, value_text);
+    } else {
+      *matched = strstr(value_hex, reader->value_hex) != NULL;
+    }
     return LC_OK;
   }
   if (reader->range_match) {
@@ -2165,7 +2251,7 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
 
 static int lc_pouch_query_index_visit_term_match(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *value, int prefix_match, int contains_match,
+    const char *value, int prefix_match, int contains_match, int ignore_case,
     const lc_pouch_query_index_range_bounds *range_bounds,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
@@ -2206,8 +2292,10 @@ static int lc_pouch_query_index_visit_term_match(
   reader.allocator = &pouch->allocator;
   reader.field_hex = field_hex;
   reader.value_hex = value_hex;
+  reader.value_text = value;
   reader.prefix_match = prefix_match;
   reader.contains_match = contains_match;
+  reader.ignore_case = ignore_case;
   if (range_bounds != NULL) {
     reader.range_match = 1;
     reader.range_bounds = *range_bounds;
@@ -2247,7 +2335,7 @@ int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
                                       unsigned long *index_seq,
                                       lc_error *error) {
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, value, 0, 0, NULL, visit, context,
+      pouch, namespace_name, field, value, 0, 0, 0, NULL, visit, context,
       index_seq, error);
 }
 
@@ -2255,6 +2343,7 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                                       const char *namespace_name,
                                       const char *field,
                                       const char *prefix,
+                                      int ignore_case,
                                       lc_pouch_query_index_key_visit_fn visit,
                                       void *context,
                                       unsigned long *index_seq,
@@ -2266,13 +2355,15 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, prefix, 1, 0, NULL, visit, context,
+      pouch, namespace_name, field, prefix, 1, 0, ignore_case, NULL, visit,
+      context,
       index_seq, error);
 }
 
 int lc_pouch_query_index_visit_contains(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *needle, lc_pouch_query_index_key_visit_fn visit, void *context,
+    const char *needle, int ignore_case,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
   if (needle == NULL || needle[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2281,7 +2372,8 @@ int lc_pouch_query_index_visit_contains(
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, needle, 0, 1, NULL, visit, context,
+      pouch, namespace_name, field, needle, 0, 1, ignore_case, NULL, visit,
+      context,
       index_seq, error);
 }
 
@@ -2299,7 +2391,7 @@ int lc_pouch_query_index_visit_range(
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, NULL, 0, 0, bounds, visit, context,
+      pouch, namespace_name, field, NULL, 0, 0, 0, bounds, visit, context,
       index_seq, error);
 }
 

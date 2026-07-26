@@ -212,6 +212,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     bounded numeric `range` selectors through durable scalar term postings with
     final `liblql` acceptance, hidden/deleted suppression, pagination, and
     fail-closed unsupported selector shapes.
+  - [x] Route explicit indexed `query_keys` and document `query` simple
+    case-insensitive `iprefix` and `icontains` selectors through same-field
+    durable scalar term postings with ASCII-folded candidate matching, final
+    `liblql` acceptance, array `/field[]` support, hidden/deleted suppression,
+    pagination, and fail-closed unsupported selector shapes.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
