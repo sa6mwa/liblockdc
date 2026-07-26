@@ -1391,12 +1391,12 @@ generation files under
 `<root>/%2elockd/logstore/query.index.docs/<escaped-namespace>.lcpdtg`
 during full query-index rebuilds and after successful compaction replay. The
 current query path still rebuilds the live in-memory global document table from
-summary refresh state; exact-term, field-presence, numeric range, and
-text/trigram generations are cut over to namespace-local persisted docIDs and
-remap through these document-table files when loading prepared postings. The
-remaining temporal reader family and result-page selection still need the same
-namespace-local doc table cutover before compiled reader files can stop
-depending on the global docID table.
+summary refresh state; exact-term, field-presence, numeric range,
+text/trigram, and temporal generations are cut over to namespace-local
+persisted docIDs and remap through these document-table files when loading
+prepared postings. Result-page selection still needs the same namespace-local
+doc table cutover before compiled reader files can stop depending on the global
+docID table.
 Even before that cutover, the query path no longer depends on direct
 summary-array-position casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
@@ -1542,6 +1542,9 @@ doc-table cursor paging; disk only adapts the temporal generation reader and
 translates the selected page. The client-level `liblql` filter remains
 authoritative for final acceptance and owns public cursor selection for
 residual pages.
+Temporal generation postings are stored with namespace-local docIDs and remap
+through the identity-matched document-table generation before DateAfter applies
+live-state and selector guards against the current global in-memory doc table.
 DateAfter result-cache plan keys include the namespace, temporal field,
 exclusive bound, and any sorted/deduplicated positive or negative equality
 suffixes. The cacheability boundary allows the parser's implied positive

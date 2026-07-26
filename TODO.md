@@ -537,8 +537,14 @@ Latest release targets confirmed on 2026-07-23:
         per-namespace document-table generation, prepared prefix/contains
         readers require an identity-matched `.lcpdtg`, remap materialized text
         docIDs back into the current global in-memory doc table, and repair
-        corrupt doc generation files through the text query path. Temporal and
-        result-page consumption still need the same namespace-local doc table
+        corrupt doc generation files through the text query path.
+      - [x] Cut temporal generation files over to namespace-local docIDs:
+        temporal generation build stores normalized-date and residual postings
+        by the matching per-namespace document-table generation, DateAfter
+        readers require an identity-matched `.lcpdtg`, remap materialized
+        temporal docIDs back into the current global in-memory doc table, and
+        repair corrupt doc generation files through the temporal query path.
+        Result-page consumption still needs the same namespace-local doc table
         cutover.
       - [x] Wire the disk query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
