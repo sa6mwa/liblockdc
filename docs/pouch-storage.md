@@ -1396,15 +1396,24 @@ Prepared exact readers load identity-matched namespace files into the
 generation-scoped exact cache before compiling from sidecar postings; absent,
 stale, or corrupt files trigger a namespace refresh and republish on the exact
 query path. Sidecar compilation remains the fallback when a current generation
-does not contain the requested term, and exists/range/text generations are
-still pending.
+does not contain the requested term.
+Field-presence terms use the same immutable generation container under
+`<root>/%2elockd/logstore/query.index.exists/<escaped-namespace>.lcpttg`.
+The term field is the namespace-qualified JSON Pointer and the term value is
+empty, so positive `exists` readers can merge identity-matched per-namespace
+files into the prepared exists cache before compiling from sidecar postings.
+Absent, stale, or corrupt exists generation files trigger the same namespace
+refresh and republish path; sidecar compilation remains the fallback when a
+current generation does not contain the requested field-presence term.
+Range/text generations are still pending.
 For primary equality plans with negative equality filters, the disk adapter can
 now ask exact-term readers for unfiltered primary and negative term docIDs,
 then lets `lc_pouch_index` subtract sorted negative docID sets from the primary
 candidate set before paging.
 Positive `exists` plans use the same bridge for field-presence postings:
 filtered sidecar candidates are compiled into adaptive docID postings per
-request, then decoded through the index layer.
+request when the immutable exists generation cannot satisfy the term, then
+decoded through the index layer.
 Positive numeric `range` plans also compile filtered sidecar candidates into
 adaptive docID postings per request before decoding through the index layer.
 The range term dictionary key records bound presence separately from bound
