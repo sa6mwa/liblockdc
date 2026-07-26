@@ -9,9 +9,11 @@
 
 #include "lc/lc.h"
 #include "lc_pouch.h"
+#include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "../support/lc_test_tmp.h"
 
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -133,16 +135,35 @@ static void assert_path_file_contains(const char *root, const char *leaf,
   assert_file_contains(path, needle);
 }
 
-static void make_marker_path(const char *root, const char *namespace_name,
-                             char *path, size_t path_size) {
+static void find_single_marker_path(const char *root,
+                                    const char *namespace_name, char *path,
+                                    size_t path_size) {
   char *namespace_path;
+  char markers_path[1024];
+  DIR *dir;
+  struct dirent *entry;
+  int found;
   int written;
 
   namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
   assert_non_null(namespace_path);
-  written = snprintf(path, path_size, "%s/markers/writer-%ld.marker",
-                     namespace_path, (long)getpid());
-  assert_true(written > 0 && (size_t)written < path_size);
+  written = snprintf(markers_path, sizeof(markers_path), "%s/markers",
+                     namespace_path);
+  assert_true(written > 0 && (size_t)written < sizeof(markers_path));
+  dir = opendir(markers_path);
+  assert_non_null(dir);
+  found = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    assert_int_equal(found, 0);
+    written = snprintf(path, path_size, "%s/%s", markers_path, entry->d_name);
+    assert_true(written > 0 && (size_t)written < path_size);
+    found = 1;
+  }
+  assert_int_equal(closedir(dir), 0);
+  assert_int_equal(found, 1);
   free(namespace_path);
 }
 
@@ -224,15 +245,17 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
   namespace_path = lc_pouch_namespace_path(NULL, root, "default");
   assert_non_null(namespace_path);
 
-  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
+  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path, NULL,
                                                &empty_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(empty_snapshot.marker_count, 0UL);
   assert_string_equal(empty_snapshot.fingerprint, "");
 
-  rc = lc_pouch_namespace_touch_marker(NULL, namespace_path, 1UL, &error);
+  rc = lc_pouch_namespace_touch_marker(NULL, namespace_path,
+                                       "writer-self.marker", 1UL, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
+                                               "writer-self.marker",
                                                &self_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(self_snapshot.marker_count, 0UL);
@@ -247,6 +270,7 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
   write_text_file(peer_b_path, "writer_pid=2\nsequence=1\n");
   write_text_file(peer_a_path, "writer_pid=1\nsequence=1\npad=x\n");
   rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
+                                               "writer-self.marker",
                                                &peer_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(peer_snapshot.marker_count, 2UL);
@@ -260,6 +284,7 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
                    1);
 
   rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
+                                               "writer-self.marker",
                                                &unchanged_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lc_pouch_namespace_marker_snapshot_changed(
@@ -268,6 +293,7 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
 
   write_text_file(peer_a_path, "writer_pid=1\nsequence=2\npad=longer\n");
   rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
+                                               "writer-self.marker",
                                                &changed_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(changed_snapshot.marker_count, 2UL);
@@ -282,6 +308,72 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
   lc_pouch_namespace_marker_snapshot_cleanup(NULL, &empty_snapshot);
   free(namespace_path);
   lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_marker_snapshots_treat_same_process_handles_as_peers(
+    void **state) {
+  lc_pouch *first;
+  lc_pouch *second;
+  lc_pouch_namespace_marker_snapshot first_view;
+  lc_pouch_namespace_marker_snapshot second_view;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  int rc;
+
+  (void)state;
+  first = NULL;
+  second = NULL;
+  namespace_path = NULL;
+  memset(&first_view, 0, sizeof(first_view));
+  memset(&second_view, 0, sizeof(second_view));
+  lc_error_init(&error);
+  make_root("marker-same-process", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, NULL, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first->writer_marker_leaf);
+  assert_non_null(second->writer_marker_leaf);
+  assert_true(strcmp(first->writer_marker_leaf, second->writer_marker_leaf) !=
+              0);
+  rc = lc_pouch_ensure_namespace(first, "default", &error);
+  assert_int_equal(rc, LC_OK);
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  assert_non_null(namespace_path);
+
+  rc = lc_pouch_namespace_touch_marker(NULL, namespace_path,
+                                       first->writer_marker_leaf, 1UL, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_namespace_touch_marker(NULL, namespace_path,
+                                       second->writer_marker_leaf, 1UL, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
+                                               first->writer_marker_leaf,
+                                               &first_view, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(first_view.marker_count, 1UL);
+  assert_non_null(strstr(first_view.fingerprint, second->writer_marker_leaf));
+  assert_null(strstr(first_view.fingerprint, first->writer_marker_leaf));
+
+  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
+                                               second->writer_marker_leaf,
+                                               &second_view, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(second_view.marker_count, 1UL);
+  assert_non_null(strstr(second_view.fingerprint, first->writer_marker_leaf));
+  assert_null(strstr(second_view.fingerprint, second->writer_marker_leaf));
+
+  lc_pouch_namespace_marker_snapshot_cleanup(NULL, &second_view);
+  lc_pouch_namespace_marker_snapshot_cleanup(NULL, &first_view);
+  free(namespace_path);
+  lc_pouch_close(second);
+  lc_pouch_close(first);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -318,23 +410,27 @@ static void test_marker_refresh_uses_directory_fast_path_and_force(
   assert_non_null(namespace_path);
 
   rc = lc_pouch_namespace_marker_refresh_should_scan(
-      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+      NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
+      &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 1);
   assert_int_equal(refresh.initialized, 1);
 
   rc = lc_pouch_namespace_marker_refresh_should_scan(
-      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+      NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
+      &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 0);
 
   rc = lc_pouch_namespace_marker_directory_snapshot_read(
       NULL, namespace_path, &before_dir, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_namespace_touch_marker(NULL, namespace_path, 1UL, &error);
+  rc = lc_pouch_namespace_touch_marker(NULL, namespace_path,
+                                       "writer-self.marker", 1UL, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_namespace_marker_refresh_should_scan(
-      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+      NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
+      &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 0);
 
@@ -348,20 +444,24 @@ static void test_marker_refresh_uses_directory_fast_path_and_force(
                        &before_dir, &after_dir),
                    1);
   rc = lc_pouch_namespace_marker_refresh_should_scan(
-      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+      NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
+      &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 1);
 
   rc = lc_pouch_namespace_marker_refresh_should_scan(
-      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+      NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
+      &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 0);
   rc = lc_pouch_namespace_marker_refresh_should_scan(
-      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+      NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
+      &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 0);
   rc = lc_pouch_namespace_marker_refresh_should_scan(
-      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+      NULL, namespace_path, "writer-self.marker", &refresh, 2UL, &should_scan,
+      &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 1);
 
@@ -1208,11 +1308,11 @@ static void test_state_mutations_touch_writer_marker(void **state) {
   make_root("state-marker", root, sizeof(root));
   cleanup_root(root);
   snprintf(key, sizeof(key), "state/marker/%ld", (long)getpid());
-  make_marker_path(root, "default", marker_path, sizeof(marker_path));
 
   open_pouch_client(root, &client, &error);
   write_client_state(client, key, "{\"value\":1}", NULL, 0L, 0, &update_res,
                      &error);
+  find_single_marker_path(root, "default", marker_path, sizeof(marker_path));
   assert_int_equal(read_marker_sequence(marker_path, &size1), 1UL);
   lc_update_res_cleanup(&update_res);
 
@@ -1635,6 +1735,8 @@ int main(void) {
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),
       cmocka_unit_test(test_marker_snapshots_detect_peer_changes),
+      cmocka_unit_test(
+          test_marker_snapshots_treat_same_process_handles_as_peers),
       cmocka_unit_test(
           test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),

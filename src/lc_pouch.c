@@ -8,6 +8,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+static unsigned long lc_pouch_next_writer_marker_id;
 
 static void lc_pouch_init_options(lc_pouch *pouch,
                                   const lc_pouch_open_options *options) {
@@ -79,6 +82,23 @@ static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
   return lc_pouch_write_root_manifest(pouch, error);
 }
 
+static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
+  char leaf[128];
+  unsigned long writer_id;
+
+  writer_id = ++lc_pouch_next_writer_marker_id;
+  snprintf(leaf, sizeof(leaf), "writer-%ld-%020lu.marker", (long)getpid(),
+           writer_id);
+  pouch->writer_marker_leaf =
+      lc_strdup_with_allocator(&pouch->allocator, leaf);
+  if (pouch->writer_marker_leaf == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch writer marker leaf", NULL,
+                        NULL, NULL);
+  }
+  return LC_OK;
+}
+
 int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   const lc_pouch_open_options *options, lc_pouch **out,
                   lc_error *error) {
@@ -108,6 +128,11 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         "failed to copy pouch root path", NULL, NULL, NULL);
   }
   lc_pouch_init_options(pouch, options);
+  rc = lc_pouch_init_writer_marker(pouch, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
   rc = lc_pouch_ensure_root(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
@@ -125,6 +150,7 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   allocator = pouch->allocator;
   lc_pouch_state_cache_cleanup(pouch);
+  lc_free_with_allocator(&allocator, pouch->writer_marker_leaf);
   lc_free_with_allocator(&allocator, pouch->root_path);
   lc_free_with_allocator(&allocator, pouch);
 }

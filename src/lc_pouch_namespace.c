@@ -450,26 +450,28 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
 
 int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
                                     const char *namespace_path,
+                                    const char *writer_marker_leaf,
                                     unsigned long sequence, lc_error *error) {
-  char leaf[96];
-  char text[192];
+  char text[256];
   char *markers_path;
   char *marker_path;
   int rc;
 
-  if (namespace_path == NULL || sequence == 0UL) {
+  if (namespace_path == NULL || writer_marker_leaf == NULL ||
+      writer_marker_leaf[0] == '\0' || sequence == 0UL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch marker touch requires namespace path and "
-                        "non-zero sequence",
+                        "writer marker leaf and non-zero sequence",
                         NULL, NULL, NULL);
   }
-  snprintf(leaf, sizeof(leaf), "writer-%ld.marker", (long)getpid());
-  snprintf(text, sizeof(text), "writer_pid=%ld\nsequence=%020lu\n%s",
-           (long)getpid(), sequence,
+  snprintf(text, sizeof(text), "writer_pid=%ld\nwriter_marker=%s\n"
+                               "sequence=%020lu\n%s",
+           (long)getpid(), writer_marker_leaf, sequence,
            (sequence % 2UL) == 0UL ? "pad=x\n" : "");
   markers_path = lc_pouch_path_join(allocator, namespace_path, "markers");
   marker_path = markers_path != NULL ? lc_pouch_path_join(allocator,
-                                                          markers_path, leaf)
+                                                          markers_path,
+                                                          writer_marker_leaf)
                                      : NULL;
   lc_free_with_allocator(allocator, markers_path);
   if (marker_path == NULL) {
@@ -484,10 +486,10 @@ int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
 
 int lc_pouch_namespace_marker_snapshot_read(
     const lc_allocator *allocator, const char *namespace_path,
-    lc_pouch_namespace_marker_snapshot *out, lc_error *error) {
+    const char *self_marker_leaf, lc_pouch_namespace_marker_snapshot *out,
+    lc_error *error) {
   lc_pouch_marker_entry *entries;
   char *markers_path;
-  char self_leaf[96];
   DIR *dir;
   struct dirent *entry;
   size_t count;
@@ -515,7 +517,6 @@ int lc_pouch_namespace_marker_snapshot_read(
                         "failed to open pouch marker directory", NULL, NULL,
                         NULL);
   }
-  snprintf(self_leaf, sizeof(self_leaf), "writer-%ld.marker", (long)getpid());
   count = 0U;
   capacity = 0U;
   rc = LC_OK;
@@ -524,7 +525,8 @@ int lc_pouch_namespace_marker_snapshot_read(
     struct stat st;
 
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
-        strcmp(entry->d_name, self_leaf) == 0) {
+        (self_marker_leaf != NULL &&
+         strcmp(entry->d_name, self_marker_leaf) == 0)) {
       continue;
     }
     marker_path = lc_pouch_path_join(allocator, markers_path, entry->d_name);
@@ -631,6 +633,7 @@ int lc_pouch_namespace_marker_directory_snapshot_changed(
 
 int lc_pouch_namespace_marker_refresh_should_scan(
     const lc_allocator *allocator, const char *namespace_path,
+    const char *self_marker_leaf,
     lc_pouch_namespace_marker_refresh_state *state,
     unsigned long force_after_skips, int *should_scan, lc_error *error) {
   lc_pouch_namespace_marker_directory_snapshot directory;
@@ -664,7 +667,8 @@ int lc_pouch_namespace_marker_refresh_should_scan(
     return LC_OK;
   }
   rc = lc_pouch_namespace_marker_snapshot_read(allocator, namespace_path,
-                                               &peers, error);
+                                               self_marker_leaf, &peers,
+                                               error);
   if (rc != LC_OK) {
     return rc;
   }

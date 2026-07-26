@@ -342,7 +342,8 @@ static int lc_pouch_state_touch_marker(
 
   sequence = ++pouch->marker_sequence;
   return lc_pouch_namespace_touch_marker(&pouch->allocator,
-                                         manifest->namespace_path, sequence,
+                                         manifest->namespace_path,
+                                         pouch->writer_marker_leaf, sequence,
                                          error);
 }
 

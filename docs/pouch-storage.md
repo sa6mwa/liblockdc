@@ -1755,14 +1755,16 @@ and periodically falls back to full marker scans plus segment validation so
 marker hints cannot hide external rewrites indefinitely.
 
 The redesigned pouch backend currently writes per-namespace
-`markers/writer-<pid>.marker` files after segmented state mutations. Marker
-payloads include a monotonic writer sequence and alternate payload size across
-adjacent writes. It also has deterministic reader-side peer-marker snapshots
-that ignore the current writer marker and compare peer markers by name, size,
-and modification time. Marker-directory snapshot state now provides a fast path
-for unchanged marker directories and a forced-refresh counter so marker hints
-cannot suppress validation indefinitely. The first state projection cache is
-active for `single_writer` handles; wiring marker refresh decisions into
+`markers/writer-<pid>-<handle-id>.marker` files after segmented state
+mutations. Marker payloads include the process id, per-handle marker identity,
+a monotonic writer sequence, and alternating payload size across adjacent
+writes. Reader-side peer-marker snapshots ignore the current handle's marker,
+not every marker from the same process, so same-process pouch handles still
+observe each other as peer writers. Snapshots compare peer markers by name,
+size, and modification time. Marker-directory snapshot state now provides a fast
+path for unchanged marker directories and a forced-refresh counter so marker
+hints cannot suppress validation indefinitely. The first state projection cache
+is active for `single_writer` handles; wiring marker refresh decisions into
 shared-mode cached namespace projections remains to be rebuilt on top of these
 primitives.
 

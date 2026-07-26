@@ -49,10 +49,12 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
                                        lc_error *error);
 int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
                                     const char *namespace_path,
+                                    const char *writer_marker_leaf,
                                     unsigned long sequence, lc_error *error);
 int lc_pouch_namespace_marker_snapshot_read(
     const lc_allocator *allocator, const char *namespace_path,
-    lc_pouch_namespace_marker_snapshot *out, lc_error *error);
+    const char *self_marker_leaf, lc_pouch_namespace_marker_snapshot *out,
+    lc_error *error);
 int lc_pouch_namespace_marker_snapshot_changed(
     const lc_pouch_namespace_marker_snapshot *before,
     const lc_pouch_namespace_marker_snapshot *after);
@@ -64,6 +66,7 @@ int lc_pouch_namespace_marker_directory_snapshot_changed(
     const lc_pouch_namespace_marker_directory_snapshot *after);
 int lc_pouch_namespace_marker_refresh_should_scan(
     const lc_allocator *allocator, const char *namespace_path,
+    const char *self_marker_leaf,
     lc_pouch_namespace_marker_refresh_state *state,
     unsigned long force_after_skips, int *should_scan, lc_error *error);
 void lc_pouch_namespace_marker_snapshot_cleanup(

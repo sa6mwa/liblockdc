@@ -36,6 +36,8 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Touch per-namespace writer markers after committed segmented state
     mutations, with monotonic sequence payloads that alternate size for
     coarse-mtime filesystems.
+  - [x] Use per-pouch-handle writer marker identities instead of pid-only
+    marker names so same-process handles observe each other as peers.
   - [x] Add reader-side peer marker snapshots that ignore the current writer
     marker and compare peers by deterministic name, size, and modification-time
     fingerprints.
