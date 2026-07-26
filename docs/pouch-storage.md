@@ -1290,6 +1290,30 @@ the long-term performance architecture. Incremental hot-loop optimizations are
 allowed only when they move toward this subsystem boundary or protect behavior
 while the subsystem is introduced.
 
+The current C source layout already reflects this subsystem boundary for the
+private index primitives:
+
+- `src/lc_pouch_index_doc.c` owns the dense document table and docID set
+  algebra. It maps namespace/key pairs to stable in-memory document IDs,
+  resolves document IDs back to namespace/key pairs, and provides sorted
+  union/intersection/subtraction helpers.
+- `src/lc_pouch_index_posting.c` owns adaptive sparse/dense posting encoding.
+  Sparse postings are delta-varint docID streams; dense postings are bitsets
+  selected when density and encoded size justify them.
+- `src/lc_pouch_index_terms.c` owns term dictionaries, term-ID posting tables,
+  and prepared-term cache generation refresh/cleanup.
+- `src/lc_pouch_index_result.c` owns cacheable plan-key normalization,
+  generation-scoped result-cache lookup/insert, and docID page selection over
+  the document table.
+- `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
+  those primitives. It invokes disk-supplied reader callbacks and normalizes
+  the resulting candidate docID sets.
+- `src/lc_pouch_disk.c` still owns the current disk bridge: sidecar scan
+  adapters, live/hidden/owner/generation visibility checks, final summary
+  translation, and final `liblql` acceptance. New index behavior should move
+  toward the private index modules instead of adding more planner logic to this
+  bridge.
+
 The first C cutover stage uses private exact-term, field-presence, and range
 docID reader callbacks: `lc_pouch_index` owns primary equality, `in`, exact
 `exists`, and numeric range planning, while `lc_pouch_disk.c` adapts the

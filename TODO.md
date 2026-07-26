@@ -493,6 +493,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Physically split document table and docID set algebra into
         `src/lc_pouch_index_doc.c`, leaving `lc_pouch_index.c` focused on
         planner/collector orchestration over the private index primitives.
+      - [x] Document the current private index module map in
+        `docs/pouch-storage.md`, including the disk bridge responsibility that
+        remains in `src/lc_pouch_disk.c`.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
