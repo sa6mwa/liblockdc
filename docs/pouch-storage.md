@@ -2290,10 +2290,12 @@ use the normal pouch state path. Queue records also persist TTL expiry and
 explicit retry-exhausted terminal status, so expired messages and messages that
 hit `max_attempts` are excluded from stats and dequeue after refresh/replay.
 Direct `subscribe` and `subscribe_with_state` use the polling dequeue path for
-bounded pages and enforce the public explicit ack/nack callback contract. This
-is not full queue parity yet: watch/notification hints, transaction side
-effects, stateful commit/rollback, and high-contention duplicate-delivery
-tests remain broader queue work.
+bounded pages and enforce the public explicit ack/nack callback contract.
+`watch_queue` now provides the baseline polling watch path: it emits an initial
+snapshot, then emits changed availability/head events from local stats without
+filesystem notifications. This is not full queue parity yet: notification-file
+hints, transaction side effects, stateful commit/rollback, and high-contention
+duplicate-delivery tests remain broader queue work.
 
 Current pouch backend milestone: the private storage interface exposes queue
 wake status. The pouch backend reports `polling`, marks queue marker files as

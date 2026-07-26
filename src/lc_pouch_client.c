@@ -5005,14 +5005,115 @@ int lc_pouch_client_subscribe_with_state_method(lc_client *self,
   return lc_pouch_client_subscribe_common(self, req, consumer, error, 1);
 }
 
+static void lc_pouch_queue_watch_poll_delay(void) {
+  struct timespec delay;
+
+  delay.tv_sec = 0;
+  delay.tv_nsec = 100L * 1000L * 1000L;
+  (void)nanosleep(&delay, NULL);
+}
+
+static int lc_pouch_queue_watch_emit(lc_watch_queue_req const *req,
+                                     const lc_queue_stats_res *stats,
+                                     const lc_watch_handler *handler,
+                                     lc_error *error) {
+  lc_watch_event event;
+  int handler_rc;
+
+  memset(&event, 0, sizeof(event));
+  event.namespace_name = lc_strdup_local(stats->namespace_name);
+  event.queue = lc_strdup_local(stats->queue);
+  event.available = stats->available;
+  event.head_message_id = lc_strdup_local(stats->head_message_id);
+  event.changed_at_unix = 0L;
+  event.correlation_id = lc_strdup_local("pouch-queue-watch");
+  if (event.namespace_name == NULL || event.queue == NULL ||
+      event.correlation_id == NULL ||
+      (stats->head_message_id != NULL && event.head_message_id == NULL)) {
+    lc_watch_event_cleanup(&event);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch queue watch event", NULL,
+                        NULL, NULL);
+  }
+  if (lc_pouch_now_unix(&event.changed_at_unix, error) != LC_OK) {
+    lc_watch_event_cleanup(&event);
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
+  }
+  (void)req;
+  handler_rc = handler->handle(handler->context, &event, error);
+  lc_watch_event_cleanup(&event);
+  if (handler_rc) {
+    return LC_OK;
+  }
+  if (error != NULL && error->code != LC_OK) {
+    return error->code;
+  }
+  return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "pouch queue watch handler stopped", NULL, NULL, NULL);
+}
+
 int lc_pouch_client_watch_queue_method(lc_client *self,
                                        const lc_watch_queue_req *req,
                                        const lc_watch_handler *handler,
                                        lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)handler;
-  return lc_pouch_client_rebuilding(error);
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats;
+  char *last_head_message_id;
+  int have_signature;
+  int last_available;
+  int rc;
+
+  if (self == NULL || req == NULL || handler == NULL ||
+      handler->handle == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch watch_queue requires self, req, and handler",
+                        NULL, NULL, NULL);
+  }
+  lc_queue_stats_req_init(&stats_req);
+  stats_req.namespace_name = req->namespace_name;
+  stats_req.queue = req->queue;
+  last_head_message_id = NULL;
+  have_signature = 0;
+  last_available = 0;
+  rc = LC_OK;
+  while (rc == LC_OK) {
+    int changed;
+
+    memset(&stats, 0, sizeof(stats));
+    rc = lc_pouch_client_queue_stats_method(self, &stats_req, &stats, error);
+    if (rc != LC_OK) {
+      break;
+    }
+    changed = !have_signature || last_available != stats.available ||
+              ((last_head_message_id == NULL) !=
+               (stats.head_message_id == NULL)) ||
+              (last_head_message_id != NULL && stats.head_message_id != NULL &&
+               strcmp(last_head_message_id, stats.head_message_id) != 0);
+    if (changed) {
+      rc = lc_pouch_queue_watch_emit(req, &stats, handler, error);
+      if (rc != LC_OK) {
+        lc_queue_stats_res_cleanup(&stats);
+        break;
+      }
+      free(last_head_message_id);
+      last_head_message_id = lc_strdup_local(stats.head_message_id);
+      if (stats.head_message_id != NULL && last_head_message_id == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch queue watch signature",
+                          NULL, NULL, NULL);
+        lc_queue_stats_res_cleanup(&stats);
+        break;
+      }
+      last_available = stats.available;
+      have_signature = 1;
+    }
+    lc_queue_stats_res_cleanup(&stats);
+    if (rc == LC_OK) {
+      lc_pouch_queue_watch_poll_delay();
+    }
+  }
+  free(last_head_message_id);
+  return rc;
 }
 
 int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,

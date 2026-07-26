@@ -58,6 +58,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       `subscribe_with_state` deliver bounded pages from local dequeue, enforce
       the public explicit ack/nack callback contract, auto-nack missing
       terminal callbacks as failure, and cover stateful delivery.
+    - [x] Add the baseline pouch queue watch path: `watch_queue` emits an
+      initial polling snapshot, polls local queue stats for signature changes,
+      emits changed availability/head events without filesystem notifications,
+      and surfaces callback stop/error semantics.
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.

@@ -2536,6 +2536,96 @@ static void test_client_queue_subscribe_polling_paths(void **state) {
   lc_error_cleanup(&error);
 }
 
+typedef struct pouch_watch_capture {
+  lc_client *client;
+  const char *queue;
+  int event_count;
+  int saw_unavailable;
+  int saw_available;
+  char head_message_id[160];
+} pouch_watch_capture;
+
+static int pouch_watch_enqueue_on_initial_unavailable(
+    void *context, const lc_watch_event *event, lc_error *error) {
+  pouch_watch_capture *capture;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_source *source;
+  int rc;
+
+  capture = (pouch_watch_capture *)context;
+  capture->event_count += 1;
+  if (event->available) {
+    capture->saw_available = 1;
+    if (event->head_message_id != NULL) {
+      snprintf(capture->head_message_id, sizeof(capture->head_message_id), "%s",
+               event->head_message_id);
+    }
+    error->code = LC_ERR_TRANSPORT;
+    error->message = strdup("pouch watch observed available event");
+    assert_non_null(error->message);
+    return 0;
+  }
+  capture->saw_unavailable = 1;
+  if (capture->event_count > 1) {
+    error->code = LC_ERR_TRANSPORT;
+    error->message = strdup("pouch watch observed repeated unavailable event");
+    assert_non_null(error->message);
+    return 0;
+  }
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  source = NULL;
+  enqueue_req.queue = capture->queue;
+  rc = lc_source_from_memory("watch", strlen("watch"), &source, error);
+  if (rc == LC_OK) {
+    rc = capture->client->enqueue(capture->client, &enqueue_req, source,
+                                  &enqueue_res, error);
+  }
+  if (source != NULL) {
+    source->close(source);
+  }
+  lc_enqueue_res_cleanup(&enqueue_res);
+  return rc == LC_OK ? 1 : 0;
+}
+
+static void test_client_queue_watch_polling_detects_change(void **state) {
+  lc_client *client;
+  lc_watch_queue_req watch_req;
+  lc_watch_handler handler;
+  pouch_watch_capture capture;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_watch_queue_req_init(&watch_req);
+  lc_watch_handler_init(&handler);
+  memset(&capture, 0, sizeof(capture));
+  lc_error_init(&error);
+  make_root("client-queue-watch", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  capture.client = client;
+  capture.queue = "watch";
+  watch_req.queue = "watch";
+  handler.handle = pouch_watch_enqueue_on_initial_unavailable;
+  handler.context = &capture;
+  rc = client->watch_queue(client, &watch_req, &handler, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message, "pouch watch observed available event");
+  assert_int_equal(capture.event_count, 2);
+  assert_int_equal(capture.saw_unavailable, 1);
+  assert_int_equal(capture.saw_available, 1);
+  assert_true(capture.head_message_id[0] != '\0');
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_remove_tombstones_state_and_enforces_preconditions(
     void **state) {
   lc_client *client;
@@ -4976,6 +5066,7 @@ int main(void) {
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),
       cmocka_unit_test(test_client_queue_subscribe_polling_paths),
+      cmocka_unit_test(test_client_queue_watch_polling_detects_change),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),
