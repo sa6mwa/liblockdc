@@ -5172,6 +5172,102 @@ static int lc_pouch_disk_rfc3339_utc_second_is_supported(const char *text) {
          second <= 59;
 }
 
+static int lc_pouch_disk_query_datetime_offset_is_plausible(const char *text,
+                                                            size_t offset) {
+  int hour;
+  int minute;
+
+  if (text == NULL ||
+      (text[offset] != '+' && text[offset] != '-') ||
+      !lc_pouch_disk_ascii_digit(text[offset + 1U]) ||
+      !lc_pouch_disk_ascii_digit(text[offset + 2U]) ||
+      text[offset + 3U] != ':' ||
+      !lc_pouch_disk_ascii_digit(text[offset + 4U]) ||
+      !lc_pouch_disk_ascii_digit(text[offset + 5U])) {
+    return 0;
+  }
+  hour = lc_pouch_disk_decimal2(text, offset + 1U);
+  minute = lc_pouch_disk_decimal2(text, offset + 4U);
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
+static int lc_pouch_disk_query_datetime_string_may_match_liblql(
+    const char *text) {
+  size_t len;
+  size_t offset;
+  int year;
+  int month;
+  int day;
+  int hour;
+  int minute;
+  int second;
+
+  if (text == NULL) {
+    return 0;
+  }
+  len = strlen(text);
+  if (len < 19U || text[4] != '-' || text[7] != '-' ||
+      (text[10] != 'T' && text[10] != 't' && text[10] != ' ') ||
+      text[13] != ':' || text[16] != ':' ||
+      !lc_pouch_disk_ascii_digit(text[0]) ||
+      !lc_pouch_disk_ascii_digit(text[1]) ||
+      !lc_pouch_disk_ascii_digit(text[2]) ||
+      !lc_pouch_disk_ascii_digit(text[3]) ||
+      !lc_pouch_disk_ascii_digit(text[5]) ||
+      !lc_pouch_disk_ascii_digit(text[6]) ||
+      !lc_pouch_disk_ascii_digit(text[8]) ||
+      !lc_pouch_disk_ascii_digit(text[9]) ||
+      !lc_pouch_disk_ascii_digit(text[11]) ||
+      !lc_pouch_disk_ascii_digit(text[12]) ||
+      !lc_pouch_disk_ascii_digit(text[14]) ||
+      !lc_pouch_disk_ascii_digit(text[15]) ||
+      !lc_pouch_disk_ascii_digit(text[17]) ||
+      !lc_pouch_disk_ascii_digit(text[18])) {
+    return 0;
+  }
+  year = lc_pouch_disk_decimal4(text);
+  month = lc_pouch_disk_decimal2(text, 5U);
+  day = lc_pouch_disk_decimal2(text, 8U);
+  hour = lc_pouch_disk_decimal2(text, 11U);
+  minute = lc_pouch_disk_decimal2(text, 14U);
+  second = lc_pouch_disk_decimal2(text, 17U);
+  if (month < 1 || month > 12 || day < 1 ||
+      day > lc_pouch_disk_month_days(year, month) || hour < 0 || hour > 23 ||
+      minute < 0 || minute > 59 || second < 0 || second > 59) {
+    return 0;
+  }
+  if (len == 19U) {
+    return 1;
+  }
+  if (len == 20U && (text[19] == 'Z' || text[19] == 'z')) {
+    return 1;
+  }
+  if (text[19] == '+' || text[19] == '-') {
+    return len == 25U &&
+           lc_pouch_disk_query_datetime_offset_is_plausible(text, 19U);
+  }
+  if (text[19] != '.') {
+    return 0;
+  }
+  offset = 20U;
+  if (offset >= len || !lc_pouch_disk_ascii_digit(text[offset])) {
+    return 0;
+  }
+  while (offset < len && lc_pouch_disk_ascii_digit(text[offset])) {
+    offset++;
+  }
+  if (offset == len) {
+    return 1;
+  }
+  if (offset + 1U == len && (text[offset] == 'Z' || text[offset] == 'z')) {
+    return 1;
+  }
+  if (offset + 6U == len) {
+    return lc_pouch_disk_query_datetime_offset_is_plausible(text, offset);
+  }
+  return 0;
+}
+
 static int lc_pouch_disk_query_field_matches_date_after_candidate(
     const char *value, const lc_pouch_document_date_after_term *term) {
   const char *date_value;
@@ -5184,11 +5280,11 @@ static int lc_pouch_disk_query_field_matches_date_after_candidate(
     return 0;
   }
   if (strncmp(value, "s:", 2U) != 0) {
-    return 1;
+    return 0;
   }
   date_value = value + 2U;
   if (!lc_pouch_disk_rfc3339_utc_second_is_supported(date_value)) {
-    return 1;
+    return lc_pouch_disk_query_datetime_string_may_match_liblql(date_value);
   }
   return strcmp(date_value, term->after) > 0;
 }

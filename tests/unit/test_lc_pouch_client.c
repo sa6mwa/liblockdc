@@ -10136,7 +10136,7 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "alpha");
   assert_string_equal(res.cursor, "alpha");
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
   pouch_query_result_cache_status(client, &cache_status, &error);
@@ -10151,7 +10151,7 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "charlie");
   assert_null(res.cursor);
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
   pouch_query_result_cache_status(client, &cache_status, &error);
@@ -10175,7 +10175,7 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_null(strstr(text, "boundary-date"));
   assert_null(strstr(text, "numeric-date"));
   assert_string_equal(res.cursor, "alpha");
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);
@@ -10201,7 +10201,7 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_null(strstr(text, "boundary-date"));
   assert_null(strstr(text, "numeric-date"));
   assert_null(res.cursor);
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);

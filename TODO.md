@@ -855,16 +855,18 @@ Latest release targets confirmed on 2026-07-23:
         1.73 s to about 91.6 ms C-side while preserving key-only output.
       - [x] Narrow simple indexed `date after` candidates for canonical UTC
         second strings by skipping text-helper postings, old canonical date
-        strings, and exact-boundary strings before final `liblql` evaluation.
-        Focused unit coverage now proves invalid string, numeric, old,
-        boundary, accepted, resumed-key, and resumed-document cases.
+        strings, exact-boundary strings, non-string field values, and
+        implausible datetime strings before final `liblql` evaluation. Focused
+        unit coverage now proves invalid string, numeric, old, boundary,
+        accepted, resumed-key, and resumed-document cases. The 2026-07-26
+        4096-document `DateAfter` benchmark now reports 1,048 candidates and
+        about 50.4 ms C-side for keys / 55.7 ms C-side for documents.
       - [ ] Add a typed date/time posting representation that matches liblql's
-        selector datetime grammar closely enough to avoid routing obviously
-        invalid or unsupported date values through the residual evaluator.
-        Current conservative narrowing keeps non-canonical strings and non-string
-        field values as residual candidates; the 2026-07-26 4096-document
-        `DateAfter` benchmark still measured about 150 ms C-side with 2,097
-        candidates, so this remains a pouch-vs-Go performance gap.
+        selector datetime grammar closely enough to avoid routing plausible
+        non-canonical datetime values through the residual evaluator. Current
+        conservative narrowing keeps plausible non-canonical strings as residual
+        candidates while pruning non-strings and implausible date strings, so
+        this remains a pouch-vs-Go performance gap.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not

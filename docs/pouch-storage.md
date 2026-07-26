@@ -765,12 +765,13 @@ predicate as the storage-owned candidate superset and leave exclusion semantics
 to final `liblql` acceptance. `date after` selectors over strict JSON Pointer
 fields narrow canonical UTC-second string postings before final acceptance:
 text-helper postings, exact-boundary canonical strings, and older canonical
-strings are skipped at candidate-collection time. Non-canonical strings and
-non-string values remain residual candidates because pouch does not yet duplicate
-liblql's full selector datetime grammar. Other date forms, relative-date
-handling, and boundary comparisons remain final `liblql` acceptance. Unsupported
-selector families and path forms remain deterministic fallback rather than
-risking false negative candidate pruning.
+strings are skipped at candidate-collection time. Non-string values and
+implausible datetime strings are also rejected as non-candidates. Plausible
+non-canonical datetime strings remain residual candidates because pouch does not
+yet duplicate liblql's full selector datetime grammar. Other date forms,
+relative-date handling, and boundary comparisons remain final `liblql`
+acceptance. Unsupported selector families and path forms remain deterministic
+fallback rather than risking false negative candidate pruning.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan
@@ -944,7 +945,8 @@ selector semantics still remain final `liblql` acceptance.
 Date selectors use indexed postings for their strict JSON Pointer field as a
 candidate superset. For simple `after`/`gt` selectors, pouch can prove canonical
 UTC-second string values older than or equal to the boundary are non-matches and
-remove them before residual evaluation; unsupported date encodings still flow to
+remove them before residual evaluation; it also removes non-string values and
+implausible datetime strings. Plausible unsupported date encodings still flow to
 `liblql`. When date selectors are paginated, cursors advance on accepted rows,
 not merely on candidates, so invalid or out-of-range date candidates cannot
 truncate a page or become the public cursor.
@@ -1436,9 +1438,11 @@ Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
 Residual selectors such as date predicates may deliberately reuse that
 field-presence cache as a candidate-superset cache. The cached vector contains
-documents with the field, including values that are invalid or outside the
-requested date window; the client-level `liblql` filter remains authoritative
-for final acceptance and owns public cursor selection for residual pages.
+documents with the field, and simple date-after planning can narrow that vector
+by dropping older canonical UTC-second strings, exact-boundary strings,
+non-strings, and implausible datetime strings. The client-level `liblql` filter
+remains authoritative for final acceptance and owns public cursor selection for
+residual pages.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every
