@@ -768,6 +768,13 @@ Latest release targets confirmed on 2026-07-23:
         Go disk run measured about 47.5 ms and was noisy relative to earlier
         runs, so this records pouch improvement without treating the broader
         contains parity gap as closed.
+      - [x] Remove redundant compiled `contains` candidate-key materialization:
+        after the raw text posting substring check became authoritative, the
+        trigram key set is only used for zero-candidate rejection and no longer
+        allocates borrowed key arrays or performs per-match binary searches.
+        Verified on 2026-07-26 with the focused 4096-doc
+        `ContainsMessage` indexed key benchmark: pouch measured about 2.75 ms;
+        the matching Go disk run measured about 47.4 ms.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.
