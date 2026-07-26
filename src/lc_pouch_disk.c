@@ -7147,7 +7147,9 @@ lc_pouch_disk_collect_range_result_doc_ids(void *context, int cacheable,
   if (collect == NULL) {
     return LC_OK;
   }
-  collect->reader.use_prepared_range_cache = cacheable;
+  collect->reader.use_prepared_range_cache =
+      cacheable && collect->reader.req != NULL &&
+      collect->reader.req->document_eq_term_count == 0U;
   return lc_pouch_index_collect_range_term_doc_ids(
       &collect->reader.store->allocator, collect->primary,
       lc_pouch_disk_query_read_range_term_doc_ids, &collect->reader, doc_ids,

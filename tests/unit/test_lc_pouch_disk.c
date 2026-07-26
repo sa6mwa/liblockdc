@@ -6696,6 +6696,9 @@ test_query_index_range_scans_field_posting_candidates(void **state) {
   lc_pouch_document_eq_term eq;
   lc_pouch_query_index_scan_req req;
   lc_pouch_query_index_scan_res scan;
+  lc_pouch_query_result_cache_status cache_baseline;
+  lc_pouch_query_result_cache_status cache_status;
+  lc_pouch_query_result_cache_status cache_after_generation;
   scan_capture rows;
   key_capture keys;
   lc_error error;
@@ -6720,12 +6723,16 @@ test_query_index_range_scans_field_posting_candidates(void **state) {
   memset(&eq, 0, sizeof(eq));
   memset(&req, 0, sizeof(req));
   memset(&scan, 0, sizeof(scan));
+  memset(&cache_baseline, 0, sizeof(cache_baseline));
+  memset(&cache_status, 0, sizeof(cache_status));
+  memset(&cache_after_generation, 0, sizeof(cache_after_generation));
   memset(&rows, 0, sizeof(rows));
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
   rc = lc_pouch_disk_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
+  assert_non_null(store->query_result_cache_status);
 
   put_opts.content_type = "application/json";
   source = source_from_text("{\"score\":1,\"kind\":\"include\"}");
@@ -6854,6 +6861,9 @@ test_query_index_range_scans_field_posting_candidates(void **state) {
   req.document_eq_terms = &eq;
   req.document_eq_term_count = 1U;
 
+  rc = store->query_result_cache_status(store, &cache_baseline, &error);
+  assert_int_equal(rc, LC_OK);
+
   rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
                                &error);
   assert_int_equal(rc, LC_OK);
@@ -6864,6 +6874,11 @@ test_query_index_range_scans_field_posting_candidates(void **state) {
   assert_false(scan.truncated);
   assert_true(scan.index_seq > 0UL);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &cache_status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(cache_status.hits, cache_baseline.hits);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 1UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 1UL);
 
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
                                     &scan, &error);
@@ -6873,6 +6888,11 @@ test_query_index_range_scans_field_posting_candidates(void **state) {
   assert_string_equal(keys.keys[1], "omega");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &cache_status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(cache_status.hits, cache_baseline.hits + 1UL);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 1UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 1UL);
 
   source = source_from_text("{\"score\":3,\"kind\":\"exclude\"}");
   rc = store->write_state(store, "default", "mid", source, &put_opts,
@@ -6898,6 +6918,11 @@ test_query_index_range_scans_field_posting_candidates(void **state) {
   assert_string_equal(rows.keys[0], "omega");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &cache_after_generation, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(cache_after_generation.hits, cache_baseline.hits + 1UL);
+  assert_int_equal(cache_after_generation.misses, cache_baseline.misses + 2UL);
+  assert_int_equal(cache_after_generation.puts, cache_baseline.puts + 2UL);
 
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
                                     &scan, &error);
@@ -6906,6 +6931,11 @@ test_query_index_range_scans_field_posting_candidates(void **state) {
   assert_string_equal(keys.keys[0], "omega");
   assert_false(scan.truncated);
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &cache_status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(cache_status.hits, cache_baseline.hits + 2UL);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 2UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 2UL);
 
   memset(&keys, 0, sizeof(keys));
   eq.field = "/kind";

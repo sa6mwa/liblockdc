@@ -425,6 +425,7 @@ static void assert_result_plan_key(const lc_pouch_query_index_scan_req *req,
 static void test_result_plan_keys_are_normalized_by_index(void **state) {
   lc_pouch_query_index_scan_req req;
   lc_pouch_document_eq_term eq;
+  lc_pouch_document_eq_term compound_eq[3];
   lc_pouch_document_exists_term exists;
   lc_pouch_document_in_term in;
   lc_pouch_document_range_term range;
@@ -474,6 +475,19 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
       &req, LC_POUCH_INDEX_RESULT_PLAN_RANGE,
       "range:7:default:2:/n:1:3:n:1:1:3:n:2:1:3:n:3:1:3:n:4");
 
+  compound_eq[0].field = "/kind";
+  compound_eq[0].value = "s:include";
+  compound_eq[1].field = "/bucket";
+  compound_eq[1].value = "s:hot";
+  compound_eq[2].field = "/kind";
+  compound_eq[2].value = "s:include";
+  req.document_eq_terms = compound_eq;
+  req.document_eq_term_count = sizeof(compound_eq) / sizeof(compound_eq[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_RANGE,
+      "range:7:default:2:/n:1:3:n:1:1:3:n:2:1:3:n:3:1:3:n:4:eq:2:7:/"
+      "bucket:5:s:hot:5:/kind:9:s:include");
+
   memset(&req, 0, sizeof(req));
   req.namespace_name = "default";
   prefix.field = "/name";
@@ -499,6 +513,8 @@ static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
   lc_pouch_query_index_scan_req req;
   lc_pouch_document_exists_term exists;
   lc_pouch_document_in_term not_in;
+  lc_pouch_document_range_term range;
+  lc_pouch_document_eq_term not_eq;
   const char *values[] = {"s:beta"};
 
   (void)state;
@@ -519,6 +535,19 @@ static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
   req.document_not_in_term_count = 1U;
   assert_null(lc_pouch_index_result_plan_key(
       NULL, &req, LC_POUCH_INDEX_RESULT_PLAN_EXISTS));
+
+  memset(&req, 0, sizeof(req));
+  req.namespace_name = "default";
+  range.field = "/n";
+  range.gte = "n:1";
+  req.document_range_terms = &range;
+  req.document_range_term_count = 1U;
+  not_eq.field = "/kind";
+  not_eq.value = "s:skip";
+  req.document_not_eq_terms = &not_eq;
+  req.document_not_eq_term_count = 1U;
+  assert_null(lc_pouch_index_result_plan_key(NULL, &req,
+                                             LC_POUCH_INDEX_RESULT_PLAN_RANGE));
 }
 
 static void test_prepared_term_cache_refreshes_by_generation(void **state) {

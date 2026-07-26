@@ -628,6 +628,12 @@ Latest release targets confirmed on 2026-07-23:
         `lc_pouch_index`: equality, exists, `in`, range, prefix, and contains
         cacheability/normalization now live with the planner cache boundary
         instead of the disk backend.
+      - [x] Extend normalized result-cache planning to primary numeric range
+        scans with positive equality filters: compound range/equality plans
+        now use sorted/deduplicated equality predicates in the plan key, reuse
+        cached filtered result pages across scan/key-scan entry points, miss
+        across generation changes, and avoid unsafe broad prepared-range reuse
+        when secondary equality filters are present.
       - [x] Add index-owned docID result paging over the document table and
         route the equality document/key scans through it, so cached equality
         result pages translate only the selected page of docIDs back through
