@@ -7333,7 +7333,33 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
 
   memset(&keys, 0, sizeof(keys));
+  req.limit = 2U;
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "both");
+  assert_string_equal(keys.keys[1], "finance");
+  assert_true(scan.truncated);
+  assert_string_equal(scan.next_start_after, "finance");
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
+  req.start_after = "finance";
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "planning");
+  assert_string_equal(keys.keys[1], "zeta");
+  assert_false(scan.truncated);
+  assert_null(scan.next_start_after);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+
+  memset(&keys, 0, sizeof(keys));
   memset(&rows, 0, sizeof(rows));
+  req.start_after = NULL;
+  req.limit = 8U;
   in_term.field = "/tags/*";
 
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,

@@ -706,6 +706,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Wire the result cache into simple non-wildcard positive `in`
         scans using a normalized key with sorted/deduplicated typed values,
         with duplicate-value and post-write generation-miss coverage.
+      - [x] Add simple non-wildcard `in` key pagination coverage after
+        duplicate-value de-duplication, proving `limit`, `next_start_after`,
+        and resumed key-only scans preserve stable key order.
       - [x] Wire the result cache into simple positive numeric `range` scans
         using a length-prefixed bound-aware plan key, with post-write
         generation-miss coverage.
