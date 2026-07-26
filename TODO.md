@@ -608,6 +608,16 @@ Latest release targets confirmed on 2026-07-23:
         3.1 ms for key results after the sorted gram-candidate guard; Go disk
         measured about 4.1 ms and 0.98 ms respectively, so contains keys remain
         a pouch perf gap.
+      - [x] Skip redundant primary `exists` and `prefix` revalidation in the
+        generic docID candidate guard after the active field-presence/text
+        reader has already validated the primary predicate; secondary positive
+        and negative exists/prefix predicates still run through the shared
+        guard.
+        Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
+        pouch `ExistsFlag` dropped from about 30.2 ms to about 7.16 ms and
+        `PrefixOwner` from about 3.83 ms to about 1.76 ms. Go disk measured
+        about 1.49 ms and 1.30 ms respectively, so persisted compiled
+        dictionaries remain the next required parity step.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
@@ -751,6 +761,15 @@ Latest release targets confirmed on 2026-07-23:
         `ContainsMessage` about 4.39 ms. Go disk measured about 46.6 ms, 1.95
         ms, and 1.06 ms respectively in the same run, so `InTags` and
         `ContainsMessage` key-return paths remain pouch performance gaps.
+      - [x] Extend direct document-table key snapshots to simple key-only
+        equality, exists, and prefix scans, so all simple cached docID result
+        pages stream keys without allocating summary-index arrays when metadata
+        rows are not needed.
+        Verified on 2026-07-26 with the same 4096-doc indexed key benchmark:
+        pouch `EqSparse` measured about 0.64 ms, `ExistsFlag` about 7.16 ms,
+        and `PrefixOwner` about 1.76 ms after the paired primary-revalidation
+        skip; Go disk measured about 55.0 ms, 1.49 ms, and 1.30 ms
+        respectively.
       - [x] Add index-owned posting append decode and route disk exact,
         exists, range, prefix, and contains readers through it, so cached
         adaptive postings append into the caller's docID set without allocating

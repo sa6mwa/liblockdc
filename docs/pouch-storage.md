@@ -724,18 +724,23 @@ Current pouch field postings support strict JSON Pointer equality, `in`,
 collection. Range-primary document and key-only scans walk ordered numeric field
 postings, apply upper-bound termination, filter stale/deleted rows through the
 live state etag/version check, and then restore stable key/cursor ordering for
-the public result stream. Cached docID result pages for key-only range,
-non-wildcard `in`, and contains scans snapshot keys directly from the immutable
-document table, avoiding a summary-index translation layer when metadata rows
-are not needed. Prepared adaptive postings decode directly into caller-owned
-docID sets, so equality, `in`, exists, range, prefix, and contains readers avoid
-temporary decoded vectors on cache hits. Contains compilation checks raw text
-postings for the substring directly; trigrams remain a zero-candidate fast
-reject until the compiled field dictionary can drive a docID-first text search
-path. The client planner also recognizes full-form `or` selectors whose
-branches are exact equality predicates over the same strict field and lowers
-them to the existing storage-owned `in` candidate path; mixed field equality OR
-branches use a storage-owned branch-union posting path.
+the public result stream. Cached docID result pages for simple key-only
+equality, exists, range, non-wildcard `in`, prefix, and contains scans snapshot
+keys directly from the immutable document table, avoiding a summary-index
+translation layer when metadata rows are not needed. Prepared adaptive postings
+decode directly into caller-owned docID sets, so equality, `in`, exists, range,
+prefix, and contains readers avoid temporary decoded vectors on cache hits.
+The generic docID candidate guard accepts per-predicate offsets for primary
+equality, range, `in`, prefix, contains, and exists readers, so a reader that
+has already proven its primary predicate does not rescan that same predicate for
+every candidate while secondary and negated predicates remain enforced.
+Contains compilation checks raw text postings for the substring directly;
+trigrams remain a zero-candidate fast reject until the compiled field dictionary
+can drive a docID-first text search path. The client planner also recognizes
+full-form `or` selectors whose branches are exact equality predicates over the
+same strict field and lowers them to the existing storage-owned `in` candidate
+path; mixed field equality OR branches use a storage-owned branch-union posting
+path.
 `exists`, prefix/iprefix, contains/icontains, and numeric range OR branches use
 storage-owned branch-union posting paths as well, de-duplicating keys before
 restoring stable cursor ordering. Mixed OR branches that combine path-string
