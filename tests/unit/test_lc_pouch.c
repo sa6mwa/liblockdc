@@ -2142,6 +2142,254 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_txn_decisions_apply_queue_side_effects(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_ack_op ack_op;
+  lc_ack_res ack_res;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_message *message;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  memset(&ack_op, 0, sizeof(ack_op));
+  memset(&ack_res, 0, sizeof(ack_res));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_error_init(&error);
+  make_root("txn-queue", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "txn-jobs";
+  enqueue_req.visibility_timeout_seconds = 120L;
+  rc = lc_source_from_memory("commit-job", strlen("commit-job"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  dequeue_req.queue = "txn-jobs";
+  dequeue_req.owner = "worker-txn";
+  dequeue_req.txn_id = "txn-queue-commit";
+  dequeue_req.visibility_timeout_seconds = 120L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->txn_id, "txn-queue-commit");
+
+  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.queue = message->queue;
+  ack_op.message.message_id = message->message_id;
+  ack_op.message.lease_id = message->lease_id;
+  ack_op.message.txn_id = message->txn_id;
+  ack_op.message.fencing_token = message->fencing_token;
+  ack_op.message.meta_etag = message->meta_etag;
+  rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(ack_res.acked, 1);
+  lc_ack_res_cleanup(&ack_res);
+
+  stats_req.queue = "txn-jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 1);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  decision_req.txn_id = "txn-queue-commit";
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+  message->close(message);
+  message = NULL;
+
+  rc = lc_source_from_memory("rollback-job", strlen("rollback-job"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  dequeue_req.txn_id = "txn-queue-rollback";
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->txn_id, "txn-queue-rollback");
+
+  memset(&ack_op, 0, sizeof(ack_op));
+  memset(&ack_res, 0, sizeof(ack_res));
+  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.queue = message->queue;
+  ack_op.message.message_id = message->message_id;
+  ack_op.message.lease_id = message->lease_id;
+  ack_op.message.txn_id = message->txn_id;
+  ack_op.message.fencing_token = message->fencing_token;
+  ack_op.message.meta_etag = message->meta_etag;
+  rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(ack_res.acked, 1);
+  lc_ack_res_cleanup(&ack_res);
+
+  decision_req.txn_id = "txn-queue-rollback";
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  ack_op.message.txn_id = NULL;
+  memset(&ack_res, 0, sizeof(ack_res));
+  rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(ack_res.acked, 1);
+  lc_ack_res_cleanup(&ack_res);
+  message->close(message);
+  message = NULL;
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_txn_recovery_applies_queue_side_effects(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_ack_op ack_op;
+  lc_ack_res ack_res;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_message *message;
+  lc_error error;
+  char root[512];
+  const char *record;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  memset(&ack_op, 0, sizeof(ack_op));
+  memset(&ack_res, 0, sizeof(ack_res));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-queue-recovery", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "txn-recover";
+  enqueue_req.visibility_timeout_seconds = 120L;
+  rc = lc_source_from_memory("recover-job", strlen("recover-job"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  dequeue_req.queue = "txn-recover";
+  dequeue_req.owner = "worker-recover";
+  dequeue_req.txn_id = "txn-queue-recover";
+  dequeue_req.visibility_timeout_seconds = 120L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+
+  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.queue = message->queue;
+  ack_op.message.message_id = message->message_id;
+  ack_op.message.lease_id = message->lease_id;
+  ack_op.message.txn_id = message->txn_id;
+  ack_op.message.fencing_token = message->fencing_token;
+  ack_op.message.meta_etag = message->meta_etag;
+  rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(ack_res.acked, 1);
+  lc_ack_res_cleanup(&ack_res);
+  message->close(message);
+  message = NULL;
+  lc_client_close(client);
+  client = NULL;
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  record = "format pouch-txn-v1\nstate 636f6d6d6974\n"
+           "expires_at_unix 0\ntc_term 1\n"
+           "target_backend_hash \nparticipant_count 0\n";
+  rc = lc_source_from_memory(record, strlen(record), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ".lockd/txn", "txn/txn-queue-recover",
+                            source, NULL, &write_result, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  stats_req.queue = "txn-recover";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+  lc_client_close(client);
+  client = NULL;
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-queue-recover",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_queue_mutations_touch_notification_marker(
     void **state) {
   lc_client *client;
@@ -5537,6 +5785,8 @@ int main(void) {
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
+      cmocka_unit_test(test_txn_decisions_apply_queue_side_effects),
+      cmocka_unit_test(test_txn_recovery_applies_queue_side_effects),
       cmocka_unit_test(
           test_client_queue_mutations_touch_notification_marker),
       cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),

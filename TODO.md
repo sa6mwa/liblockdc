@@ -94,8 +94,13 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
         delete and clear side effects: delete markers remain hidden until
         commit, rollback preserves committed attachments, and clear also
         covers same-transaction staged uploads.
-      - [ ] Extend transaction participant replay to remaining queue/object
-        side effects and query/index refresh wakeups.
+      - [x] Apply transaction commit/rollback decisions to staged queue
+        side effects: transaction-bound dequeue carries `txn_id` onto the
+        message, ack/nack/extend write hidden staged queue records, commit
+        promotes them, rollback discards them, and open-time decision replay
+        applies the same queued side effects.
+      - [ ] Extend transaction participant replay to remaining query/index
+        refresh wakeups and mixed object/queue integration coverage.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.
