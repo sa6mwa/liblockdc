@@ -55,6 +55,39 @@ static void cleanup_root(const char *root) {
   }
 }
 
+static void cleanup_all_roots(void) {
+  static const char prefix[] = "liblockdc-unit-pouch-redesign-";
+  DIR *dir;
+  struct dirent *entry;
+
+  dir = opendir("/tmp");
+  if (dir == NULL) {
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    char path[1024];
+
+    if (!has_prefix(entry->d_name, prefix)) {
+      continue;
+    }
+    snprintf(path, sizeof(path), "/tmp/%s", entry->d_name);
+    cleanup_root(path);
+  }
+  closedir(dir);
+}
+
+static int setup_pouch_unit_group(void **state) {
+  (void)state;
+  cleanup_all_roots();
+  return 0;
+}
+
+static int teardown_pouch_unit_group(void **state) {
+  (void)state;
+  cleanup_all_roots();
+  return 0;
+}
+
 static int path_is_dir(const char *path) {
   struct stat st;
 
@@ -483,5 +516,6 @@ int main(void) {
           test_namespace_manifest_repairs_from_existing_segments),
   };
 
-  return cmocka_run_group_tests(tests, NULL, NULL);
+  return cmocka_run_group_tests(tests, setup_pouch_unit_group,
+                                teardown_pouch_unit_group);
 }
