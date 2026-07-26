@@ -887,6 +887,10 @@ Latest release targets confirmed on 2026-07-23:
       - [ ] Keep expanding the in-project C benchmark matrix as the release-gate
         candidate surface for liblockdc-local behavior; the Go module is only
         for opt-in cross-backend e2e comparisons and stress work.
+        - [x] Add native pouch scan/index document/key benchmark cases for the
+          same public LQL selector families used by the Go comparison harness:
+          sparse/dense equality, numeric range, scalar `in`, array `in` via
+          `/tags[]`, exists, prefix, contains, simple `and`, and simple `or`.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
   - [ ] Refine pouch e2e coverage around segmented manifest/snapshot
     lifecycle, manifest repair, background compaction scheduling, marker

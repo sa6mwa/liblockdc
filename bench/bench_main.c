@@ -846,6 +846,269 @@ static int bench_pouch_seed_public_query_rows_by_field(const char *root,
   return 0;
 }
 
+static long bench_pouch_target_row(long rows) {
+  return rows > 1L ? rows / 2L : 0L;
+}
+
+typedef struct bench_pouch_lql_scenario {
+  const char *name;
+  int (*match)(long row, long rows);
+} bench_pouch_lql_scenario;
+
+static int bench_pouch_lql_match_eq_sparse(long row, long rows) {
+  return row == bench_pouch_target_row(rows);
+}
+
+static int bench_pouch_lql_match_eq_dense(long row, long rows) {
+  (void)rows;
+  return row % 2L == 0L;
+}
+
+static int bench_pouch_lql_match_range_half(long row, long rows) {
+  return row >= bench_pouch_target_row(rows);
+}
+
+static int bench_pouch_lql_match_in_region(long row, long rows) {
+  (void)rows;
+  return row % 3L == 0L || row % 3L == 1L;
+}
+
+static int bench_pouch_lql_match_in_region_single(long row, long rows) {
+  (void)rows;
+  return row % 3L == 0L;
+}
+
+static int bench_pouch_lql_match_in_tags(long row, long rows) {
+  (void)rows;
+  return row % 3L == 0L || row % 5L == 0L;
+}
+
+static int bench_pouch_lql_match_exists_flag(long row, long rows) {
+  (void)rows;
+  return row % 5L == 0L;
+}
+
+static int bench_pouch_lql_match_prefix_owner(long row, long rows) {
+  (void)rows;
+  return row % 10L == 0L;
+}
+
+static int bench_pouch_lql_match_contains_message(long row, long rows) {
+  (void)rows;
+  return row % 8L == 0L;
+}
+
+static int bench_pouch_lql_match_and_even_range(long row, long rows) {
+  return bench_pouch_lql_match_eq_dense(row, rows) &&
+         bench_pouch_lql_match_range_half(row, rows);
+}
+
+static int bench_pouch_lql_match_or_sparse_or_flag(long row, long rows) {
+  return bench_pouch_lql_match_eq_sparse(row, rows) ||
+         bench_pouch_lql_match_exists_flag(row, rows);
+}
+
+static const bench_pouch_lql_scenario *bench_pouch_lql_scenarios(void) {
+  static const bench_pouch_lql_scenario scenarios[] = {
+      {"EqSparse", bench_pouch_lql_match_eq_sparse},
+      {"EqDense", bench_pouch_lql_match_eq_dense},
+      {"RangeHalf", bench_pouch_lql_match_range_half},
+      {"InRegion", bench_pouch_lql_match_in_region},
+      {"InRegionSingle", bench_pouch_lql_match_in_region_single},
+      {"InTags", bench_pouch_lql_match_in_tags},
+      {"ExistsFlag", bench_pouch_lql_match_exists_flag},
+      {"PrefixOwner", bench_pouch_lql_match_prefix_owner},
+      {"ContainsMessage", bench_pouch_lql_match_contains_message},
+      {"AndEvenRange", bench_pouch_lql_match_and_even_range},
+      {"OrSparseOrFlag", bench_pouch_lql_match_or_sparse_or_flag},
+      {NULL, NULL}};
+
+  return scenarios;
+}
+
+static const bench_pouch_lql_scenario *
+bench_pouch_find_lql_scenario(const char *name) {
+  const bench_pouch_lql_scenario *scenario;
+
+  for (scenario = bench_pouch_lql_scenarios(); scenario->name != NULL;
+       ++scenario) {
+    if (strcmp(name, scenario->name) == 0) {
+      return scenario;
+    }
+  }
+  return NULL;
+}
+
+static long
+bench_pouch_lql_expected_rows(const bench_pouch_lql_scenario *scenario,
+                              long rows) {
+  long count;
+  long row;
+
+  count = 0L;
+  for (row = 0L; row < rows; ++row) {
+    if (scenario->match(row, rows)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static int
+bench_pouch_lql_selector_json(const bench_pouch_lql_scenario *scenario,
+                              long rows, char *buffer, size_t buffer_size) {
+  long target;
+  int written;
+
+  if (scenario == NULL || buffer == NULL || buffer_size == 0U) {
+    return 0;
+  }
+  target = bench_pouch_target_row(rows);
+  if (strcmp(scenario->name, "EqSparse") == 0) {
+    written = snprintf(buffer, buffer_size,
+                       "{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle\"}}");
+  } else if (strcmp(scenario->name, "EqDense") == 0) {
+    written = snprintf(buffer, buffer_size,
+                       "{\"eq\":{\"field\":\"/group\",\"value\":\"even\"}}");
+  } else if (strcmp(scenario->name, "RangeHalf") == 0) {
+    written =
+        snprintf(buffer, buffer_size,
+                 "{\"range\":{\"field\":\"/value\",\"gte\":%ld}}", target);
+  } else if (strcmp(scenario->name, "InRegion") == 0) {
+    written =
+        snprintf(buffer, buffer_size,
+                 "{\"in\":{\"field\":\"/region\",\"any\":[\"us\",\"eu\"]}}");
+  } else if (strcmp(scenario->name, "InRegionSingle") == 0) {
+    written = snprintf(buffer, buffer_size,
+                       "{\"in\":{\"field\":\"/region\",\"any\":[\"us\"]}}");
+  } else if (strcmp(scenario->name, "InTags") == 0) {
+    written = snprintf(
+        buffer, buffer_size,
+        "{\"in\":{\"field\":\"/tags[]\",\"any\":[\"planning\",\"finance\"]}}");
+  } else if (strcmp(scenario->name, "ExistsFlag") == 0) {
+    written = snprintf(buffer, buffer_size, "{\"exists\":\"/flag\"}");
+  } else if (strcmp(scenario->name, "PrefixOwner") == 0) {
+    written = snprintf(
+        buffer, buffer_size,
+        "{\"prefix\":{\"field\":\"/owner\",\"value\":\"bench-owner-00\"}}");
+  } else if (strcmp(scenario->name, "ContainsMessage") == 0) {
+    written = snprintf(buffer, buffer_size,
+                       "{\"contains\":{\"field\":\"/details/message\","
+                       "\"value\":\"timeout\"}}");
+  } else if (strcmp(scenario->name, "AndEvenRange") == 0) {
+    written =
+        snprintf(buffer, buffer_size,
+                 "{\"and\":[{\"eq\":{\"field\":\"/group\",\"value\":\"even\"}},"
+                 "{\"range\":{\"field\":\"/value\",\"gte\":%ld}}]}",
+                 target);
+  } else if (strcmp(scenario->name, "OrSparseOrFlag") == 0) {
+    written = snprintf(
+        buffer, buffer_size,
+        "{\"or\":[{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle\"}},"
+        "{\"exists\":\"/flag\"}]}");
+  } else {
+    return 0;
+  }
+  return written > 0 && (size_t)written < buffer_size;
+}
+
+static int bench_pouch_flush_index(lc_client *client, lc_error *error) {
+  lc_index_flush_req req;
+  lc_index_flush_res res;
+  int rc;
+
+  lc_index_flush_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.namespace_name = "bench";
+  req.mode = "wait";
+  rc = client->flush_index(client, &req, &res, error);
+  lc_index_flush_res_cleanup(&res);
+  return rc;
+}
+
+static int bench_pouch_seed_public_lql_rows(const char *root, long rows,
+                                            lc_error *error) {
+  char endpoint[320];
+  char key[96];
+  char owner[32];
+  char json[512];
+  char flag_json[32];
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_acquire_req acquire;
+  lc_update_opts update_opts;
+  lc_lease *lease;
+  lc_source *source;
+  long target;
+  long i;
+  int rc;
+
+  target = bench_pouch_target_row(rows);
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  rc = lc_client_open(&config, &client, error);
+  if (rc != LC_OK) {
+    return 1;
+  }
+  lc_acquire_req_init(&acquire);
+  lc_update_opts_init(&update_opts);
+  acquire.ttl_seconds = 3600L;
+  update_opts.content_type = "application/json";
+  lease = NULL;
+  source = NULL;
+  for (i = 0L; i < rows; ++i) {
+    snprintf(key, sizeof(key), "bench/query/%08ld", i);
+    snprintf(owner, sizeof(owner), "bench-owner-%02ld", i % 10L);
+    if (i % 5L == 0L) {
+      snprintf(flag_json, sizeof(flag_json), ",\"flag\":true");
+    } else {
+      flag_json[0] = '\0';
+    }
+    snprintf(json, sizeof(json),
+             "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
+             "\"owner\":\"%s\",\"value\":%ld,\"tags\":[\"%s\",\"%s\"],"
+             "\"details\":{\"message\":\"%s event %ld\"}%s}",
+             i == target ? "needle" : "haystack", i % 2L == 0L ? "even" : "odd",
+             i % 3L == 0L ? "us" : (i % 3L == 1L ? "eu" : "apac"), owner, i,
+             i % 3L == 0L ? "planning" : "ops",
+             i % 5L == 0L ? "finance" : "runtime",
+             i % 8L == 0L ? "timeout" : "normal", i, flag_json);
+    lease = NULL;
+    source = NULL;
+    acquire.key = key;
+    acquire.owner = owner;
+    rc = client->acquire(client, &acquire, &lease, error);
+    if (rc == LC_OK) {
+      source = bench_source_from_text(json, error);
+      if (source == NULL) {
+        rc = LC_ERR_NOMEM;
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lease->update(lease, source, &update_opts, error);
+    }
+    if (source != NULL) {
+      lc_source_close(source);
+    }
+    if (lease != NULL) {
+      lease->close(lease);
+    }
+    if (rc != LC_OK) {
+      client->close(client);
+      return 1;
+    }
+  }
+  rc = bench_pouch_flush_index(client, error);
+  client->close(client);
+  return rc == LC_OK ? 0 : 1;
+}
+
 typedef struct bench_scan_count {
   long rows;
 } bench_scan_count;
@@ -3038,6 +3301,186 @@ static int bench_pouch_index_query_keys_field_low_match(long iterations) {
   return bench_pouch_query_field_low_match(iterations, 0, 1);
 }
 
+static int bench_pouch_query_lql_scenario(long iterations,
+                                          const char *scenario_name,
+                                          int scan_mode, int keys_only) {
+  char root[256];
+  char endpoint[320];
+  char selector[512];
+  char suffix[128];
+  const bench_pouch_lql_scenario *scenario;
+  lc_client_config config;
+  const char *endpoints[1];
+  lc_client *client;
+  lc_sink *sink;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  bench_query_key_count count;
+  lc_error error;
+  long expected_rows;
+  int rc;
+
+  scenario = bench_pouch_find_lql_scenario(scenario_name);
+  if (scenario == NULL) {
+    fprintf(stderr, "unknown pouch LQL benchmark scenario %s\n",
+            scenario_name != NULL ? scenario_name : "(null)");
+    return 1;
+  }
+  snprintf(suffix, sizeof(suffix), "%s-lql-%s-%s", scan_mode ? "scan" : "index",
+           keys_only ? "keys" : "documents", scenario->name);
+  bench_pouch_root_path(root, sizeof(root), suffix);
+  bench_pouch_cleanup_root(root);
+  lc_error_init(&error);
+  if (bench_pouch_seed_public_lql_rows(root, iterations, &error) != 0) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+  if (!bench_pouch_lql_selector_json(scenario, iterations, selector,
+                                     sizeof(selector))) {
+    fprintf(stderr, "failed to format pouch LQL benchmark selector %s\n",
+            scenario->name);
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  snprintf(endpoint, sizeof(endpoint),
+           scan_mode ? "pouch://%s?query_engine=scan" : "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  client = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc != LC_OK) {
+    lc_error_cleanup(&error);
+    bench_pouch_cleanup_root(root);
+    return 1;
+  }
+
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.selector_json = selector;
+  req.limit = iterations;
+  expected_rows = bench_pouch_lql_expected_rows(scenario, iterations);
+  if (keys_only) {
+    memset(&handler, 0, sizeof(handler));
+    memset(&count, 0, sizeof(count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &count, &res, &error);
+    if (rc == LC_OK && count.rows != expected_rows) {
+      fprintf(stderr, "pouch %s LQL scenario streamed %ld keys, expected %ld\n",
+              scenario->name, count.rows, expected_rows);
+      rc = LC_ERR_PROTOCOL;
+    }
+  } else {
+    sink = NULL;
+    rc = lc_sink_to_file("/dev/null", &sink, &error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, &error);
+      lc_sink_close(sink);
+    }
+  }
+  if (rc == LC_OK && scan_mode && res.index_seq != 0UL) {
+    fprintf(stderr, "pouch scan %s LQL scenario reported index sequence\n",
+            scenario->name);
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK && !scan_mode && res.index_seq == 0UL) {
+    fprintf(stderr,
+            "pouch index %s LQL scenario did not report index sequence\n",
+            scenario->name);
+    rc = LC_ERR_PROTOCOL;
+  }
+  if (rc == LC_OK && res.return_mode != NULL &&
+      strcmp(res.return_mode, keys_only ? "keys" : "documents") != 0) {
+    fprintf(stderr, "pouch %s LQL scenario returned unexpected mode %s\n",
+            scenario->name, res.return_mode);
+    rc = LC_ERR_PROTOCOL;
+  }
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  lc_error_cleanup(&error);
+  bench_pouch_cleanup_root(root);
+  return rc == LC_OK ? 0 : 1;
+}
+
+#define DEFINE_POUCH_LQL_BENCH(fn_name, scenario_name, scan_mode, keys_only)   \
+  static int fn_name(long iterations) {                                        \
+    return bench_pouch_query_lql_scenario(iterations, scenario_name,           \
+                                          scan_mode, keys_only);               \
+  }
+
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_eq_sparse, "EqSparse", 1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_eq_sparse, "EqSparse", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_eq_sparse, "EqSparse", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_eq_sparse, "EqSparse", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_eq_dense, "EqDense", 1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_eq_dense, "EqDense", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_eq_dense, "EqDense", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_eq_dense, "EqDense", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_range_half, "RangeHalf", 1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_range_half, "RangeHalf", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_range_half, "RangeHalf", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_range_half, "RangeHalf", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_in_region, "InRegion", 1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_in_region, "InRegion", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_in_region, "InRegion", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_in_region, "InRegion", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_in_region_single, "InRegionSingle",
+                       1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_in_region_single, "InRegionSingle",
+                       0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_in_region_single,
+                       "InRegionSingle", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_in_region_single,
+                       "InRegionSingle", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_in_tags, "InTags", 1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_in_tags, "InTags", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_in_tags, "InTags", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_in_tags, "InTags", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_exists_flag, "ExistsFlag", 1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_exists_flag, "ExistsFlag", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_exists_flag, "ExistsFlag", 1,
+                       1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_exists_flag, "ExistsFlag", 0,
+                       1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_prefix_owner, "PrefixOwner", 1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_prefix_owner, "PrefixOwner", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_prefix_owner, "PrefixOwner", 1,
+                       1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_prefix_owner, "PrefixOwner",
+                       0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_contains_message, "ContainsMessage",
+                       1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_contains_message,
+                       "ContainsMessage", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_contains_message,
+                       "ContainsMessage", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_contains_message,
+                       "ContainsMessage", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_and_even_range, "AndEvenRange", 1,
+                       0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_and_even_range, "AndEvenRange", 0,
+                       0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_and_even_range, "AndEvenRange",
+                       1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_and_even_range,
+                       "AndEvenRange", 0, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_or_sparse_or_flag, "OrSparseOrFlag",
+                       1, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_or_sparse_or_flag,
+                       "OrSparseOrFlag", 0, 0)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_scan_lql_keys_or_sparse_or_flag,
+                       "OrSparseOrFlag", 1, 1)
+DEFINE_POUCH_LQL_BENCH(bench_pouch_index_lql_keys_or_sparse_or_flag,
+                       "OrSparseOrFlag", 0, 1)
+
 static int bench_lockd_disk_seed_query_rows_by_field(lc_client *client,
                                                      long rows,
                                                      const char *run_id,
@@ -3599,6 +4042,7 @@ static void print_usage(const char *argv0) {
   fprintf(stderr, "pouch-index-query-field-low-match|");
   fprintf(stderr, "pouch-scan-query-keys-field-low-match|");
   fprintf(stderr, "pouch-index-query-keys-field-low-match|");
+  fprintf(stderr, "pouch-(scan|index)-lql[-keys]-<scenario>|");
   fprintf(stderr, "lockd-disk-query-field-low-match|");
   fprintf(stderr, "lockd-disk-query-keys-field-low-match|");
   fprintf(stderr, "pouch-key-lock-contention]\n");
@@ -3682,6 +4126,85 @@ int main(int argc, char **argv) {
        bench_pouch_scan_query_keys_field_low_match},
       {"pouch-index-query-keys-field-low-match", 1000L, 0,
        bench_pouch_index_query_keys_field_low_match},
+      {"pouch-scan-lql-eq-sparse", 1000L, 0, bench_pouch_scan_lql_eq_sparse},
+      {"pouch-index-lql-eq-sparse", 1000L, 0, bench_pouch_index_lql_eq_sparse},
+      {"pouch-scan-lql-keys-eq-sparse", 1000L, 0,
+       bench_pouch_scan_lql_keys_eq_sparse},
+      {"pouch-index-lql-keys-eq-sparse", 1000L, 0,
+       bench_pouch_index_lql_keys_eq_sparse},
+      {"pouch-scan-lql-eq-dense", 1000L, 0, bench_pouch_scan_lql_eq_dense},
+      {"pouch-index-lql-eq-dense", 1000L, 0, bench_pouch_index_lql_eq_dense},
+      {"pouch-scan-lql-keys-eq-dense", 1000L, 0,
+       bench_pouch_scan_lql_keys_eq_dense},
+      {"pouch-index-lql-keys-eq-dense", 1000L, 0,
+       bench_pouch_index_lql_keys_eq_dense},
+      {"pouch-scan-lql-range-half", 1000L, 0, bench_pouch_scan_lql_range_half},
+      {"pouch-index-lql-range-half", 1000L, 0,
+       bench_pouch_index_lql_range_half},
+      {"pouch-scan-lql-keys-range-half", 1000L, 0,
+       bench_pouch_scan_lql_keys_range_half},
+      {"pouch-index-lql-keys-range-half", 1000L, 0,
+       bench_pouch_index_lql_keys_range_half},
+      {"pouch-scan-lql-in-region", 1000L, 0, bench_pouch_scan_lql_in_region},
+      {"pouch-index-lql-in-region", 1000L, 0, bench_pouch_index_lql_in_region},
+      {"pouch-scan-lql-keys-in-region", 1000L, 0,
+       bench_pouch_scan_lql_keys_in_region},
+      {"pouch-index-lql-keys-in-region", 1000L, 0,
+       bench_pouch_index_lql_keys_in_region},
+      {"pouch-scan-lql-in-region-single", 1000L, 0,
+       bench_pouch_scan_lql_in_region_single},
+      {"pouch-index-lql-in-region-single", 1000L, 0,
+       bench_pouch_index_lql_in_region_single},
+      {"pouch-scan-lql-keys-in-region-single", 1000L, 0,
+       bench_pouch_scan_lql_keys_in_region_single},
+      {"pouch-index-lql-keys-in-region-single", 1000L, 0,
+       bench_pouch_index_lql_keys_in_region_single},
+      {"pouch-scan-lql-in-tags", 1000L, 0, bench_pouch_scan_lql_in_tags},
+      {"pouch-index-lql-in-tags", 1000L, 0, bench_pouch_index_lql_in_tags},
+      {"pouch-scan-lql-keys-in-tags", 1000L, 0,
+       bench_pouch_scan_lql_keys_in_tags},
+      {"pouch-index-lql-keys-in-tags", 1000L, 0,
+       bench_pouch_index_lql_keys_in_tags},
+      {"pouch-scan-lql-exists-flag", 1000L, 0,
+       bench_pouch_scan_lql_exists_flag},
+      {"pouch-index-lql-exists-flag", 1000L, 0,
+       bench_pouch_index_lql_exists_flag},
+      {"pouch-scan-lql-keys-exists-flag", 1000L, 0,
+       bench_pouch_scan_lql_keys_exists_flag},
+      {"pouch-index-lql-keys-exists-flag", 1000L, 0,
+       bench_pouch_index_lql_keys_exists_flag},
+      {"pouch-scan-lql-prefix-owner", 1000L, 0,
+       bench_pouch_scan_lql_prefix_owner},
+      {"pouch-index-lql-prefix-owner", 1000L, 0,
+       bench_pouch_index_lql_prefix_owner},
+      {"pouch-scan-lql-keys-prefix-owner", 1000L, 0,
+       bench_pouch_scan_lql_keys_prefix_owner},
+      {"pouch-index-lql-keys-prefix-owner", 1000L, 0,
+       bench_pouch_index_lql_keys_prefix_owner},
+      {"pouch-scan-lql-contains-message", 1000L, 0,
+       bench_pouch_scan_lql_contains_message},
+      {"pouch-index-lql-contains-message", 1000L, 0,
+       bench_pouch_index_lql_contains_message},
+      {"pouch-scan-lql-keys-contains-message", 1000L, 0,
+       bench_pouch_scan_lql_keys_contains_message},
+      {"pouch-index-lql-keys-contains-message", 1000L, 0,
+       bench_pouch_index_lql_keys_contains_message},
+      {"pouch-scan-lql-and-even-range", 1000L, 0,
+       bench_pouch_scan_lql_and_even_range},
+      {"pouch-index-lql-and-even-range", 1000L, 0,
+       bench_pouch_index_lql_and_even_range},
+      {"pouch-scan-lql-keys-and-even-range", 1000L, 0,
+       bench_pouch_scan_lql_keys_and_even_range},
+      {"pouch-index-lql-keys-and-even-range", 1000L, 0,
+       bench_pouch_index_lql_keys_and_even_range},
+      {"pouch-scan-lql-or-sparse-or-flag", 1000L, 0,
+       bench_pouch_scan_lql_or_sparse_or_flag},
+      {"pouch-index-lql-or-sparse-or-flag", 1000L, 0,
+       bench_pouch_index_lql_or_sparse_or_flag},
+      {"pouch-scan-lql-keys-or-sparse-or-flag", 1000L, 0,
+       bench_pouch_scan_lql_keys_or_sparse_or_flag},
+      {"pouch-index-lql-keys-or-sparse-or-flag", 1000L, 0,
+       bench_pouch_index_lql_keys_or_sparse_or_flag},
       {"lockd-disk-query-field-low-match", 1000L, 1,
        bench_lockd_disk_query_field_low_match_docs},
       {"lockd-disk-query-keys-field-low-match", 1000L, 1,
