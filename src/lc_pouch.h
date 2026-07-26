@@ -33,12 +33,16 @@ typedef struct lc_pouch_state_write_options {
   const char *expected_etag;
   unsigned long expected_version;
   int has_expected_version;
+  int has_query_hidden;
+  int query_hidden;
 } lc_pouch_state_write_options;
 
 typedef struct lc_pouch_state_write_result {
   char *etag;
   unsigned long version;
   unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
 } lc_pouch_state_write_result;
 
 typedef struct lc_pouch_state_read_result {
@@ -47,6 +51,8 @@ typedef struct lc_pouch_state_read_result {
   char *etag;
   unsigned long version;
   unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
   lc_source *body;
 } lc_pouch_state_read_result;
 
@@ -68,6 +74,10 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
                           const char *key,
                           const lc_pouch_state_write_options *options,
                           lc_pouch_state_write_result *out, lc_error *error);
+int lc_pouch_state_update_metadata(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const lc_pouch_state_write_options *options,
+    lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_stage_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *txn_id, lc_source *body,

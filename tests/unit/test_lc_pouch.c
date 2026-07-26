@@ -1207,6 +1207,86 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_state_metadata_survives_snapshot_compaction(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result metadata_result;
+  lc_pouch_state_read_result read_result;
+  lc_pouch_state_write_options metadata_options;
+  lc_error error;
+  char root[512];
+  char bytes[64];
+  char *namespace_path;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&metadata_result, 0, sizeof(metadata_result));
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&metadata_options, 0, sizeof(metadata_options));
+  make_root("state-metadata-compact", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("visible", strlen("visible"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/meta", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  metadata_options.has_query_hidden = 1;
+  metadata_options.query_hidden = 1;
+  rc = lc_pouch_state_update_metadata(pouch, "team/alpha", "state/meta",
+                                      &metadata_options, &metadata_result,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(metadata_result.version, 2UL);
+  assert_string_equal(metadata_result.etag, "pouch-state-1");
+  assert_true(metadata_result.has_query_hidden);
+  assert_true(metadata_result.query_hidden);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  assert_path_file(namespace_path,
+                   "snapshots/snapshot-00000000000000000002.log");
+  assert_path_file_contains(namespace_path,
+                            "snapshots/snapshot-00000000000000000002.log",
+                            " 1 1");
+
+  lc_pouch_close(pouch);
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/meta", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_result.version, 2UL);
+  assert_string_equal(read_result.etag, "pouch-state-1");
+  assert_true(read_result.has_query_hidden);
+  assert_true(read_result.query_hidden);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "visible");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_state_write_result_cleanup(NULL, &metadata_result);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_namespace_manifest_repairs_from_existing_segments(
     void **state) {
   lc_pouch *pouch;
@@ -2095,6 +2175,175 @@ static void test_acquire_rejects_non_positive_ttl(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_lease_metadata_persists_query_hidden(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_metadata_req metadata_req;
+  lc_describe_req describe_req;
+  lc_describe_res describe_res;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&describe_res, 0, sizeof(describe_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_metadata_req_init(&metadata_req);
+  lc_describe_req_init(&describe_req);
+  lc_error_init(&error);
+  make_root("lease-metadata", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-metadata/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":15}", strlen("{\"value\":15}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_false(lease->has_query_hidden);
+
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 2L);
+  assert_string_equal(lease->state_etag, "pouch-state-1");
+  assert_true(lease->has_query_hidden);
+  assert_true(lease->query_hidden);
+
+  rc = lc_source_from_memory("{\"value\":16}", strlen("{\"value\":16}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 3L);
+  assert_string_equal(lease->state_etag, "pouch-state-3");
+  assert_true(lease->has_query_hidden);
+  assert_true(lease->query_hidden);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  lc_client_close(client);
+  client = NULL;
+
+  open_pouch_client(root, &reader, &error);
+  describe_req.key = key;
+  rc = reader->describe(reader, &describe_req, &describe_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(describe_res.version, 3L);
+  assert_string_equal(describe_res.state_etag, "pouch-state-3");
+  assert_true(describe_res.has_query_hidden);
+  assert_true(describe_res.query_hidden);
+  lc_describe_res_cleanup(&describe_res);
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = reader->acquire(reader, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 3L);
+  assert_true(lease->has_query_hidden);
+  assert_true(lease->query_hidden);
+
+  lc_metadata_req_init(&metadata_req);
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 0;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 4L);
+  assert_true(lease->has_query_hidden);
+  assert_false(lease->query_hidden);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  lc_client_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_metadata_enforces_version_precondition(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_metadata_op metadata_op;
+  lc_metadata_res metadata_res;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&metadata_res, 0, sizeof(metadata_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_metadata_op_init(&metadata_op);
+  lc_error_init(&error);
+  make_root("metadata-precondition", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/metadata-precondition/%ld",
+           (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":21}", strlen("{\"value\":21}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  metadata_op.lease.namespace_name = lease->namespace_name;
+  metadata_op.lease.key = lease->key;
+  metadata_op.lease.lease_id = lease->lease_id;
+  metadata_op.lease.txn_id = lease->txn_id;
+  metadata_op.lease.fencing_token = lease->fencing_token;
+  metadata_op.has_query_hidden = 1;
+  metadata_op.query_hidden = 1;
+  metadata_op.has_if_version = 1;
+  metadata_op.if_version = 99L;
+  rc = client->metadata(client, &metadata_op, &metadata_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_false(metadata_res.has_query_hidden);
+  lc_metadata_res_cleanup(&metadata_res);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_lease_remove_tombstones_state_and_refreshes_view(
     void **state) {
   lc_client *client;
@@ -2323,6 +2572,7 @@ int main(void) {
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
+      cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(
           test_namespace_manifest_repairs_from_existing_segments),
       cmocka_unit_test(test_staged_state_writes_durable_decision_records),
@@ -2347,6 +2597,8 @@ int main(void) {
           test_lease_save_streams_mapped_json_and_replays_after_reopen),
       cmocka_unit_test(test_lease_keepalive_and_release_use_local_lifecycle),
       cmocka_unit_test(test_acquire_rejects_non_positive_ttl),
+      cmocka_unit_test(test_lease_metadata_persists_query_hidden),
+      cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),

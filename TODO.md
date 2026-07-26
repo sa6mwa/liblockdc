@@ -34,6 +34,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add pouch-native local lease lifecycle coverage for positive TTL
     acquire expiration, keepalive refresh metadata, invalid TTL rejection, and
     release acknowledgement without reviving legacy compatibility paths.
+  - [x] Add typed committed-state query metadata for `query_hidden` through
+    lease/client metadata calls, state-log metadata records, snapshot replay,
+    reopen, and version-precondition enforcement.
   - [ ] Add durable transaction decision records, replay, staged participant
     recovery, and expired staged-state cleanup on reopen.
     - [x] Add private segmented state-log decision records for staged commit

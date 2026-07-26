@@ -237,6 +237,18 @@ static int lc_pouch_lease_refresh_state(lc_lease_handle *lease,
   return LC_OK;
 }
 
+static void lc_pouch_lease_refresh_query_metadata(lc_lease_handle *lease,
+                                                  int has_query_hidden,
+                                                  int query_hidden) {
+  if (lease == NULL) {
+    return;
+  }
+  lease->has_query_hidden = has_query_hidden;
+  lease->query_hidden = query_hidden;
+  lease->pub.has_query_hidden = lease->has_query_hidden;
+  lease->pub.query_hidden = lease->query_hidden;
+}
+
 static int lc_pouch_now_unix(long *out, lc_error *error) {
   time_t now;
 
@@ -472,6 +484,8 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   char lease_id[128];
   unsigned long version;
   long lease_expires_at_unix;
+  int has_query_hidden;
+  int query_hidden;
   lc_lease *lease;
   int rc;
 
@@ -505,6 +519,8 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                         NULL, NULL, NULL);
   }
   version = read_result.found ? read_result.version : 0UL;
+  has_query_hidden = read_result.has_query_hidden;
+  query_hidden = read_result.query_hidden;
   snprintf(lease_id, sizeof(lease_id), "pouch-lease-%020lu",
            version + 1UL);
   lease = lc_lease_new(client, namespace_name, req->key, req->owner, lease_id,
@@ -517,6 +533,8 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
   lc_pouch_lease_refresh_expiration((lc_lease_handle *)lease,
                                     lease_expires_at_unix);
+  lc_pouch_lease_refresh_query_metadata((lc_lease_handle *)lease,
+                                        has_query_hidden, query_hidden);
   lc_pouch_patch_lease_methods(lease);
   *out = lease;
   return LC_OK;
@@ -757,6 +775,8 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
   }
   out->version = read_result.found ? (long)read_result.version : 0L;
   out->fencing_token = 1L;
+  out->has_query_hidden = read_result.has_query_hidden;
+  out->query_hidden = read_result.query_hidden;
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   return LC_OK;
 }
@@ -865,10 +885,68 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
 int lc_pouch_client_metadata_method(lc_client *self,
                                     const lc_metadata_op *req,
                                     lc_metadata_res *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  const char *namespace_name;
+  char *namespace_copy;
+  char *key_copy;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata requires self, req, and out", NULL,
+                        NULL, NULL);
+  }
+  if (!req->has_query_hidden) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata requires query_hidden", NULL, NULL,
+                        NULL);
+  }
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  options.has_query_hidden = 1;
+  options.query_hidden = req->query_hidden;
+  if (req->has_if_version) {
+    if (req->if_version < 0L) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch metadata if_version must be non-negative",
+                          NULL, NULL, NULL);
+    }
+    options.expected_version = (unsigned long)req->if_version;
+    options.has_expected_version = 1;
+  }
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_state_update_metadata(client->pouch, namespace_name,
+                                      req->lease.key, &options, &result,
+                                      error);
+  if (rc != LC_OK) {
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    return rc;
+  }
+  namespace_copy = lc_strdup_local(namespace_name);
+  key_copy = lc_strdup_local(req->lease.key);
+  if (namespace_copy == NULL || key_copy == NULL) {
+    free(namespace_copy);
+    free(key_copy);
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch metadata response", NULL,
+                        NULL, NULL);
+  }
+  out->namespace_name = namespace_copy;
+  out->key = key_copy;
+  out->version = (long)result.version;
+  out->has_query_hidden = result.has_query_hidden;
+  out->query_hidden = result.query_hidden;
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  return LC_OK;
 }
 
 int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
@@ -1467,6 +1545,8 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
   options.content_type = "application/json";
+  options.has_query_hidden = lease->has_query_hidden;
+  options.query_hidden = lease->query_hidden;
   if (opts != NULL) {
     options.content_type =
         opts->content_type != NULL ? opts->content_type : options.content_type;
@@ -1570,9 +1650,42 @@ static int lc_pouch_lease_mutate_local_method(lc_lease *self,
 
 int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
                                    lc_error *error) {
-  (void)self;
-  (void)req;
-  return lc_pouch_lease_rebuilding(error);
+  lc_lease_handle *lease;
+  lc_metadata_op op;
+  lc_metadata_res res;
+  int rc;
+
+  if (self == NULL || req == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease metadata requires self and req", NULL,
+                        NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  lc_metadata_op_init(&op);
+  memset(&res, 0, sizeof(res));
+  op.lease.namespace_name = lease->namespace_name;
+  op.lease.key = lease->key;
+  op.lease.lease_id = lease->lease_id;
+  op.lease.txn_id = lease->txn_id;
+  op.lease.fencing_token = lease->fencing_token;
+  op.has_query_hidden = req->has_query_hidden;
+  op.query_hidden = req->query_hidden;
+  op.if_version = req->if_version;
+  op.has_if_version = req->has_if_version;
+  if (!op.has_if_version && lease->version > 0L) {
+    op.if_version = lease->version;
+    op.has_if_version = 1;
+  }
+  rc = lc_pouch_client_metadata_method(&lease->client->pub, &op, &res,
+                                       error);
+  if (rc == LC_OK) {
+    lease->version = res.version;
+    lease->pub.version = lease->version;
+    lc_pouch_lease_refresh_query_metadata(lease, res.has_query_hidden,
+                                          res.query_hidden);
+  }
+  lc_metadata_res_cleanup(&res);
+  return rc;
 }
 
 int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,

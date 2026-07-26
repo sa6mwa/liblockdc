@@ -26,6 +26,8 @@ typedef struct lc_pouch_state_entry {
   char *decision;
   unsigned long version;
   unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
   int seen;
   int found;
   int control;
@@ -46,6 +48,8 @@ typedef struct lc_pouch_state_cache_record {
   char *payload_leaf;
   unsigned long version;
   unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
   int found;
   struct lc_pouch_state_cache_record *next;
 } lc_pouch_state_cache_record;
@@ -254,6 +258,8 @@ static int lc_pouch_state_cache_apply_entry(
   record->payload_leaf = payload_leaf;
   record->version = entry->version;
   record->bytes = entry->bytes;
+  record->has_query_hidden = entry->has_query_hidden;
+  record->query_hidden = entry->query_hidden;
   record->found = entry->found;
   if (entry->version > ns->max_version) {
     ns->max_version = entry->version;
@@ -291,6 +297,8 @@ static int lc_pouch_state_entry_from_cache_record(
   }
   out->version = record->version;
   out->bytes = record->bytes;
+  out->has_query_hidden = record->has_query_hidden;
+  out->query_hidden = record->query_hidden;
   out->seen = 1;
   out->found = record->found;
   return LC_OK;
@@ -526,6 +534,8 @@ static int lc_pouch_state_parse_record(const lc_allocator *allocator,
   char payload_leaf[256];
   unsigned long version;
   unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
   char tag;
   int matched;
 
@@ -558,10 +568,21 @@ static int lc_pouch_state_parse_record(const lc_allocator *allocator,
     return LC_OK;
   }
 
-  matched = sscanf(line, "%c %lu %lu %8191s %8191s %8191s %255s", &tag,
-                   &version, &bytes, key_hex, content_type_hex, etag_hex,
-                   payload_leaf);
-  if (matched != 7 || (tag != 'S' && tag != 'L')) {
+  has_query_hidden = 0;
+  query_hidden = 0;
+  matched = sscanf(line, "%c %lu %lu %8191s %8191s %8191s %255s %d %d",
+                   &tag, &version, &bytes, key_hex, content_type_hex,
+                   etag_hex, payload_leaf, &has_query_hidden, &query_hidden);
+  if (matched != 9 || (tag != 'S' && tag != 'L' && tag != 'M')) {
+    matched = sscanf(line, "%c %lu %lu %8191s %8191s %8191s %255s", &tag,
+                     &version, &bytes, key_hex, content_type_hex, etag_hex,
+                     payload_leaf);
+    if (matched == 7 && (tag == 'S' || tag == 'L' || tag == 'M')) {
+      has_query_hidden = 0;
+      query_hidden = 0;
+    }
+  }
+  if (matched != 7 && matched != 9) {
     matched = sscanf(line, "%c %lu %8191s %8191s", &tag, &version, key_hex,
                      etag_hex);
     if (matched != 4 || tag != 'D') {
@@ -582,6 +603,9 @@ static int lc_pouch_state_parse_record(const lc_allocator *allocator,
     entry->found = 0;
     return LC_OK;
   }
+  if (tag != 'S' && tag != 'L' && tag != 'M') {
+    return LC_OK;
+  }
   lc_pouch_state_entry_cleanup(allocator, entry);
   entry->key = lc_pouch_state_hex_decode(allocator, key_hex);
   entry->content_type =
@@ -597,6 +621,8 @@ static int lc_pouch_state_parse_record(const lc_allocator *allocator,
   }
   entry->version = version;
   entry->bytes = bytes;
+  entry->has_query_hidden = has_query_hidden != 0;
+  entry->query_hidden = query_hidden != 0;
   entry->seen = 1;
   entry->found = 1;
   return LC_OK;
@@ -1043,9 +1069,11 @@ static int lc_pouch_state_snapshot_write_record(
                         NULL, NULL);
   }
   if (record->found) {
-    len = snprintf(line, sizeof(line), "S %lu %lu %s %s %s %s\n",
+    len = snprintf(line, sizeof(line), "S %lu %lu %s %s %s %s %d %d\n",
                    record->version, record->bytes, key_hex, content_type_hex,
-                   etag_hex, record->payload_leaf);
+                   etag_hex, record->payload_leaf,
+                   record->has_query_hidden ? 1 : 0,
+                   record->query_hidden ? 1 : 0);
   } else {
     len = snprintf(line, sizeof(line), "D %lu %s %s\n", record->version,
                    key_hex, etag_hex);
@@ -1308,7 +1336,8 @@ static int lc_pouch_state_cache_apply_write(
     lc_pouch *pouch, const char *namespace_name,
     const lc_pouch_namespace_manifest *manifest, const char *key,
     const char *content_type, const char *etag, const char *payload_leaf,
-    unsigned long version, unsigned long bytes, int found) {
+    unsigned long version, unsigned long bytes, int has_query_hidden,
+    int query_hidden, int found) {
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_entry entry;
   lc_error ignored;
@@ -1325,6 +1354,8 @@ static int lc_pouch_state_cache_apply_write(
   entry.payload_leaf = (char *)payload_leaf;
   entry.version = version;
   entry.bytes = bytes;
+  entry.has_query_hidden = has_query_hidden;
+  entry.query_hidden = query_hidden;
   entry.seen = 1;
   entry.found = found;
   lc_error_init(&ignored);
@@ -1529,6 +1560,8 @@ static int lc_pouch_state_append_record(lc_pouch *pouch,
                                         const char *payload_leaf,
                                         unsigned long version,
                                         unsigned long bytes,
+                                        int has_query_hidden,
+                                        int query_hidden,
                                         lc_error *error) {
   char *segment_path;
   char *key_hex;
@@ -1552,9 +1585,10 @@ static int lc_pouch_state_append_record(lc_pouch *pouch,
                         "failed to encode pouch state segment record", NULL,
                         NULL, NULL);
   }
-  len = snprintf(record, sizeof(record), "%c %lu %lu %s %s %s %s\n",
+  len = snprintf(record, sizeof(record), "%c %lu %lu %s %s %s %s %d %d\n",
                  record_tag, version, bytes, key_hex, content_type_hex,
-                 etag_hex, payload_leaf);
+                 etag_hex, payload_leaf, has_query_hidden ? 1 : 0,
+                 query_hidden ? 1 : 0);
   lc_free_with_allocator(&pouch->allocator, key_hex);
   lc_free_with_allocator(&pouch->allocator, content_type_hex);
   lc_free_with_allocator(&pouch->allocator, etag_hex);
@@ -1715,7 +1749,7 @@ int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
     if (rc == LC_OK) {
       (void)lc_pouch_state_cache_apply_write(
           pouch, namespace_name, &manifest, decision->staged_key, NULL,
-          decision->etag, NULL, tombstone_version, 0UL, 0);
+          decision->etag, NULL, tombstone_version, 0UL, 0, 0, 0);
       recovered = 1;
     }
     lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
@@ -1747,6 +1781,8 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   unsigned long max_version;
   unsigned long version;
   unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
   int record_appended;
   int rc;
 
@@ -1819,10 +1855,17 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   content_type = options != NULL && options->content_type != NULL
                      ? options->content_type
                      : "application/octet-stream";
+  has_query_hidden = current.has_query_hidden;
+  query_hidden = current.query_hidden;
+  if (options != NULL && options->has_query_hidden) {
+    has_query_hidden = 1;
+    query_hidden = options->query_hidden;
+  }
   if (rc == LC_OK) {
     rc = lc_pouch_state_append_record(pouch, namespace_name, &manifest, 'S',
                                       key, content_type, etag, payload_leaf,
-                                      version, bytes, error);
+                                      version, bytes, has_query_hidden,
+                                      query_hidden, error);
     if (rc == LC_OK) {
       record_appended = 1;
     }
@@ -1833,13 +1876,15 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   if (rc == LC_OK) {
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, &manifest, key, content_type, etag,
-        payload_leaf, version, bytes, 1);
+        payload_leaf, version, bytes, has_query_hidden, query_hidden, 1);
     lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
   }
   if (rc == LC_OK) {
     out->etag = etag;
     out->version = version;
     out->bytes = bytes;
+    out->has_query_hidden = has_query_hidden;
+    out->query_hidden = query_hidden;
     etag = NULL;
   } else {
     if (!record_appended) {
@@ -1861,6 +1906,97 @@ void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
   }
   lc_free_with_allocator(allocator, result->etag);
   memset(result, 0, sizeof(*result));
+}
+
+int lc_pouch_state_update_metadata(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const lc_pouch_state_write_options *options,
+    lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_state_entry current;
+  lc_pouch_namespace_manifest manifest;
+  unsigned long max_version;
+  unsigned long version;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || options == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_state_update_metadata requires pouch, "
+                        "namespace, key, options, and out",
+                        NULL, NULL, NULL);
+  }
+  if (!options->has_query_hidden) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata update requires query_hidden", NULL,
+                        NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&current, 0, sizeof(current));
+  rc = lc_pouch_state_scan(pouch, &manifest, key, &current, &max_version,
+                           error);
+  if (rc != LC_OK) {
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return rc;
+  }
+  if (!current.found) {
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata update requires existing state", NULL,
+                        NULL, NULL);
+  }
+  if (options->has_expected_version &&
+      current.version != options->expected_version) {
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata version precondition failed", NULL,
+                        NULL, NULL);
+  }
+  version = max_version + 1UL;
+  rc = lc_pouch_state_append_record(
+      pouch, namespace_name, &manifest, 'M', key, current.content_type,
+      current.etag, current.payload_leaf, version, current.bytes, 1,
+      options->query_hidden, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_touch_marker(pouch, &manifest, error);
+  }
+  if (rc == LC_OK) {
+    (void)lc_pouch_state_cache_apply_write(
+        pouch, namespace_name, &manifest, key, current.content_type,
+        current.etag, current.payload_leaf, version, current.bytes, 1,
+        options->query_hidden, 1);
+    lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
+  }
+  if (rc == LC_OK) {
+    out->etag = lc_strdup_with_allocator(&pouch->allocator, current.etag);
+    if (out->etag == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch metadata state etag", NULL,
+                        NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    out->version = version;
+    out->bytes = current.bytes;
+    out->has_query_hidden = 1;
+    out->query_hidden = options->query_hidden;
+  } else {
+    lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
+  }
+  lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
 }
 
 int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
@@ -1939,7 +2075,7 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
   if (rc == LC_OK) {
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, &manifest, key, NULL, etag, NULL, version, 0UL,
-        0);
+        0, 0, 0);
     lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
   }
   if (rc == LC_OK) {
@@ -2062,7 +2198,8 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
   version++;
   rc = lc_pouch_state_append_record(
       pouch, namespace_name, &manifest, 'L', key, staged.content_type,
-      staged.etag, staged.payload_leaf, version, staged.bytes, error);
+      staged.etag, staged.payload_leaf, version, staged.bytes,
+      staged.has_query_hidden, staged.query_hidden, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -2086,10 +2223,11 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
   }
   (void)lc_pouch_state_cache_apply_write(
       pouch, namespace_name, &manifest, key, staged.content_type, staged.etag,
-      staged.payload_leaf, version, staged.bytes, 1);
+      staged.payload_leaf, version, staged.bytes, staged.has_query_hidden,
+      staged.query_hidden, 1);
   (void)lc_pouch_state_cache_apply_write(
       pouch, namespace_name, &manifest, staged_key, NULL, staged.etag, NULL,
-      discard_version, 0UL, 0);
+      discard_version, 0UL, 0, 0, 0);
   out->etag = lc_strdup_with_allocator(&pouch->allocator, staged.etag);
   if (out->etag == NULL) {
     rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -2179,7 +2317,7 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
       if (rc == LC_OK) {
         (void)lc_pouch_state_cache_apply_write(
             pouch, namespace_name, &manifest, staged_key, NULL, etag, NULL,
-            tombstone_version, 0UL, 0);
+            tombstone_version, 0UL, 0, 0, 0);
         lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
       }
       if (rc == LC_OK && discarded != NULL) {
@@ -2245,6 +2383,8 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
     out->etag = current.etag;
     out->version = current.version;
     out->bytes = current.bytes;
+    out->has_query_hidden = current.has_query_hidden;
+    out->query_hidden = current.query_hidden;
     out->found = 1;
     current.content_type = NULL;
     current.etag = NULL;
