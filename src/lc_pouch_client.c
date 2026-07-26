@@ -58,13 +58,16 @@ typedef struct lc_pouch_query_scan_context {
   const lc_query_req *request;
   const lc_query_key_handler *handler;
   void *handler_context;
+  lc_sink *sink;
   lql *runtime;
   const lql_selector *selector;
   size_t offset;
   size_t seen;
   size_t emitted;
+  size_t matched;
   size_t next_offset;
   unsigned long index_seq;
+  int emit_documents;
 } lc_pouch_query_scan_context;
 
 static size_t lc_pouch_lonejson_source_read(void *context, void *buffer,
@@ -398,6 +401,37 @@ static int lc_pouch_query_emit_key(const lc_query_key_handler *handler,
   return LC_OK;
 }
 
+static int lc_pouch_query_emit_document(lc_pouch_query_scan_context *context,
+                                        lc_source *body, lc_error *error) {
+  static const char newline[] = "\n";
+  int rc;
+
+  if (context == NULL || context->sink == NULL || body == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch document query requires a sink and body", NULL,
+                        NULL, NULL);
+  }
+  if (body->reset == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch document query body is not resettable", NULL,
+                        NULL, "pouch-redesign");
+  }
+  rc = body->reset(body, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_copy(body, context->sink, NULL, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!context->sink->write(context->sink, newline, sizeof(newline) - 1U,
+                            error)) {
+    return error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_query_scan_visit(const lc_pouch_state_visit_entry *entry,
                                      void *scan_context, lc_error *error) {
   lc_pouch_query_scan_context *context;
@@ -431,14 +465,19 @@ static int lc_pouch_query_scan_visit(const lc_pouch_state_visit_entry *entry,
     matched = 0;
   }
   if (rc == LC_OK && matched) {
+    ++context->matched;
     if (context->request->limit > 0L &&
         context->emitted >= (size_t)context->request->limit) {
       if (context->next_offset == 0U) {
         context->next_offset = context->seen - 1U;
       }
     } else {
-      rc = lc_pouch_query_emit_key(context->handler, context->handler_context,
-                                   entry->key, error);
+      if (context->emit_documents) {
+        rc = lc_pouch_query_emit_document(context, read_result.body, error);
+      } else {
+        rc = lc_pouch_query_emit_key(context->handler, context->handler_context,
+                                     entry->key, error);
+      }
     }
     if (rc == LC_OK && context->next_offset == 0U) {
       ++context->emitted;
@@ -482,6 +521,25 @@ static char *lc_pouch_query_cursor_string(size_t offset, lc_error *error) {
   if (written < 0 || (size_t)written >= sizeof(stack)) {
     lc_error_set(error, LC_ERR_INVALID, 0L,
                  "pouch query cursor exceeds local formatting limit", NULL,
+                 NULL, NULL);
+    return NULL;
+  }
+  return lc_strdup_local(stack);
+}
+
+static char *lc_pouch_query_scan_metadata_string(size_t candidates,
+                                                 size_t matches,
+                                                 lc_error *error) {
+  char stack[160];
+  int written;
+
+  written = snprintf(stack, sizeof(stack),
+                     "{\"engine\":\"scan\",\"query_candidates\":%lu,"
+                     "\"query_matches\":%lu}",
+                     (unsigned long)candidates, (unsigned long)matches);
+  if (written < 0 || (size_t)written >= sizeof(stack)) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch query metadata exceeds local formatting limit", NULL,
                  NULL, NULL);
     return NULL;
   }
@@ -2163,11 +2221,102 @@ int lc_pouch_client_watch_queue_method(lc_client *self,
 int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                                  lc_sink *dst, lc_query_res *out,
                                  lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)dst;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_query_scan_context scan;
+  lql *runtime;
+  lql_selector *selector;
+  lql_error lql_error_value;
+  lql_status status;
+  int rc;
+
+  if (self == NULL || req == NULL || dst == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query requires self, req, dst, and out", NULL,
+                        NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  if (req->selector_json == NULL || req->selector_json[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query requires selector_json", NULL, NULL,
+                        "pouch-redesign");
+  }
+  if (req->fields_json != NULL && req->fields_json[0] != '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query fields_json is not implemented yet", NULL,
+                        NULL, "pouch-redesign");
+  }
+  if (req->return_mode != NULL && req->return_mode[0] != '\0' &&
+      strcmp(req->return_mode, "documents") != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query currently supports only document return "
+                        "mode",
+                        NULL, NULL, "pouch-redesign");
+  }
+  if (req->engine != NULL && req->engine[0] != '\0' &&
+      strcmp(req->engine, "scan") != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query currently supports only the scan engine",
+                        NULL, NULL, "pouch-redesign");
+  }
+  if (req->refresh != NULL && req->refresh[0] != '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query refresh modes are not implemented yet",
+                        NULL, NULL, "pouch-redesign");
+  }
+  client = (lc_client_handle *)self;
+  runtime = NULL;
+  selector = NULL;
+  lql_error_init(&lql_error_value);
+  status = lql_new(&runtime, &lql_error_value);
+  if (status != LQL_STATUS_OK) {
+    return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                    "failed to initialize pouch query runtime");
+  }
+  status = runtime->selector_parse_json(runtime, req->selector_json,
+                                        strlen(req->selector_json), &selector,
+                                        &lql_error_value);
+  if (status != LQL_STATUS_OK) {
+    runtime->destroy(runtime);
+    return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                    "failed to parse pouch query selector");
+  }
+
+  memset(&scan, 0, sizeof(scan));
+  scan.client = client;
+  scan.namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  scan.request = req;
+  scan.sink = dst;
+  scan.runtime = runtime;
+  scan.selector = selector;
+  scan.emit_documents = 1;
+  rc = lc_pouch_query_parse_cursor(req->cursor, &scan.offset, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_visit(client->pouch, scan.namespace_name,
+                              lc_pouch_query_scan_visit, &scan, error);
+  }
+  if (rc == LC_OK) {
+    out->return_mode = lc_strdup_local("documents");
+    out->metadata_json =
+        lc_pouch_query_scan_metadata_string(scan.seen, scan.matched, error);
+    out->correlation_id = lc_strdup_local("pouch-query");
+    out->index_seq = scan.index_seq;
+    if (scan.next_offset != 0U) {
+      out->cursor = lc_pouch_query_cursor_string(scan.next_offset, error);
+    }
+    if (out->return_mode == NULL || out->metadata_json == NULL ||
+        out->correlation_id == NULL ||
+        (scan.next_offset != 0U && out->cursor == NULL)) {
+      lc_query_res_cleanup(out);
+      rc = error != NULL && error->code != LC_OK
+               ? error->code
+               : lc_error_set(error, LC_ERR_NOMEM, 0L,
+                              "failed to allocate pouch query response", NULL,
+                              NULL, NULL);
+    }
+  }
+  runtime->selector_destroy(runtime, selector);
+  runtime->destroy(runtime);
+  return rc;
 }
 
 int lc_pouch_client_query_keys_method(lc_client *self,

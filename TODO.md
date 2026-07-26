@@ -90,8 +90,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     segmented state projection, with selector parsing/evaluation owned by
     `liblql`, `query_hidden` filtering, staged-key exclusion, pagination, and
     scan metadata.
-  - [ ] Add public document `query` row streaming over the redesigned state
-    model.
+  - [x] Add public document `query` row streaming over the redesigned state
+    model in scan mode, with `liblql` selector evaluation, `query_hidden`
+    filtering, staged-key exclusion, pagination, and scan metadata.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the

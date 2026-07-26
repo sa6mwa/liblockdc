@@ -126,6 +126,28 @@ static int pouch_query_capture_has(const pouch_query_key_capture *capture,
   return 0;
 }
 
+static int bytes_contain_text(const void *bytes, size_t length,
+                              const char *needle) {
+  const unsigned char *haystack;
+  size_t needle_len;
+  size_t offset;
+
+  if (bytes == NULL || needle == NULL) {
+    return 0;
+  }
+  needle_len = strlen(needle);
+  if (needle_len == 0U || needle_len > length) {
+    return 0;
+  }
+  haystack = (const unsigned char *)bytes;
+  for (offset = 0U; offset + needle_len <= length; ++offset) {
+    if (memcmp(haystack + offset, needle, needle_len) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int setup_pouch_unit_group(void **state) {
   (void)state;
   cleanup_all_roots();
@@ -2540,6 +2562,163 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_query_documents_scan_streams_rows(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_sink *first_sink;
+  lc_sink *second_sink;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  lc_error error;
+  const void *first_bytes;
+  const void *second_bytes;
+  size_t first_length;
+  size_t second_length;
+  char root[512];
+  char cursor[64];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  first_sink = NULL;
+  second_sink = NULL;
+  first_bytes = NULL;
+  second_bytes = NULL;
+  first_length = 0U;
+  second_length = 0U;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-documents-scan", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":1}",
+                             strlen("{\"category\":\"planning\",\"n\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs", "doc/a", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":2}",
+                             strlen("{\"category\":\"planning\",\"n\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs", "doc/b", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"category\":\"finance\",\"n\":3}",
+                             strlen("{\"category\":\"finance\",\"n\":3}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs", "doc/c", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  memset(&options, 0, sizeof(options));
+  options.has_query_hidden = 1;
+  options.query_hidden = 1;
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":4}",
+                             strlen("{\"category\":\"planning\",\"n\":4}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-docs", "doc/hidden", source,
+                            &options, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":5}",
+                             strlen("{\"category\":\"planning\",\"n\":5}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "docs/query-docs", "doc/staged",
+                                  "txn-query-docs-hidden", source, NULL,
+                                  &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  rc = lc_sink_to_memory(&first_sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  query_req.namespace_name = "docs/query-docs";
+  query_req.selector_json = selector;
+  query_req.limit = 1L;
+  query_req.return_mode = "documents";
+  query_req.engine = "scan";
+  rc = client->query(client, &query_req, first_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(first_sink, &first_bytes, &first_length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(first_length > 0U);
+  assert_non_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "documents");
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"scan\""));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "query_candidates"));
+  assert_true(query_res.index_seq > 0UL);
+
+  snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
+  query_req.cursor = cursor;
+  lc_query_res_cleanup(&query_res);
+  rc = lc_sink_to_memory(&second_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, second_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(second_sink, &second_bytes, &second_length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(second_length > 0U);
+  assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(first_bytes, first_length, "\"n\":1") ||
+              bytes_contain_text(second_bytes, second_length, "\"n\":1"));
+  assert_true(bytes_contain_text(first_bytes, first_length, "\"n\":2") ||
+              bytes_contain_text(second_bytes, second_length, "\"n\":2"));
+  assert_false(bytes_contain_text(first_bytes, first_length, "\"n\":3"));
+  assert_false(bytes_contain_text(second_bytes, second_length, "\"n\":3"));
+  assert_false(bytes_contain_text(first_bytes, first_length, "\"n\":4"));
+  assert_false(bytes_contain_text(second_bytes, second_length, "\"n\":4"));
+  assert_false(bytes_contain_text(first_bytes, first_length, "\"n\":5"));
+  assert_false(bytes_contain_text(second_bytes, second_length, "\"n\":5"));
+
+  lc_sink_close(first_sink);
+  lc_sink_close(second_sink);
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_decisions_persist_participant_records(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -3139,6 +3318,7 @@ int main(void) {
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
+      cmocka_unit_test(test_query_documents_scan_streams_rows),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),

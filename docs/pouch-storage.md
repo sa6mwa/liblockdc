@@ -442,11 +442,11 @@ of rewritten JSON files.
   supplies the public query language, parser, and final evaluator, while pouch
   maintains storage-owned summaries and postings for the candidate-generation
   paths it can prove without false negatives.
-- Current redesigned-pouch implementation status: `query_keys` has an initial
-  scan-mode path over the segmented state projection that streams each candidate
-  JSON body through `liblql` for final selector acceptance, skips
-  `query_hidden` and staged records, and returns key pages with scan metadata.
-  Document-row streaming and durable typed postings remain to be implemented.
+- Current redesigned-pouch implementation status: `query_keys` and document
+  `query` have initial scan-mode paths over the segmented state projection.
+  Both stream each candidate JSON body through `liblql` for final selector
+  acceptance, skip `query_hidden` and staged records, and return paginated scan
+  metadata. Durable typed postings and indexed mode remain to be implemented.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
