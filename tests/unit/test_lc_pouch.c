@@ -566,6 +566,93 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_shared_state_projection_cache_refreshes_peer_markers(void **state) {
+  lc_pouch *writer;
+  lc_pouch *reader;
+  lc_source *source;
+  lc_pouch_state_write_result write_res;
+  lc_pouch_state_read_result read_res;
+  lc_error error;
+  char root[512];
+  char buffer[64];
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  reader = NULL;
+  source = NULL;
+  memset(&write_res, 0, sizeof(write_res));
+  memset(&read_res, 0, sizeof(read_res));
+  lc_error_init(&error);
+  make_root("shared-cache-markers", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "cache/key", source, NULL,
+                            &write_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_res);
+
+  rc = lc_pouch_state_read(reader, "default", "cache/key", &read_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_res.found);
+  read_source_to_string(read_res.body, buffer, sizeof(buffer));
+  assert_string_equal(buffer, "{\"value\":1}");
+  lc_pouch_state_read_result_cleanup(NULL, &read_res);
+
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "cache/key", source, NULL,
+                            &write_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_res);
+
+  rc = lc_pouch_state_read(reader, "default", "cache/key", &read_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_res.found);
+  read_source_to_string(read_res.body, buffer, sizeof(buffer));
+  assert_string_equal(buffer, "{\"value\":2}");
+  lc_pouch_state_read_result_cleanup(NULL, &read_res);
+
+  rc = lc_source_from_memory("{\"value\":3}", strlen("{\"value\":3}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(reader, "default", "cache/key", source, NULL,
+                            &write_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_res);
+
+  rc = lc_pouch_state_read(reader, "default", "cache/key", &read_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_res.found);
+  read_source_to_string(read_res.body, buffer, sizeof(buffer));
+  assert_string_equal(buffer, "{\"value\":3}");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_res);
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_pouch_close(reader);
+  lc_pouch_close(writer);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void open_pouch_client(const char *root, lc_client **out,
                               lc_error *error) {
   lc_client_config config;
@@ -1740,6 +1827,8 @@ int main(void) {
       cmocka_unit_test(
           test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
+      cmocka_unit_test(
+          test_shared_state_projection_cache_refreshes_peer_markers),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),

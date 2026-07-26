@@ -44,9 +44,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add marker-directory fast-path metadata and periodic forced-refresh
     decision state so cached readers can skip unchanged marker scans without
     suppressing full validation indefinitely.
-  - [ ] Wire marker refresh decisions into shared-mode cached namespace
-    projections, then add snapshot creation, compaction scheduling, and
-    obsolete-file cleanup.
+  - [x] Wire peer-marker snapshots into shared-mode cached namespace
+    projections so same-segment peer writes and same-handle shared writes do
+    not return stale state.
+  - [ ] Extend the marker-directory fast path with cached peer stat checks for
+    unchanged directory metadata, then add snapshot creation, compaction
+    scheduling, and obsolete-file cleanup.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the

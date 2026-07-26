@@ -14,6 +14,7 @@
 
 #define LC_POUCH_STATE_COPY_CHUNK 16384U
 #define LC_POUCH_STATE_LINE_LIMIT 8192U
+#define LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS 64UL
 
 typedef struct lc_pouch_state_entry {
   char *key;
@@ -42,6 +43,7 @@ struct lc_pouch_state_cache_namespace {
   unsigned long max_segment_id;
   unsigned long max_version;
   int initialized;
+  lc_pouch_namespace_marker_refresh_state marker_refresh;
   lc_pouch_state_cache_record *records;
   struct lc_pouch_state_cache_namespace *next;
 };
@@ -94,6 +96,8 @@ void lc_pouch_state_cache_cleanup(lc_pouch *pouch) {
     next = ns->next;
     lc_free_with_allocator(&pouch->allocator, ns->namespace_name);
     lc_pouch_state_cache_records_cleanup(&pouch->allocator, ns->records);
+    lc_pouch_namespace_marker_refresh_state_cleanup(&pouch->allocator,
+                                                    &ns->marker_refresh);
     lc_free_with_allocator(&pouch->allocator, ns);
     ns = next;
   }
@@ -673,11 +677,12 @@ static int lc_pouch_state_cache_replay_file(
 
 static int lc_pouch_state_cache_refresh(
     lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
-    const lc_pouch_namespace_manifest *manifest, lc_error *error) {
+    const lc_pouch_namespace_manifest *manifest, int force, lc_error *error) {
   unsigned long segment_id;
   int rc;
 
-  if (cache->initialized && cache->max_segment_id == manifest->max_segment_id) {
+  if (!force && cache->initialized &&
+      cache->max_segment_id == manifest->max_segment_id) {
     return LC_OK;
   }
   lc_pouch_state_cache_records_cleanup(&pouch->allocator, cache->records);
@@ -717,19 +722,66 @@ static int lc_pouch_state_cache_refresh(
   return rc;
 }
 
+static int lc_pouch_state_cache_shared_marker_refresh_needed(
+    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    const lc_pouch_namespace_manifest *manifest, int *refresh,
+    lc_error *error) {
+  lc_pouch_namespace_marker_snapshot peers;
+  int changed;
+  int forced;
+  int rc;
+
+  memset(&peers, 0, sizeof(peers));
+  rc = lc_pouch_namespace_marker_snapshot_read(
+      &pouch->allocator, manifest->namespace_path, pouch->writer_marker_leaf,
+      &peers, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  changed = !cache->marker_refresh.initialized ||
+            lc_pouch_namespace_marker_snapshot_changed(
+                &cache->marker_refresh.peers, &peers);
+  forced = cache->marker_refresh.initialized &&
+           cache->marker_refresh.skipped_refreshes >=
+               LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS;
+  lc_pouch_namespace_marker_snapshot_cleanup(&pouch->allocator,
+                                             &cache->marker_refresh.peers);
+  cache->marker_refresh.peers = peers;
+  memset(&peers, 0, sizeof(peers));
+  cache->marker_refresh.initialized = 1;
+  if (changed || forced) {
+    cache->marker_refresh.skipped_refreshes = 0UL;
+    *refresh = 1;
+  } else {
+    ++cache->marker_refresh.skipped_refreshes;
+    *refresh = 0;
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_state_cache_lookup(
     lc_pouch *pouch, const char *namespace_name,
     const lc_pouch_namespace_manifest *manifest, const char *key,
     lc_pouch_state_entry *out, lc_error *error) {
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_cache_record *record;
+  int force_refresh;
   int rc;
 
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  rc = lc_pouch_state_cache_refresh(pouch, cache, manifest, error);
+  force_refresh = 0;
+  if (!pouch->single_writer) {
+    rc = lc_pouch_state_cache_shared_marker_refresh_needed(
+        pouch, cache, manifest, &force_refresh, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  rc = lc_pouch_state_cache_refresh(pouch, cache, manifest, force_refresh,
+                                    error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -747,9 +799,6 @@ static int lc_pouch_state_cache_apply_write(
   lc_error ignored;
   int rc;
 
-  if (!pouch->single_writer) {
-    return LC_OK;
-  }
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
   if (cache == NULL || !cache->initialized) {
     return LC_OK;
@@ -1471,12 +1520,8 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
     return rc;
   }
   memset(&current, 0, sizeof(current));
-  if (pouch->single_writer) {
-    rc = lc_pouch_state_cache_lookup(pouch, namespace_name, &manifest, key,
-                                     &current, error);
-  } else {
-    rc = lc_pouch_state_scan(pouch, &manifest, key, &current, NULL, error);
-  }
+  rc = lc_pouch_state_cache_lookup(pouch, namespace_name, &manifest, key,
+                                   &current, error);
   if (rc != LC_OK || !current.found) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);

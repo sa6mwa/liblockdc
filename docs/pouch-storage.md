@@ -124,8 +124,9 @@ A pouch operation normally follows this path:
    group, wait for the configured durability policy, then apply the committed
    refs into the in-memory projections.
    The current redesigned C backend has this projection path for state records
-   in `single_writer` mode; shared-mode projection refresh is still being
-   rebuilt.
+   in both `single_writer` and shared modes. Shared handles refresh their
+   projections from peer-marker snapshots, while local writes update an already
+   initialized projection directly.
 5. Query-visible metadata updates also advance the durable query-index sidecar
    and update summary rows, owner postings, strict JSON Pointer field postings,
    text postings, trigrams, numeric postings, and live/deleted state.
@@ -1763,10 +1764,13 @@ not every marker from the same process, so same-process pouch handles still
 observe each other as peer writers. Snapshots compare peer markers by name,
 size, and modification time. Marker-directory snapshot state now provides a fast
 path for unchanged marker directories and a forced-refresh counter so marker
-hints cannot suppress validation indefinitely. The first state projection cache
-is active for `single_writer` handles; wiring marker refresh decisions into
-shared-mode cached namespace projections remains to be rebuilt on top of these
-primitives.
+hints cannot suppress validation indefinitely. The state projection cache is now
+active for both `single_writer` and shared handles; shared state reads compare
+peer-marker snapshots before deciding whether to replay namespace segments, and
+same-handle writes update the initialized projection directly. The remaining
+marker optimization work is to make the directory fast path stat cached peer
+markers when directory metadata is unchanged, so same-file marker rewrites keep
+the fast path without sacrificing freshness.
 
 Refresh needs two modes:
 
