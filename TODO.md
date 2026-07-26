@@ -826,6 +826,9 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Cut simple numeric `range` result-cache/page consumption over to
         namespace-local document-table generations for both document and key
         pages, with cross-namespace global/local docID divergence coverage.
+      - [x] Cut simple non-wildcard `in` result-cache/page consumption over to
+        namespace-local document-table generations for both document and key
+        pages, with cross-namespace global/local docID divergence coverage.
       - [x] Cut simple `prefix` and `contains` result-cache/page consumption
         over to namespace-local document-table generations for both document
         and key pages, with cross-namespace global/local docID divergence

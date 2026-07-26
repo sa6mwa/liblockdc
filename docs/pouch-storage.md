@@ -1527,12 +1527,10 @@ a length-prefixed plan key, then ask the index layer to page the cached docIDs
 over the document table before disk converts the selected page back to summary
 entries or key snapshots. Updates advance the index sequence, so stale cached
 results miss the cache. DateAfter, simple equality, simple `exists`, simple
-numeric `range`, simple `prefix`, and simple `contains` now store
-namespace-local docIDs in the normalized result cache, page over the
-identity-matched document-table generation, and convert only the selected local
-page back to summaries or key snapshots. Simple non-wildcard `in` still pages
-over the live global in-memory document table until it receives the same
-cutover.
+numeric `range`, simple non-wildcard `in`, simple `prefix`, and simple
+`contains` now store namespace-local docIDs in the normalized result cache, page
+over the identity-matched document-table generation, and convert only the
+selected local page back to summaries or key snapshots.
 Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
 Residual selectors such as date predicates use the same identity-keyed result

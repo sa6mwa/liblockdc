@@ -10331,15 +10331,19 @@ static void test_pouch_endpoint_index_in_query_keys_pages(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
+  lc_client *other_client;
   lc_lease *alpha;
   lc_lease *bravo;
   lc_lease *charlie;
   lc_lease *delta;
+  lc_lease *other_doc;
   lc_query_req req;
   lc_query_res res;
   lc_query_key_handler handler;
   query_key_capture_state capture;
+  lc_sink *sink;
   lc_error error;
+  char *text;
   int rc;
 
   (void)state;
@@ -10350,6 +10354,12 @@ static void test_pouch_endpoint_index_in_query_keys_pages(void **state) {
   memset(&res, 0, sizeof(res));
   memset(&handler, 0, sizeof(handler));
   memset(&capture, 0, sizeof(capture));
+  other_client = open_pouch_client_with_namespace(endpoint, "aard");
+  other_doc = pouch_acquire_query_key(other_client, "aardvark", &error);
+  pouch_save_query_json(other_doc, "{\"region\":\"north\"}", &error);
+  other_doc->close(other_doc);
+  other_client->close(other_client);
+
   client = open_pouch_client(endpoint);
   charlie = pouch_acquire_query_key(client, "charlie", &error);
   pouch_save_query_json(charlie, "{\"region\":\"north\"}", &error);
@@ -10388,6 +10398,45 @@ static void test_pouch_endpoint_index_in_query_keys_pages(void **state) {
   assert_true(res.index_seq > 0UL);
 
   lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  req.cursor = NULL;
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_non_null(strstr(text, "{\"key\":\"bravo\""));
+  assert_null(strstr(text, "aardvark"));
+  assert_null(strstr(text, "charlie"));
+  assert_null(strstr(text, "delta"));
+  assert_string_equal(res.cursor, "bravo");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  req.cursor = "bravo";
+  rc = client->query(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  text = memory_sink_text(sink);
+  assert_non_null(strstr(text, "{\"key\":\"charlie\""));
+  assert_null(strstr(text, "aardvark"));
+  assert_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_null(strstr(text, "bravo"));
+  assert_null(strstr(text, "delta"));
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
+  assert_true(res.index_seq > 0UL);
+  free(text);
+  lc_sink_close(sink);
+  lc_query_res_cleanup(&res);
+
   alpha->close(alpha);
   bravo->close(bravo);
   charlie->close(charlie);
