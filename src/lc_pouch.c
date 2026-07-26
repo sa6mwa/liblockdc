@@ -2,22 +2,12 @@
 
 #include "lc_api_internal.h"
 #include "lc_pouch_format.h"
+#include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
 
 #include <stdio.h>
 #include <string.h>
-
-struct lc_pouch {
-  lc_allocator allocator;
-  char *root_path;
-  unsigned long segment_target_bytes;
-  unsigned long compaction_min_segment_count;
-  unsigned long compaction_min_reclaimable_bytes;
-  unsigned long compaction_interval_seconds;
-  int background_compaction_enabled;
-  int single_writer;
-};
 
 static void lc_pouch_init_options(lc_pouch *pouch,
                                   const lc_pouch_open_options *options) {

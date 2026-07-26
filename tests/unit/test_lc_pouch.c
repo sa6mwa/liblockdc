@@ -81,6 +81,29 @@ static void assert_path_file(const char *root, const char *leaf) {
   assert_true(path_is_file(path));
 }
 
+static void read_source_to_string(lc_source *source, char *buffer,
+                                  size_t buffer_size) {
+  lc_error error;
+  size_t offset;
+
+  lc_error_init(&error);
+  offset = 0U;
+  for (;;) {
+    size_t nread;
+
+    assert_true(offset < buffer_size);
+    nread = source->read(source, buffer + offset, buffer_size - offset - 1U,
+                         &error);
+    if (nread == 0U) {
+      assert_int_equal(error.code, LC_OK);
+      break;
+    }
+    offset += nread;
+  }
+  buffer[offset] = '\0';
+  lc_error_cleanup(&error);
+}
+
 static void test_open_creates_segmented_root_layout(void **state) {
   lc_pouch *pouch;
   lc_pouch_status status;
@@ -141,6 +164,7 @@ static void test_ensure_namespace_creates_per_namespace_layout(void **state) {
   assert_non_null(namespace_path);
   assert_true(strstr(namespace_path, "team%2falpha") != NULL);
   assert_path_dir(namespace_path, "segments");
+  assert_path_dir(namespace_path, "payloads");
   assert_path_dir(namespace_path, "snapshots");
   assert_path_dir(namespace_path, "markers");
   assert_path_dir(namespace_path, "index");
@@ -183,12 +207,124 @@ static void test_pouch_endpoint_opens_new_backend_without_http_engine(
   lc_error_cleanup(&error);
 }
 
+static void test_state_write_read_replays_segment_after_reopen(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char bytes[64];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  make_root("state-replay", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("alpha-state", strlen("alpha-state"), &body,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  options.content_type = "text/plain";
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body,
+                            &options, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(write_result.etag, "pouch-state-1");
+  assert_int_equal(write_result.version, 1UL);
+  assert_int_equal(write_result.bytes, strlen("alpha-state"));
+  body->close(body);
+  lc_pouch_close(pouch);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/current", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_string_equal(read_result.content_type, "text/plain");
+  assert_string_equal(read_result.etag, "pouch-state-1");
+  assert_int_equal(read_result.version, 1UL);
+  assert_int_equal(read_result.bytes, strlen("alpha-state"));
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "alpha-state");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_state_write_enforces_expected_etag(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&options, 0, sizeof(options));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  make_root("state-etag", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body, NULL,
+                            &first, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  options.expected_etag = "wrong-etag";
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body,
+                            &options, &second, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  body->close(body);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  options.expected_etag = first.etag;
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body,
+                            &options, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(second.etag, "pouch-state-2");
+  assert_int_equal(second.version, 2UL);
+  body->close(body);
+
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_open_creates_segmented_root_layout),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(
           test_pouch_endpoint_opens_new_backend_without_http_engine),
+      cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
+      cmocka_unit_test(test_state_write_enforces_expected_etag),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

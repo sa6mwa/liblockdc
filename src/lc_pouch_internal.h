@@ -1,0 +1,17 @@
+#ifndef LC_POUCH_INTERNAL_H
+#define LC_POUCH_INTERNAL_H
+
+#include "lc_pouch.h"
+
+struct lc_pouch {
+  lc_allocator allocator;
+  char *root_path;
+  unsigned long segment_target_bytes;
+  unsigned long compaction_min_segment_count;
+  unsigned long compaction_min_reclaimable_bytes;
+  unsigned long compaction_interval_seconds;
+  int background_compaction_enabled;
+  int single_writer;
+};
+
+#endif

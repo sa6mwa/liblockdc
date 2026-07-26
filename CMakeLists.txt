@@ -353,6 +353,7 @@ set(lc_sources
     src/lc_pouch.c
     src/lc_pouch_namespace.c
     src/lc_pouch_path.c
+    src/lc_pouch_state.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
     src/lc_log.c
