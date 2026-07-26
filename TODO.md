@@ -478,6 +478,10 @@ Latest release targets confirmed on 2026-07-23:
         orchestration through the same index-owned cached docID page helper;
         the disk bridge now only adapts sidecar text/trigram readers and
         translates selected docID pages to summaries for these predicates.
+      - [x] Route indexed `DateAfter` result-cache/page orchestration through
+        the same index-owned cached docID page helper; the disk bridge now
+        adapts the authoritative temporal generation reader and translates the
+        selected docID page back to summaries or key snapshots.
       - [x] Physically split result-cache/page planning into
         `src/lc_pouch_index_result.c`, leaving `lc_pouch_index.c` focused on
         document tables, docID algebra, term dictionaries, and adaptive
@@ -723,6 +727,11 @@ Latest release targets confirmed on 2026-07-23:
         `contains` scans using length-prefixed text plan keys that include the
         case-sensitivity flag; contains coverage includes a post-write
         generation miss.
+      - [x] Wire indexed `DateAfter` scans through the same result-cache/page
+        helper using a length-prefixed temporal plan key; focused coverage
+        proves first-page population and resumed key/document pages reuse the
+        cached candidate vector while final `liblql` acceptance still owns
+        visible results.
       - [x] Move simple result-cache plan key construction into
         `lc_pouch_index`: equality, exists, `in`, range, prefix, and contains
         cacheability/normalization now live with the planner cache boundary

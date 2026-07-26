@@ -1442,11 +1442,12 @@ sidecar readers. Disk lookups include both the index sequence and segmented
 manifest generation, so the normalized-result cache follows the same
 immutable-view key shape as prepared bridge readers.
 The first disk use is deliberately narrow: simple primary equality, positive
-`exists`, positive numeric `range`, and non-wildcard positive `in` scans cache
-docIDs by the current index identity and a length-prefixed plan key, then ask
-the index layer to page the cached docIDs over the document table before disk
-converts the selected page back to summary entries. Updates advance the index
-sequence, so stale cached results miss the cache.
+`exists`, positive numeric `range`, non-wildcard positive `in`, prefix,
+contains, and `DateAfter` scans cache docIDs by the current index identity and
+a length-prefixed plan key, then ask the index layer to page the cached docIDs
+over the document table before disk converts the selected page back to summary
+entries or key snapshots. Updates advance the index sequence, so stale cached
+results miss the cache.
 Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
 Residual selectors such as date predicates use the same identity-keyed result
@@ -1456,9 +1457,12 @@ strings are read as typed docID vectors newer than the bound and plausible
 unsupported temporal strings remain residual docIDs. Indexed DateAfter treats
 that generation as authoritative after repair and then applies live-state,
 owner, hidden, key, and secondary-predicate guards before paging. It does not
-fall back to reparsing field postings on the query hot path. The client-level
-`liblql` filter remains authoritative for final acceptance and owns public
-cursor selection for residual pages.
+fall back to reparsing field postings on the query hot path. DateAfter uses the
+index-owned cached-page helper for normalized-plan lookup, cache insertion, and
+doc-table cursor paging; disk only adapts the temporal generation reader and
+translates the selected page. The client-level `liblql` filter remains
+authoritative for final acceptance and owns public cursor selection for
+residual pages.
 The temporal reader codec is intentionally private to pouch index generations:
 it writes a fixed magic/version header, sorted fields, normalized temporal
 docID entries, and residual docIDs. Decode rejects wrong versions, truncated
