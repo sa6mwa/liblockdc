@@ -95,7 +95,6 @@ set_tests_properties(lc_unit_tmp_cleanup_abort PROPERTIES
 add_test(NAME lc_unit_tmp_cleanup_auto_stale
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TMP_CLEANUP_MODE=auto-stale"
-    "LOCKDC_TMP_AUTO_CLEANUP_STALE_SECONDS=0"
     "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>"
 )
 set_tests_properties(lc_unit_tmp_cleanup_auto_stale PROPERTIES

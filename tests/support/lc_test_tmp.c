@@ -1,6 +1,7 @@
 #include "lc_test_tmp.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +14,9 @@
 #define LC_TEST_TMP_MAX_TRACKED 512U
 #define LC_TEST_TMP_MAX_SWEEP_PREFIXES 64U
 #define LC_TEST_TMP_PATH_MAX 1024U
-#define LC_TEST_TMP_DEFAULT_AUTO_STALE_SECONDS 3600L
+#define LC_TEST_TMP_DEFAULT_AUTO_STALE_SECONDS 0L
+#define LC_TEST_TMP_OWNER_FILE ".liblockdc-test-tmp-owner"
+#define LC_TEST_TMP_OWNER_SUFFIX ".liblockdc-test-tmp-owner"
 
 static char lc_test_tmp_tracked[LC_TEST_TMP_MAX_TRACKED][LC_TEST_TMP_PATH_MAX];
 static char lc_test_tmp_swept[LC_TEST_TMP_MAX_SWEEP_PREFIXES]
@@ -66,6 +69,99 @@ static int lc_test_tmp_is_old_enough(const char *path, long min_age_seconds) {
   return st.st_mtime <= now - (time_t)min_age_seconds;
 }
 
+static int lc_test_tmp_marker_path(const char *path, char *marker,
+                                   size_t marker_size) {
+  struct stat st;
+  int written;
+
+  if (path == NULL || marker_size == 0U) {
+    return 0;
+  }
+  if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+    written = snprintf(marker, marker_size, "%s/%s", path,
+                       LC_TEST_TMP_OWNER_FILE);
+  } else {
+    written = snprintf(marker, marker_size, "%s%s", path,
+                       LC_TEST_TMP_OWNER_SUFFIX);
+  }
+  return written >= 0 && (size_t)written < marker_size;
+}
+
+static int lc_test_tmp_write_owner_marker(const char *path) {
+  char marker[LC_TEST_TMP_PATH_MAX];
+  FILE *fp;
+
+  if (!lc_test_tmp_marker_path(path, marker, sizeof(marker))) {
+    return 0;
+  }
+  fp = fopen(marker, "w");
+  if (fp == NULL) {
+    return 0;
+  }
+  if (fprintf(fp, "%ld\n", (long)getpid()) < 0) {
+    (void)fclose(fp);
+    (void)unlink(marker);
+    return 0;
+  }
+  if (fclose(fp) != 0) {
+    (void)unlink(marker);
+    return 0;
+  }
+  return 1;
+}
+
+static void lc_test_tmp_remove_owner_marker(const char *path) {
+  char marker[LC_TEST_TMP_PATH_MAX];
+
+  if (!lc_test_tmp_marker_path(path, marker, sizeof(marker))) {
+    return;
+  }
+  (void)unlink(marker);
+}
+
+static int lc_test_tmp_name_has_suffix(const char *name, const char *suffix) {
+  size_t name_len;
+  size_t suffix_len;
+
+  if (name == NULL || suffix == NULL) {
+    return 0;
+  }
+  name_len = strlen(name);
+  suffix_len = strlen(suffix);
+  if (name_len < suffix_len) {
+    return 0;
+  }
+  return strcmp(name + name_len - suffix_len, suffix) == 0;
+}
+
+static int lc_test_tmp_has_live_owner(const char *path) {
+  char marker[LC_TEST_TMP_PATH_MAX];
+  FILE *fp;
+  long pid;
+  int scanned;
+
+  if (!lc_test_tmp_marker_path(path, marker, sizeof(marker))) {
+    return 0;
+  }
+  fp = fopen(marker, "r");
+  if (fp == NULL) {
+    return 0;
+  }
+  scanned = fscanf(fp, "%ld", &pid);
+  (void)fclose(fp);
+  if (scanned != 1 || pid <= 0L) {
+    return 0;
+  }
+  if (pid == (long)getpid()) {
+    return 1;
+  }
+  errno = 0;
+  if (kill((pid_t)pid, 0) == 0) {
+    return 1;
+  }
+  return errno == EPERM;
+}
+
 static void lc_test_tmp_remove_tree(const char *path) {
   DIR *dir;
   struct dirent *entry;
@@ -110,6 +206,7 @@ static void lc_test_tmp_cleanup_tracked(void) {
   index = lc_test_tmp_tracked_count;
   while (index > 0U) {
     --index;
+    lc_test_tmp_remove_owner_marker(lc_test_tmp_tracked[index]);
     lc_test_tmp_remove_tree(lc_test_tmp_tracked[index]);
     lc_test_tmp_tracked[index][0] = '\0';
   }
@@ -306,7 +403,11 @@ int lc_test_tmp_track_path(const char *path, const char *allowed_prefix) {
   if (!lc_test_tmp_has_prefix(path, allowed_prefix)) {
     return 0;
   }
+  if (!lc_test_tmp_write_owner_marker(path)) {
+    return 0;
+  }
   if (!lc_test_tmp_install_atexit()) {
+    lc_test_tmp_remove_owner_marker(path);
     return 0;
   }
   for (index = 0U; index < lc_test_tmp_tracked_count; ++index) {
@@ -398,6 +499,7 @@ void lc_test_tmp_cleanup_path(const char *path, const char *allowed_prefix) {
   if (!lc_test_tmp_has_prefix(path, allowed_prefix)) {
     return;
   }
+  lc_test_tmp_remove_owner_marker(path);
   lc_test_tmp_remove_tree(path);
   lc_test_tmp_untrack_path(path);
 }
@@ -427,8 +529,14 @@ void lc_test_tmp_cleanup_stale_older_than(const char *parent_dir,
     if (!lc_test_tmp_has_prefix(entry->d_name, name_prefix)) {
       continue;
     }
+    if (lc_test_tmp_name_has_suffix(entry->d_name, LC_TEST_TMP_OWNER_SUFFIX)) {
+      continue;
+    }
     written = snprintf(path, sizeof(path), "%s/%s", parent_dir, entry->d_name);
     if (written < 0 || (size_t)written >= sizeof(path)) {
+      continue;
+    }
+    if (lc_test_tmp_has_live_owner(path)) {
       continue;
     }
     if (!lc_test_tmp_is_old_enough(path, min_age_seconds)) {

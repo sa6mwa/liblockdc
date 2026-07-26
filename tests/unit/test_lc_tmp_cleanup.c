@@ -23,7 +23,9 @@ static int run_auto_stale_cleanup_probe(void) {
   char global_stale_root[] = TMP_GLOBAL_STALE_PREFIX "abandoned";
   char global_stale_child[] = TMP_GLOBAL_STALE_PREFIX "abandoned/child";
   char template_path[] = TMP_AUTO_CLEANUP_PREFIX "fresh-XXXXXX";
+  char live_template[] = TMP_AUTO_CLEANUP_PREFIX "live-XXXXXX";
   char root[512];
+  char live_root[512];
 
   lc_test_tmp_cleanup_path(stale_root, TMP_AUTO_CLEANUP_PREFIX);
   lc_test_tmp_cleanup_path(global_stale_root, TMP_GLOBAL_STALE_PREFIX);
@@ -60,6 +62,18 @@ static int run_auto_stale_cleanup_probe(void) {
     lc_test_tmp_cleanup_path(global_stale_root, TMP_GLOBAL_STALE_PREFIX);
     return 16;
   }
+  if (!lc_test_tmp_mkdtemp(live_template, live_root, sizeof(live_root),
+                          TMP_AUTO_CLEANUP_PREFIX)) {
+    lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
+    return 17;
+  }
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-tmp-autocleanup-",
+                            TMP_AUTO_CLEANUP_PREFIX);
+  if (!path_exists(live_root)) {
+    lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
+    return 18;
+  }
+  lc_test_tmp_cleanup_path(live_root, TMP_AUTO_CLEANUP_PREFIX);
   lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
   return 0;
 }
