@@ -1348,7 +1348,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   lc_engine_error engine_error;
   lc_bundle_capture_source bundle_capture;
   lc_pouch_endpoint_options pouch_endpoint_options;
-  lc_pouch_disk_open_opts pouch_open_opts;
+  lc_pouch_open_opts pouch_open_opts;
   unsigned char *bundle_bytes;
   size_t bundle_length;
   lc_client_handle *client;
@@ -1458,7 +1458,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     pouch_open_opts.query_engine = effective_query_engine;
     pouch_open_opts.query_fallback_engine = effective_query_fallback_engine;
     pouch_open_opts.single_writer = pouch_endpoint_options.single_writer;
-    rc = lc_pouch_disk_open_with_options(
+    rc = lc_pouch_open_with_options(
         pouch_endpoint_options.root_path, &client->pouch_allocator,
         &pouch_open_opts, &client->pouch_store, error);
     if (rc != LC_OK) {

@@ -84,7 +84,7 @@ target_link_options(lc_unit_runtime PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lonejson_new>
 )
 lc_add_unit_test(lc_unit_mutate_stream test_lc_mutate_stream.c)
-lc_add_unit_test(lc_unit_pouch_disk test_lc_pouch_disk.c)
+lc_add_unit_test(lc_unit_pouch_store test_lc_pouch_store.c)
 lc_add_unit_test(lc_unit_pouch_index test_lc_pouch_index.c)
 lc_add_unit_test(lc_unit_pouch_client test_lc_pouch_client.c)
 

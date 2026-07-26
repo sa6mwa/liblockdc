@@ -285,7 +285,7 @@ typedef struct lc_pouch_query_config {
   char *fallback_engine;
 } lc_pouch_query_config;
 
-typedef struct lc_pouch_disk_open_opts {
+typedef struct lc_pouch_open_opts {
   const char *query_engine;
   const char *query_fallback_engine;
   int single_writer;
@@ -298,7 +298,7 @@ typedef struct lc_pouch_disk_open_opts {
   unsigned long background_compaction_min_reclaimable_bytes;
   unsigned long background_compaction_delete_grace_seconds;
   unsigned long background_compaction_max_io_bytes;
-} lc_pouch_disk_open_opts;
+} lc_pouch_open_opts;
 
 typedef struct lc_pouch_object_info {
   char *id;
@@ -710,16 +710,16 @@ void lc_pouch_queue_message_info_cleanup(const lc_pouch_allocator *allocator,
 void lc_pouch_queue_stats_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_queue_stats *stats);
 
-int lc_pouch_disk_open(const char *root_path,
+int lc_pouch_open(const char *root_path,
                        const lc_pouch_allocator *allocator,
                        lc_pouch_store **out, lc_error *error);
-int lc_pouch_disk_open_with_options(const char *root_path,
+int lc_pouch_open_with_options(const char *root_path,
                                     const lc_pouch_allocator *allocator,
-                                    const lc_pouch_disk_open_opts *opts,
+                                    const lc_pouch_open_opts *opts,
                                     lc_pouch_store **out, lc_error *error);
-int lc_pouch_disk_durability_batch_begin(lc_pouch_store *self,
+int lc_pouch_durability_batch_begin(lc_pouch_store *self,
                                          lc_error *error);
-int lc_pouch_disk_durability_batch_end(lc_pouch_store *self,
+int lc_pouch_durability_batch_end(lc_pouch_store *self,
                                        lc_error *error);
 
 #endif

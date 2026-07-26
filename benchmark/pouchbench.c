@@ -325,7 +325,7 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
   char flag_json[32];
   const char *created_at;
   lc_pouch_allocator allocator;
-  lc_pouch_disk_open_opts open_opts;
+  lc_pouch_open_opts open_opts;
   lc_pouch_store *store;
   lc_pouch_put_state_opts put_opts;
   lc_pouch_put_state_res put_res;
@@ -345,12 +345,12 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
   open_opts.query_engine = "index";
   open_opts.single_writer = 1;
   store = NULL;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &open_opts, &store,
+  rc = lc_pouch_open_with_options(root, &allocator, &open_opts, &store,
                                        error);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_disk_durability_batch_begin(store, error);
+  rc = lc_pouch_durability_batch_begin(store, error);
   if (rc != LC_OK) {
     (void)store->close(store, error);
     return rc;
@@ -419,7 +419,7 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
     }
   }
 
-  rc = lc_pouch_disk_durability_batch_end(store, error);
+  rc = lc_pouch_durability_batch_end(store, error);
   if (rc != LC_OK) {
     (void)store->close(store, error);
     return rc;

@@ -454,32 +454,37 @@ Latest release targets confirmed on 2026-07-23:
       incompatible sidecars rebuild from namespace segments/snapshots instead
       of being trusted.
   - [ ] Redesign pouch indexed query execution for Go lockd disk-style
-    performance parity instead of continuing monolithic disk-store posting
+    performance parity instead of continuing monolithic storage posting
     tweaks.
-    - [ ] Split the pouch search/index subsystem out of `lc_pouch_disk.c` into
+    - [x] Cut over unreleased pouch API, implementation, tests, docs, and
+      benchmark callers from the former disk-prefixed C naming to pouch-native
+      `lc_pouch_*`/`src/lc_pouch.c`; Go lockd disk remains the reference
+      implementation for storage/index ideas, not the identity of the embedded
+      C backend.
+    - [ ] Split the pouch search/index subsystem out of `lc_pouch.c` into
       an internal C index layer with explicit reader, writer, planner, posting,
       visibility, and result-cache boundaries.
       - [x] Introduce the first private reader/planner boundary in
         `lc_pouch_index`: exact-term, field-presence, and range docID reader
         callbacks let the index layer own primary equality, `in` union, exact
-        `exists`, and numeric range planning while the disk backend adapts the
+        `exists`, and numeric range planning while the pouch backend adapts the
         current sidecar postings.
       - [x] Move the first result-cache/page orchestration boundary into
         `lc_pouch_index`: a generation-scoped cached docID page helper now owns
         normalized plan key lookup, cache miss collection, cache insert, and
-        doc-table cursor paging; the disk equality path supplies sidecar
+        doc-table cursor paging; the pouch equality bridge supplies sidecar
         readers and only translates the selected docID page back to summary
         indices.
       - [x] Route simple positive `range` and `exists` result-cache/page
         orchestration through the same index-owned cached docID page helper;
-        the disk bridge now only adapts sidecar range/presence readers and
+        the pouch storage bridge now only adapts sidecar range/presence readers and
         translates selected docID pages to summaries for these predicates.
       - [x] Route simple positive `prefix` and `contains` result-cache/page
         orchestration through the same index-owned cached docID page helper;
-        the disk bridge now only adapts sidecar text/trigram readers and
+        the pouch storage bridge now only adapts sidecar text/trigram readers and
         translates selected docID pages to summaries for these predicates.
       - [x] Route indexed `DateAfter` result-cache/page orchestration through
-        the same index-owned cached docID page helper; the disk bridge now
+        the same index-owned cached docID page helper; the pouch storage bridge now
         adapts the authoritative temporal generation reader and translates the
         selected docID page back to summaries or key snapshots.
       - [x] Move remapped document-generation result-cache/page orchestration
@@ -503,8 +508,8 @@ Latest release targets confirmed on 2026-07-23:
         `src/lc_pouch_index_doc.c`, leaving `lc_pouch_index.c` focused on
         planner/collector orchestration over the private index primitives.
       - [x] Document the current private index module map in
-        `docs/pouch-storage.md`, including the disk bridge responsibility that
-        remains in `src/lc_pouch_disk.c`.
+        `docs/pouch-storage.md`, including the pouch storage bridge responsibility that
+        remains in `src/lc_pouch.c`.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
@@ -517,7 +522,7 @@ Latest release targets confirmed on 2026-07-23:
         implicit dense docIDs, duplicate rejection, and corruption/truncation
         rejection coverage.
       - [x] Publish immutable per-namespace document-table generation files
-        from the disk bridge: full query-index rebuilds and compaction publish
+        from the pouch storage bridge: full query-index rebuilds and compaction publish
         `.lcpdtg` files under the backend logstore with client coverage
         decoding default and non-default namespace artifacts.
       - [x] Cut exact-term generation files over to namespace-local docIDs:
@@ -629,12 +634,12 @@ Latest release targets confirmed on 2026-07-23:
         term-ID postings now round-trip under index sequence plus segmented
         manifest identity, with corruption/truncation rejection coverage.
       - [x] Publish and consume immutable exact-term generation files from the
-        disk bridge: full query-index rebuilds and compaction publish
+        pouch storage bridge: full query-index rebuilds and compaction publish
         per-namespace exact generations, prepared equality/`in` readers merge
         identity-matched files before compiling sidecar fallbacks, and
         missing/stale/corrupt files repair on the exact query path.
       - [x] Publish and consume immutable field-presence generation files from
-        the disk bridge: full query-index rebuilds and compaction publish
+        the pouch storage bridge: full query-index rebuilds and compaction publish
         per-namespace exists generations, prepared `exists` readers merge
         identity-matched files before compiling sidecar fallbacks, and
         missing/stale/corrupt files repair on the exists query path.
@@ -644,7 +649,7 @@ Latest release targets confirmed on 2026-07-23:
         and segmented manifest identity, with range-bound lookup and
         corruption/truncation rejection coverage.
       - [x] Publish and consume immutable numeric-range generation files from
-        the disk bridge for simple primary `range` plans: full query-index
+        the pouch storage bridge for simple primary `range` plans: full query-index
         rebuilds and compaction publish per-namespace numeric generations,
         prepared simple `range` readers materialize identity-matched files into
         query-bound adaptive postings, and missing/stale/corrupt files repair
@@ -657,7 +662,7 @@ Latest release targets confirmed on 2026-07-23:
         and round-trip under index sequence plus segmented manifest identity
         with corruption/truncation rejection coverage.
       - [x] Publish and consume immutable text/trigram generation files from
-        the disk bridge for simple primary `prefix` and `contains` plans: full
+        the pouch storage bridge for simple primary `prefix` and `contains` plans: full
         query-index rebuilds and compaction publish per-namespace text
         generations, prepared simple text readers materialize identity-matched
         files into query-bound adaptive postings, and missing/stale/corrupt
@@ -739,14 +744,14 @@ Latest release targets confirmed on 2026-07-23:
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
       - [x] Add the first generation-scoped prepared exact-term cache in the
-        disk bridge: simple equality and non-wildcard `in` plans can reuse
+        pouch storage bridge: simple equality and non-wildcard `in` plans can reuse
         namespace-qualified adaptive exact postings across compatible query
         shapes, with tests covering namespace separation and generation miss
         after writes.
       - [x] Keep prepared term caches request-independent: owner- and
         key-filtered exact queries use the request-keyed result cache but do not
         populate or consume namespace/field/value prepared exact postings.
-        Covered by a focused pouch disk regression that runs owner-filtered and
+        Covered by a focused pouch regression that runs owner-filtered and
         key-filtered exact queries before unfiltered exact queries on the same
         indexed field/value generation.
       - [x] Extend the generation-scoped prepared bridge cache to simple
@@ -772,12 +777,12 @@ Latest release targets confirmed on 2026-07-23:
         use one index-owned cache primitive instead of per-predicate disk-local
         structs.
       - [x] Introduce an explicit private index identity for prepared-term
-        caches: the disk bridge now refreshes prepared readers by index
+        caches: the pouch storage bridge now refreshes prepared readers by index
         sequence plus segmented manifest generation instead of a bare sequence
         counter, while the compiled reader contents still come from current
         sidecar scans.
       - [x] Extend prepared-reader caching to typed temporal `DateAfter`
-        generations: the disk bridge loads identity-matched per-namespace
+        generations: the pouch storage bridge loads identity-matched per-namespace
         temporal generation files into `lc_pouch_index_prepared_temporal_cache`,
         remaps namespace-local docIDs into the current global doc table once,
         and reuses the compiled temporal table across distinct DateAfter plan
@@ -847,7 +852,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Move simple result-cache plan key construction into
         `lc_pouch_index`: equality, exists, `in`, range, prefix, and contains
         cacheability/normalization now live with the planner cache boundary
-        instead of the disk backend.
+        instead of the pouch backend.
       - [x] Extend normalized result-cache planning to primary numeric range
         scans with positive equality filters: compound range/equality plans
         now use sorted/deduplicated equality predicates in the plan key, reuse
@@ -1028,7 +1033,7 @@ Latest release targets confirmed on 2026-07-23:
         - [x] Keep ordinary state writes/removes and metadata changes on the
           live query-index mutation path, and publish temporal generation files
           only from controlled rebuild/compaction or lazy DateAfter repair.
-          Disk regression coverage proves ordinary mutations no longer create
+          Pouch regression coverage proves ordinary mutations no longer create
           `.lcptgn` files eagerly, while the first DateAfter read publishes the
           identity-matched generation before returning indexed results.
         - [x] Repair missing, stale, or corrupt temporal generation files on
@@ -1039,7 +1044,7 @@ Latest release targets confirmed on 2026-07-23:
           DateAfter and remove the remaining sidecar-scan bridge. If the
           repaired identity-matched generation cannot be read, indexed DateAfter
           returns the empty candidate set instead of reparsing field postings on
-          the hot path. A query-time disk bridge attempt was measured on
+          the hot path. A query-time pouch storage bridge attempt was measured on
           2026-07-26 and rejected because building the temporal table on the
           hot path regressed 4096-document DateAfter page-one latency to
           roughly 110-140 ms C-side.
@@ -1098,12 +1103,12 @@ Latest release targets confirmed on 2026-07-23:
         indexed `EqSparse` smoke run proved the wrapper path.
       - [x] Move live query-field posting maintenance from sorted insertion to
         append-plus-lazy-sort, matching the append-first direction of the
-        segmented redesign. Disk regression coverage now proves updates before
+        segmented redesign. Pouch regression coverage now proves updates before
         the first query discard stale field values and duplicate wildcard array
         postings produce one key result after the lazy sort barrier.
       - [x] Batch query-field sidecar fsyncs per indexed JSON body and make
-        the Go pouch-vs-disk harness seed pouch through direct C disk-store
-        writes before querying through the public client LQL path. Disk fsync
+        the Go pouch-vs-disk harness seed pouch through direct C pouch
+        writes before querying through the public client LQL path. Pouch fsync
         regression coverage proves a multi-field state write emits one
         query-index fsync after the format record exists, and a 64-document
         focused Go `DateAfter` smoke passes with result-cache/page metrics.
@@ -1119,7 +1124,14 @@ Latest release targets confirmed on 2026-07-23:
         slower-than-Go indexed pouch cases for follow-up performance work:
         indexed key/document `EqSparse`, indexed `ContainsMessage`, and indexed
         `DateAfter` remain materially slower than Go lockd disk.
-  - [x] Cut pouch disk storage over to the unreleased fresh segmented
+      - [x] Re-run after pouch-native API/source naming cutover. Verified on
+        2026-07-26: `make benchmark-pouch-go-acceptance` completed in 1m53s,
+        proving the Go/cgo harness compiles against `lc_pouch_open` and still
+        enforces the 3m cap. The run continues to show the remaining indexed
+        pouch gaps: sparse equality and first-page contains/date-after are still
+        materially slower than Go lockd disk and remain the next performance
+        targets after the redesign boundaries are in place.
+  - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
     - [x] Create the per-namespace layout under

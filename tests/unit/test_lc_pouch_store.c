@@ -572,7 +572,7 @@ static size_t failing_callback_source_read(void *context, void *buffer,
   failing_callback_source *source;
   size_t remaining;
   size_t produced;
-  const char message[] = "intentional pouch disk source failure";
+  const char message[] = "intentional pouch source failure";
 
   source = (failing_callback_source *)context;
   if (source->reads_before_failure == 0U) {
@@ -1777,7 +1777,7 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   state_sha256 =
       "48208f9428d64634bd8e28ff345bf0eab60d53c18fa2fbdb0b9bc1e84df2b5f6";
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store);
 
@@ -1796,7 +1796,7 @@ static void test_write_read_reopen_and_allocator_hooks(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "alpha", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -1842,7 +1842,7 @@ test_state_write_creates_segmented_namespace_logstore(void **state) {
   memset(&error, 0, sizeof(error));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   test_query_index_path(root, path, sizeof(path));
   assert_int_equal(stat(path, &st), 0);
@@ -1928,7 +1928,7 @@ test_segment_payload_refs_survive_root_log_truncation(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("state-segment-body");
@@ -2025,9 +2025,9 @@ static void test_segment_generation_refreshes_independent_handle(void **state) {
   reader = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  rc = lc_pouch_open(root, &allocator, &writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &reader, &error);
+  rc = lc_pouch_open(root, &allocator, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("{\"fresh\":true}");
@@ -2089,7 +2089,7 @@ static void test_memory_records_append_only_to_segments(void **state) {
   store = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   root_bytes = test_log_size(root);
 
@@ -2182,7 +2182,7 @@ static void test_replay_recovers_state_from_namespace_segment(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("{\"value\":2}");
@@ -2201,7 +2201,7 @@ static void test_replay_recovers_state_from_namespace_segment(void **state) {
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   assert_int_equal(unlink(log_path), 0);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "team.alpha", "alpha", &read_body, &info,
                          &error);
@@ -2248,7 +2248,7 @@ static void test_replay_repairs_missing_namespace_manifest(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("manifest-repair-body");
   rc = store->write_state(store, "team.alpha", "alpha", source, NULL, &put_res,
@@ -2263,7 +2263,7 @@ static void test_replay_repairs_missing_namespace_manifest(void **state) {
                      sizeof(manifest_path));
   assert_int_equal(unlink(manifest_path), 0);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
   assert_string_equal(manifest_text, "open seg-0000000000000001.log\n");
@@ -2315,7 +2315,7 @@ test_replay_repairs_crash_incomplete_namespace_manifest(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   counting_source_init(&large_source, 40000U);
@@ -2354,7 +2354,7 @@ test_replay_repairs_crash_incomplete_namespace_manifest(void **state) {
          sizeof(partial_open));
   test_write_text_file(manifest_path, repaired_manifest_text);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   test_read_file_text(manifest_path, manifest_text, sizeof(manifest_text));
   assert_non_null(strstr(manifest_text, "open seg-000000000\n"
@@ -2403,7 +2403,7 @@ static void test_segment_rotation_replays_multiple_segments(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   counting_source_init(&large_source, 40000U);
@@ -2441,7 +2441,7 @@ static void test_segment_rotation_replays_multiple_segments(void **state) {
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   assert_int_equal(unlink(log_path), 0);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc =
       store->read_state(store, "default", "large-a", &read_body, &info, &error);
@@ -2498,7 +2498,7 @@ static void test_segment_replay_truncates_rotated_tail(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   counting_source_init(&large_source, 40000U);
@@ -2536,7 +2536,7 @@ static void test_segment_replay_truncates_rotated_tail(void **state) {
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   assert_int_equal(unlink(log_path), 0);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(test_segment_size(root, "default", 2UL), clean_size);
   rc = store->read_state(store, "default", "tail", &read_body, &info, &error);
@@ -2583,7 +2583,7 @@ static void test_segment_replay_honors_manifest_obsolete(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   counting_source_init(&large_source, 40000U);
@@ -2619,7 +2619,7 @@ static void test_segment_replay_honors_manifest_obsolete(void **state) {
   snprintf(log_path, sizeof(log_path), "%s/store.log", root);
   assert_int_equal(unlink(log_path), 0);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc =
       store->read_state(store, "default", "large-a", &read_body, &info, &error);
@@ -2676,7 +2676,7 @@ static void test_replay_installed_snapshot_without_segment_tail(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("snapshot-body");
@@ -2699,7 +2699,7 @@ static void test_replay_installed_snapshot_without_segment_tail(void **state) {
                    (ssize_t)(sizeof(snapshot_line) - 1U));
   assert_int_equal(close(fd), 0);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "snap-key", &body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -2724,7 +2724,7 @@ static void test_replay_installed_snapshot_without_segment_tail(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "snap-key", &body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -2780,7 +2780,7 @@ static void test_replay_cleans_obsolete_snapshot_files(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("active-snapshot-body");
@@ -2811,7 +2811,7 @@ static void test_replay_cleans_obsolete_snapshot_files(void **state) {
                    (ssize_t)(sizeof(manifest_text) - 1U));
   assert_int_equal(close(fd), 0);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(access(obsolete_snapshot_path, F_OK), -1);
   assert_int_equal(errno, ENOENT);
@@ -2872,7 +2872,7 @@ test_maintenance_cleanup_cleans_obsolete_snapshot_files(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("active-snapshot-body");
@@ -2944,7 +2944,7 @@ test_maintenance_cleanup_honors_obsolete_delete_grace(void **state) {
   const char obsolete_text[] = "obsolete snapshot bytes";
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts open_opts;
+  lc_pouch_open_opts open_opts;
   lc_pouch_store *store;
   lc_source *source;
   lc_pouch_put_state_opts opts;
@@ -2966,7 +2966,7 @@ test_maintenance_cleanup_honors_obsolete_delete_grace(void **state) {
   memset(&maintenance, 0, sizeof(maintenance));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("active-snapshot-body");
@@ -2998,7 +2998,7 @@ test_maintenance_cleanup_honors_obsolete_delete_grace(void **state) {
   assert_int_equal(close(fd), 0);
 
   open_opts.background_compaction_delete_grace_seconds = 3600UL;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &open_opts, &store,
+  rc = lc_pouch_open_with_options(root, &allocator, &open_opts, &store,
                                        &error);
   assert_int_equal(rc, LC_OK);
   rc = store->maintenance(store, "cleanup", &maintenance, &error);
@@ -3050,7 +3050,7 @@ static void test_replay_ignores_root_store_log_without_segments(void **state) {
   write_root_store_log_state_put(root, "default", "legacy-key", "text/plain",
                                  "root-only-etag", "root-only-body", 7UL);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "legacy-key", &body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -3086,7 +3086,7 @@ test_state_put_propagates_source_failure_before_append(void **state) {
   store = NULL;
   source = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -3095,7 +3095,7 @@ test_state_put_propagates_source_failure_before_append(void **state) {
                           &res, &error);
   lc_source_close(source);
   assert_int_equal(rc, LC_ERR_PROTOCOL);
-  assert_string_equal(error.message, "intentional pouch disk source failure");
+  assert_string_equal(error.message, "intentional pouch source failure");
   assert_int_equal(count_log_records_of_type(root, TEST_POUCH_RECORD_STATE_PUT),
                    0U);
   lc_error_cleanup(&error);
@@ -3133,7 +3133,7 @@ static void test_state_read_skips_replay_after_same_handle_write(void **state) {
   read_body = NULL;
   payload_length = 128U * 1024U;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   tracked.max_malloc_size = 0U;
@@ -3208,7 +3208,7 @@ test_query_index_scan_skips_replay_after_same_handle_write(void **state) {
   memset(&rows, 0, sizeof(rows));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_index_scan);
   assert_non_null(store->lock_status);
@@ -3322,7 +3322,7 @@ static void test_query_index_exists_result_cache_misses_after_generation_change(
   memset(&rows, 0, sizeof(rows));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -3428,7 +3428,7 @@ test_query_index_prepared_exact_cache_is_namespace_and_generation_scoped(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -3551,7 +3551,7 @@ static void test_query_index_prepared_exact_cache_ignores_owner_and_key_filters(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -3671,7 +3671,7 @@ test_query_index_prepared_exists_cache_is_namespace_and_generation_scoped(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -3789,7 +3789,7 @@ test_query_index_prepared_range_cache_is_namespace_and_generation_scoped(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -3909,7 +3909,7 @@ test_query_index_prepared_prefix_cache_is_namespace_and_generation_scoped(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -4028,7 +4028,7 @@ test_query_index_prepared_contains_cache_is_namespace_and_generation_scoped(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -4147,7 +4147,7 @@ test_query_index_prepared_temporal_cache_reuses_generation_after_file_corrupt(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -4248,7 +4248,7 @@ static void test_query_index_temporal_generation_is_lazy_after_writes(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -4328,7 +4328,7 @@ static void test_query_field_lazy_sort_preserves_update_and_dedupes(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "application/json";
@@ -4437,7 +4437,7 @@ static void test_cas_and_remove_semantics(void **state) {
   text = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->remove_state(store, "default", "beta", NULL, &removed, &error);
@@ -4541,7 +4541,7 @@ static void test_cas_and_remove_semantics(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
   rewrite_query_index_as_v1_without_owner(root);
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   read_body = NULL;
   memset(&info, 0, sizeof(info));
@@ -4598,7 +4598,7 @@ static void test_state_lookup_index_orders_updates_and_replays(void **state) {
   text = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("gamma");
@@ -4659,7 +4659,7 @@ static void test_state_lookup_index_orders_updates_and_replays(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->read_state(store, "default", "beta", &read_body, &info, &error);
@@ -4720,7 +4720,7 @@ test_state_write_index_allocation_failure_replays_cleanly(void **state) {
   read_body = NULL;
   replacement_type = "application/x-pouch-state-index-replay";
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "text/plain";
@@ -4799,7 +4799,7 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->stage_state);
   assert_non_null(store->load_staged_state);
@@ -4923,7 +4923,7 @@ static void test_staged_state_promote_discard_and_reopen(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->read_state(store, "default", "lease-key", &read_body, &info,
@@ -4989,7 +4989,7 @@ static void test_staged_state_remove_promote_discard_and_reopen(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->stage_state_remove);
 
@@ -5061,7 +5061,7 @@ static void test_staged_state_remove_promote_discard_and_reopen(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->read_state(store, "default", "lease-key", &read_body, &info,
@@ -5119,7 +5119,7 @@ test_staged_state_listing_orders_paginates_and_replays(void **state) {
   memset(&list, 0, sizeof(list));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "text/plain";
@@ -5188,7 +5188,7 @@ test_staged_state_listing_orders_paginates_and_replays(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   req.start_after = NULL;
@@ -5246,7 +5246,7 @@ static void test_replay_truncates_trailing_partial_record(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("stable");
   rc = store->write_state(store, "default", "gamma", source, NULL, &put_res,
@@ -5262,7 +5262,7 @@ static void test_replay_truncates_trailing_partial_record(void **state) {
   assert_int_equal(write(fd, "bad", 3U), 3);
   close(fd);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "gamma", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -5305,7 +5305,7 @@ test_replay_rebuilds_indexes_after_external_truncation(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("durable-head");
   rc = store->write_state(store, "default", "reset-key", source, NULL, &first,
@@ -5368,7 +5368,7 @@ test_replay_stops_at_corrupt_record_and_discards_later_records(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("stable-prefix");
   rc = store->write_state(store, "default", "good", source, NULL, &first,
@@ -5391,7 +5391,7 @@ test_replay_stops_at_corrupt_record_and_discards_later_records(void **state) {
 
   corrupt_first_log_match(root, "corrupt-middle");
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "good", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -5452,7 +5452,7 @@ static void test_replay_stops_at_unsupported_record_version(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("version-prefix");
   rc = store->write_state(store, "default", "good", source, NULL, &first,
@@ -5475,7 +5475,7 @@ static void test_replay_stops_at_unsupported_record_version(void **state) {
 
   set_first_log_match_record_version(root, "unsupported-version", 99UL);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "good", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -5537,7 +5537,7 @@ test_replay_stops_at_oversized_record_without_allocating_payload(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("oversized-prefix");
   rc = store->write_state(store, "default", "good", source, NULL, &first,
@@ -5561,7 +5561,7 @@ test_replay_stops_at_oversized_record_without_allocating_payload(void **state) {
   set_first_log_match_body_length(root, "oversized-middle",
                                   TEST_POUCH_MAX_INLINE_BODY_BYTES + 1UL);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "good", &read_body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -5626,7 +5626,7 @@ static void test_replay_stops_at_truncated_object_metadata(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("object-prefix");
   rc = store->write_state(store, "default", "good", source, NULL, &first,
@@ -5653,7 +5653,7 @@ static void test_replay_stops_at_truncated_object_metadata(void **state) {
 
   set_first_log_match_body_length(root, "object-truncated", 8UL);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "good", &read_body, &state_info,
                          &error);
@@ -5718,7 +5718,7 @@ static void test_replay_stops_at_truncated_queue_metadata(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("queue-prefix");
   rc = store->write_state(store, "default", "good", source, NULL, &first,
@@ -5747,7 +5747,7 @@ static void test_replay_stops_at_truncated_queue_metadata(void **state) {
 
   set_first_log_match_body_length(root, "queue-truncated", 8UL);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "good", &read_body, &state_info,
                          &error);
@@ -5814,7 +5814,7 @@ static void test_replay_stops_at_corrupt_object_record(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("object-crc-prefix");
   rc = store->write_state(store, "default", "good", source, NULL, &first,
@@ -5841,7 +5841,7 @@ static void test_replay_stops_at_corrupt_object_record(void **state) {
 
   corrupt_first_log_match(root, "object-crc-corrupt");
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "good", &read_body, &state_info,
                          &error);
@@ -5906,7 +5906,7 @@ static void test_replay_stops_at_corrupt_queue_record(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("queue-crc-prefix");
   rc = store->write_state(store, "default", "good", source, NULL, &first,
@@ -5935,7 +5935,7 @@ static void test_replay_stops_at_corrupt_queue_record(void **state) {
 
   corrupt_first_log_match(root, "queue-crc-corrupt");
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "good", &read_body, &state_info,
                          &error);
@@ -5994,7 +5994,7 @@ static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   memset(&loaded, 0, sizeof(loaded));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner-a";
@@ -6056,7 +6056,7 @@ static void test_metadata_roundtrip_cas_delete_and_reopen(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->load_meta(store, "default", "lease-key", &loaded, &error);
   assert_int_equal(rc, LC_OK);
@@ -6110,7 +6110,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -6196,7 +6196,7 @@ static void test_metadata_scan_orders_paginates_and_replays(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   memset(&capture, 0, sizeof(capture));
@@ -6271,7 +6271,7 @@ test_metadata_scan_skips_replay_after_same_handle_write(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->lock_status);
 
@@ -6333,7 +6333,7 @@ static void test_metadata_key_scan_orders_paginates_and_replays(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->scan_meta_keys);
 
@@ -6481,7 +6481,7 @@ static void test_metadata_scan_can_exclude_removed_state(void **state) {
   source = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.content_type = "application/json";
@@ -6602,7 +6602,7 @@ static void test_metadata_scan_paginates_across_removed_state(void **state) {
   source = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->scan_meta_keys);
 
@@ -6680,7 +6680,7 @@ static void test_metadata_scan_paginates_across_removed_state(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   req.namespace_name = "default";
@@ -6784,7 +6784,7 @@ static void test_staged_state_rejects_pathlike_transaction_ids(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "text/plain";
@@ -6859,7 +6859,7 @@ static void test_root_staged_state_lists_and_discards(void **state) {
   store = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "application/json";
@@ -6912,7 +6912,7 @@ static void test_root_staged_state_lists_and_discards(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->list_staged_state(store, &req, &list, &error);
@@ -6961,7 +6961,7 @@ test_query_index_scan_orders_paginates_and_reports_seq(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_index_scan);
 
@@ -7160,7 +7160,7 @@ test_query_index_range_scans_field_posting_candidates(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -7450,7 +7450,7 @@ test_query_index_range_uses_numeric_order_for_multidigit_values(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   write_query_range_number_state(&allocator, store, "k01", "{\"score\":1e0}",
@@ -7589,7 +7589,7 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -7722,7 +7722,7 @@ static void test_query_index_in_deduplicates_duplicate_values(void **state) {
   memset(&scan, 0, sizeof(scan));
   memset(&keys, 0, sizeof(keys));
   memset(&rows, 0, sizeof(rows));
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
@@ -7781,7 +7781,7 @@ static void test_query_index_in_docid_path_applies_secondary_in(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   write_query_range_number_state(&allocator, store, "east-finance",
@@ -7868,7 +7868,7 @@ test_query_index_eq_not_eq_result_cache_subtracts_negative_terms(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -7994,7 +7994,7 @@ test_query_index_in_eq_result_cache_reuses_compound_plan(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -8123,7 +8123,7 @@ test_query_index_in_not_eq_result_cache_subtracts_negative_terms(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -8253,7 +8253,7 @@ test_query_index_text_eq_result_cache_reuses_compound_plans(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -8480,7 +8480,7 @@ test_query_index_range_text_not_eq_result_cache_subtracts_negative_terms(
   memset(&req, 0, sizeof(req));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -8584,7 +8584,7 @@ test_query_index_exists_eq_result_cache_reuses_compound_plan(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -8708,7 +8708,7 @@ test_query_index_exists_not_eq_result_cache_subtracts_negative_terms(
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_result_cache_status);
 
@@ -8840,7 +8840,7 @@ test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.content_type = "application/json";
@@ -9011,7 +9011,7 @@ static void test_query_index_summary_scan_applies_negative_terms(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.content_type = "application/json";
@@ -9143,7 +9143,7 @@ test_query_index_path_pattern_scan_intersects_positive_terms(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.content_type = "application/json";
@@ -9291,7 +9291,7 @@ test_query_index_keys_scan_avoids_metadata_row_copies(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_index_keys_scan);
 
@@ -9430,7 +9430,7 @@ static void test_query_owner_index_scans_candidates_and_replays(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_owner_scan);
   assert_non_null(store->query_owner_keys_scan);
@@ -9534,7 +9534,7 @@ static void test_query_owner_index_scans_candidates_and_replays(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   memset(&keys, 0, sizeof(keys));
@@ -9609,7 +9609,7 @@ static void test_query_index_scans_exclude_removed_state(void **state) {
   source = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.content_type = "application/json";
@@ -9687,7 +9687,7 @@ static void test_query_index_scans_exclude_removed_state(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   index_req.namespace_name = "default";
@@ -9786,7 +9786,7 @@ test_query_owner_index_paginates_across_removed_state(void **state) {
   source = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.content_type = "application/json";
@@ -9863,7 +9863,7 @@ test_query_owner_index_paginates_across_removed_state(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   req.namespace_name = "default";
@@ -9980,11 +9980,11 @@ test_query_index_scans_refresh_stale_reader_before_sidecar(void **state) {
   reader_keys = NULL;
   writer = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &reader_docs, &error);
+  rc = lc_pouch_open(root, &allocator, &reader_docs, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &reader_keys, &error);
+  rc = lc_pouch_open(root, &allocator, &reader_keys, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  rc = lc_pouch_open(root, &allocator, &writer, &error);
   assert_int_equal(rc, LC_OK);
 
   req.namespace_name = "default";
@@ -10077,7 +10077,7 @@ test_query_index_projection_replays_updates_and_deletes(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -10121,7 +10121,7 @@ test_query_index_projection_replays_updates_and_deletes(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   rc = store->query_index_scan(store, &req, capture_scan_row, &capture, &scan,
@@ -10170,7 +10170,7 @@ test_metadata_update_allocation_failure_preserves_indexes(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner-old";
@@ -10257,7 +10257,7 @@ test_retention_sweep_deletes_expired_metadata_and_state(void **state) {
   read_body = NULL;
   text = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->retention_sweep);
 
@@ -10361,7 +10361,7 @@ test_retention_sweep_deletes_expired_metadata_and_state(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   memset(&sweep, 0, sizeof(sweep));
   rc = store->retention_sweep(store, &req, &sweep, &error);
@@ -10419,7 +10419,7 @@ test_retention_sweep_keeps_metadata_when_state_delete_fails(void **state) {
   read_body = NULL;
   text = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "retention-owner";
@@ -10542,7 +10542,7 @@ static void test_index_flush_reports_current_projection(void **state) {
   memset(&flushed, 0, sizeof(flushed));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->flush_index);
 
@@ -10612,7 +10612,7 @@ static void test_index_flush_recovers_from_corrupt_sidecar_tail(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -10647,7 +10647,7 @@ static void test_index_flush_recovers_from_corrupt_sidecar_tail(void **state) {
 
   corrupt_first_query_index_match(root, "corrupt");
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->flush_index(store, "default", "wait", &flushed, &error);
   assert_int_equal(rc, LC_OK);
@@ -10698,7 +10698,7 @@ static void test_query_index_sidecar_appends_metadata_records(void **state) {
   memset(&stored, 0, sizeof(stored));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(count_query_index_records_of_type(
                        root, TEST_POUCH_QUERY_INDEX_RECORD_META),
@@ -10756,7 +10756,7 @@ test_query_index_keys_recovers_from_missing_legacy_store_log(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -10804,7 +10804,7 @@ test_query_index_keys_recovers_from_missing_legacy_store_log(void **state) {
 
   truncate_store_log(root);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   req.limit = 4U;
@@ -10861,7 +10861,7 @@ test_query_index_rebuilds_field_postings_from_segments(void **state) {
   memset(&keys, 0, sizeof(keys));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.content_type = "application/json";
@@ -10904,7 +10904,7 @@ test_query_index_rebuilds_field_postings_from_segments(void **state) {
   test_query_index_path(root, index_path, sizeof(index_path));
   assert_int_equal(unlink(index_path), 0);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   term.field = "/value";
   term.value = "s:alpha";
@@ -10967,7 +10967,7 @@ test_query_index_keys_recovers_from_corrupt_sidecar_tail(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -11002,7 +11002,7 @@ test_query_index_keys_recovers_from_corrupt_sidecar_tail(void **state) {
 
   corrupt_first_query_index_match(root, "corrupt");
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   req.limit = 8U;
@@ -11053,7 +11053,7 @@ test_query_index_keys_recovers_from_corrupt_sidecar_tail(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   memset(&capture, 0, sizeof(capture));
   rc = store->query_index_keys_scan(store, &req, capture_query_key, &capture,
@@ -11100,7 +11100,7 @@ static void test_query_index_keys_recreates_missing_sidecar(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -11171,7 +11171,7 @@ test_query_index_keys_rebuilds_future_sidecar_version(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -11198,7 +11198,7 @@ test_query_index_keys_rebuilds_future_sidecar_version(void **state) {
 
   set_first_query_index_match_record_version(root, "bravo", 99UL);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
@@ -11266,7 +11266,7 @@ static void test_query_index_rebuilds_future_format_version(void **state) {
   memset(&key_rows, 0, sizeof(key_rows));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.content_type = "application/json";
@@ -11311,7 +11311,7 @@ static void test_query_index_rebuilds_future_format_version(void **state) {
 
   set_query_index_format_version(root, 99UL);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
@@ -11385,7 +11385,7 @@ test_query_index_rebuilds_legacy_sidecar_without_format(void **state) {
   memset(&row_capture, 0, sizeof(row_capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -11415,7 +11415,7 @@ test_query_index_rebuilds_legacy_sidecar_without_format(void **state) {
                    original_query_index_size -
                        (off_t)TEST_POUCH_QUERY_INDEX_HEADER_SIZE);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
@@ -11467,7 +11467,7 @@ test_query_index_keys_truncates_partial_sidecar_field(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -11496,7 +11496,7 @@ test_query_index_keys_truncates_partial_sidecar_field(void **state) {
   truncate_query_index_tail(root, 2);
   assert_int_equal(test_query_index_size(root), truncated_query_index_size);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   rc = store->query_index_scan(store, &req, capture_scan_row, &row_capture,
@@ -11551,7 +11551,7 @@ static void test_scan_meta_ignores_corrupt_query_sidecar(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner";
@@ -11586,7 +11586,7 @@ static void test_scan_meta_ignores_corrupt_query_sidecar(void **state) {
 
   corrupt_first_query_index_match(root, "corrupt");
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   req.namespace_name = "default";
   req.limit = 8U;
@@ -11640,7 +11640,7 @@ static void test_query_index_sidecar_compacts_with_segments(void **state) {
   owner[sizeof(owner) - 1U] = '\0';
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = owner;
@@ -11721,7 +11721,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   payload_two_sha256 =
       "1dcb0ea8c6e918ead74f08603000abd242de543722b49ff7b0e843a8edc5a2a1";
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.name = "result.txt";
@@ -11761,7 +11761,7 @@ static void test_object_roundtrip_overwrite_delete_and_reopen(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   selector.name = "result.txt";
@@ -11875,7 +11875,7 @@ test_object_overwrite_allocation_failure_replays_cleanly(void **state) {
   read_body = NULL;
   replacement_type = "application/x-pouch-overwrite-unique";
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.name = "same.txt";
@@ -11940,7 +11940,7 @@ static void test_object_listing_orders_by_name_after_replay(void **state) {
   memset(&list, 0, sizeof(list));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "text/plain";
@@ -11971,7 +11971,7 @@ static void test_object_listing_orders_by_name_after_replay(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->list_objects(store, "default", "lease-key", &list, &error);
@@ -12014,7 +12014,7 @@ static void test_object_key_scan_orders_pages_and_filters_name(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->scan_object_keys);
 
@@ -12114,7 +12114,7 @@ static void test_object_max_bytes_reads_only_limit_plus_one(void **state) {
   store = NULL;
   counting_source_init(&source, 100U);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.name = "large.bin";
@@ -12170,7 +12170,7 @@ static void test_object_put_streams_payload_without_large_alloc(void **state) {
   read_body = NULL;
   payload_length = 128U * 1024U;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   tracked.max_malloc_size = 0U;
@@ -12239,7 +12239,7 @@ test_object_copy_streams_existing_payload_without_large_alloc(void **state) {
   read_body = NULL;
   payload_length = 128U * 1024U;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   counting_source_init(&source, payload_length);
@@ -12318,7 +12318,7 @@ static void test_object_copy_rename_preserves_payload_metadata(void **state) {
   payload_sha256 =
       "3b13ff1f1f217911e505d690692c4c533d6bb10349c9b08f405764657cbc6793";
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.name = "source.bin";
@@ -12395,7 +12395,7 @@ static void test_object_copy_enforces_expected_etag(void **state) {
   memset(&list, 0, sizeof(list));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.name = "source.bin";
@@ -12472,7 +12472,7 @@ static void test_object_copy_source_open_failure_leaves_destination_unchanged(
   store = NULL;
   payload_length = 128U * 1024U;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   counting_source_init(&source, payload_length);
@@ -12554,9 +12554,9 @@ static void test_object_copy_refreshes_after_segment_compaction(void **state) {
   reader = NULL;
   read_body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  rc = lc_pouch_open(root, &allocator, &writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &reader, &error);
+  rc = lc_pouch_open(root, &allocator, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
   put_opts.name = "source.bin";
@@ -12645,7 +12645,7 @@ test_queue_dequeue_skips_replay_after_same_handle_enqueue(void **state) {
   payload = NULL;
   payload_length = 128U * 1024U;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   tracked.max_malloc_size = 0U;
@@ -12712,7 +12712,7 @@ static void test_queue_dequeue_honors_start_after_cursor(void **state) {
   source = NULL;
   payload = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.visibility_timeout_seconds = 30L;
@@ -12788,7 +12788,7 @@ static void test_queue_rejects_negative_timing_options(void **state) {
   store = NULL;
   payload = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -12943,7 +12943,7 @@ static void test_replay_streams_large_bodies_without_large_alloc(void **state) {
   body = NULL;
   payload_length = 128U * 1024U;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   counting_source_init(&source, payload_length);
@@ -12979,7 +12979,7 @@ static void test_replay_streams_large_bodies_without_large_alloc(void **state) {
 
   tracked.max_malloc_size = 0U;
   tracked.max_realloc_size = 0U;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(tracked.max_malloc_size < payload_length);
   assert_true(tracked.max_realloc_size < payload_length);
@@ -13092,7 +13092,7 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   body = NULL;
   last_version = 0L;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "owner-a";
@@ -13172,7 +13172,7 @@ static void test_auto_compaction_preserves_live_heads_and_tokens(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->query_index_scan(store, &query_req, capture_scan_row,
@@ -13286,7 +13286,7 @@ test_manual_compaction_reports_stats_and_preserves_state(void **state) {
   body = NULL;
   last_version = 0L;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->compact);
 
@@ -13353,7 +13353,7 @@ test_manual_compaction_reports_stats_and_preserves_state(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "hot-key", &body, &state_info,
                          &error);
@@ -13408,7 +13408,7 @@ test_manual_compaction_reports_stats_and_preserves_state(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "hot-key", &body, &state_info,
                          &error);
@@ -13459,7 +13459,7 @@ static void test_compaction_if_needed_skip_and_allocator_failure(void **state) {
   store = NULL;
   source = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   before_log_size =
       test_log_size(root) + test_namespace_segments_size(root, "default");
@@ -13539,7 +13539,7 @@ test_scheduled_maintenance_reports_compaction_diagnostics(void **state) {
   char payload[4096];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts opts;
+  lc_pouch_open_opts opts;
   lc_pouch_store *store;
   lc_source *source;
   lc_pouch_put_state_opts state_opts;
@@ -13565,7 +13565,7 @@ test_scheduled_maintenance_reports_compaction_diagnostics(void **state) {
   source = NULL;
 
   opts.background_compaction_min_log_bytes = (unsigned long)-1;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->maintenance);
   state_opts.content_type = "application/octet-stream";
@@ -13603,7 +13603,7 @@ test_scheduled_maintenance_reports_compaction_diagnostics(void **state) {
   opts.background_compaction_min_log_bytes = 1UL;
   opts.background_compaction_obsolete_multiplier = 2UL;
   opts.background_compaction_interval_seconds = 3600UL;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   memset(&maintenance, 0, sizeof(maintenance));
@@ -13650,8 +13650,8 @@ test_scheduled_maintenance_honors_not_before_deadline(void **state) {
   char payload[4096];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts generate_opts;
-  lc_pouch_disk_open_opts opts;
+  lc_pouch_open_opts generate_opts;
+  lc_pouch_open_opts opts;
   lc_pouch_store *store;
   lc_source *source;
   lc_pouch_put_state_opts state_opts;
@@ -13682,7 +13682,7 @@ test_scheduled_maintenance_honors_not_before_deadline(void **state) {
   assert_true(now > (time_t)0);
 
   generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &generate_opts, &store,
+  rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
                                        &error);
   assert_int_equal(rc, LC_OK);
 
@@ -13708,7 +13708,7 @@ test_scheduled_maintenance_honors_not_before_deadline(void **state) {
   opts.background_compaction_min_log_bytes = 1UL;
   opts.background_compaction_obsolete_multiplier = 2UL;
   opts.background_compaction_not_before_unix = (long)now + 3600L;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->maintenance(store, "scheduled", &maintenance, &error);
@@ -13729,7 +13729,7 @@ test_scheduled_maintenance_honors_not_before_deadline(void **state) {
   store = NULL;
 
   opts.background_compaction_not_before_unix = (long)now - 1L;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   memset(&maintenance, 0, sizeof(maintenance));
@@ -13752,12 +13752,12 @@ test_scheduled_maintenance_honors_not_before_deadline(void **state) {
 
   memset(&opts, 0, sizeof(opts));
   opts.background_compaction_not_before_unix = -1L;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
   assert_string_equal(
       error.message,
-      "pouch disk background_compaction_not_before_unix must be non-negative");
+      "pouch background_compaction_not_before_unix must be non-negative");
 
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -13769,8 +13769,8 @@ test_scheduled_maintenance_honors_min_candidate_files(void **state) {
   char payload[4096];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts generate_opts;
-  lc_pouch_disk_open_opts opts;
+  lc_pouch_open_opts generate_opts;
+  lc_pouch_open_opts opts;
   lc_pouch_store *store;
   lc_source *source;
   lc_pouch_put_state_opts state_opts;
@@ -13797,7 +13797,7 @@ test_scheduled_maintenance_honors_min_candidate_files(void **state) {
   source = NULL;
 
   generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &generate_opts, &store,
+  rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
                                        &error);
   assert_int_equal(rc, LC_OK);
 
@@ -13823,7 +13823,7 @@ test_scheduled_maintenance_honors_min_candidate_files(void **state) {
   opts.background_compaction_min_log_bytes = 1UL;
   opts.background_compaction_obsolete_multiplier = 2UL;
   opts.background_compaction_min_candidate_files = 2UL;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->maintenance(store, "scheduled", &maintenance, &error);
@@ -13843,7 +13843,7 @@ test_scheduled_maintenance_honors_min_candidate_files(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &generate_opts, &store,
+  rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
                                        &error);
   assert_int_equal(rc, LC_OK);
   for (index = 0U; index < 20U; ++index) {
@@ -13860,7 +13860,7 @@ test_scheduled_maintenance_honors_min_candidate_files(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   memset(&maintenance, 0, sizeof(maintenance));
@@ -13889,8 +13889,8 @@ test_scheduled_maintenance_honors_min_reclaimable_bytes(void **state) {
   char payload[4096];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts generate_opts;
-  lc_pouch_disk_open_opts opts;
+  lc_pouch_open_opts generate_opts;
+  lc_pouch_open_opts opts;
   lc_pouch_store *store;
   lc_source *source;
   lc_pouch_put_state_opts state_opts;
@@ -13917,7 +13917,7 @@ test_scheduled_maintenance_honors_min_reclaimable_bytes(void **state) {
   source = NULL;
 
   generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &generate_opts, &store,
+  rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
                                        &error);
   assert_int_equal(rc, LC_OK);
 
@@ -13944,7 +13944,7 @@ test_scheduled_maintenance_honors_min_reclaimable_bytes(void **state) {
   opts.background_compaction_obsolete_multiplier = 2UL;
   opts.background_compaction_min_reclaimable_bytes =
       (unsigned long)before_log_size + 1UL;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->maintenance(store, "scheduled", &maintenance, &error);
@@ -13965,7 +13965,7 @@ test_scheduled_maintenance_honors_min_reclaimable_bytes(void **state) {
   store = NULL;
 
   opts.background_compaction_min_reclaimable_bytes = 1UL;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   memset(&maintenance, 0, sizeof(maintenance));
@@ -13993,8 +13993,8 @@ static void test_scheduled_maintenance_honors_io_throttle(void **state) {
   char payload[4096];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts generate_opts;
-  lc_pouch_disk_open_opts opts;
+  lc_pouch_open_opts generate_opts;
+  lc_pouch_open_opts opts;
   lc_pouch_store *store;
   lc_source *source;
   lc_pouch_put_state_opts state_opts;
@@ -14023,7 +14023,7 @@ static void test_scheduled_maintenance_honors_io_throttle(void **state) {
   source = NULL;
 
   generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &generate_opts, &store,
+  rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
                                        &error);
   assert_int_equal(rc, LC_OK);
 
@@ -14051,7 +14051,7 @@ static void test_scheduled_maintenance_honors_io_throttle(void **state) {
   opts.background_compaction_obsolete_multiplier = 2UL;
   opts.background_compaction_max_io_bytes =
       (unsigned long)before_log_size - 1UL;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->maintenance(store, "scheduled", &maintenance, &error);
@@ -14115,7 +14115,7 @@ static void test_compaction_preserves_promoted_staged_state_link(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "application/octet-stream";
@@ -14163,7 +14163,7 @@ static void test_compaction_preserves_promoted_staged_state_link(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "linked-key", &body, &info, &error);
   assert_int_equal(rc, LC_OK);
@@ -14224,9 +14224,9 @@ test_independent_handle_refreshes_after_segment_compaction(void **state) {
   body = NULL;
   last_version = 0L;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = second->load_meta(second, "default", "lease-key", &loaded_meta, &error);
@@ -14316,7 +14316,7 @@ static void test_queue_dequeue_survives_compaction_refresh(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.visibility_timeout_seconds = 30L;
@@ -14429,7 +14429,7 @@ static void test_empty_identifiers_are_rejected_before_append(void **state) {
   memset(&queue_info, 0, sizeof(queue_info));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("state");
@@ -14507,7 +14507,7 @@ static void test_pathlike_identifiers_are_rejected_before_append(void **state) {
   memset(&capture, 0, sizeof(capture));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   source = source_from_text("state");
@@ -14603,7 +14603,7 @@ static void test_queue_mutations_touch_wake_marker(void **state) {
 
   test_queue_wake_marker_path(root, "default", "jobs/high", marker_path,
                               sizeof(marker_path));
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(test_count_queue_wake_markers(root), 0U);
 
@@ -14714,7 +14714,7 @@ static void test_queue_transaction_apply_touches_wake_marker(void **state) {
 
   test_queue_wake_marker_path(root, "default", "jobs", marker_path,
                               sizeof(marker_path));
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->apply_queue_txn);
   assert_int_equal(test_count_queue_wake_markers(root), 0U);
@@ -14813,7 +14813,7 @@ test_queue_wake_marker_failure_does_not_rollback_enqueue(void **state) {
 
   test_queue_wake_marker_path(root, "default", "jobs", marker_path,
                               sizeof(marker_path));
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(mkdir(marker_path, 0777), 0);
 
@@ -14832,7 +14832,7 @@ test_queue_wake_marker_failure_does_not_rollback_enqueue(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   dequeue_opts.owner = "worker";
   dequeue_opts.visibility_timeout_seconds = 30L;
@@ -14871,7 +14871,7 @@ static void test_queue_wake_status_reports_polling_marker_mode(void **state) {
   memset(&status, 0, sizeof(status));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->queue_wake_status);
 
@@ -14942,7 +14942,7 @@ static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   store = NULL;
   payload = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -14961,7 +14961,7 @@ static void test_queue_enqueue_dequeue_nack_ack_and_reopen(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->queue_stats(store, "default", "jobs", &stats, &error);
@@ -15061,7 +15061,7 @@ test_queue_enqueue_index_allocation_failure_replays_cleanly(void **state) {
   payload = NULL;
   content_type = "application/x-pouch-queue-index-replay";
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = content_type;
@@ -15135,7 +15135,7 @@ static void test_queue_ref_requires_current_meta_etag(void **state) {
   payload = NULL;
   acked = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -15221,7 +15221,7 @@ static void test_queue_delay_hides_until_visible(void **state) {
   store = NULL;
   payload = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -15254,7 +15254,7 @@ static void test_queue_delay_hides_until_visible(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->queue_stats(store, "default", "jobs", &stats, &error);
@@ -15321,7 +15321,7 @@ test_queue_ttl_expiry_removes_pending_candidate_after_replay(void **state) {
   store = NULL;
   payload = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -15362,7 +15362,7 @@ test_queue_ttl_expiry_removes_pending_candidate_after_replay(void **state) {
   rc = store->close(store, &error);
   assert_int_equal(rc, LC_OK);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = store->queue_stats(store, "default", "jobs", &stats, &error);
@@ -15416,7 +15416,7 @@ static void test_queue_inflight_ttl_expiry_rejects_ack(void **state) {
   payload = NULL;
   acked = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -15522,7 +15522,7 @@ test_queue_nack_allocation_failure_preserves_active_lease(void **state) {
   payload = NULL;
   acked = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -15610,7 +15610,7 @@ test_queue_extend_allocation_failure_preserves_active_lease(void **state) {
   payload = NULL;
   acked = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -15696,7 +15696,7 @@ test_queue_retry_exhaustion_is_not_pending_after_replay(void **state) {
   store = NULL;
   payload = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
 
   enqueue_opts.content_type = "text/plain";
@@ -15746,7 +15746,7 @@ test_queue_retry_exhaustion_is_not_pending_after_replay(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->queue_stats(store, "default", "jobs", &stats, &error);
   assert_int_equal(rc, LC_OK);
@@ -15792,9 +15792,9 @@ static void test_backend_hash_persists_across_handles(void **state) {
   second_hash = NULL;
   stored_hash = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = first->backend_hash(first, &first_hash, &error);
@@ -15809,7 +15809,7 @@ static void test_backend_hash_persists_across_handles(void **state) {
   rc = first->close(first, &error);
   assert_int_equal(rc, LC_OK);
   first = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_free(&allocator, second_hash);
   second_hash = NULL;
@@ -15879,7 +15879,7 @@ static void test_list_namespaces_reports_live_projection_names(void **state) {
   second = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(first->list_namespaces);
 
@@ -15952,7 +15952,7 @@ static void test_list_namespaces_reports_live_projection_names(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_object_info_cleanup(&allocator, &object_info);
 
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
   rc = second->list_namespaces(second, &namespaces, &error);
   assert_int_equal(rc, LC_OK);
@@ -15999,7 +15999,7 @@ static void test_backend_capabilities_report_disk_writer_model(void **state) {
   memset(&caps, 0, sizeof(caps));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->backend_capabilities);
 
@@ -16068,7 +16068,7 @@ static void test_fsync_stats_report_disk_sync_targets(void **state) {
   store = NULL;
   source = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->fsync_stats);
 
@@ -16200,12 +16200,12 @@ static void test_durability_batch_groups_seed_fsyncs_and_reopens(void **state) {
   source = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->fsync_stats(store, &before, &error);
   assert_int_equal(rc, LC_OK);
 
-  rc = lc_pouch_disk_durability_batch_begin(store, &error);
+  rc = lc_pouch_durability_batch_begin(store, &error);
   assert_int_equal(rc, LC_OK);
   put_opts.content_type = "application/json";
   for (i = 0; i < 3; ++i) {
@@ -16234,7 +16234,7 @@ static void test_durability_batch_groups_seed_fsyncs_and_reopens(void **state) {
   assert_int_equal(during.query_index_fsyncs, before.query_index_fsyncs);
   assert_int_equal(during.writer_marker_fsyncs, before.writer_marker_fsyncs);
 
-  rc = lc_pouch_disk_durability_batch_end(store, &error);
+  rc = lc_pouch_durability_batch_end(store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->fsync_stats(store, &after, &error);
   assert_int_equal(rc, LC_OK);
@@ -16248,7 +16248,7 @@ static void test_durability_batch_groups_seed_fsyncs_and_reopens(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->load_meta(store, "default", "batch-2", &loaded_meta, &error);
   assert_int_equal(rc, LC_OK);
@@ -16327,7 +16327,7 @@ test_backend_hash_create_race_publishes_single_identity(void **state) {
                        root, "%2elockd", TEST_POUCH_RECORD_OBJECT_PUT),
                    1U);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->backend_hash(store, &hash, &error);
   assert_int_equal(rc, LC_OK);
@@ -16382,9 +16382,9 @@ static void test_independent_handles_refresh_before_operations(void **state) {
   body = NULL;
   removed = 0;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "application/json";
@@ -16529,9 +16529,9 @@ static void test_independent_handles_refresh_index_projection(void **state) {
   first = NULL;
   second = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "writer-one";
@@ -16613,9 +16613,9 @@ test_independent_handle_reopens_compacted_query_index(void **state) {
   first = NULL;
   second = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
 
   meta.owner = "initial-owner";
@@ -16699,7 +16699,7 @@ static void child_process_cas_update(const char *root,
     _exit(20);
   }
   close(start_fd);
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(21);
@@ -16750,7 +16750,7 @@ static void child_process_backend_hash(const char *root, int start_fd) {
   store = NULL;
   hash = NULL;
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(40);
@@ -16797,7 +16797,7 @@ static void child_process_dequeue_one(const char *root, int start_fd) {
     _exit(30);
   }
   close(start_fd);
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(31);
@@ -16855,7 +16855,7 @@ static void test_independent_processes_contend_with_cas(void **state) {
   start_pipe[0] = -1;
   start_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   opts.content_type = "application/json";
   source = source_from_text("{\"owner\":\"initial\"}");
@@ -16894,7 +16894,7 @@ static void test_independent_processes_contend_with_cas(void **state) {
   assert_true((first_code == 0 && second_code == 2) ||
               (first_code == 2 && second_code == 0));
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "process-key", &body, &state_info,
                          &error);
@@ -16945,7 +16945,7 @@ test_independent_processes_dequeue_single_message_once(void **state) {
   start_pipe[0] = -1;
   start_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.visibility_timeout_seconds = 60L;
@@ -16985,7 +16985,7 @@ test_independent_processes_dequeue_single_message_once(void **state) {
   assert_true((first_code == 0 && second_code == 2) ||
               (first_code == 2 && second_code == 0));
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->queue_stats(store, "default", "jobs", &stats, &error);
   assert_int_equal(rc, LC_OK);
@@ -17003,7 +17003,7 @@ static void test_query_config_defaults_and_configured_options(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts opts;
+  lc_pouch_open_opts opts;
   lc_pouch_query_config config;
   lc_pouch_store *store;
   lc_error error;
@@ -17017,7 +17017,7 @@ static void test_query_config_defaults_and_configured_options(void **state) {
   memset(&config, 0, sizeof(config));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->query_config);
   rc = store->query_config(store, "default", &config, &error);
@@ -17032,7 +17032,7 @@ static void test_query_config_defaults_and_configured_options(void **state) {
   memset(&opts, 0, sizeof(opts));
   opts.query_engine = "scan";
   opts.query_fallback_engine = "index";
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->query_config(store, "default", &config, &error);
   assert_int_equal(rc, LC_OK);
@@ -17049,7 +17049,7 @@ static void test_query_config_rejects_invalid_options(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts opts;
+  lc_pouch_open_opts opts;
   lc_pouch_store *store;
   lc_error error;
   int rc;
@@ -17063,52 +17063,52 @@ static void test_query_config_rejects_invalid_options(void **state) {
   store = NULL;
 
   opts.query_engine = "linear";
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
   assert_string_equal(error.message,
-                      "pouch disk query_engine must be index or scan");
+                      "pouch query_engine must be index or scan");
   lc_error_cleanup(&error);
 
   memset(&error, 0, sizeof(error));
   opts.query_engine = "index";
   opts.query_fallback_engine = "linear";
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
   assert_string_equal(
       error.message,
-      "pouch disk query_fallback_engine must be none, index, or scan");
+      "pouch query_fallback_engine must be none, index, or scan");
   lc_error_cleanup(&error);
 
   memset(&error, 0, sizeof(error));
   memset(&opts, 0, sizeof(opts));
   opts.single_writer = 2;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
-  assert_string_equal(error.message, "pouch disk single_writer must be 0 or 1");
+  assert_string_equal(error.message, "pouch single_writer must be 0 or 1");
   lc_error_cleanup(&error);
 
   memset(&error, 0, sizeof(error));
   memset(&opts, 0, sizeof(opts));
   opts.background_compaction = 2;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
   assert_string_equal(error.message,
-                      "pouch disk background_compaction must be 0 or 1");
+                      "pouch background_compaction must be 0 or 1");
   lc_error_cleanup(&error);
 
   memset(&error, 0, sizeof(error));
   memset(&opts, 0, sizeof(opts));
   opts.background_compaction_obsolete_multiplier = 1UL;
-  rc = lc_pouch_disk_open_with_options(root, &allocator, &opts, &store, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &store, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(store);
   assert_string_equal(
       error.message,
-      "pouch disk background_compaction_obsolete_multiplier must be 0 or at "
+      "pouch background_compaction_obsolete_multiplier must be 0 or at "
       "least 2");
   lc_error_cleanup(&error);
   test_cleanup_root(root);
@@ -17151,7 +17151,7 @@ static void test_open_removes_stale_compaction_temps(void **state) {
   test_write_marker_file(temp_query);
   test_write_marker_file(temp_query_internal);
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store);
   assert_int_equal(access(temp_log, F_OK), -1);
@@ -17191,7 +17191,7 @@ static void test_close_removes_writer_marker(void **state) {
   memset(&error, 0, sizeof(error));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(test_count_writer_markers(root), 1U);
 
@@ -17218,7 +17218,7 @@ static void test_abort_preserves_writer_marker(void **state) {
   memset(&error, 0, sizeof(error));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(test_count_writer_markers(root), 1U);
 
@@ -17252,9 +17252,9 @@ static void test_writer_status_reports_marker_presence(void **state) {
   first = NULL;
   second = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(first->writer_status);
 
@@ -17317,7 +17317,7 @@ static void test_writer_status_classifies_stale_markers(void **state) {
   memset(&status, 0, sizeof(status));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   now = time(NULL);
 
@@ -17384,9 +17384,9 @@ static void test_lock_status_reports_global_writer_lock_counters(void **state) {
   second = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(first->lock_status);
 
@@ -17470,7 +17470,7 @@ static void test_lock_key_path_escapes_namespace_and_key(void **state) {
   store = NULL;
   path = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->lock_key_path);
 
@@ -17531,7 +17531,7 @@ static void child_process_hold_key_lock(const char *root, int ready_fd,
   store = NULL;
   lock = NULL;
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(60);
@@ -17582,7 +17582,7 @@ static void child_process_probe_key_locks(const char *root) {
   store = NULL;
   lock = NULL;
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(70);
@@ -17635,7 +17635,7 @@ static void child_process_write_state_after_ready(const char *root,
   memset(&opts, 0, sizeof(opts));
   memset(&put_res, 0, sizeof(put_res));
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(80);
@@ -17689,7 +17689,7 @@ static void child_process_store_meta_after_ready(const char *root, int start_fd,
   memset(&meta, 0, sizeof(meta));
   memset(&meta_res, 0, sizeof(meta_res));
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(90);
@@ -17736,7 +17736,7 @@ static void child_process_put_object_after_ready(const char *root, int start_fd,
   memset(&opts, 0, sizeof(opts));
   memset(&info, 0, sizeof(info));
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(100);
@@ -17790,7 +17790,7 @@ static void child_process_copy_object_after_ready(const char *root,
   memset(&opts, 0, sizeof(opts));
   memset(&info, 0, sizeof(info));
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(110);
@@ -17837,7 +17837,7 @@ static void child_process_enqueue_after_ready(const char *root, int start_fd,
   memset(&opts, 0, sizeof(opts));
   memset(&info, 0, sizeof(info));
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(120);
@@ -17895,7 +17895,7 @@ static void child_process_dequeue_after_ready(const char *root, int start_fd,
   memset(&opts, 0, sizeof(opts));
   memset(&info, 0, sizeof(info));
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(130);
@@ -17941,7 +17941,7 @@ static void child_process_promote_staged_after_ready(const char *root,
   store = NULL;
   memset(&promoted, 0, sizeof(promoted));
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(140);
@@ -17980,7 +17980,7 @@ static void child_process_discard_staged_after_ready(const char *root,
 
   store = NULL;
   memset(&error, 0, sizeof(error));
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     _exit(150);
@@ -18034,7 +18034,7 @@ static void *thread_write_state_after_ready(void *arg) {
   memset(&put_res, 0, sizeof(put_res));
   memset(&error, 0, sizeof(error));
   ctx->result = 200;
-  rc = lc_pouch_disk_open(ctx->root, NULL, &store, &error);
+  rc = lc_pouch_open(ctx->root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     ctx->result = rc;
@@ -18106,9 +18106,9 @@ static void test_try_lock_key_serializes_same_process_handles(void **state) {
   first_lock = NULL;
   second_lock = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(first->try_lock_key);
   assert_non_null(first->unlock_key);
@@ -18201,9 +18201,9 @@ static void test_lock_fd_cache_reuses_released_key_descriptors(void **state) {
   second = NULL;
   lock = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->lock_fd_cache_status);
 
@@ -18322,7 +18322,7 @@ test_read_fd_cache_reuses_descriptors_without_closing_active_readers(
   store = NULL;
   active = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(store->read_fd_cache_status);
 
@@ -18444,7 +18444,7 @@ test_read_source_survives_store_close_without_cache_owner(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("survives-close");
   rc = store->write_state(store, "default", "kept-source", source, NULL,
@@ -18498,7 +18498,7 @@ test_object_source_survives_store_close_without_cache_owner(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   put_opts.name = "blob";
   put_opts.content_type = "text/plain";
@@ -18555,7 +18555,7 @@ test_queue_source_survives_store_close_without_cache_owner(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.visibility_timeout_seconds = 30L;
@@ -18623,7 +18623,7 @@ static void test_key_lock_wait_serializes_same_process_threads(void **state) {
   done_pipe[0] = -1;
   done_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = pipe(start_pipe);
   assert_int_equal(rc, 0);
@@ -18772,7 +18772,7 @@ static void test_write_state_waits_for_cross_process_key_lock(void **state) {
   ready_pipe[0] = -1;
   ready_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = pipe(start_pipe);
   assert_int_equal(rc, 0);
@@ -18849,7 +18849,7 @@ static void test_store_meta_waits_for_cross_process_key_lock(void **state) {
   ready_pipe[0] = -1;
   ready_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = pipe(start_pipe);
   assert_int_equal(rc, 0);
@@ -18932,7 +18932,7 @@ static void test_put_object_waits_for_cross_process_key_lock(void **state) {
   ready_pipe[0] = -1;
   ready_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = pipe(start_pipe);
   assert_int_equal(rc, 0);
@@ -19021,7 +19021,7 @@ static void test_copy_object_waits_for_cross_process_key_lock(void **state) {
   ready_pipe[0] = -1;
   ready_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   put_opts.name = "artifact.txt";
   put_opts.content_type = "text/plain";
@@ -19117,7 +19117,7 @@ test_enqueue_message_waits_for_cross_process_queue_lock(void **state) {
   ready_pipe[0] = -1;
   ready_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = pipe(start_pipe);
   assert_int_equal(rc, 0);
@@ -19207,7 +19207,7 @@ test_dequeue_message_waits_for_cross_process_queue_lock(void **state) {
   ready_pipe[0] = -1;
   ready_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   enqueue_opts.content_type = "text/plain";
   enqueue_opts.visibility_timeout_seconds = 30L;
@@ -19310,7 +19310,7 @@ test_promote_staged_state_waits_for_cross_process_key_lock(void **state) {
   ready_pipe[0] = -1;
   ready_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("promote-blocked");
@@ -19413,7 +19413,7 @@ test_discard_staged_state_waits_for_cross_process_key_lock(void **state) {
   ready_pipe[0] = -1;
   ready_pipe[1] = -1;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   opts.content_type = "text/plain";
   source = source_from_text("discard-blocked");
@@ -19505,7 +19505,7 @@ static void test_writer_marker_heartbeat_updates_after_commit(void **state) {
   memset(&meta_res, 0, sizeof(meta_res));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(
       test_first_writer_marker_path(root, marker_path, sizeof(marker_path)));
@@ -19566,7 +19566,7 @@ test_logstore_writer_marker_updates_after_namespace_commit(void **state) {
   memset(&put_res, 0, sizeof(put_res));
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(test_count_logstore_writer_markers(root, "default"), 0U);
 
@@ -19635,9 +19635,9 @@ test_marker_snapshot_skips_unchanged_independent_refresh(void **state) {
   reader = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  rc = lc_pouch_open(root, &allocator, &writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &reader, &error);
+  rc = lc_pouch_open(root, &allocator, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "text/plain";
@@ -19734,9 +19734,9 @@ static void test_marker_dir_mtime_fast_path_stats_known_markers(void **state) {
   body = NULL;
   text = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  rc = lc_pouch_open(root, &allocator, &writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_disk_open(root, &allocator, &reader, &error);
+  rc = lc_pouch_open(root, &allocator, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
   opts.content_type = "text/plain";
@@ -19797,7 +19797,7 @@ test_single_writer_mode_skips_peer_refresh_after_sync(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
-  lc_pouch_disk_open_opts opts;
+  lc_pouch_open_opts opts;
   lc_pouch_store *writer;
   lc_pouch_store *reader;
   lc_source *source;
@@ -19821,7 +19821,7 @@ test_single_writer_mode_skips_peer_refresh_after_sync(void **state) {
   body = NULL;
   text = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &writer, &error);
+  rc = lc_pouch_open(root, &allocator, &writer, &error);
   assert_int_equal(rc, LC_OK);
   source = source_from_text("single-writer-v1");
   rc = writer->write_state(writer, "default", "single-writer-key", source, NULL,
@@ -19833,7 +19833,7 @@ test_single_writer_mode_skips_peer_refresh_after_sync(void **state) {
 
   opts.single_writer = 1;
   rc =
-      lc_pouch_disk_open_with_options(root, &allocator, &opts, &reader, &error);
+      lc_pouch_open_with_options(root, &allocator, &opts, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = reader->read_state(reader, "default", "single-writer-key", &body,
@@ -19899,7 +19899,7 @@ test_writer_marker_touch_failure_does_not_rollback_commit(void **state) {
   store = NULL;
   body = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(
       test_first_writer_marker_path(root, marker_path, sizeof(marker_path)));
@@ -19918,7 +19918,7 @@ test_writer_marker_touch_failure_does_not_rollback_commit(void **state) {
   assert_int_equal(rc, LC_OK);
   store = NULL;
 
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->read_state(store, "default", "durable-key", &body, &state_info,
                          &error);

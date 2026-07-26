@@ -83,7 +83,8 @@ Several older storage and search systems also inform the design:
   with typed metadata checks and `liblql` acceptance when full document
   semantics are required.
 
-The result should be understood as an embedded lockd disk backend, not as a
+The result should be understood as a pouch-native embedded C backend for the
+lockd storage contract, not as the Go disk backend copied into C and not as a
 general database. The design borrows proven storage ideas where they fit the
 lockd API, and rejects features that would weaken pouch's primary contract:
 deterministic local lockd-compatible behavior from a filesystem root.
@@ -93,9 +94,14 @@ deterministic local lockd-compatible behavior from a filesystem root.
 At runtime a `pouch://` endpoint is selected inside the normal `lc_client`
 engine and routed to `lc_pouch_client` instead of the HTTP transport. The
 adapter translates public client operations into private storage calls against
-`lc_pouch_store`. The current concrete backend is `lc_pouch_disk`, which owns
+`lc_pouch_store`. The current concrete backend is `lc_pouch`, which owns
 the filesystem root, namespace logstores, replay projections, key locks,
 marker refresh state, queue state, compaction lifecycle, and query indexes.
+The public local opener is `lc_pouch_open`/`lc_pouch_open_with_options`, and
+the implementation lives in `src/lc_pouch.c` plus private
+`src/lc_pouch_index*.c` modules. The Go lockd disk backend is the reference
+implementation for proven storage and indexing ideas, but pouch is not named or
+structured as a C copy of that backend.
 
 A pouch operation normally follows this path:
 
@@ -103,7 +109,7 @@ A pouch operation normally follows this path:
 2. `lc_pouch_client` maps the request onto storage primitives such as metadata
    load/store, state read/write, object put/get, queue dequeue/ack, transaction
    replay, query, or maintenance.
-3. `lc_pouch_disk` refreshes the namespace when required, waits for relevant
+3. `lc_pouch` refreshes the namespace when required, waits for relevant
    pending commit groups, and acquires the per-key or multi-key guard needed by
    the operation.
 4. Mutations append typed records to the active namespace segment, join a commit
@@ -461,7 +467,7 @@ Pouch should be split into three layers:
    A backend interface and common value types. This layer knows lockd storage
    semantics but not URI parsing or HTTP transport.
 
-2. `lc_pouch_disk`
+2. `lc_pouch`
    The first backend implementation. It persists records in a log-structured
    directory, maintains per-namespace indexes, coordinates cross-process writers
    with advisory locks, and compacts old segments.
@@ -598,7 +604,7 @@ multiple client instances can coordinate through the same store, but the log is
 still append-serialized by key-level critical sections and commit ordering, not
 by a multi-writer database protocol.
 
-Current disk backend milestone: the private backend capability hook reports a
+Current pouch backend milestone: the private backend capability hook reports a
 `disk-log` backend, advisory file-lock write coordination, same-root writer
 serialization support, crash-abort marker support, backend identity support,
 and explicitly reports that it is not a general concurrent-writer database.
@@ -713,7 +719,7 @@ not throttled by scheduled-maintenance budgets.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query
-path. The disk backend therefore maintains append-friendly index storage:
+path. The pouch backend therefore maintains append-friendly index storage:
 compactable index records with term/range postings, per-field summary columns,
 deleted/live filters, and stable key ordering. The authoritative object state
 still comes from the log, but the preferred query path touches index data first
@@ -791,8 +797,8 @@ mode even though indexed mode is the normal production route. The public client
 sets this directly on a pouch endpoint with
 `pouch:///path?query_engine=scan&query_fallback_engine=index`. The same endpoint
 query parser accepts `single_writer=true` for deployments that can promise one
-active writer and want the marker-synced refresh fast path. The disk backend
-also exposes these choices through `lc_pouch_disk_open_with_options`, where
+active writer and want the marker-synced refresh fast path. The pouch backend
+also exposes these choices through `lc_pouch_open_with_options`, where
 `query_engine=index` is the default, `query_engine=scan` forces the log-backed
 ordered scan route, `query_fallback_engine` is explicit rather than implicit,
 and `single_writer` is disabled by default. Scan mode is useful for tiny stores,
@@ -819,7 +825,7 @@ to avoid.
 
 Scan mode is a real full log-backed scan route, not a synonym for the indexed
 path with fewer predicates and not a hidden fallback inside indexed search.
-Before serving a scan page, the disk backend must refresh from the authoritative
+Before serving a scan page, the pouch backend must refresh from the authoritative
 log state, including the equivalent of a forced snapshot/segment/log scan when
 marker state, open-file replacement, missing sidecars, corrupt sidecars, future
 sidecar versions, or configured refresh intervals make cached projections
@@ -864,7 +870,7 @@ keys route through the sorted query-summary projection and can validate owner
 as a post-filter; exact owners route through storage-owned owner postings. Scan
 mode accepts the same metadata selector set, but resolves equality by walking
 ordered full-summary or metadata scan routes instead of consulting postings.
-The current disk backend keeps the sorted metadata projection as the
+The current pouch backend keeps the sorted metadata projection as the
 authoritative in-memory index for match-all and exact-key scans, while
 the internal `.lockd` namespace logstore `query.index` remains a durable
 sidecar accelerator that can be validated against current metadata and rebuilt
@@ -876,14 +882,14 @@ falling back to a single full-log scan for supported indexed shapes. Scan-mode
 key-only queries use a storage key-scan primitive when the backend provides
 one, so configured scan mode does not copy full metadata rows for
 `query_keys`. Key-only scan and indexed-scan primitives copy only visible keys
-before invoking callbacks. The current disk backend serves both primitives from
+before invoking callbacks. The current pouch backend serves both primitives from
 the query-summary projection rather than the full metadata row array, so
 `query_keys` does not pay for metadata row copies.
 Indexed match-all document scans also page over the query-summary projection
 and copy only the row fields currently required by query callbacks: key, ETag,
 owner, version, update timestamp, and query-hidden state. Document payloads are
 still loaded only after a summary row survives pagination and visibility
-filtering. The current disk backend also maintains an internal owner posting
+filtering. The current pouch backend also maintains an internal owner posting
 index over query-summary rows. That typed metadata predicate boundary can return
 document rows or key-only candidates for one owner in stable key order without
 walking unrelated owners in the namespace. The `query.index` sidecar records
@@ -1119,7 +1125,7 @@ pagination cursors are string keys, not byte offsets into mutable files.
 Reserved internal namespaces must be explicit. Backend identity uses `.lockd`
 and transaction decision records use `.lockd-txn`. Public acquire/update/query
 and queue paths must reject user requests that target those namespaces, while
-the disk backend remains free to use them internally.
+the pouch backend remains free to use them internally.
 
 The backend identity should be persisted as an object with create-if-absent CAS.
 If two processes initialize the same empty root concurrently, exactly one writes
@@ -1298,7 +1304,7 @@ upgrade, yet normal indexed query execution must use them rather than falling
 back to a full log scan.
 
 The high-performance query path should be an index subsystem, not a collection
-of ad hoc posting scans embedded in the disk backend. The Go lockd disk backend
+of ad hoc posting scans embedded in the pouch backend. The Go lockd disk backend
 is fast largely because it compiles immutable index segments into docID-oriented
 readers, evaluates selectors with sorted integer set algebra, caches prepared
 readers by manifest identity, and caches sorted matched keys by manifest plus
@@ -1363,17 +1369,17 @@ private index primitives:
   during build/decode, preserves the existing ASCII-only case-insensitive
   matching semantics, and provides a private deterministic byte codec plus a
   file-level generation container carrying identity and namespace for persisted
-  generation files. The disk bridge publishes and consumes those files for
+  generation files. The pouch storage bridge publishes and consumes those files for
   simple primary prefix/contains plans; compound text plans still compile from
   sidecar postings so secondary filtering remains explicit.
 - `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
-  those primitives. It invokes disk-supplied reader callbacks and normalizes
+  those primitives. It invokes storage-supplied reader callbacks and normalizes
   the resulting candidate docID sets.
 - `src/lc_pouch_temporal.c` owns private liblql-compatible temporal parsing and
   ordering comparison for date-only, RFC3339/RFC3339Nano offset, fractional,
   and naive UTC datetime strings used by indexed date planning and fast final
   filtering.
-- `src/lc_pouch_disk.c` still owns the current disk bridge: sidecar scan
+- `src/lc_pouch.c` still owns the current pouch storage bridge: sidecar scan
   adapters, live/hidden/owner/generation visibility checks, final summary
   translation, and final `liblql` acceptance. New index behavior should move
   toward the private index modules instead of adding more planner logic to this
@@ -1381,7 +1387,7 @@ private index primitives:
 
 The first C cutover stage uses private exact-term, field-presence, and range
 docID reader callbacks: `lc_pouch_index` owns primary equality, `in`, exact
-`exists`, and numeric range planning, while `lc_pouch_disk.c` adapts the
+`exists`, and numeric range planning, while `lc_pouch.c` adapts the
 current sidecar postings into docID candidates. This is a migration bridge
 toward immutable compiled readers, not the final reader-cache architecture.
 Prepared bridge readers refresh against the same private identity shape the
@@ -1394,7 +1400,7 @@ forward and reverse lookup, and per-namespace document-table generations can
 persist sorted keys under the same index sequence plus segmented manifest
 identity used by compiled reader files. The document table is the cutover
 target for immutable compiled generation readers.
-The disk bridge now maintains that document table alongside query summaries
+The pouch storage bridge now maintains that document table alongside query summaries
 and routes field-predicate candidate docIDs through it before converting
 results back to summary entries. Disk publishes per-namespace document-table
 generation files under
@@ -1490,7 +1496,7 @@ values so open, closed, and absent bounds stay distinct inside the compiled
 reader bridge.
 When a primary numeric range plan has positive equality filters, the disk
 adapter now supplies separate range and exact-term docID readers and
-`lc_pouch_index` intersects the resulting sorted docID sets. The disk bridge
+`lc_pouch_index` intersects the resulting sorted docID sets. The pouch storage bridge
 still owns live-state, hidden, owner, generation, and residual predicate
 guards, but the repeated candidate-set algebra is no longer embedded in the
 range posting scan loop.
@@ -1580,7 +1586,7 @@ The outer temporal generation container adds its own magic/version, the index
 identity, and namespace name around that payload so on-disk immutable readers
 can be tied to the same sequence plus segmented-manifest generation used by the
 prepared/result caches. During controlled query-index rebuild and successful
-compaction replay, the disk backend compiles live per-namespace temporal
+compaction replay, the pouch backend compiles live per-namespace temporal
 postings and atomically publishes
 `<root>/%2elockd/logstore/query.index.temporal/<escaped-namespace>.lcptgn`
 files. Ordinary state writes/removes and metadata changes advance the live
@@ -1650,7 +1656,7 @@ docIDs through disk summaries. Wildcard `in` and broader OR/path-pattern
 predicate scans still reuse or build the full matching vector before disk-side
 cursor/limit handling.
 
-The disk bridge keeps prepared-reader caches keyed by the current index
+The pouch storage bridge keeps prepared-reader caches keyed by the current index
 sequence plus segmented manifest generation. Exact terms are stored under a
 namespace-qualified field/value term and back simple equality and non-wildcard
 `in` plans. Simple positive `exists` scans use the same prepared-reader pattern
@@ -1669,11 +1675,11 @@ request-local compiled postings until their candidate sets can be cached
 without baking request-specific filters into the prepared view.
 The shared prepared-term cache container and generation refresh/cleanup
 lifecycle now live in `lc_pouch_index` as
-`lc_pouch_index_prepared_term_cache`. The disk bridge still supplies
+`lc_pouch_index_prepared_term_cache`. The pouch storage bridge still supplies
 namespace-qualified term keys and compiles sidecar-derived candidate docIDs,
 but it no longer owns separate per-predicate cache lifecycle types.
 The temporal prepared-cache lifecycle similarly lives in `lc_pouch_index` as
-`lc_pouch_index_prepared_temporal_cache`; the disk bridge supplies
+`lc_pouch_index_prepared_temporal_cache`; the pouch storage bridge supplies
 namespace-qualified temporal fields and only owns generation-file IO plus
 docID remapping into the active in-memory table.
 
@@ -1803,7 +1809,7 @@ visible through this same replay path.
 
 ## Locking
 
-The disk backend is single-writer per key mutation, not globally single-process.
+The pouch backend is single-writer per key mutation, not globally single-process.
 Writers must coordinate with:
 
 - an in-process striped mutex keyed by namespace and key
@@ -2097,7 +2103,7 @@ Promotion is intentionally link-based. It must not read the staged payload into
 memory, copy the payload into a new state record, or re-encrypt the bytes. The
 committed state head should point at the staged payload span, then compaction may
 later materialize it into a normal state-put record if doing so is safe.
-The current disk backend implements this promotion path with sorted committed
+The current pouch backend implements this promotion path with sorted committed
 key and staged-key guards before the append-log lock. Staged writes are ordinary
 state writes against the generated staged key, and staged discard acquires the
 staged-key guard before deleting the staged record.
@@ -2185,8 +2191,8 @@ notification touch after a committed queue mutation must not roll back the
 mutation, and a missing notification file must not prevent pollers from
 discovering committed queue objects during their next refresh.
 
-Current disk backend milestone: the private storage interface exposes queue
-wake status. The disk backend reports `polling`, marks queue marker files as
+Current pouch backend milestone: the private storage interface exposes queue
+wake status. The pouch backend reports `polling`, marks queue marker files as
 best-effort hints, and reports filesystem notifications disabled. This is an
 internal diagnostic/capability surface, not a durability contract.
 
@@ -2282,7 +2288,7 @@ failure must leave the destination unchanged.
 
 ## Retention and Cleanup
 
-The disk backend should support an optional retention sweep. The sweep scans
+The pouch backend should support an optional retention sweep. The sweep scans
 metadata, decodes records, and removes metadata plus state when `UpdatedAtUnix`
 is older than the configured retention. Sweep failures for individual keys
 should not abort the whole pass. The logstore directories themselves remain; the

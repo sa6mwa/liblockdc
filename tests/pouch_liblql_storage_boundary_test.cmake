@@ -21,7 +21,7 @@ endforeach()
 
 set(lockdc_storage_owned_sources
   "${LOCKDC_ROOT}/src/lc_pouch_store.h"
-  "${LOCKDC_ROOT}/src/lc_pouch_disk.c"
+  "${LOCKDC_ROOT}/src/lc_pouch.c"
   "${LOCKDC_ROOT}/src/lc_pouch_allocator.c"
 )
 

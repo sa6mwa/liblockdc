@@ -3,7 +3,7 @@ if(NOT DEFINED LOCKDC_ROOT)
 endif()
 
 set(pouch_storage_files
-    "src/lc_pouch_disk.c"
+    "src/lc_pouch.c"
     "src/lc_pouch_store.h"
 )
 

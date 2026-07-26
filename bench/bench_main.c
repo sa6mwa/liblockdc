@@ -545,7 +545,7 @@ static int bench_pouch_seed_query_rows(const char *root, long rows,
   int rc;
 
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, error);
+  rc = lc_pouch_open(root, NULL, &store, error);
   if (rc != LC_OK) {
     return 1;
   }
@@ -571,7 +571,7 @@ static int bench_pouch_seed_query_rows_with_allocator(
   int rc;
 
   store = NULL;
-  rc = lc_pouch_disk_open(root, allocator, &store, error);
+  rc = lc_pouch_open(root, allocator, &store, error);
   if (rc != LC_OK) {
     return 1;
   }
@@ -598,7 +598,7 @@ static int bench_pouch_seed_query_rows_by_owner(
   int rc;
 
   store = NULL;
-  rc = lc_pouch_disk_open(root, allocator, &store, error);
+  rc = lc_pouch_open(root, allocator, &store, error);
   if (rc != LC_OK) {
     return 1;
   }
@@ -1204,7 +1204,7 @@ static int bench_pouch_state_roundtrip(long iterations) {
   bench_pouch_cleanup_root(root);
   lc_error_init(&error);
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     return 1;
@@ -1283,7 +1283,7 @@ static int bench_pouch_state_write_payload(long iterations, size_t payload_size,
   bench_fill_payload(payload, payload_size);
 
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     free(payload);
     lc_error_cleanup(&error);
@@ -1352,7 +1352,7 @@ static int bench_pouch_state_read_payload(long iterations, size_t payload_size,
   bench_fill_payload(payload, payload_size);
 
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     free(payload);
     lc_error_cleanup(&error);
@@ -1395,7 +1395,7 @@ static int bench_pouch_state_read_payload(long iterations, size_t payload_size,
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     free(payload);
     lc_error_cleanup(&error);
@@ -1485,7 +1485,7 @@ static int bench_pouch_staged_promote(long iterations) {
   bench_pouch_cleanup_root(root);
   lc_error_init(&error);
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     return 1;
@@ -1647,7 +1647,7 @@ static int bench_pouch_object_roundtrip(long iterations) {
   bench_pouch_cleanup_root(root);
   lc_error_init(&error);
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     return 1;
@@ -1717,7 +1717,7 @@ static int bench_pouch_queue_roundtrip(long iterations) {
   bench_pouch_cleanup_root(root);
   lc_error_init(&error);
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     return 1;
@@ -1821,7 +1821,7 @@ static int bench_pouch_queue_txn_rollback(long iterations) {
   lc_error_init(&error);
   bench_pouch_allocator(&allocator);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     return 1;
@@ -1980,7 +1980,7 @@ static int bench_pouch_queue_txn_commit(long iterations) {
   lc_error_init(&error);
   bench_pouch_allocator(&allocator);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     return 1;
@@ -2108,7 +2108,7 @@ static int bench_pouch_compaction(long iterations) {
   memset(payload, 'x', sizeof(payload));
   lc_error_init(&error);
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     return 1;
@@ -2159,7 +2159,7 @@ static int bench_pouch_retention_sweep(long iterations) {
   bench_pouch_cleanup_root(root);
   lc_error_init(&error);
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     return 1;
@@ -2180,7 +2180,7 @@ static int bench_pouch_retention_sweep(long iterations) {
   store = NULL;
   bench_alloc_metrics_reset();
   bench_pouch_allocator(&allocator);
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2229,7 +2229,7 @@ static int bench_pouch_scan_meta(long iterations) {
   }
 
   store = NULL;
-  rc = lc_pouch_disk_open(root, NULL, &store, &error);
+  rc = lc_pouch_open(root, NULL, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2268,7 +2268,7 @@ static int bench_pouch_open_rebuild(long iterations) {
   bench_alloc_metrics_reset();
   bench_pouch_allocator(&allocator);
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc == LC_OK) {
     rc = store->close(store, &error);
   }
@@ -2300,7 +2300,7 @@ static int bench_pouch_index_scan(long iterations) {
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2343,7 +2343,7 @@ static int bench_pouch_index_keys(long iterations) {
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2403,7 +2403,7 @@ static int bench_pouch_index_scan_key(long iterations) {
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2452,7 +2452,7 @@ static int bench_pouch_index_scan_owner(long iterations) {
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2504,7 +2504,7 @@ static int bench_pouch_index_scan_key_owner(long iterations) {
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2557,7 +2557,7 @@ static int bench_pouch_index_keys_key(long iterations) {
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2606,7 +2606,7 @@ static int bench_pouch_index_keys_owner(long iterations) {
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -2658,7 +2658,7 @@ static int bench_pouch_index_keys_key_owner(long iterations) {
 
   bench_alloc_metrics_reset();
   store = NULL;
-  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  rc = lc_pouch_open(root, &allocator, &store, &error);
   if (rc != LC_OK) {
     lc_error_cleanup(&error);
     bench_pouch_cleanup_root(root);
@@ -3895,11 +3895,11 @@ static int bench_pouch_key_lock_contention(long iterations) {
   baseline_contentions = 0UL;
   rc = LC_OK;
 
-  rc = lc_pouch_disk_open(root, &allocator, &first, &error);
+  rc = lc_pouch_open(root, &allocator, &first, &error);
   if (rc != LC_OK) {
     goto cleanup;
   }
-  rc = lc_pouch_disk_open(root, &allocator, &second, &error);
+  rc = lc_pouch_open(root, &allocator, &second, &error);
   if (rc != LC_OK) {
     goto cleanup;
   }
