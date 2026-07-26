@@ -490,6 +490,9 @@ Latest release targets confirmed on 2026-07-23:
         prepared-term cache lifecycle into `src/lc_pouch_index_terms.c`, so
         the private index layer has distinct document, posting, term, and
         result-cache modules.
+      - [x] Physically split document table and docID set algebra into
+        `src/lc_pouch_index_doc.c`, leaving `lc_pouch_index.c` focused on
+        planner/collector orchestration over the private index primitives.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
