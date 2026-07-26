@@ -1,6 +1,7 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define POUCH_UNIT_TMP_PREFIX "/tmp/liblockdc-unit-pouch-redesign-"
@@ -3098,7 +3100,9 @@ typedef struct pouch_watch_capture {
 
 typedef struct pouch_watch_txn_ack_capture {
   lc_client *client;
+  const char *root_path;
   const char *queue;
+  int fork_child;
   int event_count;
   int saw_available;
   int saw_unavailable_after_commit;
@@ -3149,15 +3153,124 @@ static int pouch_watch_enqueue_on_initial_unavailable(
   return rc == LC_OK ? 1 : 0;
 }
 
-static int pouch_watch_commit_txn_ack_on_initial_available(
-    void *context, const lc_watch_event *event, lc_error *error) {
-  pouch_watch_txn_ack_capture *capture;
+static int pouch_watch_commit_txn_ack_with_client(lc_client *client,
+                                                  const char *queue,
+                                                  const char *txn_id,
+                                                  lc_error *error) {
   lc_dequeue_req dequeue_req;
   lc_ack_op ack_op;
   lc_ack_res ack_res;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
   lc_message *message;
+  int rc;
+
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&ack_op, 0, sizeof(ack_op));
+  memset(&ack_res, 0, sizeof(ack_res));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  message = NULL;
+  dequeue_req.queue = queue;
+  dequeue_req.owner = "watch-txn-worker";
+  dequeue_req.txn_id = txn_id;
+  dequeue_req.visibility_timeout_seconds = 120L;
+  rc = client->dequeue(client, &dequeue_req, &message, error);
+  if (rc == LC_OK && message == NULL) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "pouch watch transaction dequeue returned no message",
+                      NULL, NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    ack_op.message.namespace_name = message->namespace_name;
+    ack_op.message.queue = message->queue;
+    ack_op.message.message_id = message->message_id;
+    ack_op.message.lease_id = message->lease_id;
+    ack_op.message.txn_id = message->txn_id;
+    ack_op.message.fencing_token = message->fencing_token;
+    ack_op.message.meta_etag = message->meta_etag;
+    rc = client->queue_ack(client, &ack_op, &ack_res, error);
+  }
+  if (rc == LC_OK && !ack_res.acked) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "pouch watch transaction ack was not accepted", NULL,
+                      NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    decision_req.txn_id = txn_id;
+    rc = client->txn_commit(client, &decision_req, &decision_res, error);
+  }
+  if (message != NULL) {
+    message->close(message);
+  }
+  lc_ack_res_cleanup(&ack_res);
+  lc_txn_decision_res_cleanup(&decision_res);
+  return rc;
+}
+
+static int pouch_watch_commit_txn_ack_child(const char *root,
+                                            const char *queue,
+                                            const char *txn_id) {
+  lc_client_config config;
+  lc_client *client;
+  const char *endpoints[1];
+  char endpoint[540];
+  lc_error error;
+  int rc;
+
+  client = NULL;
+  lc_error_init(&error);
+  make_endpoint(root, endpoint, sizeof(endpoint));
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  rc = lc_client_open(&config, &client, &error);
+  if (rc == LC_OK) {
+    rc = pouch_watch_commit_txn_ack_with_client(client, queue, txn_id, &error);
+  }
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
+static int pouch_watch_commit_txn_ack_in_child(const char *root,
+                                               const char *queue,
+                                               const char *txn_id,
+                                               lc_error *error) {
+  pid_t pid;
+  int status;
+
+  pid = fork();
+  if (pid < 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to fork pouch watch transaction child",
+                        strerror(errno), NULL, NULL);
+  }
+  if (pid == 0) {
+    int child_rc;
+
+    child_rc = pouch_watch_commit_txn_ack_child(root, queue, txn_id);
+    _exit(child_rc == LC_OK ? 0 : 1);
+  }
+  if (waitpid(pid, &status, 0) < 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to wait for pouch watch transaction child",
+                        strerror(errno), NULL, NULL);
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "pouch watch transaction child failed", NULL, NULL,
+                        NULL);
+  }
+  return LC_OK;
+}
+
+static int pouch_watch_commit_txn_ack_on_initial_available(
+    void *context, const lc_watch_event *event, lc_error *error) {
+  pouch_watch_txn_ack_capture *capture;
   int rc;
 
   capture = (pouch_watch_txn_ack_capture *)context;
@@ -3172,49 +3285,13 @@ static int pouch_watch_commit_txn_ack_on_initial_available(
     capture->saw_available = 1;
     snprintf(capture->head_message_id, sizeof(capture->head_message_id), "%s",
              event->head_message_id);
-    lc_dequeue_req_init(&dequeue_req);
-    memset(&ack_op, 0, sizeof(ack_op));
-    memset(&ack_res, 0, sizeof(ack_res));
-    lc_txn_decision_req_init(&decision_req);
-    memset(&decision_res, 0, sizeof(decision_res));
-    message = NULL;
-    dequeue_req.queue = capture->queue;
-    dequeue_req.owner = "watch-txn-worker";
-    dequeue_req.txn_id = "txn-watch-ack";
-    dequeue_req.visibility_timeout_seconds = 120L;
-    rc = capture->client->dequeue(capture->client, &dequeue_req, &message,
-                                  error);
-    if (rc == LC_OK && message == NULL) {
-      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "pouch watch transaction dequeue returned no message",
-                        NULL, NULL, NULL);
+    if (capture->fork_child) {
+      rc = pouch_watch_commit_txn_ack_in_child(
+          capture->root_path, capture->queue, "txn-watch-ack", error);
+    } else {
+      rc = pouch_watch_commit_txn_ack_with_client(
+          capture->client, capture->queue, "txn-watch-ack", error);
     }
-    if (rc == LC_OK) {
-      ack_op.message.namespace_name = message->namespace_name;
-      ack_op.message.queue = message->queue;
-      ack_op.message.message_id = message->message_id;
-      ack_op.message.lease_id = message->lease_id;
-      ack_op.message.txn_id = message->txn_id;
-      ack_op.message.fencing_token = message->fencing_token;
-      ack_op.message.meta_etag = message->meta_etag;
-      rc = capture->client->queue_ack(capture->client, &ack_op, &ack_res,
-                                      error);
-    }
-    if (rc == LC_OK && !ack_res.acked) {
-      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "pouch watch transaction ack was not accepted", NULL,
-                        NULL, NULL);
-    }
-    if (rc == LC_OK) {
-      decision_req.txn_id = "txn-watch-ack";
-      rc = capture->client->txn_commit(capture->client, &decision_req,
-                                       &decision_res, error);
-    }
-    if (message != NULL) {
-      message->close(message);
-    }
-    lc_ack_res_cleanup(&ack_res);
-    lc_txn_decision_res_cleanup(&decision_res);
     return rc == LC_OK ? 1 : 0;
   }
   if (!event->available) {
@@ -3378,6 +3455,63 @@ static void test_client_queue_watch_detects_peer_transaction_ack_commit(
   assert_true(capture.head_message_id[0] != '\0');
 
   lc_client_close(actor);
+  lc_client_close(watcher);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_queue_watch_detects_forked_transaction_ack_commit(
+    void **state) {
+  lc_client *watcher;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_watch_queue_req watch_req;
+  lc_watch_handler handler;
+  pouch_watch_txn_ack_capture capture;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  watcher = NULL;
+  source = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_watch_queue_req_init(&watch_req);
+  lc_watch_handler_init(&handler);
+  memset(&capture, 0, sizeof(capture));
+  lc_error_init(&error);
+  make_root("client-queue-watch-fork-txn", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &watcher, &error);
+  enqueue_req.queue = "watch-fork-txn";
+  enqueue_req.visibility_timeout_seconds = 120L;
+  rc = lc_source_from_memory("watch-fork-txn", strlen("watch-fork-txn"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = watcher->enqueue(watcher, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  capture.root_path = root;
+  capture.queue = "watch-fork-txn";
+  capture.fork_child = 1;
+  watch_req.queue = "watch-fork-txn";
+  handler.handle = pouch_watch_commit_txn_ack_on_initial_available;
+  handler.context = &capture;
+  rc = watcher->watch_queue(watcher, &watch_req, &handler, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message,
+                      "pouch watch observed transaction ack commit");
+  assert_int_equal(capture.event_count, 2);
+  assert_int_equal(capture.saw_available, 1);
+  assert_int_equal(capture.saw_unavailable_after_commit, 1);
+  assert_true(capture.head_message_id[0] != '\0');
+
   lc_client_close(watcher);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -6421,6 +6555,8 @@ int main(void) {
           test_client_queue_watch_detects_transaction_ack_commit),
       cmocka_unit_test(
           test_client_queue_watch_detects_peer_transaction_ack_commit),
+      cmocka_unit_test(
+          test_client_queue_watch_detects_forked_transaction_ack_commit),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),

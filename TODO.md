@@ -114,11 +114,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
         effects: one pouch client can watch while another client on the same
         root commits the transaction-bound queue ack, forcing state visit
         callbacks to tolerate peer marker cache refresh.
+      - [x] Cover forked-process watcher refresh for transaction side effects:
+        a parent watcher observes a child process opening its own pouch client
+        and committing the transaction-bound queue ack.
       - [x] Cover mixed object/queue transaction composition: one transaction
         can commit staged attachment upload plus staged queue ack, and another
         can roll both side-effect types back together.
-      - [ ] Extend transaction participant replay to remaining restart/forked
-        process watcher wakeup coverage.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

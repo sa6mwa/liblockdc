@@ -2211,9 +2211,10 @@ records, rollback discards them, and open-time transaction replay applies the
 same queue side effects. The local polling `watch_queue` path observes
 transaction-bound queue ack commits as queue availability changes, including
 when a watcher client observes a peer client committing the transaction-bound
-queue ack on the same pouch root. Mixed transactions now cover staged attachment
-uploads plus staged queue acks for both commit and rollback. Restart/forked
-process watcher wakeup coverage remains a target for transaction integration.
+queue ack on the same pouch root and when a forked child process opens its own
+pouch client and commits the same transaction side effect. Mixed transactions
+now cover staged attachment uploads plus staged queue acks for both commit and
+rollback.
 
 The staging listing contract is narrower than generic object listing. It must
 include direct staged state objects only and exclude nested staged attachment
