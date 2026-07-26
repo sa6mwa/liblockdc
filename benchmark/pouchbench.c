@@ -158,6 +158,11 @@ static int match_exists_flag(uint64_t i, uint64_t rows) {
   return (i % 5U) == 0U;
 }
 
+static int match_date_after(uint64_t i, uint64_t rows) {
+  (void)rows;
+  return (i % 4U) == 0U;
+}
+
 static int match_prefix_owner(uint64_t i, uint64_t rows) {
   (void)rows;
   return (i % 10U) == 0U;
@@ -178,10 +183,10 @@ static int match_or_sparse_or_flag(uint64_t i, uint64_t rows) {
 
 static const query_scenario *find_scenario(const char *name) {
   static const query_scenario scenarios[] = {
-      {"EqSparse"},     {"EqDense"},        {"RangeHalf"},
-      {"InRegion"},     {"InRegionSingle"}, {"InTags"},
-      {"ExistsFlag"},   {"PrefixOwner"},    {"ContainsMessage"},
-      {"AndEvenRange"}, {"OrSparseOrFlag"},
+      {"EqSparse"},        {"EqDense"},        {"RangeHalf"},
+      {"InRegion"},        {"InRegionSingle"}, {"InTags"},
+      {"ExistsFlag"},      {"DateAfter"},      {"PrefixOwner"},
+      {"ContainsMessage"}, {"AndEvenRange"},   {"OrSparseOrFlag"},
   };
   size_t index;
 
@@ -221,6 +226,9 @@ static uint64_t scenario_expected_rows(const query_scenario *scenario,
   }
   if (strcmp(scenario->name, "ExistsFlag") == 0) {
     return count_matching(rows, match_exists_flag);
+  }
+  if (strcmp(scenario->name, "DateAfter") == 0) {
+    return count_matching(rows, match_date_after);
   }
   if (strcmp(scenario->name, "PrefixOwner") == 0) {
     return count_matching(rows, match_prefix_owner);
@@ -271,6 +279,10 @@ static int scenario_selector_json(const query_scenario *scenario, uint64_t rows,
                        "\"any\":[\"planning\",\"finance\"]}}");
   } else if (strcmp(name, "ExistsFlag") == 0) {
     written = snprintf(out, out_len, "{\"exists\":\"/flag\"}");
+  } else if (strcmp(name, "DateAfter") == 0) {
+    written = snprintf(out, out_len,
+                       "{\"date\":{\"field\":\"/created_at\",\"after\":"
+                       "\"2025-01-01T00:00:00Z\"}}");
   } else if (strcmp(name, "PrefixOwner") == 0) {
     written = snprintf(
         out, out_len,
@@ -310,6 +322,7 @@ static int seed_field_rows(lc_client *client, uint64_t rows, lc_error *error) {
   char owner[32];
   char json[512];
   char flag_json[32];
+  const char *created_at;
   lc_acquire_req acquire;
   lc_update_opts update_opts;
   lc_lease *lease;
@@ -337,14 +350,22 @@ static int seed_field_rows(lc_client *client, uint64_t rows, lc_error *error) {
     } else {
       flag_json[0] = '\0';
     }
+    if ((i % 4U) == 0U) {
+      created_at = "2026-01-01T00:00:00Z";
+    } else if ((i % 4U) == 1U) {
+      created_at = "not-a-date";
+    } else {
+      created_at = "2024-01-01T00:00:00Z";
+    }
     (void)snprintf(
         json, sizeof(json),
         "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
-        "\"owner\":\"%s\",\"value\":%llu,\"tags\":[\"%s\",\"%s\"],"
+        "\"owner\":\"%s\",\"value\":%llu,\"created_at\":\"%s\","
+        "\"tags\":[\"%s\",\"%s\"],"
         "\"details\":{\"message\":\"%s event %llu\"}%s}",
         i == target ? "needle" : "haystack", (i % 2U) == 0U ? "even" : "odd",
         (i % 3U) == 0U ? "us" : ((i % 3U) == 1U ? "eu" : "apac"), owner,
-        (unsigned long long)i, (i % 3U) == 0U ? "planning" : "ops",
+        (unsigned long long)i, created_at, (i % 3U) == 0U ? "planning" : "ops",
         (i % 5U) == 0U ? "finance" : "runtime",
         (i % 8U) == 0U ? "timeout" : "normal", (unsigned long long)i,
         flag_json);

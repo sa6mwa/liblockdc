@@ -89,6 +89,8 @@ key-return queries:
 - `InRegionSingle`: scalar membership over `/region` with one string value.
 - `InTags`: explicit array-member membership over `/tags[]`.
 - `ExistsFlag`: sparse field existence.
+- `DateAfter`: date selector over `/created_at` with valid, invalid, and
+  out-of-range values.
 - `PrefixOwner`: sparse string prefix.
 - `ContainsMessage`: sparse substring search.
 - `AndEvenRange`: equality plus numeric range.

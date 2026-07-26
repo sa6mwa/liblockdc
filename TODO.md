@@ -1100,6 +1100,11 @@ Latest release targets confirmed on 2026-07-23:
     `pouch://` client instance with the same full-form LQL selector shape.
   - [ ] Mirror more of the Go lockd disk benchmark suite shape in the Go/cgo
     module so pouch and Go disk backend results can be compared case by case.
+    - [x] Add Go/cgo pouch-vs-lockd disk comparison coverage for the same
+      `DateAfter` residual-filter scenario as the native C benchmark: seeded
+      documents include valid, invalid, and out-of-range `/created_at` values,
+      while both backends run `date{field=/created_at,after=...}` through the
+      normal document and key-return benchmark matrix.
   - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
     Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`

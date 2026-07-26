@@ -94,6 +94,15 @@ var queryScenarios = []queryScenario{
 		},
 	},
 	{
+		name: "DateAfter",
+		lockdLQL: func(rows int) string {
+			return "date{field=/created_at,after=2025-01-01T00:00:00Z}"
+		},
+		expected: func(rows int) int {
+			return countMatching(rows, func(i int) bool { return i%4 == 0 })
+		},
+	},
+	{
 		name: "PrefixOwner",
 		lockdLQL: func(rows int) string {
 			return "prefix{field=/owner,value=bench-owner-00}"
@@ -499,6 +508,12 @@ func benchmarkRowPayload(i int, rows int) []byte {
 	if i%5 == 0 {
 		secondaryTag = "finance"
 	}
+	createdAt := "2024-01-01T00:00:00Z"
+	if i%4 == 0 {
+		createdAt = "2026-01-01T00:00:00Z"
+	} else if i%4 == 1 {
+		createdAt = "not-a-date"
+	}
 	message := "normal"
 	if i%8 == 0 {
 		message = "timeout"
@@ -508,8 +523,9 @@ func benchmarkRowPayload(i int, rows int) []byte {
 		flag = `,"flag":true`
 	}
 	return []byte(fmt.Sprintf(
-		`{"bucket":"%s","group":"%s","region":"%s","owner":"bench-owner-%02d","value":%d,"tags":["%s","%s"],"details":{"message":"%s event %d"}%s}`,
-		bucket, group, region, i%10, i, primaryTag, secondaryTag, message, i, flag))
+		`{"bucket":"%s","group":"%s","region":"%s","owner":"bench-owner-%02d","value":%d,"created_at":"%s","tags":["%s","%s"],"details":{"message":"%s event %d"}%s}`,
+		bucket, group, region, i%10, i, createdAt, primaryTag, secondaryTag,
+		message, i, flag))
 }
 
 func seedLockdState(b *testing.B, cli *lockdclient.Client, key string, payload []byte) {
