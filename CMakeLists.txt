@@ -351,6 +351,7 @@ set(lc_sources
     src/lc_mutate_stream.c
     src/lc_pouch_client.c
     src/lc_pouch.c
+    src/lc_pouch_query_index.c
     src/lc_pouch_namespace.c
     src/lc_pouch_path.c
     src/lc_pouch_state.c

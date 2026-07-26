@@ -1,5 +1,6 @@
 #include "lc_api_internal.h"
 #include "lc_pouch.h"
+#include "lc_pouch_query_index.h"
 
 #include "lc_internal.h"
 
@@ -2437,6 +2438,7 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                                        lc_index_flush_res *out,
                                        lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_query_index_flush_result index_result;
   const char *namespace_name;
   const char *mode;
   unsigned long index_seq;
@@ -2463,13 +2465,21 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   if (rc != LC_OK) {
     return rc;
   }
+  memset(&index_result, 0, sizeof(index_result));
+  rc = lc_pouch_query_index_flush(client->pouch, namespace_name, index_seq,
+                                  &index_result, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   out->namespace_name = lc_strdup_local(namespace_name);
   out->mode = lc_strdup_local(mode);
-  out->flush_id = lc_strdup_local("pouch-local-index-flush");
+  out->flush_id = lc_strdup_local(index_result.repaired
+                                      ? "pouch-query-index-repair"
+                                      : "pouch-query-index-flush");
   out->accepted = 1;
   out->flushed = 1;
   out->pending = 0;
-  out->index_seq = index_seq;
+  out->index_seq = index_result.index_seq;
   out->correlation_id = lc_strdup_local("pouch-index-flush");
   if (out->namespace_name == NULL || out->mode == NULL ||
       out->flush_id == NULL || out->correlation_id == NULL) {

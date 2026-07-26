@@ -96,6 +96,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add the first pouch `flush_index` implementation over the redesigned
     state projection, returning a synchronous local high-water index token that
     includes tombstones and peer-writer marker refreshes.
+  - [x] Add the first durable per-namespace query-index sidecar metadata file
+    under `index/query.index`, with version validation, high-water persistence,
+    and repair on missing, stale, or corrupt sidecars during `flush_index`.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the

@@ -2728,6 +2728,8 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;
   lc_error error;
+  char *namespace_path;
+  char sidecar_path[1024];
   char root[512];
   unsigned long delete_version;
   int rc;
@@ -2736,6 +2738,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   client = NULL;
   writer = NULL;
   source = NULL;
+  namespace_path = NULL;
   memset(&write_result, 0, sizeof(write_result));
   memset(&delete_result, 0, sizeof(delete_result));
   lc_index_flush_req_init(&flush_req);
@@ -2772,12 +2775,39 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(flush_res.namespace_name, "docs/flush");
   assert_string_equal(flush_res.mode, "wait");
-  assert_string_equal(flush_res.flush_id, "pouch-local-index-flush");
+  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
   assert_true(flush_res.accepted);
   assert_true(flush_res.flushed);
   assert_false(flush_res.pending);
   assert_true(flush_res.index_seq >= delete_version);
   assert_string_equal(flush_res.correlation_id, "pouch-index-flush");
+  namespace_path = lc_pouch_namespace_path(NULL, root, "docs/flush");
+  assert_non_null(namespace_path);
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "format=pouch-query-index");
+  assert_path_file_contains(namespace_path, "index/query.index", "version=1");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "state_index_seq=2");
+  lc_index_flush_res_cleanup(&flush_res);
+
+  snprintf(sidecar_path, sizeof(sidecar_path), "%s/index/query.index",
+           namespace_path);
+  write_text_file(sidecar_path, "not=query-index\n");
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.mode, "sync");
+  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
+  assert_true(flush_res.index_seq >= delete_version);
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "format=pouch-query-index");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "state_index_seq=2");
+  lc_index_flush_res_cleanup(&flush_res);
+
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.flush_id, "pouch-query-index-flush");
   lc_index_flush_res_cleanup(&flush_res);
 
   flush_req.mode = "eventually";
@@ -2785,6 +2815,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message, "pouch flush_index mode must be wait or sync");
 
+  free(namespace_path);
   lc_error_cleanup(&error);
   lc_client_close(client);
   cleanup_root(root);
