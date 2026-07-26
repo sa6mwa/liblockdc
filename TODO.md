@@ -1625,8 +1625,8 @@ Latest release targets confirmed on 2026-07-23:
       recursive `exists`, and negated typed equality seeds; the fuzz fixture now
       includes valid, invalid, and out-of-range dates plus a false boolean flag
       so index-vs-scan parity covers candidate-superset planner paths.
-    - [x] Extend the pouch LQL planning fuzz harness to damage the durable
-      `query.index` sidecar before indexed `query_keys` execution, covering
-      missing, corrupt, and future-version query-index replay/repair modes
-      while asserting scan/index row-count parity against the same selector
-      corpus.
+    - [x] Extend the pouch LQL planning fuzz harness to close and reopen the
+      seeded store after damaging namespace manifests, peer marker files, and
+      the durable `query.index` sidecar, covering missing, corrupt, and
+      future-version query-index replay/repair modes while asserting
+      scan/index row-count parity against the same selector corpus.

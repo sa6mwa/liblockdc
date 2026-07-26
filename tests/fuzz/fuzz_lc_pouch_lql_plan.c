@@ -154,17 +154,75 @@ static int fuzz_seed_store(lc_client *client, lc_error *error) {
   return rc;
 }
 
+static int fuzz_namespace_path(char *path, size_t path_size, const char *root,
+                               const char *leaf) {
+  int written;
+
+  if (root == NULL || leaf == NULL) {
+    return 0;
+  }
+  written = snprintf(path, path_size, "%s/namespaces/fuzz/%s", root, leaf);
+  return written > 0 && (size_t)written < path_size;
+}
+
+static void fuzz_write_text_file(const char *path, const char *text) {
+  FILE *fp;
+
+  if (path == NULL || text == NULL) {
+    return;
+  }
+  fp = fopen(path, "wb");
+  if (fp == NULL) {
+    return;
+  }
+  (void)fwrite(text, 1U, strlen(text), fp);
+  (void)fclose(fp);
+}
+
+static void fuzz_damage_namespace_manifest(const char *root,
+                                           unsigned int mode) {
+  char path[768];
+
+  if (!fuzz_namespace_path(path, sizeof(path), root, "manifest") ||
+      mode == 0U) {
+    return;
+  }
+  if (mode == 1U) {
+    (void)remove(path);
+  } else if (mode == 2U) {
+    fuzz_write_text_file(path, "not-a-manifest\nactive_segment=broken\n");
+  } else {
+    fuzz_write_text_file(path,
+                         "active_segment=seg-00000000000000000000.log\n"
+                         "snapshot=snapshot-00000000000000000000.log\n");
+  }
+}
+
+static void fuzz_damage_marker(const char *root, unsigned int mode) {
+  char path[768];
+
+  if (mode == 0U ||
+      !fuzz_namespace_path(path, sizeof(path), root,
+                           "markers/writer-fuzz-peer.marker")) {
+    return;
+  }
+  if (mode == 1U) {
+    fuzz_write_text_file(path, "sequence=not-a-number\n");
+  } else if (mode == 2U) {
+    fuzz_write_text_file(path, "");
+  } else {
+    fuzz_write_text_file(path, "sequence=184467440737095516150\n");
+  }
+}
+
 static void fuzz_damage_query_index(const char *root, unsigned int mode) {
   char path[768];
   FILE *fp;
-  int written;
 
   if (root == NULL || mode == 0U) {
     return;
   }
-  written = snprintf(path, sizeof(path),
-                     "%s/namespaces/fuzz/index/query.index", root);
-  if (written <= 0 || (size_t)written >= sizeof(path)) {
+  if (!fuzz_namespace_path(path, sizeof(path), root, "index/query.index")) {
     return;
   }
   if (mode == 1U) {
@@ -258,6 +316,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   size_t scan_rows;
   int index_rc;
   int scan_rc;
+  unsigned int damage;
 
   selector = fuzz_selector_from_input(data, size);
   if (selector == NULL) {
@@ -281,7 +340,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (index_rc == LC_OK) {
     index_rc = fuzz_seed_store(index_client, &index_error);
     if (index_rc == LC_OK) {
-      fuzz_damage_query_index(root, (unsigned int)(size % 4U));
+      index_client->close(index_client);
+      index_client = NULL;
+      damage = (unsigned int)size;
+      fuzz_damage_namespace_manifest(root, (damage / 4U) % 4U);
+      fuzz_damage_marker(root, (damage / 16U) % 4U);
+      fuzz_damage_query_index(root, damage % 4U);
+      index_rc = fuzz_open_client(root, 0, &index_client, &index_error);
     }
   }
   scan_rc = fuzz_open_client(root, 1, &scan_client, &scan_error);
