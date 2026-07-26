@@ -706,10 +706,13 @@ authoritative records to per-namespace segmented state logs and installs
 compacted live heads as manifested namespace snapshots. Compaction runs through
 the pouch writer path, captures the live namespace projection, writes a fresh
 snapshot file, installs it in the namespace manifest, advances the active
-segment, and best-effort deletes superseded segment and prior snapshot files.
-The root `store.log` file is a non-authoritative placeholder and is not replaced
-during compaction. The durable append-only obsolete-record and high-water
-lifecycle is still tracked as follow-on work.
+segment, and records superseded segments or prior snapshots as manifest
+obsolete entries. Obsolete cleanup is retryable: post-compaction cleanup and
+later namespace manifest opens attempt to delete the tracked file and prune the
+manifest entry only after the file is gone or already missing. The root
+`store.log` file is a non-authoritative placeholder and is not replaced during
+compaction. Durable high-water lifecycle records are still tracked as follow-on
+work.
 Idle read descriptors are cached separately from active read sources. The cache
 is a performance artifact only: entries are bounded, allocator-backed, reusable
 across state/object/queue payload reads, and discarded when their descriptor no
@@ -728,9 +731,9 @@ candidate bytes, compacted segment id, and a concrete diagnostic such as
 `disabled`, `no-candidates`, `below-segment-threshold`,
 `below-reclaimable-threshold`, `interval-not-elapsed`, or `compacted`. This
 keeps lifecycle work observable without introducing hidden worker threads or
-background I/O. Cleanup-only maintenance, append-only manifest obsolete records,
-delete grace/retry accounting, and validation-drift abort diagnostics remain
-part of the open lifecycle work.
+background I/O. Cleanup-only maintenance, delete-grace retry accounting,
+durable high-water records, and validation-drift abort diagnostics remain part
+of the open lifecycle work.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query

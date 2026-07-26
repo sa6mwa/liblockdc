@@ -237,6 +237,19 @@ static void assert_file_contains(const char *path, const char *needle) {
   assert_non_null(strstr(bytes, needle));
 }
 
+static void assert_file_not_contains(const char *path, const char *needle) {
+  FILE *fp;
+  char bytes[2048];
+  size_t nread;
+
+  fp = fopen(path, "rb");
+  assert_non_null(fp);
+  nread = fread(bytes, 1U, sizeof(bytes) - 1U, fp);
+  assert_int_equal(fclose(fp), 0);
+  bytes[nread] = '\0';
+  assert_null(strstr(bytes, needle));
+}
+
 static void assert_path_file_contains(const char *root, const char *leaf,
                                       const char *needle) {
   char path[1024];
@@ -1559,6 +1572,124 @@ static void test_maintenance_reports_interval_skip(void **state) {
 
   free(namespace_path);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char manifest_path[2048];
+  char segments_path[2048];
+  char snapshots_path[2048];
+  char *segment_one_path;
+  char *segment_two_path;
+  char *stale_snapshot_path;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  segment_one_path = NULL;
+  segment_two_path = NULL;
+  stale_snapshot_path = NULL;
+  make_root("maintenance-obsolete-retry", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &first, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
+                            &second, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
+           namespace_path);
+  snprintf(segments_path, sizeof(segments_path), "%s/segments",
+           namespace_path);
+  snprintf(snapshots_path, sizeof(snapshots_path), "%s/snapshots",
+           namespace_path);
+  segment_one_path =
+      lc_pouch_path_join(NULL, segments_path,
+                         "seg-00000000000000000001.log");
+  segment_two_path =
+      lc_pouch_path_join(NULL, segments_path,
+                         "seg-00000000000000000002.log");
+  assert_non_null(segment_one_path);
+  assert_non_null(segment_two_path);
+  assert_true(path_is_file(segment_one_path));
+  assert_true(path_is_file(segment_two_path));
+  assert_int_equal(chmod(segments_path, 0555), 0);
+
+  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "compacted");
+  assert_true(path_is_file(segment_one_path));
+  assert_true(path_is_file(segment_two_path));
+  assert_file_contains(manifest_path,
+                       "obsolete_segment=seg-00000000000000000001.log");
+  assert_file_contains(manifest_path,
+                       "obsolete_segment=seg-00000000000000000002.log");
+  assert_int_equal(chmod(segments_path, 0755), 0);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_ensure_namespace(pouch, "team/alpha", &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(path_is_file(segment_one_path));
+  assert_false(path_is_file(segment_two_path));
+  assert_file_not_contains(manifest_path, "obsolete_segment=");
+
+  stale_snapshot_path =
+      lc_pouch_path_join(NULL, snapshots_path,
+                         "snapshot-00000000000000000099.log");
+  assert_non_null(stale_snapshot_path);
+  write_text_file(stale_snapshot_path, "stale\n");
+  append_text_file(
+      manifest_path,
+      "obsolete_snapshot=snapshot-00000000000000000099.log\n");
+  rc = lc_pouch_ensure_namespace(pouch, "team/alpha", &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(path_is_file(stale_snapshot_path));
+  assert_file_not_contains(manifest_path, "obsolete_snapshot=");
+
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
+  free(segment_one_path);
+  free(segment_two_path);
+  free(stale_snapshot_path);
+  free(namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -6786,6 +6917,7 @@ int main(void) {
       cmocka_unit_test(test_maintenance_reports_threshold_skip),
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
       cmocka_unit_test(test_maintenance_reports_interval_skip),
+      cmocka_unit_test(test_compaction_retries_manifest_obsolete_cleanup),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(
           test_namespace_manifest_repairs_from_existing_segments),

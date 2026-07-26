@@ -149,10 +149,13 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     compaction, threshold-gated `if_needed` behavior, interval gating for
     scheduled checks, and diagnostics for disabled, no-candidate,
     below-threshold, interval, and compacted outcomes.
+  - [x] Persist manifest obsolete records for compacted segment/snapshot files
+    and retry cleanup on namespace manifest open or post-compaction cleanup,
+    pruning obsolete entries only after the target file is deleted or already
+    missing.
   - [ ] Extend snapshot compaction to the full storage surface with durable
-    high-water records, manifest obsolete records, validation-drift aborts,
-    cleanup retry accounting, explicit maintenance entry points, and
-    compaction diagnostics.
+    high-water records, validation-drift aborts, cleanup retry accounting,
+    cleanup-only maintenance entry points, and expanded compaction diagnostics.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
   - [x] Add the first redesigned pouch `query_keys` scan path over the

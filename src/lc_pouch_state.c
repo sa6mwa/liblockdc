@@ -1323,42 +1323,46 @@ static int lc_pouch_state_compact_namespace(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, lc_error *error);
 
-static void lc_pouch_state_delete_compacted_files(
-    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
-    unsigned long compacted_segment_id, const char *old_snapshot) {
+static int lc_pouch_state_queue_compacted_files(
+    lc_pouch *pouch, lc_pouch_namespace_manifest *manifest,
+    const char *namespace_name, unsigned long compacted_segment_id,
+    const char *old_snapshot, lc_error *error) {
   unsigned long segment_id;
+  int rc;
 
   for (segment_id = 1UL; segment_id <= compacted_segment_id; ++segment_id) {
     char *segment_leaf;
-    char *segment_path;
 
     segment_leaf =
         lc_pouch_namespace_segment_leaf(&pouch->allocator, segment_id);
-    segment_path =
-        segment_leaf != NULL
-            ? lc_pouch_state_child_path(&pouch->allocator,
-                                        manifest->namespace_path, "segments",
-                                        segment_leaf)
-            : NULL;
+    if (segment_leaf == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch obsolete segment name",
+                          NULL, NULL, NULL);
+    }
+    rc = lc_pouch_namespace_manifest_mark_obsolete_segment(
+        &pouch->allocator, manifest, segment_leaf, error);
     lc_free_with_allocator(&pouch->allocator, segment_leaf);
-    if (segment_path != NULL) {
-      (void)unlink(segment_path);
-      lc_free_with_allocator(&pouch->allocator, segment_path);
+    if (rc != LC_OK) {
+      return rc;
     }
   }
   if (old_snapshot != NULL &&
       (manifest->latest_snapshot == NULL ||
        strcmp(old_snapshot, manifest->latest_snapshot) != 0)) {
-    char *snapshot_path;
-
-    snapshot_path =
-        lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
-                                  "snapshots", old_snapshot);
-    if (snapshot_path != NULL) {
-      (void)unlink(snapshot_path);
-      lc_free_with_allocator(&pouch->allocator, snapshot_path);
+    rc = lc_pouch_namespace_manifest_mark_obsolete_snapshot(
+        &pouch->allocator, manifest, old_snapshot, error);
+    if (rc != LC_OK) {
+      return rc;
     }
   }
+  rc = lc_pouch_namespace_manifest_save(&pouch->allocator, namespace_name,
+                                        manifest, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_namespace_manifest_cleanup_obsolete(
+      &pouch->allocator, namespace_name, manifest, error);
 }
 
 static int lc_pouch_state_compact_namespace_if_needed(
@@ -1457,8 +1461,10 @@ static int lc_pouch_state_compact_namespace(
   char *snapshot_leaf;
   char *old_snapshot;
   unsigned long compacted_segment_id;
+  int snapshot_installed;
   int rc;
 
+  snapshot_installed = 0;
   if (manifest->max_segment_id <= manifest->latest_snapshot_segment_id) {
     return LC_OK;
   }
@@ -1493,12 +1499,18 @@ static int lc_pouch_state_compact_namespace(
     rc = lc_pouch_namespace_manifest_install_snapshot(
         &pouch->allocator, namespace_name, manifest, snapshot_leaf,
         compacted_segment_id, compacted_segment_id + 1UL, error);
+    if (rc == LC_OK) {
+      snapshot_installed = 1;
+    }
   }
   if (rc == LC_OK) {
-    lc_pouch_state_delete_compacted_files(pouch, manifest,
-                                          compacted_segment_id, old_snapshot);
+    rc = lc_pouch_state_queue_compacted_files(
+        pouch, manifest, namespace_name, compacted_segment_id, old_snapshot,
+        error);
+  }
+  if (rc == LC_OK) {
     (void)lc_pouch_state_touch_marker(pouch, manifest, error);
-  } else {
+  } else if (!snapshot_installed) {
     char *snapshot_path;
 
     snapshot_path =
