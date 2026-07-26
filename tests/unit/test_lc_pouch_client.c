@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include <cmocka.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -16,6 +17,7 @@
 
 #include "lc/lc.h"
 #include "lc_api_internal.h"
+#include "lc_pouch_index.h"
 
 #define TEST_POUCH_QUERY_INDEX_HEADER_SIZE 64U
 #define TEST_POUCH_QUERY_INDEX_PAYLOAD_LENGTH_OFFSET 44U
@@ -85,6 +87,38 @@ static void test_query_index_temp_path(const char *root, char *path,
   strncat(path, ".compact.tmp", path_size - strlen(path) - 1U);
 }
 
+static void test_query_temporal_generation_path(const char *root,
+                                                const char *namespace_name,
+                                                char *path,
+                                                size_t path_size) {
+  snprintf(path, path_size,
+           "%s/%%2elockd/logstore/query.index.temporal/%s.lcptgn", root,
+           namespace_name);
+}
+
+static void test_cleanup_query_temporal_dir(const char *root) {
+  char dir_path[512];
+  DIR *dir;
+  struct dirent *entry;
+
+  snprintf(dir_path, sizeof(dir_path),
+           "%s/%%2elockd/logstore/query.index.temporal", root);
+  dir = opendir(dir_path);
+  if (dir != NULL) {
+    while ((entry = readdir(dir)) != NULL) {
+      char path[800];
+
+      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        continue;
+      }
+      snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
+      unlink(path);
+    }
+    closedir(dir);
+  }
+  rmdir(dir_path);
+}
+
 static void test_cleanup_root(const char *root) {
   char path[512];
 
@@ -100,6 +134,7 @@ static void test_cleanup_root(const char *root) {
   unlink(path);
   test_query_index_path(root, path, sizeof(path));
   unlink(path);
+  test_cleanup_query_temporal_dir(root);
   snprintf(path, sizeof(path), "%s/%%2elockd/logstore", root);
   rmdir(path);
   snprintf(path, sizeof(path), "%s/%%2elockd", root);
@@ -116,6 +151,35 @@ static off_t test_query_index_size(const char *root) {
   test_query_index_path(root, path, sizeof(path));
   assert_int_equal(stat(path, &st), 0);
   return st.st_size;
+}
+
+static void
+test_read_temporal_generation_file(const char *path,
+                                   lc_pouch_index_temporal_generation *out) {
+  struct stat st;
+  unsigned char *bytes;
+  size_t offset;
+  int fd;
+
+  memset(out, 0, sizeof(*out));
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(st.st_size > 0);
+  bytes = (unsigned char *)malloc((size_t)st.st_size);
+  assert_non_null(bytes);
+  fd = open(path, O_RDONLY);
+  assert_true(fd >= 0);
+  offset = 0U;
+  while (offset < (size_t)st.st_size) {
+    ssize_t got;
+
+    got = read(fd, bytes + offset, (size_t)st.st_size - offset);
+    assert_true(got > 0);
+    offset += (size_t)got;
+  }
+  assert_int_equal(close(fd), 0);
+  assert_true(lc_pouch_index_temporal_generation_decode(
+      NULL, out, bytes, (size_t)st.st_size));
+  free(bytes);
 }
 
 static unsigned long test_get_u64(const unsigned char *bytes) {
@@ -10342,6 +10406,99 @@ test_pouch_endpoint_index_date_after_normalizes_temporal_values(void **state) {
 }
 
 static void
+test_pouch_endpoint_index_rebuild_writes_temporal_generation(void **state) {
+  char root[256];
+  char endpoint[320];
+  char query_path[512];
+  char generation_path[512];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_lease *delta;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_pouch_index_temporal_generation generation;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-temporal-generation");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&generation, 0, sizeof(generation));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  client = open_pouch_client(endpoint);
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha,
+                        "{\"created_at\":\"2025-01-01T00:00:00Z\","
+                        "\"value\":\"boundary\"}",
+                        &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo,
+                        "{\"created_at\":\"2025-01-01T00:00:01Z\","
+                        "\"value\":\"normalized-one\"}",
+                        &error);
+  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  pouch_save_query_json(charlie,
+                        "{\"created_at\":\"2025-01-01T00:00:02Z\","
+                        "\"value\":\"normalized\"}",
+                        &error);
+  delta = pouch_acquire_query_key(client, "delta", &error);
+  pouch_save_query_json(delta, "{\"value\":\"missing-date\"}", &error);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  delta->close(delta);
+  client->close(client);
+
+  test_query_index_path(root, query_path, sizeof(query_path));
+  assert_int_equal(unlink(query_path), 0);
+
+  client = open_pouch_client(endpoint);
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{\"date\":{\"field\":\"/created_at\","
+                      "\"after\":\"2025-01-01T00:00:00Z\"}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(capture.keys[1], "charlie");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  lc_query_res_cleanup(&res);
+  client->close(client);
+
+  test_query_temporal_generation_path(root, "default", generation_path,
+                                      sizeof(generation_path));
+  test_read_temporal_generation_file(generation_path, &generation);
+  assert_string_equal(generation.namespace_name, "default");
+  assert_true(generation.identity.sequence > 0U);
+  assert_true(lc_pouch_index_temporal_posting_table_has_field(
+      &generation.postings, "/created_at"));
+  assert_true(lc_pouch_index_temporal_posting_table_append_after(
+      NULL, &generation.postings, "/created_at", 1735689600, 0, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_int_equal(doc_ids.count, 2U);
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_temporal_generation_cleanup(NULL, &generation);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_pouch_endpoint_index_query_keys_filters_owner_selector(void **state) {
   char root[256];
   char endpoint[320];
@@ -12995,6 +13152,8 @@ int main(void) {
           test_pouch_endpoint_index_date_superset_uses_liblql_paging),
       cmocka_unit_test(
           test_pouch_endpoint_index_date_after_normalizes_temporal_values),
+      cmocka_unit_test(
+          test_pouch_endpoint_index_rebuild_writes_temporal_generation),
       cmocka_unit_test(
           test_pouch_endpoint_index_query_keys_filters_owner_selector),
       cmocka_unit_test(

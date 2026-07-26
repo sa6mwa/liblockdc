@@ -1344,7 +1344,7 @@ private index primitives:
   final `liblql` authority, exposes DateAfter collection for the immutable
   generation reader cutover, and provides a private deterministic byte codec
   plus a file-level generation container carrying identity and namespace for
-  future generation-file persistence.
+  persisted generation files.
 - `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
   those primitives. It invokes disk-supplied reader callbacks and normalizes
   the resulting candidate docID sets.
@@ -1466,7 +1466,11 @@ payloads, and malformed encoded values before rebuilding in-memory search aids.
 The outer temporal generation container adds its own magic/version, the index
 identity, and namespace name around that payload so on-disk immutable readers
 can be tied to the same sequence plus segmented-manifest generation used by the
-prepared/result caches.
+prepared/result caches. During controlled query-index rebuild, the disk backend
+now compiles live per-namespace temporal postings and atomically publishes
+`<root>/%2elockd/logstore/query.index.temporal/<escaped-namespace>.lcptgn`
+files. Those files are rebuild artifacts for the upcoming immutable DateAfter
+reader; the current query path does not yet read them.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every

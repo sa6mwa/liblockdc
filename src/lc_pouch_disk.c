@@ -222,6 +222,7 @@ typedef struct lc_pouch_disk_store {
   char *log_path;
   char *lock_path;
   char *query_index_path;
+  char *query_temporal_index_dir_path;
   char *writer_marker_path;
   char *logstore_writer_marker_leaf;
   char *query_engine;
@@ -1208,6 +1209,110 @@ lc_pouch_disk_make_query_index_temp_path(lc_pouch_disk_store *store) {
     return NULL;
   }
   memcpy(temp_path, store->query_index_path, path_len);
+  memcpy(temp_path + path_len, suffix, sizeof(suffix));
+  return temp_path;
+}
+
+static char *
+lc_pouch_disk_make_query_temporal_index_dir_path(lc_pouch_disk_store *store,
+                                                 lc_error *error) {
+  char *namespace_path;
+  char *logstore_path;
+  char *temporal_path;
+  int rc;
+
+  namespace_path =
+      lc_pouch_disk_make_namespace_path(store, LC_POUCH_BACKEND_NAMESPACE);
+  logstore_path =
+      namespace_path != NULL
+          ? lc_pouch_join_path(&store->allocator, namespace_path, "logstore")
+          : NULL;
+  temporal_path =
+      logstore_path != NULL
+          ? lc_pouch_join_path(&store->allocator, logstore_path,
+                               "query.index.temporal")
+          : NULL;
+  if (namespace_path == NULL || logstore_path == NULL ||
+      temporal_path == NULL) {
+    lc_pouch_free(&store->allocator, namespace_path);
+    lc_pouch_free(&store->allocator, logstore_path);
+    lc_pouch_free(&store->allocator, temporal_path);
+    (void)lc_pouch_set_nomem(
+        error, "failed to allocate pouch temporal query index path");
+    return NULL;
+  }
+  rc = lc_pouch_disk_ensure_directory(
+      namespace_path, "failed to create pouch backend namespace", error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_ensure_directory(
+        logstore_path, "failed to create pouch backend logstore", error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_ensure_directory(
+        temporal_path, "failed to create pouch temporal query index", error);
+  }
+  lc_pouch_free(&store->allocator, namespace_path);
+  lc_pouch_free(&store->allocator, logstore_path);
+  if (rc != LC_OK) {
+    lc_pouch_free(&store->allocator, temporal_path);
+    return NULL;
+  }
+  return temporal_path;
+}
+
+static char *lc_pouch_disk_make_query_temporal_generation_path(
+    lc_pouch_disk_store *store, const char *namespace_name) {
+  char *escaped;
+  char *leaf;
+  char *path;
+  size_t escaped_len;
+  size_t leaf_len;
+
+  if (store == NULL || store->query_temporal_index_dir_path == NULL ||
+      namespace_name == NULL) {
+    return NULL;
+  }
+  escaped_len = lc_pouch_disk_lock_escaped_length(namespace_name);
+  if (escaped_len > ((size_t)-1) - sizeof(".lcptgn")) {
+    return NULL;
+  }
+  escaped = (char *)lc_pouch_alloc(&store->allocator, escaped_len + 1U);
+  if (escaped == NULL) {
+    return NULL;
+  }
+  lc_pouch_disk_lock_escape(escaped, namespace_name);
+  leaf_len = escaped_len + sizeof(".lcptgn");
+  leaf = (char *)lc_pouch_alloc(&store->allocator, leaf_len);
+  if (leaf == NULL) {
+    lc_pouch_free(&store->allocator, escaped);
+    return NULL;
+  }
+  memcpy(leaf, escaped, escaped_len);
+  memcpy(leaf + escaped_len, ".lcptgn", sizeof(".lcptgn"));
+  path = lc_pouch_join_path(&store->allocator,
+                            store->query_temporal_index_dir_path, leaf);
+  lc_pouch_free(&store->allocator, escaped);
+  lc_pouch_free(&store->allocator, leaf);
+  return path;
+}
+
+static char *
+lc_pouch_disk_make_query_temporal_generation_temp_path(
+    lc_pouch_disk_store *store, const char *path) {
+  static const char suffix[] = ".tmp";
+  size_t path_len;
+  char *temp_path;
+
+  if (store == NULL || path == NULL) {
+    return NULL;
+  }
+  path_len = strlen(path);
+  temp_path =
+      (char *)lc_pouch_alloc(&store->allocator, path_len + sizeof(suffix));
+  if (temp_path == NULL) {
+    return NULL;
+  }
+  memcpy(temp_path, path, path_len);
   memcpy(temp_path + path_len, suffix, sizeof(suffix));
   return temp_path;
 }
@@ -12447,6 +12552,293 @@ static int lc_pouch_disk_append_query_field_value_record(
       field, value, state_etag, version, 0, error);
 }
 
+static int lc_pouch_disk_fsync_directory(lc_pouch_disk_store *store,
+                                         const char *path, lc_error *error,
+                                         const char *message) {
+  int fd;
+  int rc;
+
+  fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    return lc_pouch_set_errno(error, message);
+  }
+  rc = lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_QUERY_INDEX);
+  if (close(fd) != 0 && rc == 0) {
+    return lc_pouch_set_errno(error, message);
+  }
+  if (rc != 0) {
+    return lc_pouch_set_errno(error, message);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_write_query_temporal_generation(
+    lc_pouch_disk_store *store,
+    const lc_pouch_index_temporal_generation *generation, lc_error *error) {
+  unsigned char *encoded;
+  char *path;
+  char *temp_path;
+  size_t encoded_size;
+  size_t written;
+  int fd;
+  int rc;
+
+  encoded = NULL;
+  path = NULL;
+  temp_path = NULL;
+  fd = -1;
+  if (!lc_pouch_index_temporal_generation_encoded_size(generation,
+                                                       &encoded_size)) {
+    return lc_pouch_set_invalid(error,
+                                "pouch temporal query index exceeds limits");
+  }
+  encoded = (unsigned char *)lc_pouch_alloc(&store->allocator, encoded_size);
+  path = lc_pouch_disk_make_query_temporal_generation_path(
+      store, generation->namespace_name);
+  if (encoded == NULL || path == NULL) {
+    lc_pouch_free(&store->allocator, encoded);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch temporal query index generation");
+  }
+  temp_path = lc_pouch_disk_make_query_temporal_generation_temp_path(store,
+                                                                    path);
+  if (temp_path == NULL) {
+    lc_pouch_free(&store->allocator, encoded);
+    lc_pouch_free(&store->allocator, path);
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch temporal query index temp path");
+  }
+  if (!lc_pouch_index_temporal_generation_encode(
+          generation, encoded, encoded_size, &written) ||
+      written != encoded_size) {
+    lc_pouch_free(&store->allocator, encoded);
+    lc_pouch_free(&store->allocator, path);
+    lc_pouch_free(&store->allocator, temp_path);
+    return lc_pouch_set_invalid(error,
+                                "failed to encode pouch temporal query index");
+  }
+
+  fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd < 0) {
+    rc = lc_pouch_set_errno(error,
+                            "failed to open pouch temporal query index");
+    goto done;
+  }
+  if (!lc_pouch_write_all(fd, encoded, encoded_size)) {
+    rc = lc_pouch_set_errno(error,
+                            "failed to write pouch temporal query index");
+    goto done;
+  }
+  if (lc_pouch_disk_fsync(store, fd, LC_POUCH_FSYNC_QUERY_INDEX) != 0) {
+    rc = lc_pouch_set_errno(error,
+                            "failed to fsync pouch temporal query index");
+    goto done;
+  }
+  if (close(fd) != 0) {
+    fd = -1;
+    rc = lc_pouch_set_errno(error,
+                            "failed to close pouch temporal query index");
+    goto done;
+  }
+  fd = -1;
+  if (rename(temp_path, path) != 0) {
+    rc = lc_pouch_set_errno(error,
+                            "failed to install pouch temporal query index");
+    goto done;
+  }
+  rc = lc_pouch_disk_fsync_directory(
+      store, store->query_temporal_index_dir_path, error,
+      "failed to fsync pouch temporal query index directory");
+
+done:
+  if (fd >= 0) {
+    (void)close(fd);
+  }
+  if (rc != LC_OK && temp_path != NULL) {
+    (void)unlink(temp_path);
+  }
+  lc_pouch_free(&store->allocator, encoded);
+  lc_pouch_free(&store->allocator, path);
+  lc_pouch_free(&store->allocator, temp_path);
+  return rc;
+}
+
+static int lc_pouch_disk_clear_query_temporal_generations(
+    lc_pouch_disk_store *store, lc_error *error) {
+  DIR *dir;
+  struct dirent *entry;
+
+  if (store == NULL || store->query_temporal_index_dir_path == NULL) {
+    return LC_OK;
+  }
+  dir = opendir(store->query_temporal_index_dir_path);
+  if (dir == NULL) {
+    return lc_pouch_set_errno(error,
+                              "failed to open pouch temporal query index");
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    const char *name;
+    size_t name_len;
+    char *path;
+
+    name = entry->d_name;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+      continue;
+    }
+    name_len = strlen(name);
+    if (!((name_len > strlen(".lcptgn") &&
+           strcmp(name + name_len - strlen(".lcptgn"), ".lcptgn") == 0) ||
+          (name_len > strlen(".lcptgn.tmp") &&
+           strcmp(name + name_len - strlen(".lcptgn.tmp"), ".lcptgn.tmp") ==
+               0))) {
+      continue;
+    }
+    path = lc_pouch_join_path(&store->allocator,
+                              store->query_temporal_index_dir_path, name);
+    if (path == NULL) {
+      (void)closedir(dir);
+      return lc_pouch_set_nomem(
+          error, "failed to allocate pouch temporal query index path");
+    }
+    if (unlink(path) != 0 && errno != ENOENT) {
+      lc_pouch_free(&store->allocator, path);
+      (void)closedir(dir);
+      return lc_pouch_set_errno(error,
+                                "failed to remove pouch temporal query index");
+    }
+    lc_pouch_free(&store->allocator, path);
+  }
+  if (closedir(dir) != 0) {
+    return lc_pouch_set_errno(error,
+                              "failed to close pouch temporal query index");
+  }
+  return lc_pouch_disk_fsync_directory(
+      store, store->query_temporal_index_dir_path, error,
+      "failed to fsync pouch temporal query index directory");
+}
+
+static int lc_pouch_disk_build_query_temporal_generation(
+    lc_pouch_disk_store *store, const char *namespace_name,
+    lc_pouch_index_temporal_generation *generation, lc_error *error) {
+  size_t position;
+  size_t index;
+
+  memset(generation, 0, sizeof(*generation));
+  generation->identity = lc_pouch_disk_query_index_identity(store);
+  generation->namespace_name =
+      lc_pouch_strdup(&store->allocator, namespace_name);
+  if (generation->namespace_name == NULL) {
+    return lc_pouch_set_nomem(
+        error, "failed to allocate pouch temporal query index namespace");
+  }
+
+  (void)lc_pouch_disk_query_field_find(store, namespace_name, "", "", "",
+                                       &position);
+  for (index = position; index < store->query_field_posting_count; ++index) {
+    lc_pouch_disk_query_field_posting *posting;
+    lc_pouch_disk_query_summary_entry *summary;
+    lc_pouch_index_doc_id doc_id;
+    lc_pouch_temporal temporal;
+    const char *date_value;
+    size_t summary_index;
+    int cmp;
+
+    posting = &store->query_field_postings[index];
+    cmp = strcmp(posting->namespace_name, namespace_name);
+    if (cmp > 0) {
+      break;
+    }
+    if (cmp < 0 || strncmp(posting->value, "s:", 2U) != 0) {
+      continue;
+    }
+    if (!lc_pouch_disk_query_field_posting_has_live_state(store, posting) ||
+        !lc_pouch_disk_query_summary_find(store, posting->namespace_name,
+                                          posting->key, &summary_index)) {
+      continue;
+    }
+    summary = &store->query_summary_entries[summary_index];
+    if (!lc_pouch_disk_query_field_posting_matches_summary(posting, summary)) {
+      continue;
+    }
+    if (!lc_pouch_index_doc_table_find(&store->query_doc_table,
+                                       posting->namespace_name, posting->key,
+                                       &doc_id)) {
+      return lc_pouch_set_invalid(
+          error, "pouch temporal query index references missing docID");
+    }
+    date_value = posting->value + 2U;
+    if (lc_pouch_temporal_parse(date_value, &temporal)) {
+      if (!lc_pouch_index_temporal_posting_table_add_value_doc_id(
+              &store->allocator, &generation->postings, posting->field,
+              temporal.unix_seconds, temporal.nanosecond, doc_id)) {
+        return lc_pouch_set_nomem(
+            error, "failed to build pouch temporal query index");
+      }
+    } else if (lc_pouch_temporal_may_match_liblql(date_value)) {
+      if (!lc_pouch_index_temporal_posting_table_add_residual_doc_id(
+              &store->allocator, &generation->postings, posting->field,
+              doc_id)) {
+        return lc_pouch_set_nomem(
+            error, "failed to build pouch temporal query index");
+      }
+    }
+  }
+  if (!lc_pouch_index_temporal_posting_table_build_postings(
+          &store->allocator, &generation->postings)) {
+    return lc_pouch_set_nomem(error,
+                              "failed to encode pouch temporal query index");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_disk_publish_query_temporal_generation(
+    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
+  lc_pouch_index_temporal_generation generation;
+  int rc;
+
+  memset(&generation, 0, sizeof(generation));
+  rc = lc_pouch_disk_build_query_temporal_generation(store, namespace_name,
+                                                    &generation, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_write_query_temporal_generation(store, &generation,
+                                                       error);
+  }
+  lc_pouch_index_temporal_generation_cleanup(&store->allocator, &generation);
+  return rc;
+}
+
+static int
+lc_pouch_disk_publish_query_temporal_generations(lc_pouch_disk_store *store,
+                                                lc_error *error) {
+  const char *last_namespace;
+  size_t index;
+  int rc;
+
+  rc = lc_pouch_disk_clear_query_temporal_generations(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  last_namespace = NULL;
+  for (index = 0U; index < store->query_summary_entry_count; ++index) {
+    const char *namespace_name;
+
+    namespace_name = store->query_summary_entries[index].namespace_name;
+    if (namespace_name == NULL ||
+        (last_namespace != NULL &&
+         strcmp(last_namespace, namespace_name) == 0)) {
+      continue;
+    }
+    rc = lc_pouch_disk_publish_query_temporal_generation(store, namespace_name,
+                                                        error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    last_namespace = namespace_name;
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_disk_rebuild_query_index(lc_pouch_disk_store *store,
                                              lc_error *error) {
   size_t index;
@@ -12502,6 +12894,10 @@ static int lc_pouch_disk_rebuild_query_index(lc_pouch_disk_store *store,
     if (rc != LC_OK) {
       return rc;
     }
+  }
+  rc = lc_pouch_disk_publish_query_temporal_generations(store, error);
+  if (rc != LC_OK) {
+    return rc;
   }
   store->replayed_query_index_size = (unsigned long)-1;
   store->replayed_query_index_record_count = 0UL;
@@ -23562,6 +23958,7 @@ static int lc_pouch_disk_close_with_options(lc_pouch_store *self,
   lc_pouch_free(&allocator, store->log_path);
   lc_pouch_free(&allocator, store->lock_path);
   lc_pouch_free(&allocator, store->query_index_path);
+  lc_pouch_free(&allocator, store->query_temporal_index_dir_path);
   lc_pouch_free(&allocator, store->writer_marker_path);
   lc_pouch_free(&allocator, store->logstore_writer_marker_leaf);
   lc_pouch_free(&allocator, store->query_engine);
@@ -23672,6 +24069,8 @@ int lc_pouch_disk_open_with_options(const char *root_path,
   store->lock_path =
       lc_pouch_join_path(&store->allocator, root_path, "writer.lock");
   store->query_index_path = lc_pouch_disk_make_query_index_path(store, error);
+  store->query_temporal_index_dir_path =
+      lc_pouch_disk_make_query_temporal_index_dir_path(store, error);
   store->writer_marker_path = lc_pouch_disk_make_writer_marker_path(store);
   if (store->writer_marker_path != NULL) {
     store->logstore_writer_marker_leaf =
@@ -23682,6 +24081,7 @@ int lc_pouch_disk_open_with_options(const char *root_path,
       lc_pouch_strdup(&store->allocator, query_fallback_engine);
   if (store->root_path == NULL || store->log_path == NULL ||
       store->lock_path == NULL || store->query_index_path == NULL ||
+      store->query_temporal_index_dir_path == NULL ||
       store->writer_marker_path == NULL ||
       store->logstore_writer_marker_leaf == NULL ||
       store->query_engine == NULL || store->query_fallback_engine == NULL) {

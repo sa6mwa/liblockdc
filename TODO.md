@@ -887,12 +887,16 @@ Latest release targets confirmed on 2026-07-23:
           index identity, namespace, and the temporal table payload so disk can
           persist immutable per-namespace DateAfter reader files without
           rebuilding the table on the query hot path.
-        - [ ] Move the bridge-stage temporal table into immutable compiled
-          index generation files and wire DateAfter readers to those generation
-          files. A query-time disk bridge attempt was measured on 2026-07-26
-          and rejected because building the temporal table on the hot path
-          regressed 4096-document DateAfter page-one latency to roughly
-          110-140 ms C-side.
+        - [x] Publish deterministic per-namespace temporal generation files
+          under the backend logstore during controlled query-index rebuilds.
+          The rebuild pass now compiles live sidecar string postings into the
+          generation container and installs the file atomically, with client
+          coverage decoding the persisted artifact after reopen/rebuild.
+        - [ ] Move the DateAfter reader to those immutable compiled
+          generation files. A query-time disk bridge attempt was measured on
+          2026-07-26 and rejected because building the temporal table on the
+          hot path regressed 4096-document DateAfter page-one latency to
+          roughly 110-140 ms C-side.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not
