@@ -2723,7 +2723,10 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   lc_client *client;
   lc_pouch *writer;
   lc_source *source;
+  lc_pouch_state_write_options hidden_options;
   lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result live_result;
+  lc_pouch_state_write_result hidden_result;
   lc_pouch_state_write_result delete_result;
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;
@@ -2739,7 +2742,10 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   writer = NULL;
   source = NULL;
   namespace_path = NULL;
+  memset(&hidden_options, 0, sizeof(hidden_options));
   memset(&write_result, 0, sizeof(write_result));
+  memset(&live_result, 0, sizeof(live_result));
+  memset(&hidden_result, 0, sizeof(hidden_result));
   memset(&delete_result, 0, sizeof(delete_result));
   lc_index_flush_req_init(&flush_req);
   memset(&flush_res, 0, sizeof(flush_res));
@@ -2760,6 +2766,30 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"kind\":\"flush\",\"n\":2}",
+                             strlen("{\"kind\":\"flush\",\"n\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "docs/flush", "doc/live", source, NULL,
+                            &live_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &live_result);
+
+  hidden_options.has_query_hidden = 1;
+  hidden_options.query_hidden = 1;
+  rc = lc_source_from_memory("{\"kind\":\"flush\",\"n\":3}",
+                             strlen("{\"kind\":\"flush\",\"n\":3}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "docs/flush", "doc/hidden", source,
+                            &hidden_options, &hidden_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &hidden_result);
 
   rc = lc_pouch_state_delete(writer, "docs/flush", "doc/a", NULL,
                              &delete_result, &error);
@@ -2785,14 +2815,29 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_non_null(namespace_path);
   assert_path_file_contains(namespace_path, "index/query.index",
                             "format=pouch-query-index");
-  assert_path_file_contains(namespace_path, "index/query.index", "version=1");
+  assert_path_file_contains(namespace_path, "index/query.index", "version=2");
   assert_path_file_contains(namespace_path, "index/query.index",
-                            "state_index_seq=2");
+                            "state_index_seq=4");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "row_count=2");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "summary_hash=");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "646f632f6c697665");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "row 3 ");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "646f632f68696464656e");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "row 2 ");
   lc_index_flush_res_cleanup(&flush_res);
 
   snprintf(sidecar_path, sizeof(sidecar_path), "%s/index/query.index",
            namespace_path);
-  write_text_file(sidecar_path, "not=query-index\n");
+  write_text_file(sidecar_path,
+                  "format=pouch-query-index\nversion=2\nstate_index_seq=4\n"
+                  "row_count=1\nsummary_hash=1\nrow 3 22 0 0 "
+                  "646f632f6c697665 - -\n");
   flush_req.mode = "sync";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -2802,7 +2847,9 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_path_file_contains(namespace_path, "index/query.index",
                             "format=pouch-query-index");
   assert_path_file_contains(namespace_path, "index/query.index",
-                            "state_index_seq=2");
+                            "state_index_seq=4");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "row_count=2");
   lc_index_flush_res_cleanup(&flush_res);
 
   rc = client->flush_index(client, &flush_req, &flush_res, &error);

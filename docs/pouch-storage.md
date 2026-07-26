@@ -448,9 +448,10 @@ of rewritten JSON files.
   acceptance, skip `query_hidden` and staged records, and return paginated scan
   metadata. `flush_index` synchronously refreshes the local redesigned state
   projection, validates or repairs a durable per-namespace `index/query.index`
-  metadata sidecar, and returns its storage high-water token, including
-  tombstones and peer-writer marker invalidation. Durable typed postings and
-  indexed mode remain to be implemented.
+  sidecar, and returns its storage high-water token, including tombstones and
+  peer-writer marker invalidation. The sidecar now carries deterministic live
+  summary rows with row-count/hash validation and query-hidden flags; durable
+  typed postings and indexed mode remain to be implemented.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
@@ -1016,11 +1017,15 @@ matching only one pattern is not returned as an indexed candidate for the
 conjunction. Exists-only root `or` groups may union wildcard/recursive
 expansions with exact presence postings before final acceptance.
 The `query.index` sidecar starts with a format/version record so incompatible
-posting layouts rebuild from authoritative namespace segments/snapshots instead
-of being trusted; the text-predicate and trigram posting slices increment that
-format version. A format-triggered rebuild must restore both the ordered query
-summary projection and the field postings used by indexed predicate document and
-key scans.
+layouts rebuild from authoritative namespace segments/snapshots instead of
+being trusted. Version 2 stores the namespace state high-water, deterministic
+live-row count, a hash over the row payload, and one row per live state entry:
+version, byte length, query-hidden metadata flags, hex-encoded key,
+content-type, and etag. Tombstones advance the high-water but are not emitted as
+live rows. The planned typed-posting slices will extend this format and must
+preserve the same rebuild rule: a format-triggered rebuild restores both the
+ordered query summary projection and the field postings used by indexed
+predicate document and key scans.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
@@ -1032,7 +1037,7 @@ document rows in the same ordered page, embeds JSON state payloads as
 `document`, emits `null` for non-JSON or empty state payloads, and returns
 `documents`. The current redesigned pouch `flush_index` is synchronous for the
 local state projection: it refreshes from markers/segments/snapshots, validates
-or repairs the namespace's durable `index/query.index` metadata sidecar, and
+or repairs the namespace's durable `index/query.index` live-row sidecar, and
 returns accepted/flushed/not-pending plus the latest storage high-water
 sequence. The planned durable query-index implementation extends that same
 boundary by replaying query-index sidecar records, running the lightweight

@@ -99,6 +99,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add the first durable per-namespace query-index sidecar metadata file
     under `index/query.index`, with version validation, high-water persistence,
     and repair on missing, stale, or corrupt sidecars during `flush_index`.
+  - [x] Extend `index/query.index` with deterministic live-row summary records
+    rebuilt from the redesigned state projection, including row-count/hash
+    validation, deleted-row exclusion, and `query_hidden` flags for future
+    indexed candidate generation.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
