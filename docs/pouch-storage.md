@@ -1,5 +1,12 @@
 # Pouch Storage Technical Specification
 
+> Current status: this document contains the pre-redesign pouch specification
+> and is retained as background. The active implementation has cut over to a
+> new `lc_pouch` architecture; the old implementation now lives under
+> `deprecated/pouch-legacy/` and is not compiled. The replacement spec must be
+> rewritten around the new root/namespace/layout modules as storage, manifest,
+> compaction, marker, index, search, queue, and benchmark subsystems are rebuilt.
+
 `pouch` is the embedded storage runtime for `liblockdc`. It gives the C client a
 local `lockd`-compatible backend selected by `pouch://` endpoints, without
 requiring a local server process. The storage layer must be usable by the client

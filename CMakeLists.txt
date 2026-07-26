@@ -349,20 +349,10 @@ set(lc_sources
     src/lc_management_api.c
     src/lc_message_api.c
     src/lc_mutate_stream.c
-    src/lc_pouch_allocator.c
     src/lc_pouch_client.c
     src/lc_pouch.c
-    src/lc_pouch_index.c
-    src/lc_pouch_index_doc.c
-    src/lc_pouch_index_number.c
-    src/lc_pouch_index_posting.c
-    src/lc_pouch_index_result.c
-    src/lc_pouch_index_temporal.c
-    src/lc_pouch_index_terms.c
-    src/lc_pouch_index_text.c
-    src/lc_pouch_logstore.c
-    src/lc_pouch_number.c
-    src/lc_pouch_temporal.c
+    src/lc_pouch_namespace.c
+    src/lc_pouch_path.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
     src/lc_log.c
@@ -900,12 +890,12 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(devenv_compose_config_test PROPERTIES RUN_SERIAL TRUE)
 
-    add_test(NAME pouch_allocator_boundary_test
+    add_test(NAME pouch_redesign_boundary_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/pouch_allocator_boundary_test.cmake
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/pouch_redesign_boundary_test.cmake
     )
-    set_tests_properties(pouch_allocator_boundary_test PROPERTIES RUN_SERIAL TRUE)
+    set_tests_properties(pouch_redesign_boundary_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME pslog_build_modes_test
         COMMAND ${CMAKE_COMMAND}

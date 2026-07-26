@@ -29,5 +29,3 @@ function(lc_add_integration_test target_name)
       ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
   endif()
 endfunction()
-
-lc_add_integration_test(lc_integration_pouch test_lc_pouch_integration.c)

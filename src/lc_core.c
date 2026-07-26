@@ -950,29 +950,8 @@ void lc_allocator_init(lc_allocator *allocator) {
   }
 }
 
-static int lc_pouch_query_engine_supported(const char *value,
-                                           int allow_none) {
-  if (value == NULL || value[0] == '\0') {
-    return 1;
-  }
-  if (strcmp(value, "index") == 0 || strcmp(value, "scan") == 0) {
-    return 1;
-  }
-  return allow_none && strcmp(value, "none") == 0;
-}
-
-static const char *lc_pouch_query_engine_default(const char *value) {
-  return value != NULL && value[0] != '\0' ? value : "index";
-}
-
-static const char *lc_pouch_query_fallback_default(const char *value) {
-  return value != NULL && value[0] != '\0' ? value : "none";
-}
-
 typedef struct lc_pouch_endpoint_options {
   char *root_path;
-  char *query_engine;
-  char *query_fallback_engine;
   int single_writer;
 } lc_pouch_endpoint_options;
 
@@ -982,8 +961,6 @@ static void lc_pouch_endpoint_options_cleanup(
     return;
   }
   lc_free_with_allocator(allocator, options->root_path);
-  lc_free_with_allocator(allocator, options->query_engine);
-  lc_free_with_allocator(allocator, options->query_fallback_engine);
   memset(options, 0, sizeof(*options));
 }
 
@@ -1080,52 +1057,6 @@ static int lc_pouch_endpoint_parse_option(
                                                    "query option", error);
   if (decoded_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-  }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "query_engine") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_query_engine")) {
-    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                              "query_engine", error);
-    if (copy == NULL) {
-      lc_free_with_allocator(allocator, decoded_key);
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
-    }
-    if (!lc_pouch_query_engine_supported(copy, 0)) {
-      lc_free_with_allocator(allocator, copy);
-      lc_free_with_allocator(allocator, decoded_key);
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch endpoint query_engine must be index or scan",
-                          NULL, NULL, NULL);
-    }
-    lc_free_with_allocator(allocator, options->query_engine);
-    options->query_engine = copy;
-    lc_free_with_allocator(allocator, decoded_key);
-    return LC_OK;
-  }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "query_fallback_engine") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_query_fallback_engine")) {
-    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                              "query_fallback_engine", error);
-    if (copy == NULL) {
-      lc_free_with_allocator(allocator, decoded_key);
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
-    }
-    if (!lc_pouch_query_engine_supported(copy, 1)) {
-      lc_free_with_allocator(allocator, copy);
-      lc_free_with_allocator(allocator, decoded_key);
-      return lc_error_set(
-          error, LC_ERR_INVALID, 0L,
-          "pouch endpoint query_fallback_engine must be none, index, or scan",
-          NULL, NULL, NULL);
-    }
-    lc_free_with_allocator(allocator, options->query_fallback_engine);
-    options->query_fallback_engine = copy;
-    lc_free_with_allocator(allocator, decoded_key);
-    return LC_OK;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key), "single_writer") ||
       lc_query_part_equal(decoded_key, strlen(decoded_key),
@@ -1348,7 +1279,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   lc_engine_error engine_error;
   lc_bundle_capture_source bundle_capture;
   lc_pouch_endpoint_options pouch_endpoint_options;
-  lc_pouch_open_opts pouch_open_opts;
+  lc_pouch_open_options pouch_open_options;
   unsigned char *bundle_bytes;
   size_t bundle_length;
   lc_client_handle *client;
@@ -1422,21 +1353,19 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   }
   client->allocator = config->allocator;
   client->is_pouch = is_pouch;
-  lc_pouch_allocator_from_lc(&config->allocator, &client->pouch_allocator);
-  rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);
-  if (rc != LC_ENGINE_OK) {
-    int public_rc;
+  if (!is_pouch) {
+    rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);
+    if (rc != LC_ENGINE_OK) {
+      int public_rc;
 
-    public_rc = lc_error_from_engine(error, &engine_error);
-    lc_engine_error_cleanup(&engine_error);
-    lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
-    lc_free_with_allocator(&config->allocator, client);
-    return public_rc;
+      public_rc = lc_error_from_engine(error, &engine_error);
+      lc_engine_error_cleanup(&engine_error);
+      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      lc_free_with_allocator(&config->allocator, client);
+      return public_rc;
+    }
   }
   if (client->is_pouch) {
-    const char *effective_query_engine;
-    const char *effective_query_fallback_engine;
-
     rc = lc_pouch_endpoint_options_parse(&config->allocator,
                                          config->endpoints[0],
                                          &pouch_endpoint_options, error);
@@ -1446,21 +1375,10 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
       lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
       return rc;
     }
-    effective_query_engine =
-        pouch_endpoint_options.query_engine != NULL
-            ? pouch_endpoint_options.query_engine
-            : lc_pouch_query_engine_default(NULL);
-    effective_query_fallback_engine =
-        pouch_endpoint_options.query_fallback_engine != NULL
-            ? pouch_endpoint_options.query_fallback_engine
-            : lc_pouch_query_fallback_default(NULL);
-    memset(&pouch_open_opts, 0, sizeof(pouch_open_opts));
-    pouch_open_opts.query_engine = effective_query_engine;
-    pouch_open_opts.query_fallback_engine = effective_query_fallback_engine;
-    pouch_open_opts.single_writer = pouch_endpoint_options.single_writer;
-    rc = lc_pouch_open_with_options(
-        pouch_endpoint_options.root_path, &client->pouch_allocator,
-        &pouch_open_opts, &client->pouch_store, error);
+    memset(&pouch_open_options, 0, sizeof(pouch_open_options));
+    pouch_open_options.single_writer = pouch_endpoint_options.single_writer;
+    rc = lc_pouch_open(pouch_endpoint_options.root_path, &config->allocator,
+                       &pouch_open_options, &client->pouch, error);
     if (rc != LC_OK) {
       lc_client_close_method(&client->pub);
       lc_engine_error_cleanup(&engine_error);
@@ -1469,21 +1387,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                                         &pouch_endpoint_options);
       return rc;
     }
-    client->pouch_query_engine =
-        lc_client_strdup(client, effective_query_engine);
-    client->pouch_query_fallback_engine =
-        lc_client_strdup(client, effective_query_fallback_engine);
     lc_pouch_endpoint_options_cleanup(&config->allocator,
                                       &pouch_endpoint_options);
-    if (client->pouch_query_engine == NULL ||
-        client->pouch_query_fallback_engine == NULL) {
-      lc_client_close_method(&client->pub);
-      lc_engine_error_cleanup(&engine_error);
-      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to copy pouch query configuration", NULL,
-                          NULL, NULL);
-    }
   }
   bundle_bytes = bundle_capture.bytes;
   bundle_length = bundle_capture.length;
@@ -1544,7 +1449,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->disable_logger_sys_field = config->disable_logger_sys_field;
   client->base_logger =
       config->logger != NULL ? config->logger : lc_log_noop_logger();
-  client->logger = lc_engine_client_logger(client->engine);
+  client->logger = client->engine != NULL ? lc_engine_client_logger(client->engine)
+                                          : client->base_logger;
   client->http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
   client->pub.acquire = lc_client_acquire_method;

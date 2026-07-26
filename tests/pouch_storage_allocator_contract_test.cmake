@@ -3,8 +3,10 @@ if(NOT DEFINED LOCKDC_ROOT)
 endif()
 
 set(pouch_storage_files
+    "src/lc_pouch.h"
     "src/lc_pouch.c"
-    "src/lc_pouch_store.h"
+    "src/lc_pouch_namespace.c"
+    "src/lc_pouch_path.c"
 )
 
 foreach(pouch_storage_file IN LISTS pouch_storage_files)
@@ -23,7 +25,7 @@ foreach(pouch_storage_file IN LISTS pouch_storage_files)
     if(raw_allocator_matches)
         string(REPLACE "\n" "\n  " formatted_matches "${raw_allocator_matches}")
         message(FATAL_ERROR
-            "Pouch storage code must use lc_pouch_allocator helpers, not raw "
+            "Pouch storage code must use project allocator helpers, not raw "
             "malloc/calloc/realloc/free calls. Matches in ${pouch_storage_file}:\n"
             "  ${formatted_matches}"
         )

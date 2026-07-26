@@ -2,6 +2,33 @@
 
 This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/handler.go` and the Go client behavior from `../lockd/client/`.
 
+## Pouch redesign
+
+- [x] Move the unreleased old pouch implementation, tests, and benchmark
+  harnesses under `deprecated/pouch-legacy/` as reference-only material.
+- [x] Remove the old pouch store, allocator, logstore, index, integration
+  tests, e2e shard, and benchmark matrix from live compilation and CTest
+  registration.
+- [x] Create the new pouch-native `lc_pouch` handle and module boundaries for
+  root layout, path escaping, per-namespace segmented layout initialization,
+  and client endpoint construction.
+- [x] Replace old source/test boundary checks with redesign checks that prove
+  retired files are not live and storage modules stay independent of `liblql`.
+- [x] Add first executable redesign coverage for root manifest creation,
+  per-namespace `segments`/`snapshots`/`markers`/`index` directories, escaped
+  namespace paths, `pouch://` client open, and benchmark temp cleanup.
+- [ ] Rebuild the pouch storage write/read path on the new architecture:
+  metadata, state payloads, objects, staged state, queues, transactions, and
+  retention.
+- [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
+  marker invalidation, compaction scheduling, and obsolete-file cleanup on the
+  new `lc_pouch` modules.
+- [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
+  engine against the new storage model, without fallback to deprecated code.
+- [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
+  new pouch API and restore the comparison scenarios only when they measure the
+  redesigned implementation.
+
 ## Foundation
 
 - [x] Map the registered server routes from the lockd HTTP handler.

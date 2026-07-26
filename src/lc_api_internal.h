@@ -14,7 +14,7 @@
 #endif
 #include "lc/lc.h"
 #include "lc_engine_api.h"
-#include "lc_pouch_store.h"
+#include "lc_pouch.h"
 
 #include <pslog.h>
 #include <pthread.h>
@@ -32,8 +32,7 @@ typedef struct lc_consumer_service_handle lc_consumer_service_handle;
 struct lc_client_handle {
   lc_client pub;
   lc_engine_client *engine;
-  lc_pouch_store *pouch_store;
-  lc_pouch_allocator pouch_allocator;
+  lc_pouch *pouch;
   int is_pouch;
   char **endpoints;
   size_t endpoint_count;
@@ -47,8 +46,6 @@ struct lc_client_handle {
   int insecure_skip_verify;
   int prefer_http_2;
   size_t http_json_response_limit_bytes;
-  char *pouch_query_engine;
-  char *pouch_query_fallback_engine;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;

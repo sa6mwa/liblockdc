@@ -65,7 +65,7 @@ assert_release_output_has_werror(
     TRUE
 )
 assert_release_output_has_werror(
-    "tests/unit/CMakeFiles/lc_unit_pouch_store.dir/test_lc_pouch_store.c.o"
+    "tests/unit/CMakeFiles/lc_unit_pouch.dir/test_lc_pouch.c.o"
     "release unit tests"
     TRUE
 )

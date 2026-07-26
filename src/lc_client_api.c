@@ -2714,8 +2714,8 @@ void lc_client_close_method(lc_client *self) {
     return;
   }
   client = (lc_client_handle *)self;
-  if (client->pouch_store != NULL) {
-    client->pouch_store->close(client->pouch_store, NULL);
+  if (client->pouch != NULL) {
+    lc_pouch_close(client->pouch);
   }
   if (client->engine != NULL) {
     lc_engine_client_close(client->engine);
@@ -2730,7 +2730,5 @@ void lc_client_close_method(lc_client *self) {
   lc_client_free(client, client->client_bundle_bytes);
   lc_client_free(client, client->client_bundle_path);
   lc_client_free(client, client->default_namespace);
-  lc_client_free(client, client->pouch_query_engine);
-  lc_client_free(client, client->pouch_query_fallback_engine);
   lc_client_free(client, client);
 }
