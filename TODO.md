@@ -31,6 +31,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Implement bound lease typed `save()` by streaming lonejson-generated
     mapped JSON through the segmented state update path, with lease load and
     reopen replay coverage.
+  - [x] Add pouch-native local lease lifecycle coverage for positive TTL
+    acquire expiration, keepalive refresh metadata, invalid TTL rejection, and
+    release acknowledgement without reviving legacy compatibility paths.
   - [ ] Add durable transaction decision records, replay, staged participant
     recovery, and expired staged-state cleanup on reopen.
     - [x] Add private segmented state-log decision records for staged commit

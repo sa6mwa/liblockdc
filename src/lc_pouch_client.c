@@ -4,9 +4,11 @@
 #include "lc_internal.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct lc_pouch_acquire_for_update_file {
   FILE *fp;
@@ -235,6 +237,55 @@ static int lc_pouch_lease_refresh_state(lc_lease_handle *lease,
   return LC_OK;
 }
 
+static int lc_pouch_now_unix(long *out, lc_error *error) {
+  time_t now;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch time read requires output storage", NULL, NULL,
+                        NULL);
+  }
+  now = time(NULL);
+  if (now == (time_t)-1) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to read pouch wall clock", NULL, NULL, NULL);
+  }
+  *out = (long)now;
+  return LC_OK;
+}
+
+static int lc_pouch_expiration_from_ttl(long ttl_seconds, long *out,
+                                        lc_error *error) {
+  long now;
+  int rc;
+
+  if (ttl_seconds <= 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch ttl_seconds must be positive", NULL, NULL,
+                        NULL);
+  }
+  rc = lc_pouch_now_unix(&now, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (ttl_seconds > LONG_MAX - now) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch ttl_seconds exceeds supported range", NULL,
+                        NULL, NULL);
+  }
+  *out = now + ttl_seconds;
+  return LC_OK;
+}
+
+static void lc_pouch_lease_refresh_expiration(lc_lease_handle *lease,
+                                              long lease_expires_at_unix) {
+  if (lease == NULL) {
+    return;
+  }
+  lease->lease_expires_at_unix = lease_expires_at_unix;
+  lease->pub.lease_expires_at_unix = lease_expires_at_unix;
+}
+
 static int lc_pouch_client_copy_state_metadata(
     const lc_pouch_state_read_result *read_result, lc_get_res *out,
     lc_error *error) {
@@ -420,6 +471,7 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   const char *namespace_name;
   char lease_id[128];
   unsigned long version;
+  long lease_expires_at_unix;
   lc_lease *lease;
   int rc;
 
@@ -431,6 +483,11 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   *out = NULL;
   client = (lc_client_handle *)self;
   rc = lc_pouch_client_validate_public_key(req->key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_expiration_from_ttl(req->ttl_seconds, &lease_expires_at_unix,
+                                    error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -458,6 +515,8 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch lease", NULL, NULL, NULL);
   }
+  lc_pouch_lease_refresh_expiration((lc_lease_handle *)lease,
+                                    lease_expires_at_unix);
   lc_pouch_patch_lease_methods(lease);
   *out = lease;
   return LC_OK;
@@ -858,18 +917,80 @@ int lc_pouch_client_keepalive_method(lc_client *self,
                                      const lc_keepalive_op *req,
                                      lc_keepalive_res *out,
                                      lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_state_read_result read_result;
+  const char *namespace_name;
+  long lease_expires_at_unix;
+  char *state_etag;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch keepalive requires self, req, and out", NULL,
+                        NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_expiration_from_ttl(req->ttl_seconds, &lease_expires_at_unix,
+                                    error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(client->pouch, namespace_name, req->lease.key,
+                           &read_result, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  state_etag = read_result.etag != NULL ? lc_strdup_local(read_result.etag)
+                                        : NULL;
+  if (read_result.etag != NULL && state_etag == NULL) {
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch keepalive state etag", NULL,
+                        NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  out->lease_expires_at_unix = lease_expires_at_unix;
+  out->version = read_result.found ? (long)read_result.version : 0L;
+  out->state_etag = state_etag;
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  return LC_OK;
 }
 
 int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                                    lc_release_res *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  int discarded;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch release requires self, req, and out", NULL,
+                        NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (req->rollback && req->lease.txn_id != NULL &&
+      req->lease.txn_id[0] != '\0') {
+    rc = lc_pouch_state_discard_staged(
+        client->pouch,
+        lc_pouch_client_namespace(client, req->lease.namespace_name),
+        req->lease.key, req->lease.txn_id, &discarded, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  memset(out, 0, sizeof(*out));
+  out->released = 1;
+  return LC_OK;
 }
 
 int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
@@ -1494,19 +1615,63 @@ int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
 int lc_pouch_lease_keepalive_method(lc_lease *self,
                                     const lc_keepalive_req *req,
                                     lc_error *error) {
-  (void)self;
-  (void)req;
-  return lc_pouch_lease_rebuilding(error);
+  lc_lease_handle *lease;
+  lc_keepalive_op op;
+  lc_keepalive_res res;
+  int rc;
+
+  if (self == NULL || req == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease keepalive requires self and req", NULL,
+                        NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  lc_keepalive_op_init(&op);
+  memset(&res, 0, sizeof(res));
+  op.lease.namespace_name = lease->namespace_name;
+  op.lease.key = lease->key;
+  op.lease.lease_id = lease->lease_id;
+  op.lease.txn_id = lease->txn_id;
+  op.lease.fencing_token = lease->fencing_token;
+  op.ttl_seconds = req->ttl_seconds;
+  rc = lc_pouch_client_keepalive_method(&lease->client->pub, &op, &res,
+                                        error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_lease_refresh_state(lease, res.state_etag, res.version,
+                                      error);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_lease_refresh_expiration(lease, res.lease_expires_at_unix);
+  }
+  lc_keepalive_res_cleanup(&res);
+  return rc;
 }
 
 int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
                                   lc_error *error) {
-  (void)req;
-  (void)error;
+  lc_lease_handle *lease;
+  lc_release_op op;
+  lc_release_res res;
+  int rc;
+
   if (self == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch lease release requires self", NULL, NULL,
                         NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  lc_release_op_init(&op);
+  memset(&res, 0, sizeof(res));
+  op.lease.namespace_name = lease->namespace_name;
+  op.lease.key = lease->key;
+  op.lease.lease_id = lease->lease_id;
+  op.lease.txn_id = lease->txn_id;
+  op.lease.fencing_token = lease->fencing_token;
+  op.rollback = req != NULL ? req->rollback : 0;
+  rc = lc_pouch_client_release_method(&lease->client->pub, &op, &res, error);
+  lc_release_res_cleanup(&res);
+  if (rc != LC_OK) {
+    return rc;
   }
   self->close(self);
   return LC_OK;

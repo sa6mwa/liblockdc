@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <cmocka.h>
 
@@ -1971,6 +1972,129 @@ static void test_lease_save_streams_mapped_json_and_replays_after_reopen(
   lc_error_cleanup(&error);
 }
 
+static void test_lease_keepalive_and_release_use_local_lifecycle(
+    void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_keepalive_req keepalive_req;
+  lc_keepalive_op keepalive_op;
+  lc_keepalive_res keepalive_res;
+  lc_release_op release_op;
+  lc_release_res release_res;
+  lc_error error;
+  char root[512];
+  char key[96];
+  long before;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&keepalive_res, 0, sizeof(keepalive_res));
+  memset(&release_res, 0, sizeof(release_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_keepalive_req_init(&keepalive_req);
+  lc_keepalive_op_init(&keepalive_op);
+  lc_release_op_init(&release_op);
+  lc_error_init(&error);
+  make_root("lease-keepalive", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-keepalive/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  before = (long)time(NULL);
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lease->lease_expires_at_unix >= before + 30L);
+
+  rc = lc_source_from_memory("{\"value\":9}", strlen("{\"value\":9}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_string_equal(lease->state_etag, "pouch-state-1");
+
+  keepalive_req.ttl_seconds = 45L;
+  before = (long)time(NULL);
+  rc = lease->keepalive(lease, &keepalive_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lease->lease_expires_at_unix >= before + 45L);
+  assert_int_equal(lease->version, 1L);
+  assert_string_equal(lease->state_etag, "pouch-state-1");
+
+  keepalive_op.lease.namespace_name = lease->namespace_name;
+  keepalive_op.lease.key = lease->key;
+  keepalive_op.lease.lease_id = lease->lease_id;
+  keepalive_op.lease.txn_id = lease->txn_id;
+  keepalive_op.lease.fencing_token = lease->fencing_token;
+  keepalive_op.ttl_seconds = 60L;
+  before = (long)time(NULL);
+  rc = client->keepalive(client, &keepalive_op, &keepalive_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(keepalive_res.lease_expires_at_unix >= before + 60L);
+  assert_int_equal(keepalive_res.version, 1L);
+  assert_string_equal(keepalive_res.state_etag, "pouch-state-1");
+  lc_keepalive_res_cleanup(&keepalive_res);
+
+  release_op.lease.namespace_name = lease->namespace_name;
+  release_op.lease.key = lease->key;
+  release_op.lease.lease_id = lease->lease_id;
+  release_op.lease.txn_id = lease->txn_id;
+  release_op.lease.fencing_token = lease->fencing_token;
+  rc = client->release(client, &release_op, &release_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(release_res.released, 1);
+  lc_release_res_cleanup(&release_res);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_acquire_rejects_non_positive_ttl(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("lease-invalid-ttl", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-invalid-ttl/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 0L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(lease);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_lease_remove_tombstones_state_and_refreshes_view(
     void **state) {
   lc_client *client;
@@ -2221,6 +2345,8 @@ int main(void) {
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(
           test_lease_save_streams_mapped_json_and_replays_after_reopen),
+      cmocka_unit_test(test_lease_keepalive_and_release_use_local_lifecycle),
+      cmocka_unit_test(test_acquire_rejects_non_positive_ttl),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
