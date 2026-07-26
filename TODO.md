@@ -467,6 +467,12 @@ Latest release targets confirmed on 2026-07-23:
       selection, segment rollover, and segment/snapshot name parsing behind a
       small allocator/root/fsync context instead of depending on the concrete
       pouch backend object.
+    - [x] Move active segmented replay input discovery into
+      `lc_pouch_logstore`: manifest replay now selects authoritative
+      segment/snapshot paths, repairs manifestless segment files, cleans
+      obsolete manifest records under the configured grace policy, fingerprints
+      active logstore generations, and counts compaction candidates outside the
+      monolithic backend adapter.
     - [ ] Split the pouch search/index subsystem out of `lc_pouch.c` into
       an internal C index layer with explicit reader, writer, planner, posting,
       visibility, and result-cache boundaries.
@@ -1151,6 +1157,9 @@ Latest release targets confirmed on 2026-07-23:
         `src/lc_pouch_logstore.c`, preserving the unreleased pouch layout while
         making namespace pathing, manifest append, active segment selection,
         and rollover testable without the monolithic backend adapter.
+      - [x] Move active replay path collection, manifestless segment repair,
+        obsolete path cleanup, active generation fingerprinting, and compaction
+        candidate counting into `src/lc_pouch_logstore.c`.
     - [x] Implement manifest append/replay for segment open, segment seal,
       snapshot install, obsolete segment, and obsolete snapshot records.
       - [x] Append text manifest lifecycle records for current active-segment

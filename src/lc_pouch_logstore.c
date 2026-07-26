@@ -6,9 +6,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LC_POUCH_LOGSTORE_SEGMENT_SEAL_BYTES (64UL * 1024UL)
@@ -477,6 +479,7 @@ void lc_pouch_logstore_init(lc_pouch_logstore *logstore,
   logstore->fsync_fn = fsync_fn;
   logstore->fsync_context = fsync_context;
   logstore->segment_seal_bytes = LC_POUCH_LOGSTORE_SEGMENT_SEAL_BYTES;
+  logstore->obsolete_delete_grace_seconds = 0UL;
 }
 
 int lc_pouch_logstore_segment_name_parse(const char *name,
@@ -850,5 +853,655 @@ int lc_pouch_logstore_append_manifest_event_for_record_path(
   lc_pouch_free(logstore->allocator, logstore_path);
   lc_pouch_free(logstore->allocator, manifest_path);
   lc_pouch_free(logstore->allocator, manifest_log_path);
+  return rc;
+}
+
+void lc_pouch_logstore_paths_cleanup(const lc_pouch_logstore *logstore,
+                                     lc_pouch_logstore_paths *paths) {
+  size_t index;
+
+  if (paths == NULL) {
+    return;
+  }
+  for (index = 0U; index < paths->count; ++index) {
+    lc_pouch_free(logstore != NULL ? logstore->allocator : NULL,
+                  paths->items[index]);
+  }
+  lc_pouch_free(logstore != NULL ? logstore->allocator : NULL, paths->items);
+  memset(paths, 0, sizeof(*paths));
+}
+
+static int lc_pouch_logstore_path_compare(const void *left,
+                                          const void *right) {
+  const char *const *left_path;
+  const char *const *right_path;
+  const char *left_snapshot;
+  const char *right_snapshot;
+  const char *left_segment;
+  const char *right_segment;
+  size_t left_prefix_len;
+  size_t right_prefix_len;
+  int prefix_cmp;
+
+  left_path = (const char *const *)left;
+  right_path = (const char *const *)right;
+  left_snapshot = strstr(*left_path, "/logstore/snapshots/");
+  right_snapshot = strstr(*right_path, "/logstore/snapshots/");
+  left_segment = strstr(*left_path, "/logstore/segments/");
+  right_segment = strstr(*right_path, "/logstore/segments/");
+  if ((left_snapshot != NULL || left_segment != NULL) &&
+      (right_snapshot != NULL || right_segment != NULL)) {
+    const char *left_marker;
+    const char *right_marker;
+
+    left_marker = left_snapshot != NULL ? left_snapshot : left_segment;
+    right_marker = right_snapshot != NULL ? right_snapshot : right_segment;
+    left_prefix_len = (size_t)(left_marker - *left_path);
+    right_prefix_len = (size_t)(right_marker - *right_path);
+    prefix_cmp = strncmp(*left_path, *right_path,
+                         left_prefix_len < right_prefix_len ? left_prefix_len
+                                                            : right_prefix_len);
+    if (prefix_cmp != 0) {
+      return prefix_cmp;
+    }
+    if (left_prefix_len != right_prefix_len) {
+      return left_prefix_len < right_prefix_len ? -1 : 1;
+    }
+    if ((left_snapshot != NULL) != (right_snapshot != NULL)) {
+      return left_snapshot != NULL ? -1 : 1;
+    }
+  }
+  return strcmp(*left_path, *right_path);
+}
+
+int lc_pouch_logstore_paths_add_take(const lc_pouch_logstore *logstore,
+                                     lc_pouch_logstore_paths *paths,
+                                     char *path) {
+  char **grown;
+  size_t new_capacity;
+
+  if (paths->count >= paths->capacity) {
+    new_capacity = paths->capacity == 0U ? 8U : paths->capacity * 2U;
+    grown = (char **)lc_pouch_realloc(
+        logstore->allocator, paths->items,
+        new_capacity * sizeof(paths->items[0]));
+    if (grown == NULL) {
+      return 0;
+    }
+    paths->items = grown;
+    paths->capacity = new_capacity;
+  }
+  paths->items[paths->count++] = path;
+  return 1;
+}
+
+static int lc_pouch_logstore_paths_contains(
+    const lc_pouch_logstore_paths *paths, const char *path) {
+  size_t index;
+
+  for (index = 0U; index < paths->count; ++index) {
+    if (strcmp(paths->items[index], path) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_logstore_paths_add_copy(
+    const lc_pouch_logstore *logstore, lc_pouch_logstore_paths *paths,
+    const char *path, lc_error *error) {
+  char *copy;
+
+  if (lc_pouch_logstore_paths_contains(paths, path)) {
+    return LC_OK;
+  }
+  copy = lc_pouch_strdup(logstore->allocator, path);
+  if (copy == NULL) {
+    return lc_pouch_logstore_set_nomem(
+        error, "failed to allocate pouch logstore replay path");
+  }
+  if (!lc_pouch_logstore_paths_add_take(logstore, paths, copy)) {
+    lc_pouch_free(logstore->allocator, copy);
+    return lc_pouch_logstore_set_nomem(
+        error, "failed to collect pouch logstore replay path");
+  }
+  return LC_OK;
+}
+
+static void lc_pouch_logstore_paths_remove(
+    const lc_pouch_logstore *logstore, lc_pouch_logstore_paths *paths,
+    const char *path) {
+  size_t index;
+
+  for (index = 0U; index < paths->count; ++index) {
+    if (strcmp(paths->items[index], path) == 0) {
+      lc_pouch_free(logstore->allocator, paths->items[index]);
+      if (index + 1U < paths->count) {
+        memmove(paths->items + index, paths->items + index + 1U,
+                (paths->count - index - 1U) * sizeof(paths->items[0]));
+      }
+      paths->count--;
+      return;
+    }
+  }
+}
+
+static int lc_pouch_logstore_read_namespace_manifest_paths(
+    const lc_pouch_logstore *logstore, const char *manifest_log_path,
+    const char *segments_path, const char *snapshots_path,
+    lc_pouch_logstore_paths *paths, lc_pouch_logstore_paths *mentioned_paths,
+    lc_pouch_logstore_paths *obsolete_paths, lc_error *error) {
+  char line[512];
+  FILE *manifest;
+  int rc;
+
+  manifest = fopen(manifest_log_path, "r");
+  if (manifest == NULL) {
+    if (errno == ENOENT || errno == ENOTDIR) {
+      return LC_OK;
+    }
+    return lc_pouch_logstore_set_errno(error, "failed to open pouch manifest");
+  }
+  rc = LC_OK;
+  while (fgets(line, sizeof(line), manifest) != NULL) {
+    char *event;
+    char *file_name;
+    char *newline;
+    char *record_path;
+    unsigned long ignored_number;
+
+    event = line;
+    file_name = strchr(line, ' ');
+    if (file_name == NULL) {
+      continue;
+    }
+    *file_name++ = '\0';
+    newline = strchr(file_name, '\n');
+    if (newline != NULL) {
+      *newline = '\0';
+    }
+    record_path = NULL;
+    if (lc_pouch_logstore_segment_name_parse(file_name, &ignored_number)) {
+      record_path = lc_pouch_logstore_join_path(logstore->allocator,
+                                                segments_path, file_name);
+    } else if (lc_pouch_logstore_snapshot_name_parse(file_name,
+                                                     &ignored_number)) {
+      record_path = lc_pouch_logstore_join_path(logstore->allocator,
+                                                snapshots_path, file_name);
+    } else {
+      continue;
+    }
+    if (record_path == NULL) {
+      rc = lc_pouch_logstore_set_nomem(
+          error, "failed to allocate pouch manifest record path");
+      break;
+    }
+    if (lc_pouch_logstore_segment_name_parse(file_name, &ignored_number)) {
+      rc = lc_pouch_logstore_paths_add_copy(logstore, mentioned_paths,
+                                            record_path, error);
+    }
+    if (rc == LC_OK && strcmp(event, "obsolete") == 0) {
+      rc = lc_pouch_logstore_paths_add_copy(logstore, obsolete_paths,
+                                            record_path, error);
+    }
+    if (rc == LC_OK && strcmp(event, "snapshot") == 0 &&
+        lc_pouch_logstore_snapshot_name_parse(file_name, &ignored_number)) {
+      rc = lc_pouch_logstore_paths_add_copy(logstore, paths, record_path,
+                                            error);
+    } else if (rc == LC_OK &&
+               lc_pouch_logstore_segment_name_parse(file_name,
+                                                    &ignored_number) &&
+               (strcmp(event, "open") == 0 || strcmp(event, "compact") == 0)) {
+      rc = lc_pouch_logstore_paths_add_copy(logstore, paths, record_path,
+                                            error);
+    } else if (rc == LC_OK && strcmp(event, "obsolete") == 0) {
+      lc_pouch_logstore_paths_remove(logstore, paths, record_path);
+    }
+    lc_pouch_free(logstore->allocator, record_path);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  if (ferror(manifest) && rc == LC_OK) {
+    rc = lc_pouch_logstore_set_errno(error, "failed to read pouch manifest");
+  }
+  if (fclose(manifest) != 0 && rc == LC_OK) {
+    rc = lc_pouch_logstore_set_errno(error, "failed to close pouch manifest");
+  }
+  return rc;
+}
+
+static int lc_pouch_logstore_repair_manifest_for_segment_path(
+    const lc_pouch_logstore *logstore, const char *segment_path,
+    lc_error *error) {
+  const char marker[] = "/segments/";
+  const char *marker_at;
+  size_t logstore_len;
+  char *logstore_path;
+  char *manifest_path;
+  char *manifest_log_path;
+  int rc;
+
+  marker_at = strstr(segment_path, marker);
+  if (marker_at == NULL) {
+    return lc_pouch_logstore_set_invalid(
+        error, "pouch segment path is not manifestable");
+  }
+  logstore_len = (size_t)(marker_at - segment_path);
+  logstore_path = lc_pouch_logstore_dup_bytes(logstore->allocator,
+                                              segment_path, logstore_len);
+  manifest_path =
+      logstore_path != NULL
+          ? lc_pouch_logstore_join_path(logstore->allocator, logstore_path,
+                                        "manifest")
+          : NULL;
+  manifest_log_path =
+      manifest_path != NULL
+          ? lc_pouch_logstore_join_path(logstore->allocator, manifest_path,
+                                        "manifest.log")
+          : NULL;
+  if (logstore_path == NULL || manifest_path == NULL ||
+      manifest_log_path == NULL) {
+    lc_pouch_free(logstore->allocator, logstore_path);
+    lc_pouch_free(logstore->allocator, manifest_path);
+    lc_pouch_free(logstore->allocator, manifest_log_path);
+    return lc_pouch_logstore_set_nomem(
+        error, "failed to allocate pouch manifest path");
+  }
+  rc = lc_pouch_logstore_ensure_directory(
+      manifest_path, "failed to create pouch manifest directory", error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_logstore_append_manifest_event_for_record_path(
+        logstore, segment_path, "open", error);
+  }
+  lc_pouch_free(logstore->allocator, logstore_path);
+  lc_pouch_free(logstore->allocator, manifest_path);
+  lc_pouch_free(logstore->allocator, manifest_log_path);
+  return rc;
+}
+
+static int lc_pouch_logstore_cleanup_obsolete_manifest_paths(
+    const lc_pouch_logstore *logstore,
+    const lc_pouch_logstore_paths *active_paths,
+    const lc_pouch_logstore_paths *obsolete_paths, lc_error *error) {
+  size_t index;
+
+  for (index = 0U; index < obsolete_paths->count; ++index) {
+    if (lc_pouch_logstore_paths_contains(active_paths,
+                                         obsolete_paths->items[index])) {
+      continue;
+    }
+    if (logstore->obsolete_delete_grace_seconds > 0UL) {
+      struct stat st;
+      time_t now;
+
+      if (stat(obsolete_paths->items[index], &st) != 0) {
+        if (errno == ENOENT || errno == ENOTDIR) {
+          continue;
+        }
+        return lc_pouch_logstore_set_errno(
+            error, "failed to stat obsolete pouch logstore");
+      }
+      now = time(NULL);
+      if (now != (time_t)-1 &&
+          (now <= st.st_mtime ||
+           (unsigned long)(now - st.st_mtime) <
+               logstore->obsolete_delete_grace_seconds)) {
+        continue;
+      }
+    }
+    if (unlink(obsolete_paths->items[index]) != 0 && errno != ENOENT &&
+        errno != ENOTDIR) {
+      return lc_pouch_logstore_set_errno(
+          error, "failed to cleanup obsolete pouch logstore");
+    }
+  }
+  return LC_OK;
+}
+
+int lc_pouch_logstore_collect_active_paths(
+    const lc_pouch_logstore *logstore, lc_pouch_logstore_paths *paths,
+    lc_error *error) {
+  DIR *root_dir;
+  struct dirent *entry;
+  int rc;
+
+  memset(paths, 0, sizeof(*paths));
+  root_dir = opendir(logstore->root_path);
+  if (root_dir == NULL) {
+    return lc_pouch_logstore_set_errno(error,
+                                       "failed to open pouch root directory");
+  }
+  rc = LC_OK;
+  while ((entry = readdir(root_dir)) != NULL) {
+    DIR *segments_dir;
+    struct dirent *segment_entry;
+    char *namespace_path;
+    char *logstore_path;
+    char *segments_path;
+    char *snapshots_path;
+    char *manifest_path;
+    char *manifest_log_path;
+    lc_pouch_logstore_paths manifest_active_paths;
+    lc_pouch_logstore_paths mentioned_paths;
+    lc_pouch_logstore_paths obsolete_paths;
+
+    memset(&manifest_active_paths, 0, sizeof(manifest_active_paths));
+    memset(&mentioned_paths, 0, sizeof(mentioned_paths));
+    memset(&obsolete_paths, 0, sizeof(obsolete_paths));
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    namespace_path = NULL;
+    logstore_path = NULL;
+    segments_path = NULL;
+    snapshots_path = NULL;
+    manifest_path = NULL;
+    manifest_log_path = NULL;
+    namespace_path = lc_pouch_logstore_join_path(logstore->allocator,
+                                                 logstore->root_path,
+                                                 entry->d_name);
+    logstore_path =
+        namespace_path != NULL
+            ? lc_pouch_logstore_join_path(logstore->allocator, namespace_path,
+                                          "logstore")
+            : NULL;
+    segments_path =
+        logstore_path != NULL
+            ? lc_pouch_logstore_join_path(logstore->allocator, logstore_path,
+                                          "segments")
+            : NULL;
+    snapshots_path =
+        logstore_path != NULL
+            ? lc_pouch_logstore_join_path(logstore->allocator, logstore_path,
+                                          "snapshots")
+            : NULL;
+    manifest_path =
+        logstore_path != NULL
+            ? lc_pouch_logstore_join_path(logstore->allocator, logstore_path,
+                                          "manifest")
+            : NULL;
+    manifest_log_path =
+        manifest_path != NULL
+            ? lc_pouch_logstore_join_path(logstore->allocator, manifest_path,
+                                          "manifest.log")
+            : NULL;
+    if (namespace_path == NULL || logstore_path == NULL ||
+        segments_path == NULL || snapshots_path == NULL ||
+        manifest_path == NULL || manifest_log_path == NULL) {
+      lc_pouch_free(logstore->allocator, namespace_path);
+      lc_pouch_free(logstore->allocator, logstore_path);
+      lc_pouch_free(logstore->allocator, segments_path);
+      lc_pouch_free(logstore->allocator, snapshots_path);
+      lc_pouch_free(logstore->allocator, manifest_path);
+      lc_pouch_free(logstore->allocator, manifest_log_path);
+      rc = lc_pouch_logstore_set_nomem(
+          error, "failed to allocate pouch segment path");
+      break;
+    }
+    rc = lc_pouch_logstore_read_namespace_manifest_paths(
+        logstore, manifest_log_path, segments_path, snapshots_path,
+        &manifest_active_paths, &mentioned_paths, &obsolete_paths, error);
+    if (rc == LC_OK) {
+      size_t path_index;
+
+      for (path_index = 0U; path_index < manifest_active_paths.count;
+           ++path_index) {
+        struct stat st;
+
+        if (strstr(manifest_active_paths.items[path_index],
+                   "/logstore/snapshots/") == NULL) {
+          continue;
+        }
+        errno = 0;
+        if (stat(manifest_active_paths.items[path_index], &st) == 0 &&
+            S_ISREG(st.st_mode) && st.st_size > 0) {
+          rc = lc_pouch_logstore_paths_add_copy(
+              logstore, paths, manifest_active_paths.items[path_index], error);
+          if (rc != LC_OK) {
+            break;
+          }
+        } else if (errno != ENOENT && errno != ENOTDIR && errno != 0) {
+          rc = lc_pouch_logstore_set_errno(error,
+                                           "failed to stat pouch snapshot");
+          break;
+        }
+      }
+    }
+    if (rc != LC_OK) {
+      lc_pouch_logstore_paths_cleanup(logstore, &manifest_active_paths);
+      lc_pouch_logstore_paths_cleanup(logstore, &mentioned_paths);
+      lc_pouch_logstore_paths_cleanup(logstore, &obsolete_paths);
+      lc_pouch_free(logstore->allocator, namespace_path);
+      lc_pouch_free(logstore->allocator, logstore_path);
+      lc_pouch_free(logstore->allocator, segments_path);
+      lc_pouch_free(logstore->allocator, snapshots_path);
+      lc_pouch_free(logstore->allocator, manifest_path);
+      lc_pouch_free(logstore->allocator, manifest_log_path);
+      break;
+    }
+    segments_dir = opendir(segments_path);
+    if (segments_dir != NULL) {
+      while ((segment_entry = readdir(segments_dir)) != NULL) {
+        struct stat st;
+        char *segment_path;
+        unsigned long ignored_number;
+
+        if (!lc_pouch_logstore_segment_name_parse(segment_entry->d_name,
+                                                  &ignored_number)) {
+          continue;
+        }
+        segment_path = lc_pouch_logstore_join_path(logstore->allocator,
+                                                   segments_path,
+                                                   segment_entry->d_name);
+        if (segment_path == NULL) {
+          rc = lc_pouch_logstore_set_nomem(
+              error, "failed to allocate pouch segment path");
+          break;
+        }
+        errno = 0;
+        if (stat(segment_path, &st) == 0 && S_ISREG(st.st_mode) &&
+            st.st_size > 0) {
+          if (lc_pouch_logstore_paths_contains(&manifest_active_paths,
+                                               segment_path)) {
+            rc = lc_pouch_logstore_paths_add_copy(logstore, paths,
+                                                  segment_path, error);
+            if (rc != LC_OK) {
+              lc_pouch_free(logstore->allocator, segment_path);
+              break;
+            }
+          } else if (!lc_pouch_logstore_paths_contains(&mentioned_paths,
+                                                       segment_path)) {
+            rc = lc_pouch_logstore_repair_manifest_for_segment_path(
+                logstore, segment_path, error);
+            if (rc != LC_OK) {
+              lc_pouch_free(logstore->allocator, segment_path);
+              break;
+            }
+            rc = lc_pouch_logstore_paths_add_copy(logstore, paths,
+                                                  segment_path, error);
+            if (rc != LC_OK) {
+              lc_pouch_free(logstore->allocator, segment_path);
+              break;
+            }
+          }
+        } else if (errno != ENOENT && errno != ENOTDIR && errno != 0) {
+          lc_pouch_free(logstore->allocator, segment_path);
+          rc = lc_pouch_logstore_set_errno(error,
+                                           "failed to stat pouch segment");
+          break;
+        }
+        lc_pouch_free(logstore->allocator, segment_path);
+      }
+      if (closedir(segments_dir) != 0 && rc == LC_OK) {
+        rc = lc_pouch_logstore_set_errno(
+            error, "failed to close pouch segments directory");
+      }
+    } else if (errno != ENOENT && errno != ENOTDIR) {
+      rc = lc_pouch_logstore_set_errno(
+          error, "failed to open pouch segments directory");
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_logstore_cleanup_obsolete_manifest_paths(
+          logstore, &manifest_active_paths, &obsolete_paths, error);
+    }
+    lc_pouch_logstore_paths_cleanup(logstore, &manifest_active_paths);
+    lc_pouch_logstore_paths_cleanup(logstore, &mentioned_paths);
+    lc_pouch_logstore_paths_cleanup(logstore, &obsolete_paths);
+    lc_pouch_free(logstore->allocator, namespace_path);
+    lc_pouch_free(logstore->allocator, logstore_path);
+    lc_pouch_free(logstore->allocator, segments_path);
+    lc_pouch_free(logstore->allocator, snapshots_path);
+    lc_pouch_free(logstore->allocator, manifest_path);
+    lc_pouch_free(logstore->allocator, manifest_log_path);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  if (closedir(root_dir) != 0 && rc == LC_OK) {
+    rc = lc_pouch_logstore_set_errno(error,
+                                     "failed to close pouch root directory");
+  }
+  if (rc != LC_OK) {
+    lc_pouch_logstore_paths_cleanup(logstore, paths);
+    return rc;
+  }
+  if (paths->count > 1U) {
+    qsort(paths->items, paths->count, sizeof(paths->items[0]),
+          lc_pouch_logstore_path_compare);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_logstore_path_segment_number(
+    const char *path, unsigned long *number_out) {
+  const char *marker;
+  const char *file_name;
+
+  marker = strstr(path, "/logstore/segments/");
+  if (marker == NULL) {
+    return 0;
+  }
+  file_name = strrchr(path, '/');
+  file_name = file_name != NULL ? file_name + 1 : path;
+  return lc_pouch_logstore_segment_name_parse(file_name, number_out);
+}
+
+static int lc_pouch_logstore_paths_same_logstore_prefix(const char *left,
+                                                       const char *right) {
+  const char *left_marker;
+  const char *right_marker;
+  size_t left_len;
+  size_t right_len;
+
+  left_marker = strstr(left, "/logstore/segments/");
+  right_marker = strstr(right, "/logstore/segments/");
+  if (left_marker == NULL || right_marker == NULL) {
+    return 0;
+  }
+  left_len = (size_t)(left_marker - left);
+  right_len = (size_t)(right_marker - right);
+  return left_len == right_len && strncmp(left, right, left_len) == 0;
+}
+
+size_t lc_pouch_logstore_compaction_candidate_file_count(
+    const lc_pouch_logstore_paths *paths) {
+  size_t candidates;
+  size_t index;
+
+  if (paths == NULL) {
+    return 0U;
+  }
+  candidates = 0U;
+  for (index = 0U; index < paths->count; ++index) {
+    unsigned long number;
+    size_t other_index;
+    int has_later_segment;
+
+    if (strstr(paths->items[index], "/logstore/snapshots/") != NULL) {
+      candidates++;
+      continue;
+    }
+    if (!lc_pouch_logstore_path_segment_number(paths->items[index], &number)) {
+      continue;
+    }
+    has_later_segment = 0;
+    for (other_index = 0U; other_index < paths->count; ++other_index) {
+      unsigned long other_number;
+
+      if (other_index == index ||
+          !lc_pouch_logstore_paths_same_logstore_prefix(
+              paths->items[index], paths->items[other_index]) ||
+          !lc_pouch_logstore_path_segment_number(paths->items[other_index],
+                                                 &other_number)) {
+        continue;
+      }
+      if (other_number > number) {
+        has_later_segment = 1;
+        break;
+      }
+    }
+    if (has_later_segment) {
+      candidates++;
+    }
+  }
+  return candidates;
+}
+
+unsigned long
+lc_pouch_logstore_mix_stat_generation(unsigned long current,
+                                      const struct stat *st) {
+  unsigned long value;
+
+  value = (unsigned long)st->st_size;
+  value ^= ((unsigned long)st->st_dev << 3);
+  value ^= ((unsigned long)st->st_ino << 1);
+  value ^= ((unsigned long)st->st_mtime << 7);
+  current ^= value + 0x9e3779b9UL + (current << 6) + (current >> 2);
+  return current;
+}
+
+int lc_pouch_logstore_active_generation(const lc_pouch_logstore *logstore,
+                                        int *found,
+                                        unsigned long *generation,
+                                        lc_error *error) {
+  lc_pouch_logstore_paths paths;
+  unsigned long total;
+  size_t path_count;
+  size_t index;
+  int rc;
+
+  if (found != NULL) {
+    *found = 0;
+  }
+  if (generation != NULL) {
+    *generation = 0UL;
+  }
+  memset(&paths, 0, sizeof(paths));
+  total = 0UL;
+  rc = lc_pouch_logstore_collect_active_paths(logstore, &paths, error);
+  path_count = paths.count;
+  for (index = 0U; rc == LC_OK && index < paths.count; ++index) {
+    struct stat st;
+
+    if (stat(paths.items[index], &st) != 0) {
+      rc = lc_pouch_logstore_set_errno(error,
+                                       "failed to stat pouch logstore record");
+      break;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size <= 0) {
+      continue;
+    }
+    total = lc_pouch_logstore_mix_stat_generation(total, &st);
+  }
+  lc_pouch_logstore_paths_cleanup(logstore, &paths);
+  if (rc == LC_OK) {
+    if (path_count > 0U && found != NULL) {
+      *found = 1;
+    }
+    if (generation != NULL) {
+      *generation = total;
+    }
+  }
   return rc;
 }

@@ -49,6 +49,10 @@ static void cleanup_default_logstore(const char *root) {
   char path[512];
 
   (void)snprintf(path, sizeof(path),
+                 "%s/default/logstore/snapshots/snap-0000000000000001.log",
+                 root);
+  (void)unlink(path);
+  (void)snprintf(path, sizeof(path),
                  "%s/default/logstore/segments/seg-0000000000000002.log",
                  root);
   (void)unlink(path);
@@ -108,6 +112,29 @@ static void fill_segment_to_seal(const char *path) {
   for (index = 0U; index < 64U; ++index) {
     assert_true(write_full(fd, bytes, sizeof(bytes)));
   }
+  assert_int_equal(close(fd), 0);
+}
+
+static void make_default_logstore_dirs(const char *root) {
+  char path[512];
+
+  assert_int_equal(mkdir(root, 0777), 0);
+  (void)snprintf(path, sizeof(path), "%s/default", root);
+  assert_int_equal(mkdir(path, 0777), 0);
+  (void)snprintf(path, sizeof(path), "%s/default/logstore", root);
+  assert_int_equal(mkdir(path, 0777), 0);
+  (void)snprintf(path, sizeof(path), "%s/default/logstore/segments", root);
+  assert_int_equal(mkdir(path, 0777), 0);
+  (void)snprintf(path, sizeof(path), "%s/default/logstore/snapshots", root);
+  assert_int_equal(mkdir(path, 0777), 0);
+}
+
+static void write_text_file(const char *path, const char *text) {
+  int fd;
+
+  fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+  assert_true(fd >= 0);
+  assert_true(write_full(fd, (const unsigned char *)text, strlen(text)));
   assert_int_equal(close(fd), 0);
 }
 
@@ -206,11 +233,108 @@ static void test_logstore_rolls_sealed_active_segment(void **state) {
   cleanup_default_logstore(root);
 }
 
+static void test_logstore_collect_repairs_manifestless_segment(void **state) {
+  char root[256];
+  char segment_path[512];
+  char manifest_path[512];
+  lc_pouch_logstore logstore;
+  lc_pouch_logstore_paths paths;
+  fsync_capture fsyncs;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "repair");
+  cleanup_default_logstore(root);
+  make_default_logstore_dirs(root);
+  (void)snprintf(segment_path, sizeof(segment_path),
+                 "%s/default/logstore/segments/seg-0000000000000001.log",
+                 root);
+  write_text_file(segment_path, "segment-body");
+  memset(&paths, 0, sizeof(paths));
+  memset(&fsyncs, 0, sizeof(fsyncs));
+  memset(&error, 0, sizeof(error));
+  lc_pouch_logstore_init(&logstore, NULL, root, capture_fsync, &fsyncs);
+
+  rc = lc_pouch_logstore_collect_active_paths(&logstore, &paths, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(paths.count, 1U);
+  assert_non_null(strstr(paths.items[0], "seg-0000000000000001.log"));
+  assert_int_equal(fsyncs.calls, 1UL);
+  (void)snprintf(manifest_path, sizeof(manifest_path),
+                 "%s/default/logstore/manifest/manifest.log", root);
+  assert_true(path_exists(manifest_path));
+
+  lc_pouch_logstore_paths_cleanup(&logstore, &paths);
+  lc_error_cleanup(&error);
+  cleanup_default_logstore(root);
+}
+
+static void test_logstore_collects_snapshot_and_generation(void **state) {
+  char root[256];
+  char segment_path[512];
+  char snapshot_path[512];
+  lc_pouch_logstore logstore;
+  lc_pouch_logstore_paths paths;
+  fsync_capture fsyncs;
+  lc_error error;
+  unsigned long generation;
+  int found;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "snapshot");
+  cleanup_default_logstore(root);
+  assert_int_equal(mkdir(root, 0777), 0);
+  memset(&paths, 0, sizeof(paths));
+  memset(&fsyncs, 0, sizeof(fsyncs));
+  memset(&error, 0, sizeof(error));
+  lc_pouch_logstore_init(&logstore, NULL, root, capture_fsync, &fsyncs);
+  rc = lc_pouch_logstore_ensure_namespace(&logstore, "default", &error);
+  assert_int_equal(rc, LC_OK);
+
+  (void)snprintf(segment_path, sizeof(segment_path),
+                 "%s/default/logstore/segments/seg-0000000000000001.log",
+                 root);
+  (void)snprintf(snapshot_path, sizeof(snapshot_path),
+                 "%s/default/logstore/snapshots/snap-0000000000000001.log",
+                 root);
+  write_text_file(segment_path, "old-segment");
+  write_text_file(snapshot_path, "snapshot-body");
+  rc = lc_pouch_logstore_append_manifest_event_for_record_path(
+      &logstore, snapshot_path, "snapshot", &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_logstore_append_manifest_event_for_record_path(
+      &logstore, segment_path, "obsolete", &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_logstore_collect_active_paths(&logstore, &paths, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(paths.count, 1U);
+  assert_non_null(strstr(paths.items[0], "snap-0000000000000001.log"));
+  assert_int_equal(lc_pouch_logstore_compaction_candidate_file_count(&paths),
+                   1U);
+  lc_pouch_logstore_paths_cleanup(&logstore, &paths);
+
+  found = 0;
+  generation = 0UL;
+  rc = lc_pouch_logstore_active_generation(&logstore, &found, &generation,
+                                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(found);
+  assert_true(generation != 0UL);
+
+  lc_error_cleanup(&error);
+  cleanup_default_logstore(root);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_logstore_parses_segment_and_snapshot_names),
       cmocka_unit_test(test_logstore_creates_namespace_manifest_and_segment),
       cmocka_unit_test(test_logstore_rolls_sealed_active_segment),
+      cmocka_unit_test(test_logstore_collect_repairs_manifestless_segment),
+      cmocka_unit_test(test_logstore_collects_snapshot_and_generation),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

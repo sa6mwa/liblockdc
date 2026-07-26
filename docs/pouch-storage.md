@@ -1383,9 +1383,12 @@ private index primitives:
 - `src/lc_pouch_logstore.c` owns per-namespace segmented logstore mechanics:
   namespace path escaping, logstore directory creation, manifest append,
   active segment selection, segment rollover, and segment/snapshot name
-  parsing. It uses a small pouch-native context made from allocator, root path,
-  and fsync callback inputs so these storage mechanics do not depend on the
-  concrete backend object.
+  parsing. It also owns manifest-derived active replay input discovery,
+  manifestless segment repair, obsolete segment/snapshot cleanup, logstore
+  generation fingerprinting, and compaction-candidate counting. It uses a small
+  pouch-native context made from allocator, root path, fsync callback inputs,
+  and retention policy so these storage mechanics do not depend on the concrete
+  backend object.
 - `src/lc_pouch.c` still owns the higher-level pouch backend adapter: sidecar
   scan adapters, live/hidden/owner/generation visibility checks, final summary
   translation, concrete fsync policy, and final `liblql` acceptance. New
