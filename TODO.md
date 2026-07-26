@@ -103,6 +103,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     rebuilt from the redesigned state projection, including row-count/hash
     validation, deleted-row exclusion, and `query_hidden` flags for future
     indexed candidate generation.
+  - [x] Add the first validated `query.index` summary reader and route
+    selectorless `query_keys` through it for default/index engines, including
+    synchronous refresh, pagination, hidden-row filtering, and an explicit
+    typed-postings error for selector predicates on the index engine.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the

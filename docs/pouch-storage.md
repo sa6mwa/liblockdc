@@ -451,7 +451,9 @@ of rewritten JSON files.
   sidecar, and returns its storage high-water token, including tombstones and
   peer-writer marker invalidation. The sidecar now carries deterministic live
   summary rows with row-count/hash validation and query-hidden flags; durable
-  typed postings and indexed mode remain to be implemented.
+  typed postings remain to be implemented. Selectorless `query_keys` can use
+  the validated summary as the first indexed path; selector predicates still
+  require explicit scan until typed postings exist.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
@@ -1044,9 +1046,15 @@ boundary by replaying query-index sidecar records, running the lightweight
 query-field posting sort/deduplicate barrier, and returning an index sequence
 that cannot move backwards across compaction or reopen. Indexed match-all queries accept
 `refresh=wait_for` by performing the same synchronous local index flush before
-scanning the indexed projection. Explicit scan mode remains available for
-full-log/full-summary scanning through the ordered metadata summary API, but it
-does not accept refresh hints because no durable query index is consulted.
+scanning the indexed projection. The first implemented indexed projection is the
+validated `query.index` live-row summary for selectorless `query_keys`:
+default/index engines refresh the sidecar, validate its row count and hash,
+stream decoded keys from the sidecar, filter `query_hidden`, paginate by row
+offset, and report `engine=index-summary`. Selector-bearing index queries fail
+closed with an explicit typed-postings error until field postings are durable.
+Explicit scan mode remains available for full-log/full-summary scanning through
+the ordered metadata summary API, but it does not accept refresh hints because
+no durable query index is consulted.
 Non-empty field selection and non-document scan return modes remain outside the
 current pouch v1 query surface. Unsupported LQL selector families are explicit
 fallback or deterministic unsupported cases; supported indexed families must

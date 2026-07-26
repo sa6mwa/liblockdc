@@ -8,9 +8,24 @@ typedef struct lc_pouch_query_index_flush_result {
   int repaired;
 } lc_pouch_query_index_flush_result;
 
+typedef struct lc_pouch_query_index_row_view {
+  const char *key;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
+} lc_pouch_query_index_row_view;
+
+typedef int (*lc_pouch_query_index_row_visit_fn)(
+    const lc_pouch_query_index_row_view *row, void *context, lc_error *error);
+
 int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                unsigned long state_index_seq,
                                lc_pouch_query_index_flush_result *out,
+                               lc_error *error);
+int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
+                               lc_pouch_query_index_row_visit_fn visit,
+                               void *context, unsigned long *index_seq,
                                lc_error *error);
 
 #endif
