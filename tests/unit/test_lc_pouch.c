@@ -1084,6 +1084,102 @@ static void test_state_writes_roll_active_manifest_segment(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_state_scheduled_compaction_installs_snapshot(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_a;
+  lc_pouch_state_write_result delete_a;
+  lc_pouch_state_write_result write_b;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char bytes[64];
+  char *namespace_path;
+  char path[1024];
+  int written;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_a, 0, sizeof(write_a));
+  memset(&delete_a, 0, sizeof(delete_a));
+  memset(&write_b, 0, sizeof(write_b));
+  memset(&read_result, 0, sizeof(read_result));
+  make_root("state-compact", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &write_a, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  rc = lc_pouch_state_delete(pouch, "team/alpha", "state/a", NULL, &delete_a,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(delete_a.etag, "pouch-state-2");
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  assert_path_file(namespace_path,
+                   "snapshots/snapshot-00000000000000000002.log");
+  assert_path_file_contains(namespace_path, "manifest",
+                            "snapshot=snapshot-00000000000000000002.log");
+  assert_path_file_contains(namespace_path, "manifest",
+                            "active_segment=seg-00000000000000000003.log");
+  written = snprintf(path, sizeof(path), "%s/segments/%s", namespace_path,
+                     "seg-00000000000000000001.log");
+  assert_true(written > 0 && (size_t)written < sizeof(path));
+  assert_false(path_is_file(path));
+  written = snprintf(path, sizeof(path), "%s/segments/%s", namespace_path,
+                     "seg-00000000000000000002.log");
+  assert_true(written > 0 && (size_t)written < sizeof(path));
+  assert_false(path_is_file(path));
+
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
+                            &write_b, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  lc_pouch_close(pouch);
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/a", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/b", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_string_equal(read_result.etag, "pouch-state-3");
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "two");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_a);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_a);
+  lc_pouch_state_write_result_cleanup(NULL, &write_b);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_namespace_manifest_repairs_from_existing_segments(
     void **state) {
   lc_pouch *pouch;
@@ -1829,6 +1925,7 @@ int main(void) {
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
+      cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
       cmocka_unit_test(
           test_namespace_manifest_repairs_from_existing_segments),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),

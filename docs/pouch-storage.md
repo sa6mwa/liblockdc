@@ -2036,6 +2036,17 @@ Compaction creates a snapshot segment containing the current live records from
 candidate sealed segments and the installed prior snapshot. It never mutates
 existing segment contents.
 
+The current redesigned C backend has the first state-only form of that
+lifecycle. When scheduled compaction is enabled and its segment-count and byte
+thresholds are met after a state mutation, pouch rebuilds the namespace state
+projection, writes `snapshots/snapshot-<segment>.log`, installs it in the
+namespace manifest, opens the next active segment, and best-effort deletes the
+compacted segment files plus the prior snapshot. Replay starts from the
+manifested snapshot and then applies only later segment tails, so failed delete
+cleanup cannot resurrect compacted records. This first cut keeps latest
+tombstone records in the snapshot as the version high-water mechanism until the
+full compact binary high-water records are implemented.
+
 When the durable segmented history is large enough and the replayed record
 count is more than twice the compacted live-head count, the writer builds
 manifested snapshot files containing a private high-water record for

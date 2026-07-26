@@ -14,6 +14,8 @@
 
 #define LC_POUCH_SEGMENT_PREFIX "seg-"
 #define LC_POUCH_SEGMENT_SUFFIX ".log"
+#define LC_POUCH_SNAPSHOT_PREFIX "snapshot-"
+#define LC_POUCH_SNAPSHOT_SUFFIX ".log"
 
 typedef lc_pouch_namespace_marker_peer_stat lc_pouch_marker_entry;
 
@@ -40,6 +42,15 @@ char *lc_pouch_namespace_segment_leaf(const lc_allocator *allocator,
 
   snprintf(stack, sizeof(stack), "%s%020lu%s", LC_POUCH_SEGMENT_PREFIX,
            segment_id, LC_POUCH_SEGMENT_SUFFIX);
+  return lc_strdup_with_allocator(allocator, stack);
+}
+
+char *lc_pouch_namespace_snapshot_leaf(const lc_allocator *allocator,
+                                       unsigned long segment_id) {
+  char stack[96];
+
+  snprintf(stack, sizeof(stack), "%s%020lu%s", LC_POUCH_SNAPSHOT_PREFIX,
+           segment_id, LC_POUCH_SNAPSHOT_SUFFIX);
   return lc_strdup_with_allocator(allocator, stack);
 }
 
@@ -99,6 +110,43 @@ static int lc_pouch_namespace_parse_segment_id(const char *leaf,
   return 1;
 }
 
+static int lc_pouch_namespace_parse_snapshot_id(const char *leaf,
+                                                unsigned long *snapshot_id) {
+  const char *digits;
+  char *end;
+  unsigned long value;
+  size_t prefix_len;
+  size_t suffix_len;
+  size_t leaf_len;
+  size_t digits_len;
+  size_t i;
+
+  if (leaf == NULL || snapshot_id == NULL) {
+    return 0;
+  }
+  prefix_len = strlen(LC_POUCH_SNAPSHOT_PREFIX);
+  suffix_len = strlen(LC_POUCH_SNAPSHOT_SUFFIX);
+  leaf_len = strlen(leaf);
+  if (leaf_len <= prefix_len + suffix_len ||
+      strncmp(leaf, LC_POUCH_SNAPSHOT_PREFIX, prefix_len) != 0 ||
+      strcmp(leaf + leaf_len - suffix_len, LC_POUCH_SNAPSHOT_SUFFIX) != 0) {
+    return 0;
+  }
+  digits = leaf + prefix_len;
+  digits_len = leaf_len - prefix_len - suffix_len;
+  for (i = 0U; i < digits_len; ++i) {
+    if (digits[i] < '0' || digits[i] > '9') {
+      return 0;
+    }
+  }
+  value = strtoul(digits, &end, 10);
+  if (end != digits + digits_len || value == 0UL) {
+    return 0;
+  }
+  *snapshot_id = value;
+  return 1;
+}
+
 static int lc_pouch_namespace_scan_segments(const lc_allocator *allocator,
                                             const char *namespace_path,
                                             unsigned long *max_segment_id,
@@ -133,12 +181,65 @@ static int lc_pouch_namespace_scan_segments(const lc_allocator *allocator,
   return LC_OK;
 }
 
-static int lc_pouch_namespace_manifest_read_active(
-    const char *manifest_path, unsigned long *active_segment_id) {
+static int lc_pouch_namespace_scan_snapshots(const lc_allocator *allocator,
+                                             const char *namespace_path,
+                                             unsigned long *max_snapshot_id,
+                                             char **latest_snapshot,
+                                             lc_error *error) {
+  char *snapshots_path;
+  DIR *dir;
+  struct dirent *entry;
+
+  *max_snapshot_id = 0UL;
+  *latest_snapshot = NULL;
+  snapshots_path = lc_pouch_path_join(allocator, namespace_path, "snapshots");
+  if (snapshots_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch snapshots path", NULL, NULL,
+                        NULL);
+  }
+  dir = opendir(snapshots_path);
+  lc_free_with_allocator(allocator, snapshots_path);
+  if (dir == NULL) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open pouch namespace snapshots", NULL, NULL,
+                        NULL);
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    unsigned long snapshot_id;
+
+    if (lc_pouch_namespace_parse_snapshot_id(entry->d_name, &snapshot_id) &&
+        snapshot_id > *max_snapshot_id) {
+      char *copy;
+
+      copy = lc_strdup_with_allocator(allocator, entry->d_name);
+      if (copy == NULL) {
+        closedir(dir);
+        lc_free_with_allocator(allocator, *latest_snapshot);
+        *latest_snapshot = NULL;
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch snapshot name", NULL,
+                            NULL, NULL);
+      }
+      lc_free_with_allocator(allocator, *latest_snapshot);
+      *latest_snapshot = copy;
+      *max_snapshot_id = snapshot_id;
+    }
+  }
+  closedir(dir);
+  return LC_OK;
+}
+
+static int lc_pouch_namespace_manifest_read(
+    const lc_allocator *allocator, const char *manifest_path,
+    unsigned long *active_segment_id, unsigned long *snapshot_segment_id,
+    char **latest_snapshot) {
   char line[256];
   FILE *fp;
 
   *active_segment_id = 0UL;
+  *snapshot_segment_id = 0UL;
+  *latest_snapshot = NULL;
   fp = fopen(manifest_path, "rb");
   if (fp == NULL) {
     return 0;
@@ -162,6 +263,24 @@ static int lc_pouch_namespace_manifest_read_active(
       if (lc_pouch_namespace_parse_segment_id(value, &parsed)) {
         *active_segment_id = parsed;
       }
+    } else if (strcmp(line, "snapshot") == 0) {
+      unsigned long parsed;
+
+      if (lc_pouch_namespace_parse_snapshot_id(value, &parsed)) {
+        char *copy;
+
+        copy = lc_strdup_with_allocator(allocator, value);
+        if (copy == NULL) {
+          fclose(fp);
+          lc_free_with_allocator(allocator, *latest_snapshot);
+          *latest_snapshot = NULL;
+          *snapshot_segment_id = 0UL;
+          return 0;
+        }
+        lc_free_with_allocator(allocator, *latest_snapshot);
+        *latest_snapshot = copy;
+        *snapshot_segment_id = parsed;
+      }
     }
   }
   fclose(fp);
@@ -171,8 +290,9 @@ static int lc_pouch_namespace_manifest_read_active(
 static int lc_pouch_namespace_manifest_write(
     const lc_allocator *allocator, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, lc_error *error) {
-  char text[512];
+  char text[640];
   char *manifest_path;
+  int written;
   int rc;
 
   manifest_path = lc_pouch_path_join(allocator, manifest->namespace_path,
@@ -182,11 +302,30 @@ static int lc_pouch_namespace_manifest_write(
                         "failed to allocate pouch namespace manifest path",
                         NULL, NULL, NULL);
   }
-  snprintf(text, sizeof(text),
-           "layout=%s\nversion=%lu\nnamespace=%s\nactive_segment=%s\n"
-           "max_segment_id=%lu\n",
-           LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION, namespace_name,
-           manifest->active_segment, manifest->max_segment_id);
+  written = snprintf(text, sizeof(text),
+                     "layout=%s\nversion=%lu\nnamespace=%s\n"
+                     "active_segment=%s\nmax_segment_id=%lu\n",
+                     LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION,
+                     namespace_name, manifest->active_segment,
+                     manifest->max_segment_id);
+  if (written < 0 || (size_t)written >= sizeof(text)) {
+    lc_free_with_allocator(allocator, manifest_path);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to format pouch namespace manifest", NULL,
+                        NULL, NULL);
+  }
+  if (manifest->latest_snapshot != NULL) {
+    int more;
+
+    more = snprintf(text + written, sizeof(text) - (size_t)written,
+                    "snapshot=%s\n", manifest->latest_snapshot);
+    if (more < 0 || (size_t)more >= sizeof(text) - (size_t)written) {
+      lc_free_with_allocator(allocator, manifest_path);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to format pouch namespace manifest", NULL,
+                          NULL, NULL);
+    }
+  }
   rc = lc_pouch_path_write_text_file(manifest_path, text, error);
   lc_free_with_allocator(allocator, manifest_path);
   return rc;
@@ -428,8 +567,12 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
                                      lc_pouch_namespace_manifest *out,
                                      lc_error *error) {
   char *manifest_path;
+  char *manifest_snapshot;
+  char *scanned_snapshot;
   unsigned long active_segment_id;
   unsigned long max_segment_id;
+  unsigned long manifest_snapshot_id;
+  unsigned long max_snapshot_id;
   int manifest_valid;
   int rc;
 
@@ -446,8 +589,17 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
                         "failed to allocate pouch namespace path", NULL, NULL,
                         NULL);
   }
+  manifest_snapshot = NULL;
+  scanned_snapshot = NULL;
   rc = lc_pouch_namespace_scan_segments(allocator, out->namespace_path,
                                         &max_segment_id, error);
+  if (rc != LC_OK) {
+    lc_pouch_namespace_manifest_cleanup(allocator, out);
+    return rc;
+  }
+  rc = lc_pouch_namespace_scan_snapshots(allocator, out->namespace_path,
+                                         &max_snapshot_id, &scanned_snapshot,
+                                         error);
   if (rc != LC_OK) {
     lc_pouch_namespace_manifest_cleanup(allocator, out);
     return rc;
@@ -455,17 +607,31 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
   manifest_path = lc_pouch_path_join(allocator, out->namespace_path,
                                      "manifest");
   if (manifest_path == NULL) {
+    lc_free_with_allocator(allocator, scanned_snapshot);
     lc_pouch_namespace_manifest_cleanup(allocator, out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch namespace manifest path",
                         NULL, NULL, NULL);
   }
   manifest_valid =
-      lc_pouch_namespace_manifest_read_active(manifest_path,
-                                             &active_segment_id);
+      lc_pouch_namespace_manifest_read(allocator, manifest_path,
+                                       &active_segment_id,
+                                       &manifest_snapshot_id,
+                                       &manifest_snapshot);
   lc_free_with_allocator(allocator, manifest_path);
-  if (!manifest_valid || active_segment_id < max_segment_id) {
+  if (max_snapshot_id > manifest_snapshot_id) {
+    lc_free_with_allocator(allocator, manifest_snapshot);
+    manifest_snapshot = scanned_snapshot;
+    scanned_snapshot = NULL;
+    manifest_snapshot_id = max_snapshot_id;
+    out->repaired = 1;
+  }
+  if (!manifest_valid || active_segment_id < max_segment_id ||
+      active_segment_id <= manifest_snapshot_id) {
     active_segment_id = max_segment_id != 0UL ? max_segment_id : 1UL;
+    if (active_segment_id <= manifest_snapshot_id) {
+      active_segment_id = manifest_snapshot_id + 1UL;
+    }
     out->repaired = 1;
   }
   if (active_segment_id == 0UL) {
@@ -473,6 +639,9 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
     out->repaired = 1;
   }
   out->active_segment_id = active_segment_id;
+  out->latest_snapshot = manifest_snapshot;
+  manifest_snapshot = NULL;
+  out->latest_snapshot_segment_id = manifest_snapshot_id;
   out->max_segment_id =
       max_segment_id > active_segment_id ? max_segment_id : active_segment_id;
   out->active_segment =
@@ -487,10 +656,13 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
     rc = lc_pouch_namespace_manifest_write(allocator, namespace_name, out,
                                            error);
     if (rc != LC_OK) {
+      lc_free_with_allocator(allocator, scanned_snapshot);
       lc_pouch_namespace_manifest_cleanup(allocator, out);
       return rc;
     }
   }
+  lc_free_with_allocator(allocator, manifest_snapshot);
+  lc_free_with_allocator(allocator, scanned_snapshot);
   return LC_OK;
 }
 
@@ -519,6 +691,52 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
   manifest->active_segment_id = segment_id;
   if (segment_id > manifest->max_segment_id) {
     manifest->max_segment_id = segment_id;
+  }
+  rc = lc_pouch_namespace_manifest_write(allocator, namespace_name, manifest,
+                                         error);
+  if (rc == LC_OK) {
+    manifest->repaired = 0;
+  }
+  return rc;
+}
+
+int lc_pouch_namespace_manifest_install_snapshot(
+    const lc_allocator *allocator, const char *namespace_name,
+    lc_pouch_namespace_manifest *manifest, const char *snapshot_leaf,
+    unsigned long snapshot_segment_id, unsigned long next_segment_id,
+    lc_error *error) {
+  char *snapshot_copy;
+  char *active_segment;
+  int rc;
+
+  if (manifest == NULL || snapshot_leaf == NULL || snapshot_leaf[0] == '\0' ||
+      snapshot_segment_id == 0UL || next_segment_id <= snapshot_segment_id) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch snapshot install requires manifest, snapshot "
+                        "and later active segment",
+                        NULL, NULL, NULL);
+  }
+  snapshot_copy = lc_strdup_with_allocator(allocator, snapshot_leaf);
+  if (snapshot_copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch snapshot name", NULL, NULL,
+                        NULL);
+  }
+  active_segment = lc_pouch_namespace_segment_leaf(allocator, next_segment_id);
+  if (active_segment == NULL) {
+    lc_free_with_allocator(allocator, snapshot_copy);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch active segment name", NULL,
+                        NULL, NULL);
+  }
+  lc_free_with_allocator(allocator, manifest->latest_snapshot);
+  lc_free_with_allocator(allocator, manifest->active_segment);
+  manifest->latest_snapshot = snapshot_copy;
+  manifest->latest_snapshot_segment_id = snapshot_segment_id;
+  manifest->active_segment = active_segment;
+  manifest->active_segment_id = next_segment_id;
+  if (next_segment_id > manifest->max_segment_id) {
+    manifest->max_segment_id = next_segment_id;
   }
   rc = lc_pouch_namespace_manifest_write(allocator, namespace_name, manifest,
                                          error);
@@ -819,6 +1037,7 @@ void lc_pouch_namespace_manifest_cleanup(
   }
   lc_free_with_allocator(allocator, manifest->namespace_path);
   lc_free_with_allocator(allocator, manifest->active_segment);
+  lc_free_with_allocator(allocator, manifest->latest_snapshot);
   memset(manifest, 0, sizeof(*manifest));
 }
 
