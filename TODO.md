@@ -30,6 +30,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     on first use.
   - [ ] Add durable transaction decision records, replay, staged participant
     recovery, and expired staged-state cleanup on reopen.
+    - [x] Add private segmented state-log decision records for staged commit
+      and discard, replay them without projecting them as user state, and
+      recover decided staged participants whose tombstone was interrupted.
+    - [ ] Add full transaction participant records and expired undecided staged
+      cleanup policy on reopen.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

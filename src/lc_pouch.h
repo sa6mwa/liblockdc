@@ -81,6 +81,9 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
 int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
                                   const char *key, const char *txn_id,
                                   int *discarded, lc_error *error);
+int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
+                                            const char *namespace_name,
+                                            lc_error *error);
 void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
                                          lc_pouch_state_write_result *result);
 int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,

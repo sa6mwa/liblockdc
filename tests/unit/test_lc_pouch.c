@@ -114,6 +114,32 @@ static void write_text_file(const char *path, const char *text) {
   assert_int_equal(fclose(fp), 0);
 }
 
+static void append_text_file(const char *path, const char *text) {
+  FILE *fp;
+
+  fp = fopen(path, "ab");
+  assert_non_null(fp);
+  assert_int_equal(fputs(text, fp) < 0 ? -1 : 0, 0);
+  assert_int_equal(fclose(fp), 0);
+}
+
+static void hex_encode_string(const char *value, char *out, size_t out_size) {
+  static const char hex[] = "0123456789abcdef";
+  const unsigned char *src;
+  size_t offset;
+
+  src = (const unsigned char *)value;
+  offset = 0U;
+  while (*src != '\0') {
+    assert_true(offset + 2U < out_size);
+    out[offset++] = hex[*src >> 4];
+    out[offset++] = hex[*src & 0x0fU];
+    ++src;
+  }
+  assert_true(offset < out_size);
+  out[offset] = '\0';
+}
+
 static void assert_file_contains(const char *path, const char *needle) {
   FILE *fp;
   char bytes[1024];
@@ -1235,6 +1261,181 @@ static void test_namespace_manifest_repairs_from_existing_segments(
   lc_error_cleanup(&error);
 }
 
+static void test_staged_state_writes_durable_decision_records(void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_state_write_result committed;
+  lc_pouch_state_write_result staged_commit;
+  lc_pouch_state_write_result promoted;
+  lc_pouch_state_write_result staged_discard;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *segment_leaf;
+  char segment_path[1024];
+  char committed_hex[64];
+  char discarded_hex[64];
+  int discarded;
+  int written;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  namespace_path = NULL;
+  segment_leaf = NULL;
+  memset(&committed, 0, sizeof(committed));
+  memset(&staged_commit, 0, sizeof(staged_commit));
+  memset(&promoted, 0, sizeof(promoted));
+  memset(&staged_discard, 0, sizeof(staged_discard));
+  lc_error_init(&error);
+  make_root("state-decision-records", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/decision", source,
+                            NULL, &committed, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "team/alpha", "state/decision",
+                                  "commit-txn", source, NULL, &staged_commit,
+                                  &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_promote_staged(pouch, "team/alpha", "state/decision",
+                                     "commit-txn", committed.etag, &promoted,
+                                     &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("{\"value\":3}", strlen("{\"value\":3}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "team/alpha", "state/discard",
+                                  "discard-txn", source, NULL,
+                                  &staged_discard, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  discarded = 0;
+  rc = lc_pouch_state_discard_staged(pouch, "team/alpha", "state/discard",
+                                     "discard-txn", &discarded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(discarded, 1);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
+  assert_non_null(namespace_path);
+  assert_non_null(segment_leaf);
+  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
+                     namespace_path, segment_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  hex_encode_string("committed", committed_hex, sizeof(committed_hex));
+  hex_encode_string("discarded", discarded_hex, sizeof(discarded_hex));
+  assert_file_contains(segment_path, "T ");
+  assert_file_contains(segment_path, committed_hex);
+  assert_file_contains(segment_path, discarded_hex);
+
+  free(segment_leaf);
+  free(namespace_path);
+  lc_pouch_state_write_result_cleanup(NULL, &staged_discard);
+  lc_pouch_state_write_result_cleanup(NULL, &promoted);
+  lc_pouch_state_write_result_cleanup(NULL, &staged_commit);
+  lc_pouch_state_write_result_cleanup(NULL, &committed);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_staged_decision_recovery_tombstones_interrupted_discard(
+    void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_state_write_result staged;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char staged_key[256];
+  char staged_key_hex[512];
+  char etag_hex[128];
+  char decision_hex[64];
+  char decision_record[1024];
+  char *namespace_path;
+  char *segment_leaf;
+  char segment_path[1024];
+  int written;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  namespace_path = NULL;
+  segment_leaf = NULL;
+  memset(&staged, 0, sizeof(staged));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("state-decision-recovery", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":9}", strlen("{\"value\":9}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "team/alpha", "state/recover",
+                                  "txn-recover", source, NULL, &staged,
+                                  &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
+  assert_non_null(namespace_path);
+  assert_non_null(segment_leaf);
+  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
+                     namespace_path, segment_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  written = snprintf(staged_key, sizeof(staged_key),
+                     "state/recover/.staging/txn-recover");
+  assert_true(written > 0 && (size_t)written < sizeof(staged_key));
+  hex_encode_string(staged_key, staged_key_hex, sizeof(staged_key_hex));
+  hex_encode_string(staged.etag, etag_hex, sizeof(etag_hex));
+  hex_encode_string("discarded", decision_hex, sizeof(decision_hex));
+  written = snprintf(decision_record, sizeof(decision_record), "T 2 %s %s %s\n",
+                     staged_key_hex, etag_hex, decision_hex);
+  assert_true(written > 0 && (size_t)written < sizeof(decision_record));
+  append_text_file(segment_path, decision_record);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", staged_key, &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(read_result.found, 0);
+  assert_file_contains(segment_path, "D 3 ");
+  assert_file_contains(segment_path, staged_key_hex);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  free(segment_leaf);
+  free(namespace_path);
+  lc_pouch_state_write_result_cleanup(NULL, &staged);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_update_get_load_roundtrips_state(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -1928,6 +2129,9 @@ int main(void) {
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
       cmocka_unit_test(
           test_namespace_manifest_repairs_from_existing_segments),
+      cmocka_unit_test(test_staged_state_writes_durable_decision_records),
+      cmocka_unit_test(
+          test_staged_decision_recovery_tombstones_interrupted_discard),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),

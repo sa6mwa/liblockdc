@@ -195,11 +195,17 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
 
 int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
                               lc_error *error) {
+  int rc;
+
   if (pouch == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "lc_pouch_ensure_namespace requires pouch", NULL, NULL,
                         NULL);
   }
-  return lc_pouch_namespace_ensure(&pouch->allocator, pouch->root_path,
-                                   namespace_name, error);
+  rc = lc_pouch_namespace_ensure(&pouch->allocator, pouch->root_path,
+                                 namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_state_recover_staged_decisions(pouch, namespace_name, error);
 }
