@@ -486,6 +486,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Physically split adaptive sparse/dense posting encoding into
         `src/lc_pouch_index_posting.c`, keeping the private posting boundary
         separate from document-table, term-dictionary, and result-cache code.
+      - [x] Physically split term dictionaries, term-ID posting tables, and
+        prepared-term cache lifecycle into `src/lc_pouch_index_terms.c`, so
+        the private index layer has distinct document, posting, term, and
+        result-cache modules.
     - [ ] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
