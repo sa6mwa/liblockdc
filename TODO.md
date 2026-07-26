@@ -86,6 +86,14 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     compaction diagnostics.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
+  - [x] Add the first redesigned pouch `query_keys` scan path over the
+    segmented state projection, with selector parsing/evaluation owned by
+    `liblql`, `query_hidden` filtering, staged-key exclusion, pagination, and
+    scan metadata.
+  - [ ] Add public document `query` row streaming over the redesigned state
+    model.
+  - [ ] Build the durable typed index/postings path and make indexed mode the
+    preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
   new pouch API and restore the comparison scenarios only when they measure the
   redesigned implementation.

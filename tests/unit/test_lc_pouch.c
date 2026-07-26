@@ -37,6 +37,13 @@ typedef struct pouch_acquire_for_update_state {
   int fail;
 } pouch_acquire_for_update_state;
 
+typedef struct pouch_query_key_capture {
+  char keys[8][128];
+  char current[128];
+  size_t current_len;
+  size_t count;
+} pouch_query_key_capture;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
@@ -66,6 +73,57 @@ static void cleanup_root(const char *root) {
 static void cleanup_all_roots(void) {
   lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-pouch-redesign-",
                             POUCH_UNIT_TMP_PREFIX);
+}
+
+static int pouch_query_key_begin(void *context, lc_error *error) {
+  pouch_query_key_capture *capture;
+
+  (void)error;
+  capture = (pouch_query_key_capture *)context;
+  capture->current_len = 0U;
+  capture->current[0] = '\0';
+  return 1;
+}
+
+static int pouch_query_key_chunk(void *context, const char *bytes, size_t len,
+                                 lc_error *error) {
+  pouch_query_key_capture *capture;
+
+  (void)error;
+  capture = (pouch_query_key_capture *)context;
+  if (capture->current_len + len >= sizeof(capture->current)) {
+    return 0;
+  }
+  memcpy(capture->current + capture->current_len, bytes, len);
+  capture->current_len += len;
+  capture->current[capture->current_len] = '\0';
+  return 1;
+}
+
+static int pouch_query_key_end(void *context, lc_error *error) {
+  pouch_query_key_capture *capture;
+
+  (void)error;
+  capture = (pouch_query_key_capture *)context;
+  if (capture->count >= sizeof(capture->keys) / sizeof(capture->keys[0])) {
+    return 0;
+  }
+  snprintf(capture->keys[capture->count], sizeof(capture->keys[capture->count]),
+           "%s", capture->current);
+  ++capture->count;
+  return 1;
+}
+
+static int pouch_query_capture_has(const pouch_query_key_capture *capture,
+                                   const char *key) {
+  size_t i;
+
+  for (i = 0U; i < capture->count; ++i) {
+    if (strcmp(capture->keys[i], key) == 0) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static int setup_pouch_unit_group(void **state) {
@@ -2344,6 +2402,144 @@ static void test_client_metadata_enforces_version_precondition(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture first_page;
+  pouch_query_key_capture second_page;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  lc_error error;
+  char root[512];
+  char cursor[64];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&first_page, 0, sizeof(first_page));
+  memset(&second_page, 0, sizeof(second_page));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-scan", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":1}",
+                             strlen("{\"category\":\"planning\",\"n\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query", "doc/a", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":2}",
+                             strlen("{\"category\":\"planning\",\"n\":2}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query", "doc/b", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"category\":\"finance\",\"n\":3}",
+                             strlen("{\"category\":\"finance\",\"n\":3}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query", "doc/c", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  memset(&options, 0, sizeof(options));
+  options.has_query_hidden = 1;
+  options.query_hidden = 1;
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":4}",
+                             strlen("{\"category\":\"planning\",\"n\":4}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query", "doc/hidden", source,
+                            &options, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":5}",
+                             strlen("{\"category\":\"planning\",\"n\":5}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "docs/query", "doc/staged",
+                                  "txn-query-hidden", source, NULL,
+                                  &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/query";
+  query_req.selector_json = selector;
+  query_req.limit = 1L;
+  rc = client->query_keys(client, &query_req, &handler, &first_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(first_page.count, 1);
+  assert_non_null(query_res.cursor);
+  assert_string_equal(query_res.return_mode, "keys");
+  assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
+  assert_true(query_res.index_seq > 0UL);
+
+  snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
+  query_req.cursor = cursor;
+  lc_query_res_cleanup(&query_res);
+  rc = client->query_keys(client, &query_req, &handler, &second_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(second_page.count, 1);
+  assert_null(query_res.cursor);
+  assert_true(pouch_query_capture_has(&first_page, "doc/a") ||
+              pouch_query_capture_has(&second_page, "doc/a"));
+  assert_true(pouch_query_capture_has(&first_page, "doc/b") ||
+              pouch_query_capture_has(&second_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/staged"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/staged"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/c"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/c"));
+
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_decisions_persist_participant_records(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -2942,6 +3138,7 @@ int main(void) {
       cmocka_unit_test(test_acquire_rejects_non_positive_ttl),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
+      cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
