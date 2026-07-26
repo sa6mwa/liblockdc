@@ -9243,13 +9243,22 @@ static int lc_pouch_disk_query_field_collect_in_summary_indices_locked(
     if (!cache_hit) {
       reader.store = store;
       reader.req = req;
+      reader.eq_from = req != NULL ? req->document_eq_term_count : (size_t)0U;
       reader.in_from = 1U;
       reader.use_prepared_exact_cache = cache_key != NULL;
       reader.alloc_message = "failed to allocate pouch in query docIDs";
-      rc = lc_pouch_index_collect_in_term_doc_ids(
-          &store->allocator, primary,
-          lc_pouch_disk_query_read_exact_term_doc_ids, &reader, &doc_ids,
-          error);
+      if (req != NULL && req->document_eq_term_count > 0U) {
+        rc = lc_pouch_index_collect_in_term_with_eq_doc_ids(
+            &store->allocator, primary, req->document_eq_terms,
+            req->document_eq_term_count,
+            lc_pouch_disk_query_read_exact_term_doc_ids, &reader, &doc_ids,
+            error);
+      } else {
+        rc = lc_pouch_index_collect_in_term_doc_ids(
+            &store->allocator, primary,
+            lc_pouch_disk_query_read_exact_term_doc_ids, &reader, &doc_ids,
+            error);
+      }
       if (rc != LC_OK) {
         lc_pouch_free(&store->allocator, cache_key);
         lc_pouch_disk_exact_term_doc_id_reader_cleanup(&reader);
@@ -13698,6 +13707,17 @@ static int lc_pouch_disk_query_index_scan(
     return lc_pouch_disk_query_field_exists_scan_locked(
         store, req, visit, visit_context, out, error);
   }
+  if (req->document_in_terms != NULL && req->document_in_term_count > 0U &&
+      req->document_in_terms[0].field != NULL &&
+      req->document_in_terms[0].values != NULL &&
+      req->document_in_terms[0].value_count > 0U &&
+      strchr(req->document_in_terms[0].field, '*') == NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_in_scan_locked(store, req, visit,
+                                                    visit_context, out, error);
+  }
   if (req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
       req->document_eq_terms[0].field != NULL &&
       req->document_eq_terms[0].value != NULL) {
@@ -14030,6 +14050,17 @@ static int lc_pouch_disk_query_index_keys_scan(
       req->document_eq_terms[0].field != NULL &&
       req->document_eq_terms[0].value != NULL) {
     return lc_pouch_disk_query_field_exists_keys_scan_locked(
+        store, req, visit, visit_context, out, error);
+  }
+  if (req->document_in_terms != NULL && req->document_in_term_count > 0U &&
+      req->document_in_terms[0].field != NULL &&
+      req->document_in_terms[0].values != NULL &&
+      req->document_in_terms[0].value_count > 0U &&
+      strchr(req->document_in_terms[0].field, '*') == NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_in_keys_scan_locked(
         store, req, visit, visit_context, out, error);
   }
   if (req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&

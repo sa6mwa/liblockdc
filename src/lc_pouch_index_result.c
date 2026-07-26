@@ -4,13 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int lc_pouch_index_result_plan_has_no_eq_filters(
-    const lc_pouch_query_index_scan_req *req) {
-  return req->document_eq_term_count == 0U &&
-         req->document_not_eq_term_count == 0U &&
-         req->document_or_eq_term_count == 0U;
-}
-
 static int lc_pouch_index_result_plan_has_no_range_filters(
     const lc_pouch_query_index_scan_req *req) {
   return req->document_range_term_count == 0U &&
@@ -117,7 +110,7 @@ static int lc_pouch_index_result_plan_in_cacheable(
          req->document_in_terms[0].values != NULL &&
          req->document_in_terms[0].value_count > 0U &&
          strchr(req->document_in_terms[0].field, '*') == NULL &&
-         lc_pouch_index_result_plan_has_no_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          req->document_not_in_term_count == 0U &&
          req->document_or_in_term_count == 0U &&
@@ -399,11 +392,14 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
                                   const lc_pouch_query_index_scan_req *req) {
   const lc_pouch_document_in_term *term;
   const char **values;
+  lc_pouch_index_eq_result_plan_key_term *eq_terms;
   size_t namespace_len;
   size_t field_len;
   size_t value_count;
   size_t value_index;
   size_t unique_count;
+  size_t eq_unique_count;
+  size_t eq_index;
   size_t total_len;
   int written;
   char *key;
@@ -446,11 +442,18 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
   }
   namespace_len = strlen(req->namespace_name);
   field_len = strlen(term->field);
+  eq_terms =
+      lc_pouch_index_result_sorted_eq_terms(allocator, req, &eq_unique_count);
+  if (req->document_eq_term_count > 0U && eq_terms == NULL) {
+    lc_pouch_free(allocator, values);
+    return NULL;
+  }
   written =
       snprintf(NULL, 0, "in:%lu:%s:%lu:%s:%lu", (unsigned long)namespace_len,
                req->namespace_name, (unsigned long)field_len, term->field,
                (unsigned long)unique_count);
   if (written < 0) {
+    lc_pouch_free(allocator, eq_terms);
     lc_pouch_free(allocator, values);
     return NULL;
   }
@@ -462,17 +465,45 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
     written = snprintf(NULL, 0, ":%lu:%s", (unsigned long)value_len,
                        values[value_index]);
     if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, eq_terms);
       lc_pouch_free(allocator, values);
       return NULL;
     }
     total_len += (size_t)written;
   }
+  if (eq_unique_count > 0U) {
+    written = snprintf(NULL, 0, ":eq:%lu", (unsigned long)eq_unique_count);
+    if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, eq_terms);
+      lc_pouch_free(allocator, values);
+      return NULL;
+    }
+    total_len += (size_t)written;
+    for (eq_index = 0U; eq_index < eq_unique_count; ++eq_index) {
+      size_t eq_field_len;
+      size_t eq_value_len;
+
+      eq_field_len = strlen(eq_terms[eq_index].field);
+      eq_value_len = strlen(eq_terms[eq_index].value);
+      written = snprintf(NULL, 0, ":%lu:%s:%lu:%s", (unsigned long)eq_field_len,
+                         eq_terms[eq_index].field, (unsigned long)eq_value_len,
+                         eq_terms[eq_index].value);
+      if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+        lc_pouch_free(allocator, eq_terms);
+        lc_pouch_free(allocator, values);
+        return NULL;
+      }
+      total_len += (size_t)written;
+    }
+  }
   if (total_len == (size_t)-1) {
+    lc_pouch_free(allocator, eq_terms);
     lc_pouch_free(allocator, values);
     return NULL;
   }
   key = (char *)lc_pouch_alloc(allocator, total_len + 1U);
   if (key == NULL) {
+    lc_pouch_free(allocator, eq_terms);
     lc_pouch_free(allocator, values);
     return NULL;
   }
@@ -493,6 +524,25 @@ lc_pouch_index_in_result_plan_key(const lc_pouch_allocator *allocator,
     offset += (size_t)written;
     cursor = key + offset;
   }
+  if (eq_unique_count > 0U) {
+    written = snprintf(cursor, (total_len + 1U) - offset, ":eq:%lu",
+                       (unsigned long)eq_unique_count);
+    offset += (size_t)written;
+    cursor = key + offset;
+    for (eq_index = 0U; eq_index < eq_unique_count; ++eq_index) {
+      size_t eq_field_len;
+      size_t eq_value_len;
+
+      eq_field_len = strlen(eq_terms[eq_index].field);
+      eq_value_len = strlen(eq_terms[eq_index].value);
+      written = snprintf(cursor, (total_len + 1U) - offset, ":%lu:%s:%lu:%s",
+                         (unsigned long)eq_field_len, eq_terms[eq_index].field,
+                         (unsigned long)eq_value_len, eq_terms[eq_index].value);
+      offset += (size_t)written;
+      cursor = key + offset;
+    }
+  }
+  lc_pouch_free(allocator, eq_terms);
   lc_pouch_free(allocator, values);
   return key;
 }

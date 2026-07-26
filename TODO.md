@@ -529,6 +529,11 @@ Latest release targets confirmed on 2026-07-23:
         `contains` candidates into private index collectors as well: disk now
         adapts text/trigram and exact-term readers, while `lc_pouch_index`
         performs sorted docID intersections before page selection.
+      - [x] Move positive equality filtering for primary non-wildcard `in`
+        candidates into a private index collector: disk adapts exact-term
+        readers for the `in` value set and equality filters, while
+        `lc_pouch_index` performs sorted docID intersections before
+        result-cache page selection.
     - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
       delta-varint docID streams and dense bitsets selected by posting
       density/encoded size.
@@ -654,6 +659,13 @@ Latest release targets confirmed on 2026-07-23:
         intersect field-presence docIDs with exact-term docIDs in
         `lc_pouch_index`, and reuse cached filtered pages across document and
         key scans until the index generation advances.
+      - [x] Extend normalized result-cache planning and routing to primary
+        non-wildcard positive `in` scans with positive equality filters:
+        compound in/equality plans append the same sorted/deduplicated
+        equality suffix after the normalized sorted/deduplicated `in` values,
+        intersect exact-term docID sets in `lc_pouch_index`, and reuse cached
+        filtered pages across document and key scans until the index
+        generation advances.
       - [x] Add index-owned docID result paging over the document table and
         route the equality document/key scans through it, so cached equality
         result pages translate only the selected page of docIDs back through

@@ -167,6 +167,24 @@ int lc_pouch_index_collect_exists_term_with_eq_doc_ids(
                                                   read_context, doc_ids, error);
 }
 
+int lc_pouch_index_collect_in_term_with_eq_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_in_term *in_term,
+    const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  int rc;
+
+  rc = lc_pouch_index_collect_in_term_doc_ids(allocator, in_term, read_exact,
+                                              read_context, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
+                                                  eq_term_count, read_exact,
+                                                  read_context, doc_ids, error);
+}
+
 int lc_pouch_index_collect_range_term_with_eq_doc_ids(
     const lc_pouch_allocator *allocator,
     const lc_pouch_document_range_term *range_term,

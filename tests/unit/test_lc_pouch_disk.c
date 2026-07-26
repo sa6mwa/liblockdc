@@ -7364,6 +7364,135 @@ static void test_query_index_in_docid_path_applies_secondary_in(void **state) {
 }
 
 static void
+test_query_index_in_eq_result_cache_reuses_compound_plan(void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  const char *values[2];
+  lc_pouch_document_in_term in;
+  lc_pouch_document_eq_term eq;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  lc_pouch_query_result_cache_status baseline;
+  lc_pouch_query_result_cache_status status;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-in-eq-cache");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&in, 0, sizeof(in));
+  memset(&eq, 0, sizeof(eq));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&baseline, 0, sizeof(baseline));
+  memset(&status, 0, sizeof(status));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->query_result_cache_status);
+
+  write_query_range_number_state(&allocator, store, "alpha",
+                                 "{\"tag\":\"planning\",\"kind\":\"include\"}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "bravo",
+                                 "{\"tag\":\"finance\",\"kind\":\"exclude\"}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "charlie",
+                                 "{\"tag\":\"ops\",\"kind\":\"include\"}",
+                                 &error);
+
+  values[0] = "s:planning";
+  values[1] = "s:finance";
+  in.field = "/tag";
+  in.values = values;
+  in.value_count = sizeof(values) / sizeof(values[0]);
+  eq.field = "/kind";
+  eq.value = "s:include";
+  req.namespace_name = "default";
+  req.limit = 8U;
+  req.document_in_terms = &in;
+  req.document_in_term_count = 1U;
+  req.document_eq_terms = &eq;
+  req.document_eq_term_count = 1U;
+
+  rc = store->query_result_cache_status(store, &baseline, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+  assert_int_equal(status.puts, baseline.puts + 1UL);
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits + 1UL);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+  assert_int_equal(status.puts, baseline.puts + 1UL);
+
+  write_query_range_number_state(&allocator, store, "delta",
+                                 "{\"tag\":\"finance\",\"kind\":\"include\"}",
+                                 &error);
+
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 2U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_string_equal(rows.keys[1], "delta");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits + 1UL);
+  assert_int_equal(status.misses, baseline.misses + 2UL);
+  assert_int_equal(status.puts, baseline.puts + 2UL);
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_string_equal(keys.keys[1], "delta");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits + 2UL);
+  assert_int_equal(status.misses, baseline.misses + 2UL);
+  assert_int_equal(status.puts, baseline.puts + 2UL);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_query_index_text_eq_result_cache_reuses_compound_plans(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -18745,6 +18874,8 @@ int main(void) {
           test_query_index_range_uses_numeric_order_for_multidigit_values),
       cmocka_unit_test(test_query_index_in_deduplicates_duplicate_values),
       cmocka_unit_test(test_query_index_in_docid_path_applies_secondary_in),
+      cmocka_unit_test(
+          test_query_index_in_eq_result_cache_reuses_compound_plan),
       cmocka_unit_test(
           test_query_index_text_eq_result_cache_reuses_compound_plans),
       cmocka_unit_test(

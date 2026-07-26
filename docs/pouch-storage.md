@@ -1353,6 +1353,10 @@ adapter now supplies separate range and exact-term docID readers and
 still owns live-state, hidden, owner, generation, and residual predicate
 guards, but the repeated candidate-set algebra is no longer embedded in the
 range posting scan loop.
+When a primary non-wildcard `in` plan has positive equality filters, the disk
+adapter supplies exact-term docID readers for both the `in` value set and the
+equality filters. `lc_pouch_index` unions the `in` values, intersects the
+positive equality docID sets, and then pages the filtered result.
 Primary positive `prefix` plans now use the same reader/planner bridge: the
 disk adapter filters text sidecar postings with visibility and secondary
 predicate checks, compiles the matching summary docIDs into adaptive postings,
@@ -1401,6 +1405,11 @@ generic equality path for the same reason. Their normalized plan keys append
 the sorted/deduplicated equality suffix to the length-prefixed field-presence
 key, so document scans and key scans share the filtered result cache until the
 index sequence advances.
+Compound non-wildcard `in`/equality scans also route through the `in` collector
+before the generic equality path. Their normalized plan keys sort and
+deduplicate typed `in` values first, then append the same sorted/deduplicated
+equality suffix, so document scans and key scans share the filtered result
+cache until the index sequence advances.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,
 simple positive numeric `range`, simple non-wildcard positive `in`, simple
