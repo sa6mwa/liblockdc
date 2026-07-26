@@ -155,7 +155,7 @@ static int lc_pouch_index_result_plan_prefix_cacheable(
          req->document_prefix_term_count == 1U &&
          req->document_prefix_terms[0].field != NULL &&
          req->document_prefix_terms[0].value != NULL &&
-         lc_pouch_index_result_plan_has_no_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
          req->document_not_prefix_term_count == 0U &&
@@ -171,7 +171,7 @@ static int lc_pouch_index_result_plan_contains_cacheable(
          req->document_contains_term_count == 1U &&
          req->document_contains_terms[0].field != NULL &&
          req->document_contains_terms[0].value != NULL &&
-         lc_pouch_index_result_plan_has_no_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
          lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
@@ -278,6 +278,51 @@ static int lc_pouch_index_eq_result_plan_key_term_compare(const void *left,
     return cmp;
   }
   return strcmp(left_term->value, right_term->value);
+}
+
+static lc_pouch_index_eq_result_plan_key_term *
+lc_pouch_index_result_sorted_eq_terms(const lc_pouch_allocator *allocator,
+                                      const lc_pouch_query_index_scan_req *req,
+                                      size_t *unique_count_out) {
+  lc_pouch_index_eq_result_plan_key_term *terms;
+  size_t count;
+  size_t index;
+  size_t unique_count;
+
+  if (unique_count_out != NULL) {
+    *unique_count_out = 0U;
+  }
+  if (req == NULL || req->document_eq_term_count == 0U) {
+    return NULL;
+  }
+  count = req->document_eq_term_count;
+  if (count > ((size_t)-1) / sizeof(terms[0])) {
+    return NULL;
+  }
+  terms = (lc_pouch_index_eq_result_plan_key_term *)lc_pouch_alloc(
+      allocator, count * sizeof(terms[0]));
+  if (terms == NULL) {
+    return NULL;
+  }
+  for (index = 0U; index < count; ++index) {
+    terms[index].field = req->document_eq_terms[index].field;
+    terms[index].value = req->document_eq_terms[index].value;
+  }
+  qsort(terms, count, sizeof(terms[0]),
+        lc_pouch_index_eq_result_plan_key_term_compare);
+  unique_count = 0U;
+  for (index = 0U; index < count; ++index) {
+    if (unique_count > 0U &&
+        strcmp(terms[index].field, terms[unique_count - 1U].field) == 0 &&
+        strcmp(terms[index].value, terms[unique_count - 1U].value) == 0) {
+      continue;
+    }
+    terms[unique_count++] = terms[index];
+  }
+  if (unique_count_out != NULL) {
+    *unique_count_out = unique_count;
+  }
+  return terms;
 }
 
 static char *
@@ -539,12 +584,18 @@ lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
                                     const lc_pouch_query_index_scan_req *req,
                                     const char *kind, const char *field,
                                     const char *value, int ignore_case) {
+  lc_pouch_index_eq_result_plan_key_term *eq_terms;
   size_t namespace_len;
   size_t field_len;
   size_t value_len;
+  size_t eq_unique_count;
+  size_t eq_index;
+  size_t total_len;
   int written;
   size_t needed;
   char *key;
+  char *cursor;
+  size_t offset;
 
   if (req == NULL || kind == NULL || field == NULL || value == NULL) {
     return NULL;
@@ -552,22 +603,80 @@ lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
   namespace_len = strlen(req->namespace_name);
   field_len = strlen(field);
   value_len = strlen(value);
+  eq_terms =
+      lc_pouch_index_result_sorted_eq_terms(allocator, req, &eq_unique_count);
+  if (req->document_eq_term_count > 0U && eq_terms == NULL) {
+    return NULL;
+  }
   written = snprintf(NULL, 0, "%s:%lu:%s:%lu:%s:%d:%lu:%s", kind,
                      (unsigned long)namespace_len, req->namespace_name,
                      (unsigned long)field_len, field, ignore_case ? 1 : 0,
                      (unsigned long)value_len, value);
   if (written < 0) {
+    lc_pouch_free(allocator, eq_terms);
     return NULL;
   }
-  needed = (size_t)written + 1U;
+  total_len = (size_t)written;
+  if (eq_unique_count > 0U) {
+    written = snprintf(NULL, 0, ":eq:%lu", (unsigned long)eq_unique_count);
+    if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, eq_terms);
+      return NULL;
+    }
+    total_len += (size_t)written;
+    for (eq_index = 0U; eq_index < eq_unique_count; ++eq_index) {
+      size_t eq_field_len;
+      size_t eq_value_len;
+
+      eq_field_len = strlen(eq_terms[eq_index].field);
+      eq_value_len = strlen(eq_terms[eq_index].value);
+      written = snprintf(NULL, 0, ":%lu:%s:%lu:%s", (unsigned long)eq_field_len,
+                         eq_terms[eq_index].field, (unsigned long)eq_value_len,
+                         eq_terms[eq_index].value);
+      if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+        lc_pouch_free(allocator, eq_terms);
+        return NULL;
+      }
+      total_len += (size_t)written;
+    }
+  }
+  if (total_len == (size_t)-1) {
+    lc_pouch_free(allocator, eq_terms);
+    return NULL;
+  }
+  needed = total_len + 1U;
   key = (char *)lc_pouch_alloc(allocator, needed);
   if (key == NULL) {
+    lc_pouch_free(allocator, eq_terms);
     return NULL;
   }
-  (void)snprintf(key, needed, "%s:%lu:%s:%lu:%s:%d:%lu:%s", kind,
-                 (unsigned long)namespace_len, req->namespace_name,
-                 (unsigned long)field_len, field, ignore_case ? 1 : 0,
-                 (unsigned long)value_len, value);
+  cursor = key;
+  offset = 0U;
+  written = snprintf(cursor, needed - offset, "%s:%lu:%s:%lu:%s:%d:%lu:%s",
+                     kind, (unsigned long)namespace_len, req->namespace_name,
+                     (unsigned long)field_len, field, ignore_case ? 1 : 0,
+                     (unsigned long)value_len, value);
+  offset += (size_t)written;
+  cursor = key + offset;
+  if (eq_unique_count > 0U) {
+    written = snprintf(cursor, needed - offset, ":eq:%lu",
+                       (unsigned long)eq_unique_count);
+    offset += (size_t)written;
+    cursor = key + offset;
+    for (eq_index = 0U; eq_index < eq_unique_count; ++eq_index) {
+      size_t eq_field_len;
+      size_t eq_value_len;
+
+      eq_field_len = strlen(eq_terms[eq_index].field);
+      eq_value_len = strlen(eq_terms[eq_index].value);
+      written = snprintf(cursor, needed - offset, ":%lu:%s:%lu:%s",
+                         (unsigned long)eq_field_len, eq_terms[eq_index].field,
+                         (unsigned long)eq_value_len, eq_terms[eq_index].value);
+      offset += (size_t)written;
+      cursor = key + offset;
+    }
+  }
+  lc_pouch_free(allocator, eq_terms);
   return key;
 }
 

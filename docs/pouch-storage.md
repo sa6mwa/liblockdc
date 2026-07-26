@@ -1388,6 +1388,11 @@ Simple positive `prefix` and `contains` scans use the same result cache. Their
 plan keys include namespace, field, case-sensitivity, and length-prefixed text
 values, so repeated text pages can reuse the matching docID vector until the
 index sequence advances.
+Compound `prefix`/equality and `contains`/equality scans now route through the
+text primary collectors before the generic equality path. Their normalized
+plan keys append the same sorted/deduplicated equality suffix used by compound
+range plans, so document scans and key scans share the filtered docID cache
+until a write advances the index generation.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,
 simple positive numeric `range`, simple non-wildcard positive `in`, simple

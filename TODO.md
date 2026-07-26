@@ -643,6 +643,11 @@ Latest release targets confirmed on 2026-07-23:
         cached filtered result pages across scan/key-scan entry points, miss
         across generation changes, and avoid unsafe broad prepared-range reuse
         when secondary equality filters are present.
+      - [x] Extend normalized result-cache planning and routing to primary
+        `prefix` and `contains` scans with positive equality filters: compound
+        text/equality plans use the same sorted/deduplicated equality suffix
+        in their plan keys and reuse cached filtered pages across document and
+        key scans until the index generation advances.
       - [x] Add index-owned docID result paging over the document table and
         route the equality document/key scans through it, so cached equality
         result pages translate only the selected page of docIDs back through

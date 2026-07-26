@@ -13656,6 +13656,26 @@ static int lc_pouch_disk_query_index_scan(
     return lc_pouch_disk_query_field_range_scan_locked(
         store, req, visit, visit_context, out, error);
   }
+  if (req->document_prefix_terms != NULL &&
+      req->document_prefix_term_count > 0U &&
+      req->document_prefix_terms[0].field != NULL &&
+      req->document_prefix_terms[0].value != NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_prefix_scan_locked(
+        store, req, visit, visit_context, out, error);
+  }
+  if (req->document_contains_terms != NULL &&
+      req->document_contains_term_count > 0U &&
+      req->document_contains_terms[0].field != NULL &&
+      req->document_contains_terms[0].value != NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_contains_scan_locked(
+        store, req, visit, visit_context, out, error);
+  }
   if (req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
       req->document_eq_terms[0].field != NULL &&
       req->document_eq_terms[0].value != NULL) {
@@ -13959,6 +13979,26 @@ static int lc_pouch_disk_query_index_keys_scan(
       req->document_eq_terms[0].field != NULL &&
       req->document_eq_terms[0].value != NULL) {
     return lc_pouch_disk_query_field_range_keys_scan_locked(
+        store, req, visit, visit_context, out, error);
+  }
+  if (req->document_prefix_terms != NULL &&
+      req->document_prefix_term_count > 0U &&
+      req->document_prefix_terms[0].field != NULL &&
+      req->document_prefix_terms[0].value != NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_prefix_keys_scan_locked(
+        store, req, visit, visit_context, out, error);
+  }
+  if (req->document_contains_terms != NULL &&
+      req->document_contains_term_count > 0U &&
+      req->document_contains_terms[0].field != NULL &&
+      req->document_contains_terms[0].value != NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_contains_keys_scan_locked(
         store, req, visit, visit_context, out, error);
   }
   if (req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&

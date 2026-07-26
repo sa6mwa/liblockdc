@@ -498,6 +498,19 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
   assert_result_plan_key(&req, LC_POUCH_INDEX_RESULT_PLAN_PREFIX,
                          "prefix:7:default:5:/name:1:2:al");
 
+  compound_eq[0].field = "/kind";
+  compound_eq[0].value = "s:include";
+  compound_eq[1].field = "/bucket";
+  compound_eq[1].value = "s:hot";
+  compound_eq[2].field = "/kind";
+  compound_eq[2].value = "s:include";
+  req.document_eq_terms = compound_eq;
+  req.document_eq_term_count = sizeof(compound_eq) / sizeof(compound_eq[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_PREFIX,
+      "prefix:7:default:5:/name:1:2:al:eq:2:7:/bucket:5:s:hot:5:/kind:9:s:"
+      "include");
+
   memset(&req, 0, sizeof(req));
   req.namespace_name = "default";
   contains.field = "/name";
@@ -507,6 +520,13 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
   req.document_contains_term_count = 1U;
   assert_result_plan_key(&req, LC_POUCH_INDEX_RESULT_PLAN_CONTAINS,
                          "contains:7:default:5:/name:0:3:pha");
+
+  req.document_eq_terms = compound_eq;
+  req.document_eq_term_count = sizeof(compound_eq) / sizeof(compound_eq[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_CONTAINS,
+      "contains:7:default:5:/name:0:3:pha:eq:2:7:/bucket:5:s:hot:5:/kind:9:s:"
+      "include");
 }
 
 static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
