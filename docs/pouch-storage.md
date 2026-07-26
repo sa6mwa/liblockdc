@@ -1526,7 +1526,12 @@ contains, and `DateAfter` scans cache docIDs by the current index identity and
 a length-prefixed plan key, then ask the index layer to page the cached docIDs
 over the document table before disk converts the selected page back to summary
 entries or key snapshots. Updates advance the index sequence, so stale cached
-results miss the cache.
+results miss the cache. DateAfter has started the result-page local-docID
+cutover: disk stores namespace-local docIDs in the normalized result cache,
+pages over the identity-matched document-table generation, and converts only
+the selected local page back to summaries or key snapshots. The other simple
+result-cache families still page over the live global in-memory document table
+until they receive the same cutover.
 Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
 Residual selectors such as date predicates use the same identity-keyed result
@@ -1536,10 +1541,10 @@ strings are read as typed docID vectors newer than the bound and plausible
 unsupported temporal strings remain residual docIDs. Indexed DateAfter treats
 that generation as authoritative after repair and then applies live-state,
 owner, hidden, key, and secondary-predicate guards before paging. It does not
-fall back to reparsing field postings on the query hot path. DateAfter uses the
-index-owned cached-page helper for normalized-plan lookup, cache insertion, and
-doc-table cursor paging; disk only adapts the temporal generation reader and
-translates the selected page. The client-level `liblql` filter remains
+fall back to reparsing field postings on the query hot path. DateAfter converts
+the accepted global candidate docIDs into the identity-matched document-table
+generation, stores and pages those namespace-local docIDs, and then translates
+only the selected local page. The client-level `liblql` filter remains
 authoritative for final acceptance and owns public cursor selection for
 residual pages.
 Temporal generation postings are stored with namespace-local docIDs and remap

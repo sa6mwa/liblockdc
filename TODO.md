@@ -811,6 +811,12 @@ Latest release targets confirmed on 2026-07-23:
         proves first-page population and resumed key/document pages reuse the
         cached candidate vector while final `liblql` acceptance still owns
         visible results.
+      - [x] Cut indexed `DateAfter` result-cache/page consumption over to
+        namespace-local document-table generations: disk converts collected
+        global candidate docIDs into the identity-matched `.lcpdtg`, stores
+        local docIDs in the normalized result cache, pages over that
+        per-namespace document table, and only resolves selected page docIDs
+        back to summaries or key snapshots after paging.
       - [x] Move simple result-cache plan key construction into
         `lc_pouch_index`: equality, exists, `in`, range, prefix, and contains
         cacheability/normalization now live with the planner cache boundary

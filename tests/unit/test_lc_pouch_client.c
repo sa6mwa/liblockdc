@@ -10555,6 +10555,7 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
+  lc_client *other_client;
   lc_lease *alpha;
   lc_lease *bravo;
   lc_lease *charlie;
@@ -10562,6 +10563,7 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   lc_lease *echo;
   lc_lease *foxtrot;
   lc_lease *golf;
+  lc_lease *other_doc;
   lc_query_req req;
   lc_query_res res;
   lc_query_key_handler handler;
@@ -10583,6 +10585,15 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   memset(&capture, 0, sizeof(capture));
   memset(&cache_baseline, 0, sizeof(cache_baseline));
   memset(&cache_status, 0, sizeof(cache_status));
+  other_client = open_pouch_client_with_namespace(endpoint, "aard");
+  other_doc = pouch_acquire_query_key(other_client, "aardvark", &error);
+  pouch_save_query_json(other_doc,
+                        "{\"created_at\":\"2028-01-01T00:00:00Z\","
+                        "\"value\":\"other-namespace\"}",
+                        &error);
+  other_doc->close(other_doc);
+  other_client->close(other_client);
+
   client = open_pouch_client(endpoint);
   alpha = pouch_acquire_query_key(client, "alpha", &error);
   pouch_save_query_json(alpha,
