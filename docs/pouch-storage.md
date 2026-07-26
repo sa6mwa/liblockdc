@@ -1379,6 +1379,9 @@ the primary text candidate docIDs with exact-term docIDs before result paging.
 For primary positive `exists` plans with positive equality filters, the disk
 adapter reuses field-presence docID readers and exact-term docID readers while
 `lc_pouch_index` performs the sorted docID intersection before paging.
+Negative equality filters on primary positive `exists` plans use the same
+bridge: field-presence docIDs are intersected with optional positive equality
+docIDs, then negative exact-term docID sets are subtracted in `lc_pouch_index`.
 The index layer also owns the first result-cache primitive: a generation plus
 normalized-plan key maps to a sorted docID vector. The simple result-cache plan
 key constructors now live in `lc_pouch_index`, and disk supplies only the known
@@ -1424,6 +1427,10 @@ scans reuse the same filtered result until the index sequence advances.
 Primary non-wildcard `in`/not-equality scans append that same normalized
 `not_eq` suffix after the sorted/deduplicated `in` value list and any positive
 equality suffix. The cached docID vector is the unioned `in` value set after
+index-owned intersection/subtraction.
+Primary positive `exists`/not-equality scans append the normalized `not_eq`
+suffix after the length-prefixed field-presence key and any positive equality
+suffix. The cached docID vector is the field-presence candidate set after
 index-owned intersection/subtraction.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,

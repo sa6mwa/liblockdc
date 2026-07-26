@@ -8052,6 +8052,130 @@ test_query_index_exists_eq_result_cache_reuses_compound_plan(void **state) {
 }
 
 static void
+test_query_index_exists_not_eq_result_cache_subtracts_negative_terms(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_document_exists_term exists;
+  lc_pouch_document_eq_term not_equal;
+  lc_pouch_query_index_scan_req req;
+  lc_pouch_query_index_scan_res scan;
+  lc_pouch_query_result_cache_status baseline;
+  lc_pouch_query_result_cache_status status;
+  scan_capture rows;
+  key_capture keys;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-exists-not-eq-cache");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&exists, 0, sizeof(exists));
+  memset(&not_equal, 0, sizeof(not_equal));
+  memset(&req, 0, sizeof(req));
+  memset(&scan, 0, sizeof(scan));
+  memset(&baseline, 0, sizeof(baseline));
+  memset(&status, 0, sizeof(status));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->query_result_cache_status);
+
+  write_query_range_number_state(&allocator, store, "alpha",
+                                 "{\"tag\":\"yes\",\"status\":\"allow\"}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "bravo",
+                                 "{\"tag\":\"yes\",\"status\":\"block\"}",
+                                 &error);
+  write_query_range_number_state(&allocator, store, "charlie",
+                                 "{\"status\":\"allow\"}", &error);
+
+  exists.field = "/tag";
+  not_equal.field = "/status";
+  not_equal.value = "s:block";
+  req.namespace_name = "default";
+  req.limit = 8U;
+  req.document_exists_terms = &exists;
+  req.document_exists_term_count = 1U;
+  req.document_not_eq_terms = &not_equal;
+  req.document_not_eq_term_count = 1U;
+
+  rc = store->query_result_cache_status(store, &baseline, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 1U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+  assert_int_equal(status.puts, baseline.puts + 1UL);
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 1U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits + 1UL);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+  assert_int_equal(status.puts, baseline.puts + 1UL);
+
+  write_query_range_number_state(&allocator, store, "delta",
+                                 "{\"tag\":\"yes\",\"status\":\"allow\"}",
+                                 &error);
+
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+  rc = store->query_index_scan(store, &req, capture_scan_row, &rows, &scan,
+                               &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, 2U);
+  assert_string_equal(rows.keys[0], "alpha");
+  assert_string_equal(rows.keys[1], "delta");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits + 1UL);
+  assert_int_equal(status.misses, baseline.misses + 2UL);
+  assert_int_equal(status.puts, baseline.puts + 2UL);
+
+  rc = store->query_index_keys_scan(store, &req, capture_query_key, &keys,
+                                    &scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, 2U);
+  assert_string_equal(keys.keys[0], "alpha");
+  assert_string_equal(keys.keys[1], "delta");
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(&allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits + 2UL);
+  assert_int_equal(status.misses, baseline.misses + 2UL);
+  assert_int_equal(status.puts, baseline.puts + 2UL);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_query_index_contains_uses_trigram_posting_candidates(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
@@ -19138,6 +19262,8 @@ int main(void) {
           test_query_index_text_eq_result_cache_reuses_compound_plans),
       cmocka_unit_test(
           test_query_index_exists_eq_result_cache_reuses_compound_plan),
+      cmocka_unit_test(
+          test_query_index_exists_not_eq_result_cache_subtracts_negative_terms),
       cmocka_unit_test(
           test_query_index_contains_uses_trigram_posting_candidates),
       cmocka_unit_test(test_query_index_summary_scan_applies_negative_terms),

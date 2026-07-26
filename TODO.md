@@ -543,6 +543,11 @@ Latest release targets confirmed on 2026-07-23:
         exact-term readers while `lc_pouch_index` unions `in` values,
         intersects optional positive equality filters, and subtracts sorted
         not-eq docID sets before result-cache page selection.
+      - [x] Move negative equality filtering for primary positive `exists`
+        candidates into the same private index collector path: disk adapts
+        field-presence and exact-term readers while `lc_pouch_index`
+        intersects optional positive equality filters and subtracts sorted
+        not-eq docID sets before result-cache page selection.
     - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
       delta-varint docID streams and dense bitsets selected by posting
       density/encoded size.
@@ -686,6 +691,13 @@ Latest release targets confirmed on 2026-07-23:
         any positive equality suffix, subtract the negative exact-term docID
         sets in `lc_pouch_index`, and reuse cached filtered pages across
         document and key scans until the index generation advances.
+      - [x] Extend normalized result-cache planning to primary positive
+        `exists` scans with negative equality filters: exists/not-equality
+        plans append a sorted/deduplicated `not_eq` suffix after the
+        field-presence key and any positive equality suffix, subtract the
+        negative exact-term docID sets in `lc_pouch_index`, and reuse cached
+        filtered pages across document and key scans until the index
+        generation advances.
       - [x] Add index-owned docID result paging over the document table and
         route the equality document/key scans through it, so cached equality
         result pages translate only the selected page of docIDs back through

@@ -7241,13 +7241,19 @@ lc_pouch_disk_collect_exists_result_doc_ids(void *context, int cacheable,
   collect->reader.eq_from = collect->reader.req != NULL
                                 ? collect->reader.req->document_eq_term_count
                                 : 0U;
+  collect->reader.skip_not_eq_match =
+      collect->reader.req != NULL &&
+      collect->reader.req->document_not_eq_term_count > 0U;
   collect->reader.use_prepared_exists_cache = cacheable;
   if (collect->reader.req != NULL &&
-      collect->reader.req->document_eq_term_count > 0U) {
-    return lc_pouch_index_collect_exists_term_with_eq_doc_ids(
+      (collect->reader.req->document_eq_term_count > 0U ||
+       collect->reader.req->document_not_eq_term_count > 0U)) {
+    return lc_pouch_index_collect_exists_term_with_eq_and_not_eq_doc_ids(
         &collect->reader.store->allocator, collect->primary,
         collect->reader.req->document_eq_terms,
         collect->reader.req->document_eq_term_count,
+        collect->reader.req->document_not_eq_terms,
+        collect->reader.req->document_not_eq_term_count,
         lc_pouch_disk_query_read_exists_term_doc_ids,
         lc_pouch_disk_query_read_exact_term_doc_ids, &collect->reader, doc_ids,
         error);
