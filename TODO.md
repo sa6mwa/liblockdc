@@ -90,9 +90,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
         side effects: lease attachment uploads with `txn_id` remain hidden
         until participant commit, are discarded on rollback, and replay during
         client open uses the same staged object records.
+      - [x] Apply transaction commit/rollback decisions to staged attachment
+        delete and clear side effects: delete markers remain hidden until
+        commit, rollback preserves committed attachments, and clear also
+        covers same-transaction staged uploads.
       - [ ] Extend transaction participant replay to remaining queue/object
-        side effects, staged attachment delete/clear operations, and
-        query/index refresh wakeups.
+        side effects and query/index refresh wakeups.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

@@ -4996,6 +4996,179 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void pouch_attach_text(lc_client *client, const char *namespace_name,
+                              const char *key, const char *txn_id,
+                              const char *name, const char *body,
+                              lc_error *error) {
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_source *source;
+  int rc;
+
+  lc_attach_op_init(&attach_op);
+  memset(&attach_res, 0, sizeof(attach_res));
+  source = NULL;
+  attach_op.lease.namespace_name = namespace_name;
+  attach_op.lease.key = key;
+  attach_op.lease.txn_id = txn_id;
+  attach_op.name = name;
+  attach_op.content_type = "text/plain";
+  rc = lc_source_from_memory(body, strlen(body), &source, error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, error);
+  source->close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_attach_res_cleanup(&attach_res);
+}
+
+static int pouch_attachment_list_has_name(const lc_attachment_list *list,
+                                          const char *name) {
+  size_t i;
+
+  for (i = 0U; i < list->count; ++i) {
+    if (strcmp(list->items[i].name, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void test_txn_decisions_apply_attachment_delete_and_clear(
+    void **state) {
+  lc_client *client;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_attachment_delete_op delete_op;
+  lc_attachment_delete_all_op delete_all_op;
+  lc_attachment_list_req list_req;
+  lc_attachment_list list;
+  lc_error error;
+  char root[512];
+  int deleted;
+  int deleted_count;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_attachment_delete_op_init(&delete_op);
+  lc_attachment_delete_all_op_init(&delete_all_op);
+  lc_attachment_list_req_init(&list_req);
+  memset(&list, 0, sizeof(list));
+  lc_error_init(&error);
+  make_root("txn-attachment-delete", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
+                    "keep.txt", "keep", &error);
+  pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
+                    "delete.txt", "delete", &error);
+  pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
+                    "rollback-delete.txt", "rollback-delete", &error);
+
+  list_req.lease.namespace_name = "objects/delete";
+  list_req.lease.key = "state/object-3";
+  delete_op.lease.namespace_name = "objects/delete";
+  delete_op.lease.key = "state/object-3";
+  delete_op.lease.txn_id = "txn-delete-commit";
+  delete_op.selector.name = "delete.txt";
+  deleted = 0;
+  rc = client->delete_attachment(client, &delete_op, &deleted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted, 1);
+
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(pouch_attachment_list_has_name(&list, "delete.txt"));
+  lc_attachment_list_cleanup(&list);
+
+  participant.namespace_name = "objects/delete";
+  participant.key = "state/object-3";
+  participant.backend_hash = "backend-object";
+  decision_req.txn_id = "txn-delete-commit";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(pouch_attachment_list_has_name(&list, "delete.txt"));
+  assert_true(pouch_attachment_list_has_name(&list, "keep.txt"));
+  assert_true(pouch_attachment_list_has_name(&list, "rollback-delete.txt"));
+  lc_attachment_list_cleanup(&list);
+
+  delete_op.lease.txn_id = "txn-delete-rollback";
+  delete_op.selector.name = "rollback-delete.txt";
+  deleted = 0;
+  rc = client->delete_attachment(client, &delete_op, &deleted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted, 1);
+  decision_req.txn_id = "txn-delete-rollback";
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(pouch_attachment_list_has_name(&list, "rollback-delete.txt"));
+  lc_attachment_list_cleanup(&list);
+
+  pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
+                    "clear-a.txt", "clear-a", &error);
+  pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
+                    "clear-b.txt", "clear-b", &error);
+  pouch_attach_text(client, "objects/delete", "state/object-3",
+                    "txn-clear-commit", "staged-clear.txt", "staged-clear",
+                    &error);
+  delete_all_op.lease.namespace_name = "objects/delete";
+  delete_all_op.lease.key = "state/object-3";
+  delete_all_op.lease.txn_id = "txn-clear-commit";
+  deleted_count = 0;
+  rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(deleted_count >= 4);
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(list.count >= 4U);
+  lc_attachment_list_cleanup(&list);
+  decision_req.txn_id = "txn-clear-commit";
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 0U);
+  lc_attachment_list_cleanup(&list);
+
+  pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
+                    "rollback-clear.txt", "rollback-clear", &error);
+  delete_all_op.lease.txn_id = "txn-clear-rollback";
+  deleted_count = 0;
+  rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted_count, 1);
+  decision_req.txn_id = "txn-clear-rollback";
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_string_equal(list.items[0].name, "rollback-clear.txt");
+  lc_attachment_list_cleanup(&list);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   lc_client *client;
   lc_pouch *pouch;
@@ -5400,6 +5573,7 @@ int main(void) {
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_txn_decisions_apply_attachment_side_effects),
       cmocka_unit_test(test_txn_recovery_applies_attachment_side_effects),
+      cmocka_unit_test(test_txn_decisions_apply_attachment_delete_and_clear),
       cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),

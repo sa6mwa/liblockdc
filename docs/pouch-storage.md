@@ -2194,10 +2194,13 @@ open-time tombstone cleanup of recovered decided transaction records. Attachment
 uploads made through a lease carrying `txn_id` now write staged object records
 under `.lockd/attachments`; ordinary attachment listing skips those staged
 records, participant commit promotes them, participant rollback discards them,
-and open-time transaction replay applies the same side effects. Queue
-transaction wakeups, staged attachment delete/clear operations, query refresh
-coupling, and broader mixed object/queue transaction coverage remain targets
-for transaction integration.
+and open-time transaction replay applies the same side effects. Attachment
+delete and clear operations made through a lease carrying `txn_id` now write
+hidden staged delete-marker records; participant commit converts those markers
+into committed attachment tombstones, while participant rollback discards the
+markers and preserves committed attachments. Queue transaction wakeups, query
+refresh coupling, and broader mixed object/queue transaction coverage remain
+targets for transaction integration.
 
 The staging listing contract is narrower than generic object listing. It must
 include direct staged state objects only and exclude nested staged attachment
@@ -2223,6 +2226,8 @@ objects. Recovery must support:
   every participant;
 - rollback records that discard staged state, staged attachment uploads, and
   clear staged metadata;
+- commit records that apply staged attachment delete/clear tombstones, while
+  rollback records discard those delete markers;
 - expired pending records that roll back;
 - participants in different namespaces;
 - explicit replay by transaction id;

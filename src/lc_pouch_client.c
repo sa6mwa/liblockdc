@@ -18,6 +18,9 @@
 #include <string.h>
 #include <time.h>
 
+#define LC_POUCH_ATTACHMENT_DELETE_CONTENT_TYPE                               \
+  "application/x-lockdc-pouch-attachment-delete"
+
 typedef struct lc_pouch_acquire_for_update_file {
   FILE *fp;
 } lc_pouch_acquire_for_update_file;
@@ -1588,6 +1591,37 @@ static int lc_pouch_storage_key_has_staging_suffix(const char *key) {
   return key != NULL && strstr(key, "/.staging/") != NULL;
 }
 
+static int lc_pouch_attachment_is_delete_marker(const char *content_type) {
+  return content_type != NULL &&
+         strcmp(content_type, LC_POUCH_ATTACHMENT_DELETE_CONTENT_TYPE) == 0;
+}
+
+static int lc_pouch_attachment_stage_delete(lc_client_handle *client,
+                                            const char *attachment_key,
+                                            const char *txn_id,
+                                            lc_error *error) {
+  lc_source *source;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  int rc;
+
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  rc = lc_source_from_memory("", 0U, &source, error);
+  if (rc == LC_OK) {
+    options.content_type = LC_POUCH_ATTACHMENT_DELETE_CONTENT_TYPE;
+    rc = lc_pouch_state_stage_write(client->pouch, ".lockd/attachments",
+                                    attachment_key, txn_id, source, &options,
+                                    &result, error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  return rc;
+}
+
 static char *lc_pouch_attachment_id_from_name(const char *name,
                                               lc_error *error) {
   char *name_hex;
@@ -1927,6 +1961,21 @@ static int lc_pouch_txn_key_list_append(lc_pouch_txn_key_list *list,
   }
   list->keys[list->count++] = copy;
   return LC_OK;
+}
+
+static int lc_pouch_txn_key_list_contains(const lc_pouch_txn_key_list *list,
+                                          const char *key) {
+  size_t i;
+
+  if (list == NULL || key == NULL) {
+    return 0;
+  }
+  for (i = 0U; i < list->count; ++i) {
+    if (strcmp(list->keys[i], key) == 0) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static int lc_pouch_txn_collect_key(const lc_pouch_state_visit_entry *entry,
@@ -3299,18 +3348,17 @@ static char *lc_pouch_txn_staging_suffix(const char *txn_id,
   return suffix;
 }
 
-static int lc_pouch_txn_apply_attachment_participant(
-    lc_client_handle *client, const lc_txn_participant *participant,
-    const char *txn_id, const char *state, lc_error *error) {
+static int lc_pouch_collect_staged_attachment_bases(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *txn_id, lc_pouch_txn_key_list *out, lc_error *error) {
   lc_pouch_txn_attachment_collect collect;
   char *prefix;
   char *suffix;
-  size_t i;
   int rc;
 
+  memset(out, 0, sizeof(*out));
   memset(&collect, 0, sizeof(collect));
-  prefix = lc_pouch_attachment_prefix(participant->namespace_name,
-                                      participant->key, error);
+  prefix = lc_pouch_attachment_prefix(namespace_name, key, error);
   if (prefix == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
@@ -3326,26 +3374,77 @@ static int lc_pouch_txn_apply_attachment_participant(
   rc = lc_pouch_state_visit(client->pouch, ".lockd/attachments",
                             lc_pouch_txn_collect_attachment_staged, &collect,
                             error);
-  for (i = 0U; rc == LC_OK && i < collect.base_keys.count; ++i) {
-    if (strcmp(state, "commit") == 0) {
-      lc_pouch_state_write_result result;
-
-      memset(&result, 0, sizeof(result));
-      rc = lc_pouch_state_commit_staged(client->pouch, ".lockd/attachments",
-                                        collect.base_keys.keys[i], txn_id,
-                                        &result, error);
-      lc_pouch_state_write_result_cleanup(&client->allocator, &result);
-    } else if (strcmp(state, "rollback") == 0) {
-      int discarded;
-
-      rc = lc_pouch_state_discard_staged(client->pouch, ".lockd/attachments",
-                                         collect.base_keys.keys[i], txn_id,
-                                         &discarded, error);
-    }
+  if (rc == LC_OK) {
+    *out = collect.base_keys;
+    memset(&collect.base_keys, 0, sizeof(collect.base_keys));
   }
   lc_pouch_txn_key_list_cleanup(&collect.base_keys);
   free(suffix);
   free(prefix);
+  return rc;
+}
+
+static int lc_pouch_txn_commit_attachment_stage(lc_client_handle *client,
+                                                const char *base_key,
+                                                const char *txn_id,
+                                                lc_error *error) {
+  lc_pouch_state_read_result staged;
+  lc_pouch_state_write_result result;
+  char *staged_key;
+  int discarded;
+  int rc;
+
+  memset(&staged, 0, sizeof(staged));
+  memset(&result, 0, sizeof(result));
+  staged_key = lc_pouch_staged_storage_key(base_key, txn_id, error);
+  if (staged_key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  rc = lc_pouch_state_read(client->pouch, ".lockd/attachments", staged_key,
+                           &staged, error);
+  if (rc == LC_OK && staged.found &&
+      lc_pouch_attachment_is_delete_marker(staged.content_type)) {
+    rc = lc_pouch_state_delete(client->pouch, ".lockd/attachments", base_key,
+                               NULL, &result, error);
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_discard_staged(client->pouch, ".lockd/attachments",
+                                         base_key, txn_id, &discarded, error);
+    }
+  } else if (rc == LC_OK) {
+    rc = lc_pouch_state_commit_staged(client->pouch, ".lockd/attachments",
+                                      base_key, txn_id, &result, error);
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  }
+  free(staged_key);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &staged);
+  return rc;
+}
+
+static int lc_pouch_txn_apply_attachment_participant(
+    lc_client_handle *client, const lc_txn_participant *participant,
+    const char *txn_id, const char *state, lc_error *error) {
+  lc_pouch_txn_key_list base_keys;
+  size_t i;
+  int rc;
+
+  memset(&base_keys, 0, sizeof(base_keys));
+  rc = lc_pouch_collect_staged_attachment_bases(
+      client, participant->namespace_name, participant->key, txn_id,
+      &base_keys, error);
+  for (i = 0U; rc == LC_OK && i < base_keys.count; ++i) {
+    if (strcmp(state, "commit") == 0) {
+      rc = lc_pouch_txn_commit_attachment_stage(client, base_keys.keys[i],
+                                                txn_id, error);
+    } else if (strcmp(state, "rollback") == 0) {
+      int discarded;
+
+      rc = lc_pouch_state_discard_staged(client->pouch, ".lockd/attachments",
+                                         base_keys.keys[i], txn_id,
+                                         &discarded, error);
+    }
+  }
+  lc_pouch_txn_key_list_cleanup(&base_keys);
   return rc;
 }
 
@@ -4492,6 +4591,8 @@ int lc_pouch_client_delete_attachment_method(
   const char *namespace_name;
   char *name;
   char *attachment_key;
+  char *staged_key;
+  int found;
   int rc;
 
   if (self == NULL || req == NULL || deleted == NULL) {
@@ -4511,6 +4612,8 @@ int lc_pouch_client_delete_attachment_method(
   memset(&write_result, 0, sizeof(write_result));
   name = NULL;
   attachment_key = NULL;
+  staged_key = NULL;
+  found = 0;
   namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
 
   name = lc_pouch_attachment_name_from_selector(&req->selector, error);
@@ -4526,6 +4629,30 @@ int lc_pouch_client_delete_attachment_method(
   rc = lc_pouch_state_read(client->pouch, ".lockd/attachments",
                            attachment_key, &read_result, error);
   if (rc == LC_OK && read_result.found) {
+    found = 1;
+  }
+  if (rc == LC_OK && lc_pouch_txn_id_present(req->lease.txn_id)) {
+    staged_key =
+        lc_pouch_staged_storage_key(attachment_key, req->lease.txn_id, error);
+    if (staged_key == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      goto cleanup;
+    }
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    memset(&read_result, 0, sizeof(read_result));
+    rc = lc_pouch_state_read(client->pouch, ".lockd/attachments",
+                             staged_key, &read_result, error);
+    if (rc == LC_OK && read_result.found) {
+      found = 1;
+    }
+    if (rc == LC_OK && found) {
+      rc = lc_pouch_attachment_stage_delete(client, attachment_key,
+                                            req->lease.txn_id, error);
+      if (rc == LC_OK) {
+        *deleted = 1;
+      }
+    }
+  } else if (rc == LC_OK && read_result.found) {
     options.expected_version = read_result.version;
     options.has_expected_version = 1;
     rc = lc_pouch_state_delete(client->pouch, ".lockd/attachments",
@@ -4539,6 +4666,7 @@ int lc_pouch_client_delete_attachment_method(
 cleanup:
   free(name);
   free(attachment_key);
+  free(staged_key);
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
   return rc;
@@ -4549,6 +4677,8 @@ int lc_pouch_client_delete_all_attachments_method(
     int *deleted_count, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_attachment_list_builder builder;
+  lc_pouch_txn_key_list staged_keys;
+  lc_pouch_txn_key_list affected_keys;
   const char *namespace_name;
   size_t i;
   int rc;
@@ -4566,9 +4696,40 @@ int lc_pouch_client_delete_all_attachments_method(
     return rc;
   }
   memset(&builder, 0, sizeof(builder));
+  memset(&staged_keys, 0, sizeof(staged_keys));
+  memset(&affected_keys, 0, sizeof(affected_keys));
   namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
   rc = lc_pouch_collect_attachments(client, namespace_name, req->lease.key,
                                     &builder, error);
+  if (rc == LC_OK && lc_pouch_txn_id_present(req->lease.txn_id)) {
+    rc = lc_pouch_collect_staged_attachment_bases(
+        client, namespace_name, req->lease.key, req->lease.txn_id,
+        &staged_keys, error);
+  }
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    for (i = 0U; rc == LC_OK && i < builder.key_count; ++i) {
+      rc = lc_pouch_txn_key_list_append(&affected_keys, builder.keys[i].key,
+                                        error);
+    }
+    for (i = 0U; rc == LC_OK && i < staged_keys.count; ++i) {
+      if (!lc_pouch_txn_key_list_contains(&affected_keys,
+                                          staged_keys.keys[i])) {
+        rc = lc_pouch_txn_key_list_append(&affected_keys, staged_keys.keys[i],
+                                          error);
+      }
+    }
+    for (i = 0U; rc == LC_OK && i < affected_keys.count; ++i) {
+      rc = lc_pouch_attachment_stage_delete(client, affected_keys.keys[i],
+                                            req->lease.txn_id, error);
+      if (rc == LC_OK) {
+        *deleted_count += 1;
+      }
+    }
+    lc_pouch_txn_key_list_cleanup(&affected_keys);
+    lc_pouch_txn_key_list_cleanup(&staged_keys);
+    lc_pouch_attachment_list_builder_cleanup(&builder);
+    return rc;
+  }
   for (i = 0U; rc == LC_OK && i < builder.key_count; ++i) {
     lc_pouch_state_write_options options;
     lc_pouch_state_write_result result;
@@ -4584,6 +4745,8 @@ int lc_pouch_client_delete_all_attachments_method(
       *deleted_count += 1;
     }
   }
+  lc_pouch_txn_key_list_cleanup(&affected_keys);
+  lc_pouch_txn_key_list_cleanup(&staged_keys);
   lc_pouch_attachment_list_builder_cleanup(&builder);
   return rc;
 }
