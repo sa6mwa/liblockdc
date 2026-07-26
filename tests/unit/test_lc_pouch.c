@@ -4775,6 +4775,227 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_txn_decisions_apply_attachment_side_effects(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list list;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_attach_op_init(&attach_op);
+  memset(&attach_res, 0, sizeof(attach_res));
+  lc_attachment_list_req_init(&list_req);
+  memset(&list, 0, sizeof(list));
+  lc_attachment_get_op_init(&get_op);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  bytes = NULL;
+  length = 0U;
+  make_root("txn-attachments", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  attach_op.lease.namespace_name = "objects/txn";
+  attach_op.lease.key = "state/object-1";
+  attach_op.lease.txn_id = "txn-attachment-commit";
+  attach_op.name = "report.txt";
+  attach_op.content_type = "text/plain";
+  attach_op.prevent_overwrite = 1;
+  rc = lc_source_from_memory("committed-object", strlen("committed-object"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_attach_res_cleanup(&attach_res);
+
+  list_req.lease.namespace_name = "objects/txn";
+  list_req.lease.key = "state/object-1";
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 0U);
+  lc_attachment_list_cleanup(&list);
+
+  participant.namespace_name = "objects/txn";
+  participant.key = "state/object-1";
+  participant.backend_hash = "backend-object";
+  decision_req.txn_id = "txn-attachment-commit";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "commit");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_string_equal(list.items[0].name, "report.txt");
+  lc_attachment_list_cleanup(&list);
+
+  get_op.lease.namespace_name = "objects/txn";
+  get_op.lease.key = "state/object-1";
+  get_op.selector.name = "report.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("committed-object"));
+  assert_memory_equal(bytes, "committed-object", strlen("committed-object"));
+  sink->close(sink);
+  sink = NULL;
+  lc_attachment_get_res_cleanup(&get_res);
+
+  attach_op.lease.txn_id = "txn-attachment-rollback";
+  attach_op.name = "rolled-back.txt";
+  rc = lc_source_from_memory("rolled-back-object",
+                             strlen("rolled-back-object"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_attach_res_cleanup(&attach_res);
+
+  decision_req.txn_id = "txn-attachment-rollback";
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "rollback");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_string_equal(list.items[0].name, "report.txt");
+  lc_attachment_list_cleanup(&list);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_txn_recovery_applies_attachment_side_effects(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list list;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char record[1024];
+  char namespace_hex[128];
+  char key_hex[128];
+  char backend_hex[128];
+  int written;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  lc_attach_op_init(&attach_op);
+  memset(&attach_res, 0, sizeof(attach_res));
+  lc_attachment_list_req_init(&list_req);
+  memset(&list, 0, sizeof(list));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-attachment-recovery", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  attach_op.lease.namespace_name = "objects/recover";
+  attach_op.lease.key = "state/object-2";
+  attach_op.lease.txn_id = "txn-attachment-recover";
+  attach_op.name = "recovered.txt";
+  attach_op.content_type = "text/plain";
+  rc = lc_source_from_memory("recovered-object", strlen("recovered-object"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_attach_res_cleanup(&attach_res);
+  lc_client_close(client);
+  client = NULL;
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  hex_encode_string("objects/recover", namespace_hex, sizeof(namespace_hex));
+  hex_encode_string("state/object-2", key_hex, sizeof(key_hex));
+  hex_encode_string("backend-object", backend_hex, sizeof(backend_hex));
+  written = snprintf(record, sizeof(record),
+                     "format pouch-txn-v1\nstate 636f6d6d6974\n"
+                     "expires_at_unix 0\ntc_term 1\n"
+                     "target_backend_hash \nparticipant_count 1\n"
+                     "participant %s %s %s\n",
+                     namespace_hex, key_hex, backend_hex);
+  assert_true(written > 0 && (size_t)written < sizeof(record));
+  rc = lc_source_from_memory(record, strlen(record), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ".lockd/txn",
+                            "txn/txn-attachment-recover", source, NULL,
+                            &write_result, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  list_req.lease.namespace_name = "objects/recover";
+  list_req.lease.key = "state/object-2";
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_string_equal(list.items[0].name, "recovered.txt");
+  lc_attachment_list_cleanup(&list);
+  lc_client_close(client);
+  client = NULL;
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, ".lockd/txn",
+                           "txn/txn-attachment-recover", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   lc_client *client;
   lc_pouch *pouch;
@@ -5177,6 +5398,8 @@ int main(void) {
       cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
+      cmocka_unit_test(test_txn_decisions_apply_attachment_side_effects),
+      cmocka_unit_test(test_txn_recovery_applies_attachment_side_effects),
       cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),

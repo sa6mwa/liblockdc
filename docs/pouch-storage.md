@@ -2190,9 +2190,14 @@ state tombstones, staged `acquire_for_update` writes, link-style promotion,
 staged discard over the segmented state log, durable transaction decision
 records, foreground participant commit/rollback, open-time committed/rolled-back
 participant replay, expired prepared-transaction rollback cleanup, and
-open-time tombstone cleanup of recovered decided transaction records. Queue
-transaction wakeups, query refresh coupling, and broader mixed object/queue
-transaction coverage remain targets for transaction integration.
+open-time tombstone cleanup of recovered decided transaction records. Attachment
+uploads made through a lease carrying `txn_id` now write staged object records
+under `.lockd/attachments`; ordinary attachment listing skips those staged
+records, participant commit promotes them, participant rollback discards them,
+and open-time transaction replay applies the same side effects. Queue
+transaction wakeups, staged attachment delete/clear operations, query refresh
+coupling, and broader mixed object/queue transaction coverage remain targets
+for transaction integration.
 
 The staging listing contract is narrower than generic object listing. It must
 include direct staged state objects only and exclude nested staged attachment
@@ -2214,8 +2219,10 @@ state API.
 Transaction decision records live in the reserved transaction namespace as
 objects. Recovery must support:
 
-- commit records that promote staged state for every participant;
-- rollback records that discard staged state and clear staged metadata;
+- commit records that promote staged state and staged attachment uploads for
+  every participant;
+- rollback records that discard staged state, staged attachment uploads, and
+  clear staged metadata;
 - expired pending records that roll back;
 - participants in different namespaces;
 - explicit replay by transaction id;

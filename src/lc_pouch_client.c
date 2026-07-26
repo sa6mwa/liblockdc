@@ -1550,6 +1550,44 @@ static char *lc_pouch_attachment_key(const char *namespace_name,
   return attachment_key;
 }
 
+static int lc_pouch_txn_id_present(const char *txn_id) {
+  return txn_id != NULL && txn_id[0] != '\0';
+}
+
+static char *lc_pouch_staged_storage_key(const char *key, const char *txn_id,
+                                         lc_error *error) {
+  char *staged_key;
+  size_t key_len;
+  size_t txn_len;
+  size_t suffix_len;
+
+  if (key == NULL || key[0] == '\0' || !lc_pouch_txn_id_present(txn_id)) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch staged storage key requires key and txn_id",
+                       NULL, NULL, NULL);
+    return NULL;
+  }
+  key_len = strlen(key);
+  txn_len = strlen(txn_id);
+  suffix_len = strlen("/.staging/");
+  staged_key = (char *)malloc(key_len + suffix_len + txn_len + 1U);
+  if (staged_key == NULL) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch staged storage key", NULL,
+                       NULL, NULL);
+    return NULL;
+  }
+  memcpy(staged_key, key, key_len);
+  memcpy(staged_key + key_len, "/.staging/", suffix_len);
+  memcpy(staged_key + key_len + suffix_len, txn_id, txn_len);
+  staged_key[key_len + suffix_len + txn_len] = '\0';
+  return staged_key;
+}
+
+static int lc_pouch_storage_key_has_staging_suffix(const char *key) {
+  return key != NULL && strstr(key, "/.staging/") != NULL;
+}
+
 static char *lc_pouch_attachment_id_from_name(const char *name,
                                               lc_error *error) {
   char *name_hex;
@@ -1791,6 +1829,9 @@ static int lc_pouch_attachment_visit(
 
   builder = (lc_pouch_attachment_list_builder *)context;
   if (strncmp(entry->key, builder->prefix, builder->prefix_len) != 0) {
+    return LC_OK;
+  }
+  if (lc_pouch_storage_key_has_staging_suffix(entry->key)) {
     return LC_OK;
   }
   name = lc_pouch_attachment_hex_decode(entry->key + builder->prefix_len);
@@ -3186,6 +3227,128 @@ static int lc_pouch_txn_replay_response(lc_txn_replay_res *out,
   return LC_OK;
 }
 
+typedef struct lc_pouch_txn_attachment_collect {
+  const char *prefix;
+  size_t prefix_len;
+  const char *suffix;
+  size_t suffix_len;
+  lc_pouch_txn_key_list base_keys;
+} lc_pouch_txn_attachment_collect;
+
+static int lc_pouch_txn_collect_attachment_staged(
+    const lc_pouch_state_visit_entry *entry, void *context, lc_error *error) {
+  lc_pouch_txn_attachment_collect *collect;
+  char *base_key;
+  size_t key_len;
+  size_t base_len;
+  int rc;
+
+  collect = (lc_pouch_txn_attachment_collect *)context;
+  if (entry->key == NULL ||
+      strncmp(entry->key, collect->prefix, collect->prefix_len) != 0) {
+    return LC_OK;
+  }
+  key_len = strlen(entry->key);
+  if (key_len <= collect->prefix_len + collect->suffix_len ||
+      strcmp(entry->key + key_len - collect->suffix_len,
+             collect->suffix) != 0) {
+    return LC_OK;
+  }
+  base_len = key_len - collect->suffix_len;
+  base_key = (char *)malloc(base_len + 1U);
+  if (base_key == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch transaction attachment key",
+                        NULL, NULL, NULL);
+  }
+  memcpy(base_key, entry->key, base_len);
+  base_key[base_len] = '\0';
+  if (lc_pouch_storage_key_has_staging_suffix(base_key)) {
+    free(base_key);
+    return LC_OK;
+  }
+  rc = lc_pouch_txn_key_list_append(&collect->base_keys, base_key, error);
+  free(base_key);
+  return rc;
+}
+
+static char *lc_pouch_txn_staging_suffix(const char *txn_id,
+                                         lc_error *error) {
+  char *suffix;
+  size_t suffix_len;
+  size_t txn_len;
+
+  if (!lc_pouch_txn_id_present(txn_id)) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch transaction staging suffix requires txn_id",
+                       NULL, NULL, NULL);
+    return NULL;
+  }
+  suffix_len = strlen("/.staging/");
+  txn_len = strlen(txn_id);
+  suffix = (char *)malloc(suffix_len + txn_len + 1U);
+  if (suffix == NULL) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch transaction staging suffix",
+                       NULL, NULL, NULL);
+    return NULL;
+  }
+  memcpy(suffix, "/.staging/", suffix_len);
+  memcpy(suffix + suffix_len, txn_id, txn_len);
+  suffix[suffix_len + txn_len] = '\0';
+  return suffix;
+}
+
+static int lc_pouch_txn_apply_attachment_participant(
+    lc_client_handle *client, const lc_txn_participant *participant,
+    const char *txn_id, const char *state, lc_error *error) {
+  lc_pouch_txn_attachment_collect collect;
+  char *prefix;
+  char *suffix;
+  size_t i;
+  int rc;
+
+  memset(&collect, 0, sizeof(collect));
+  prefix = lc_pouch_attachment_prefix(participant->namespace_name,
+                                      participant->key, error);
+  if (prefix == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  suffix = lc_pouch_txn_staging_suffix(txn_id, error);
+  if (suffix == NULL) {
+    free(prefix);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  collect.prefix = prefix;
+  collect.prefix_len = strlen(prefix);
+  collect.suffix = suffix;
+  collect.suffix_len = strlen(suffix);
+  rc = lc_pouch_state_visit(client->pouch, ".lockd/attachments",
+                            lc_pouch_txn_collect_attachment_staged, &collect,
+                            error);
+  for (i = 0U; rc == LC_OK && i < collect.base_keys.count; ++i) {
+    if (strcmp(state, "commit") == 0) {
+      lc_pouch_state_write_result result;
+
+      memset(&result, 0, sizeof(result));
+      rc = lc_pouch_state_commit_staged(client->pouch, ".lockd/attachments",
+                                        collect.base_keys.keys[i], txn_id,
+                                        &result, error);
+      lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    } else if (strcmp(state, "rollback") == 0) {
+      int discarded;
+
+      rc = lc_pouch_state_discard_staged(client->pouch, ".lockd/attachments",
+                                         collect.base_keys.keys[i], txn_id,
+                                         &discarded, error);
+    }
+  }
+  lc_pouch_txn_key_list_cleanup(&collect.base_keys);
+  free(suffix);
+  free(prefix);
+  return rc;
+}
+
 static int lc_pouch_txn_apply_participants(lc_client_handle *client,
                                            const lc_txn_decision_req *req,
                                            const char *state,
@@ -3229,6 +3392,11 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch transaction state is unsupported", NULL,
                           NULL, NULL);
+    }
+    rc = lc_pouch_txn_apply_attachment_participant(
+        client, &req->participants[i], req->txn_id, state, error);
+    if (rc != LC_OK) {
+      return rc;
     }
   }
   return LC_OK;
@@ -4066,6 +4234,7 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   const char *namespace_name;
   const char *content_type;
   char *attachment_key;
+  char *staged_key;
   FILE *fp;
   unsigned long bytes;
   int rc;
@@ -4091,6 +4260,7 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   memset(&result, 0, sizeof(result));
   file_source = NULL;
   attachment_key = NULL;
+  staged_key = NULL;
   fp = NULL;
   bytes = 0UL;
   namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
@@ -4115,6 +4285,29 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
                         "pouch attachment already exists", NULL, NULL, NULL);
       goto cleanup;
     }
+    if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+      staged_key =
+          lc_pouch_staged_storage_key(attachment_key, req->lease.txn_id,
+                                      error);
+      if (staged_key == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+        goto cleanup;
+      }
+      lc_pouch_state_read_result_cleanup(&client->allocator, &existing);
+      memset(&existing, 0, sizeof(existing));
+      rc = lc_pouch_state_read(client->pouch, ".lockd/attachments",
+                               staged_key, &existing, error);
+      if (rc != LC_OK) {
+        goto cleanup;
+      }
+      if (existing.found) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch attachment already exists", NULL, NULL,
+                          NULL);
+        goto cleanup;
+      }
+    }
   }
   rc = lc_pouch_attachment_copy_to_temp(src, req->max_bytes,
                                         req->has_max_bytes, &fp, &bytes,
@@ -4130,8 +4323,15 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
     goto cleanup;
   }
   options.content_type = content_type;
-  rc = lc_pouch_state_write(client->pouch, ".lockd/attachments", attachment_key,
-                            file_source, &options, &result, error);
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    rc = lc_pouch_state_stage_write(client->pouch, ".lockd/attachments",
+                                    attachment_key, req->lease.txn_id,
+                                    file_source, &options, &result, error);
+  } else {
+    rc = lc_pouch_state_write(client->pouch, ".lockd/attachments",
+                              attachment_key, file_source, &options,
+                              &result, error);
+  }
   if (rc == LC_OK) {
     rc = lc_pouch_attachment_info_fill(&out->attachment, req->name,
                                        (long)bytes, content_type,
@@ -4155,6 +4355,7 @@ cleanup:
     fclose(fp);
   }
   free(attachment_key);
+  free(staged_key);
   lc_pouch_state_read_result_cleanup(&client->allocator, &existing);
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
   if (rc != LC_OK) {

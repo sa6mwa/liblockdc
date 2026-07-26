@@ -86,8 +86,13 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
         rollback cleanup on reopen.
       - [x] Add decided transaction record garbage collection after idempotent
         replay no longer needs the durable decision body.
-      - [ ] Extend transaction participant replay to queue/object side effects
-        and query/index refresh wakeups.
+      - [x] Apply transaction commit/rollback decisions to staged attachment
+        side effects: lease attachment uploads with `txn_id` remain hidden
+        until participant commit, are discarded on rollback, and replay during
+        client open uses the same staged object records.
+      - [ ] Extend transaction participant replay to remaining queue/object
+        side effects, staged attachment delete/clear operations, and
+        query/index refresh wakeups.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.
