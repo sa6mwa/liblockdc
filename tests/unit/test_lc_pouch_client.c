@@ -10492,6 +10492,10 @@ test_pouch_endpoint_index_rebuild_writes_temporal_generation(void **state) {
       NULL, &generation.postings, "/created_at", 1735689600, 0, &doc_ids));
   assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
   assert_int_equal(doc_ids.count, 2U);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_temporal_generation_cleanup(NULL, &generation);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&generation, 0, sizeof(generation));
 
   client = open_pouch_client(endpoint);
   echo = pouch_acquire_query_key(client, "echo", &error);
@@ -10512,6 +10516,14 @@ test_pouch_endpoint_index_rebuild_writes_temporal_generation(void **state) {
   assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
   lc_query_res_cleanup(&res);
   client->close(client);
+
+  test_read_temporal_generation_file(generation_path, &generation);
+  assert_string_equal(generation.namespace_name, "default");
+  assert_true(generation.identity.sequence > 0U);
+  assert_true(lc_pouch_index_temporal_posting_table_append_after(
+      NULL, &generation.postings, "/created_at", 1735689600, 0, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_int_equal(doc_ids.count, 3U);
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
   lc_pouch_index_temporal_generation_cleanup(NULL, &generation);

@@ -898,13 +898,17 @@ Latest release targets confirmed on 2026-07-23:
           secondary-predicate guards. Stale or absent generation files remain
           ignored so incremental writes do not lose results before full
           generation publication exists on all update paths.
+        - [x] Republish temporal generation files after ordinary state
+          writes/removes, metadata identity changes, and successful compaction
+          replay so the DateAfter reader can keep using current immutable
+          generation files across normal mutation paths.
         - [ ] Make temporal generation files authoritative for DateAfter by
-          publishing or repairing them across ordinary state writes,
-          compaction, and recovery, removing the remaining sidecar-scan bridge.
-          A query-time disk bridge attempt was measured on 2026-07-26 and
-          rejected because building the temporal table on the hot path
-          regressed 4096-document DateAfter page-one latency to roughly
-          110-140 ms C-side.
+          repairing them during recovery/open when missing or corrupt,
+          covering any remaining identity-changing non-query mutations, and
+          removing the remaining sidecar-scan bridge. A query-time disk bridge
+          attempt was measured on 2026-07-26 and rejected because building the
+          temporal table on the hot path regressed 4096-document DateAfter
+          page-one latency to roughly 110-140 ms C-side.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not

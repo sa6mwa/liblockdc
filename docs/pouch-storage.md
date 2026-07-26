@@ -1468,13 +1468,15 @@ payloads, and malformed encoded values before rebuilding in-memory search aids.
 The outer temporal generation container adds its own magic/version, the index
 identity, and namespace name around that payload so on-disk immutable readers
 can be tied to the same sequence plus segmented-manifest generation used by the
-prepared/result caches. During controlled query-index rebuild, the disk backend
-now compiles live per-namespace temporal postings and atomically publishes
+prepared/result caches. During controlled query-index rebuild and ordinary
+state/metadata mutations, the disk backend compiles live per-namespace temporal
+postings and atomically publishes
 `<root>/%2elockd/logstore/query.index.temporal/<escaped-namespace>.lcptgn`
-files. Those files are rebuild artifacts for the immutable DateAfter reader;
-until ordinary writes and recovery can republish them for every new identity,
-the reader trusts only files whose encoded identity equals the current index
-identity.
+files. Successful compaction replay republishes all namespace temporal
+generations because the segmented-manifest identity changes. Until recovery can
+repair missing or corrupt generation files for every current identity, the
+reader trusts only files whose encoded identity equals the current index
+identity and otherwise falls back to the sidecar scan.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every

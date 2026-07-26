@@ -13068,6 +13068,20 @@ lc_pouch_disk_publish_query_temporal_generations(lc_pouch_disk_store *store,
   return LC_OK;
 }
 
+static int lc_pouch_disk_refresh_and_publish_query_temporal_generation(
+    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error) {
+  int rc;
+
+  store->replayed_query_index_size = (unsigned long)-1;
+  store->replayed_query_index_record_count = 0UL;
+  rc = lc_pouch_disk_replay_query_index(store, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_disk_publish_query_temporal_generation(store, namespace_name,
+                                                        error);
+}
+
 static int lc_pouch_disk_rebuild_query_index(lc_pouch_disk_store *store,
                                              lc_error *error) {
   size_t index;
@@ -14444,6 +14458,10 @@ static int lc_pouch_disk_store_meta(lc_pouch_store *self,
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
                                                      error);
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
+        store, namespace_name, error);
+  }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, payload);
   lc_pouch_disk_meta_upsert_cleanup(store, &upsert);
@@ -14499,6 +14517,10 @@ static int lc_pouch_disk_delete_meta(lc_pouch_store *self,
   if (rc == LC_OK) {
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
                                                      error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
+        store, namespace_name, error);
   }
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
     rc = LC_ERR_TRANSPORT;
@@ -18537,6 +18559,9 @@ static int lc_pouch_disk_compact_locked(lc_pouch_disk_store *store,
     store->replayed_segment_generation = (unsigned long)-1;
     rc = lc_pouch_disk_replay(store, error);
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_publish_query_temporal_generations(store, error);
+  }
   return rc;
 }
 
@@ -20927,6 +20952,10 @@ static int lc_pouch_disk_write_state(lc_pouch_store *self,
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
                                                      error);
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
+        store, namespace_name, error);
+  }
   lc_pouch_free(&store->allocator, etag);
   lc_pouch_free(&store->allocator, body_path);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
@@ -21017,6 +21046,10 @@ static int lc_pouch_disk_remove_state(lc_pouch_store *self,
     *removed = 1;
     rc = lc_pouch_disk_mark_replayed_to_current_size(store, namespace_name,
                                                      error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
+        store, namespace_name, error);
   }
   lc_pouch_free(&store->allocator, etag);
   if (lc_pouch_disk_unlock(store, error) != LC_OK && rc == LC_OK) {
