@@ -2275,6 +2275,113 @@ static void test_client_queue_dequeue_with_state_uses_pouch_lease(
   lc_error_cleanup(&error);
 }
 
+static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_message *message;
+  lc_nack_op nack_op;
+  lc_nack_res nack_res;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  lc_nack_op_init(&nack_op);
+  memset(&nack_res, 0, sizeof(nack_res));
+  lc_error_init(&error);
+  make_root("client-queue-terminal", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+
+  enqueue_req.queue = "retry";
+  enqueue_req.max_attempts = 1;
+  rc = lc_source_from_memory("retry", strlen("retry"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "retry";
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_int_equal(message->attempts, 1);
+
+  nack_op.message.namespace_name = message->namespace_name;
+  nack_op.message.queue = message->queue;
+  nack_op.message.message_id = message->message_id;
+  nack_op.message.lease_id = message->lease_id;
+  nack_op.message.fencing_token = message->fencing_token;
+  nack_op.message.meta_etag = message->meta_etag;
+  nack_op.intent = LC_NACK_INTENT_FAILURE;
+  rc = client->queue_nack(client, &nack_op, &nack_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(nack_res.requeued, 0);
+  message->close(message);
+  message = NULL;
+
+  stats_req.queue = "retry";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_null(message);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_nack_res_cleanup(&nack_res);
+  lc_nack_op_init(&nack_op);
+  memset(&nack_res, 0, sizeof(nack_res));
+
+  lc_enqueue_req_init(&enqueue_req);
+  enqueue_req.queue = "ttl";
+  enqueue_req.ttl_seconds = 1L;
+  enqueue_req.delay_seconds = 2L;
+  rc = lc_source_from_memory("ttl", strlen("ttl"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  sleep(2U);
+
+  stats_req.queue = "ttl";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "ttl";
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_null(message);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_remove_tombstones_state_and_enforces_preconditions(
     void **state) {
   lc_client *client;
@@ -4713,6 +4820,7 @@ int main(void) {
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
       cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
+      cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),

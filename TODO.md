@@ -50,6 +50,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       now attaches a pouch-local state lease for `q/<queue>/state/<message_id>`,
       patches that lease to the local pouch methods, and covers save/read/ack
       behavior through the public message state handle.
+    - [x] Persist queue TTL expiry in durable records and make retry exhaustion
+      explicit: expired records are excluded from stats/dequeue, and failure
+      nacks that hit `max_attempts` persist a terminal queue status with
+      stats/dequeue coverage.
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.

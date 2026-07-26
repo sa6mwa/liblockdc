@@ -2286,9 +2286,11 @@ extend, and pouch message methods operate over those records with visibility
 and redelivery state persisted through the same append/replay path.
 `dequeue_with_state` now attaches a pouch-local state lease for the SDK
 convention `q/<queue>/state/<message_id>`, so public message state operations
-use the normal pouch state path. This is not full queue parity yet:
-subscribe/watch loops, notification hints, transaction side effects,
-stateful commit/rollback, TTL/retry exhaustion hardening, and high-contention
+use the normal pouch state path. Queue records also persist TTL expiry and
+explicit retry-exhausted terminal status, so expired messages and messages that
+hit `max_attempts` are excluded from stats and dequeue after refresh/replay.
+This is not full queue parity yet: subscribe/watch loops, notification hints,
+transaction side effects, stateful commit/rollback, and high-contention
 duplicate-delivery tests remain broader queue work.
 
 Current pouch backend milestone: the private storage interface exposes queue

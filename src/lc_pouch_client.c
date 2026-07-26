@@ -73,6 +73,7 @@ typedef struct lc_pouch_queue_record {
   int max_attempts;
   int failure_attempts;
   long enqueued_at_unix;
+  long expires_at_unix;
   long not_visible_until_unix;
   long visibility_timeout_seconds;
   unsigned char *payload;
@@ -2238,15 +2239,16 @@ static int lc_pouch_queue_record_source(const lc_pouch_queue_record *record,
       "max_attempts %d\n"
       "failure_attempts %d\n"
       "enqueued_at_unix %ld\n"
+      "expires_at_unix %ld\n"
       "not_visible_until_unix %ld\n"
       "visibility_timeout_seconds %ld\n"
       "payload_bytes %lu\n"
       "\n",
       namespace_hex, queue_hex, message_hex, status_hex, content_type_hex,
       lease_hex, record->attempts, record->max_attempts,
-      record->failure_attempts, record->enqueued_at_unix,
-      record->not_visible_until_unix, record->visibility_timeout_seconds,
-      (unsigned long)record->payload_length);
+  record->failure_attempts, record->enqueued_at_unix,
+      record->expires_at_unix, record->not_visible_until_unix,
+      record->visibility_timeout_seconds, (unsigned long)record->payload_length);
   if (rc == LC_OK && record->payload_length > 0U) {
     rc = lc_pouch_txn_buffer_reserve(
         &buffer, buffer.length + record->payload_length, error);
@@ -2423,6 +2425,13 @@ static int lc_pouch_queue_record_parse(
                         NULL);
     }
   }
+  if (rc == LC_OK && lc_pouch_queue_find_line(body, "expires_at_unix") != NULL &&
+      !lc_pouch_queue_parse_long_field(body, "expires_at_unix",
+                                       &record->expires_at_unix)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue record has invalid expiry", NULL, NULL,
+                      NULL);
+  }
   if (rc == LC_OK) {
     payload = (const unsigned char *)(strstr(body, "\n\n") + 2U);
     if ((size_t)payload_bytes > length - (size_t)(payload - (const unsigned char *)body)) {
@@ -2547,6 +2556,10 @@ static int lc_pouch_queue_record_is_live(
   if (strcmp(record->status, "acked") == 0) {
     return 0;
   }
+  if (strcmp(record->status, "dead") == 0 ||
+      strcmp(record->status, "expired") == 0) {
+    return 0;
+  }
   if (record->max_attempts > 0 &&
       record->failure_attempts >= record->max_attempts) {
     return 0;
@@ -2554,9 +2567,20 @@ static int lc_pouch_queue_record_is_live(
   return 1;
 }
 
+static int lc_pouch_queue_record_is_live_at(
+    const lc_pouch_queue_record *record, long now) {
+  if (!lc_pouch_queue_record_is_live(record)) {
+    return 0;
+  }
+  if (record->expires_at_unix > 0L && record->expires_at_unix <= now) {
+    return 0;
+  }
+  return 1;
+}
+
 static int lc_pouch_queue_record_available(
     const lc_pouch_queue_record *record, long now) {
-  return lc_pouch_queue_record_is_live(record) &&
+  return lc_pouch_queue_record_is_live_at(record, now) &&
          strcmp(record->status, "available") == 0 &&
          record->not_visible_until_unix <= now;
 }
@@ -4333,7 +4357,7 @@ int lc_pouch_client_queue_stats_method(lc_client *self,
     lc_pouch_queue_record *record;
 
     record = &scan.records[i];
-    if (!lc_pouch_queue_record_is_live(record)) {
+    if (!lc_pouch_queue_record_is_live_at(record, now)) {
       continue;
     }
     out->pending_candidates += 1;
@@ -4441,10 +4465,24 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
           req->intent == LC_NACK_INTENT_FAILURE) {
         record.failure_attempts += 1;
       }
-      rc = lc_pouch_queue_write_record(client, &record, error);
+      if (!lc_pouch_queue_record_is_live_at(&record, now)) {
+        free(record.status);
+        record.status =
+            record.expires_at_unix > 0L && record.expires_at_unix <= now
+                ? lc_strdup_local("expired")
+                : lc_strdup_local("dead");
+        if (record.status == NULL) {
+          rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch queue terminal status",
+                            NULL, NULL, NULL);
+        }
+      }
+      if (rc == LC_OK) {
+        rc = lc_pouch_queue_write_record(client, &record, error);
+      }
     }
     if (rc == LC_OK) {
-      out->requeued = lc_pouch_queue_record_is_live(&record);
+      out->requeued = lc_pouch_queue_record_is_live_at(&record, now);
       out->meta_etag = lc_strdup_local(record.meta_etag);
       out->correlation_id = lc_strdup_local("pouch-queue-nack");
       if (out->meta_etag == NULL || out->correlation_id == NULL) {
@@ -4565,6 +4603,8 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
     record.max_attempts = req->max_attempts;
     record.failure_attempts = 0;
     record.enqueued_at_unix = now;
+    record.expires_at_unix =
+        req->ttl_seconds > 0L ? now + req->ttl_seconds : 0L;
     record.not_visible_until_unix = now + req->delay_seconds;
     record.visibility_timeout_seconds = req->visibility_timeout_seconds;
     if (record.namespace_name == NULL || record.queue == NULL ||
