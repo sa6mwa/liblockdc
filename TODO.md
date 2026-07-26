@@ -539,6 +539,17 @@ Latest release targets confirmed on 2026-07-23:
         contains docID reader callback, preserving trigram candidate narrowing
         and final substring validation while compiling results into adaptive
         postings.
+      - [x] Add a field-local text posting lookup for trigram-backed
+        `contains` compilation, so substring validation walks only gram
+        candidate keys instead of probing every text posting for the field.
+      - [x] Skip redundant primary `contains` revalidation after the contains
+        compiler has already validated the selected text posting; secondary
+        positive and negative contains predicates still run through the shared
+        candidate guard.
+        Verified on 2026-07-26 with the 4096-doc text benchmark:
+        `ContainsMessage` improved from about 56 ms to about 6.9 ms for
+        document results and from about 46 ms to about 2.6 ms for key results;
+        Go disk still measured about 4.0 ms and 0.98 ms respectively.
     - [ ] Add prepared-reader caching keyed by the immutable pouch index
       generation/manifest identity so repeated queries do not rebuild the same
       compiled index view.
