@@ -461,6 +461,12 @@ Latest release targets confirmed on 2026-07-23:
       `lc_pouch_*`/`src/lc_pouch.c`; Go lockd disk remains the reference
       implementation for storage/index ideas, not the identity of the embedded
       C backend.
+    - [x] Split the first pouch-native storage subsystem boundary out of
+      `src/lc_pouch.c`: `lc_pouch_logstore` now owns namespace path escaping,
+      per-namespace logstore creation, manifest append, active segment
+      selection, segment rollover, and segment/snapshot name parsing behind a
+      small allocator/root/fsync context instead of depending on the concrete
+      pouch backend object.
     - [ ] Split the pouch search/index subsystem out of `lc_pouch.c` into
       an internal C index layer with explicit reader, writer, planner, posting,
       visibility, and result-cache boundaries.
@@ -1141,6 +1147,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Establish the initial active-segment scaffold and manifest-open
         record during namespace writes; the root-level `store.log` placeholder
         is not an authoritative record source.
+      - [x] Move the per-namespace segmented logstore mechanics into
+        `src/lc_pouch_logstore.c`, preserving the unreleased pouch layout while
+        making namespace pathing, manifest append, active segment selection,
+        and rollover testable without the monolithic backend adapter.
     - [x] Implement manifest append/replay for segment open, segment seal,
       snapshot install, obsolete segment, and obsolete snapshot records.
       - [x] Append text manifest lifecycle records for current active-segment

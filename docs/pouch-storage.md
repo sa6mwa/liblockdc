@@ -99,7 +99,8 @@ the filesystem root, namespace logstores, replay projections, key locks,
 marker refresh state, queue state, compaction lifecycle, and query indexes.
 The public local opener is `lc_pouch_open`/`lc_pouch_open_with_options`, and
 the implementation lives in `src/lc_pouch.c` plus private
-`src/lc_pouch_index*.c` modules. The Go lockd disk backend is the reference
+`src/lc_pouch_logstore.c` and `src/lc_pouch_index*.c` modules. The Go lockd
+disk backend is the reference
 implementation for proven storage and indexing ideas, but pouch is not named or
 structured as a C copy of that backend.
 
@@ -1379,11 +1380,17 @@ private index primitives:
   ordering comparison for date-only, RFC3339/RFC3339Nano offset, fractional,
   and naive UTC datetime strings used by indexed date planning and fast final
   filtering.
-- `src/lc_pouch.c` still owns the current pouch storage bridge: sidecar scan
-  adapters, live/hidden/owner/generation visibility checks, final summary
-  translation, and final `liblql` acceptance. New index behavior should move
-  toward the private index modules instead of adding more planner logic to this
-  bridge.
+- `src/lc_pouch_logstore.c` owns per-namespace segmented logstore mechanics:
+  namespace path escaping, logstore directory creation, manifest append,
+  active segment selection, segment rollover, and segment/snapshot name
+  parsing. It uses a small pouch-native context made from allocator, root path,
+  and fsync callback inputs so these storage mechanics do not depend on the
+  concrete backend object.
+- `src/lc_pouch.c` still owns the higher-level pouch backend adapter: sidecar
+  scan adapters, live/hidden/owner/generation visibility checks, final summary
+  translation, concrete fsync policy, and final `liblql` acceptance. New
+  storage/index behavior should move toward private modules instead of adding
+  more logic to this adapter.
 
 The first C cutover stage uses private exact-term, field-presence, and range
 docID reader callbacks: `lc_pouch_index` owns primary equality, `in`, exact

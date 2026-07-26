@@ -86,6 +86,7 @@ target_link_options(lc_unit_runtime PRIVATE
 lc_add_unit_test(lc_unit_mutate_stream test_lc_mutate_stream.c)
 lc_add_unit_test(lc_unit_pouch_store test_lc_pouch_store.c)
 lc_add_unit_test(lc_unit_pouch_index test_lc_pouch_index.c)
+lc_add_unit_test(lc_unit_pouch_logstore test_lc_pouch_logstore.c)
 lc_add_unit_test(lc_unit_pouch_client test_lc_pouch_client.c)
 
 lc_add_https_unit_test_case(
