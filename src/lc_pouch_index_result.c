@@ -69,12 +69,6 @@ static int lc_pouch_index_result_plan_has_cacheable_eq_filters(
   return 1;
 }
 
-static int lc_pouch_index_result_plan_has_cacheable_eq_filters_only(
-    const lc_pouch_query_index_scan_req *req) {
-  return lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
-         req->document_not_eq_term_count == 0U;
-}
-
 static int lc_pouch_index_result_plan_has_cacheable_not_eq_filters(
     const lc_pouch_query_index_scan_req *req) {
   size_t index;
@@ -162,7 +156,8 @@ static int lc_pouch_index_result_plan_range_cacheable(
   term = &req->document_range_terms[0];
   return (term->gt != NULL || term->gte != NULL || term->lt != NULL ||
           term->lte != NULL) &&
-         lc_pouch_index_result_plan_has_cacheable_eq_filters_only(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_not_eq_filters(req) &&
          req->document_not_range_term_count == 0U &&
          req->document_or_range_term_count == 0U &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
@@ -178,7 +173,8 @@ static int lc_pouch_index_result_plan_prefix_cacheable(
          req->document_prefix_term_count == 1U &&
          req->document_prefix_terms[0].field != NULL &&
          req->document_prefix_terms[0].value != NULL &&
-         lc_pouch_index_result_plan_has_cacheable_eq_filters_only(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_not_eq_filters(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
          req->document_not_prefix_term_count == 0U &&
@@ -194,7 +190,8 @@ static int lc_pouch_index_result_plan_contains_cacheable(
          req->document_contains_term_count == 1U &&
          req->document_contains_terms[0].field != NULL &&
          req->document_contains_terms[0].value != NULL &&
-         lc_pouch_index_result_plan_has_cacheable_eq_filters_only(req) &&
+         lc_pouch_index_result_plan_has_cacheable_eq_filters(req) &&
+         lc_pouch_index_result_plan_has_cacheable_not_eq_filters(req) &&
          lc_pouch_index_result_plan_has_no_range_filters(req) &&
          lc_pouch_index_result_plan_has_no_in_filters(req) &&
          lc_pouch_index_result_plan_has_no_prefix_filters(req) &&
@@ -867,9 +864,12 @@ lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
   size_t lt_len;
   size_t lte_len;
   lc_pouch_index_eq_result_plan_key_term *eq_terms;
+  lc_pouch_index_eq_result_plan_key_term *not_eq_terms;
   size_t eq_count;
   size_t eq_unique_count;
   size_t eq_index;
+  size_t not_eq_unique_count;
+  size_t not_eq_index;
   size_t total_len;
   int written;
   size_t needed;
@@ -892,6 +892,7 @@ lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
   lt_len = strlen(lt);
   lte_len = strlen(lte);
   eq_terms = NULL;
+  not_eq_terms = NULL;
   eq_count = req->document_eq_term_count;
   eq_unique_count = 0U;
   if (eq_count > 0U) {
@@ -921,6 +922,12 @@ lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
       eq_terms[eq_unique_count++] = eq_terms[eq_index];
     }
   }
+  not_eq_terms = lc_pouch_index_result_sorted_not_eq_terms(
+      allocator, req, &not_eq_unique_count);
+  if (req->document_not_eq_term_count > 0U && not_eq_terms == NULL) {
+    lc_pouch_free(allocator, eq_terms);
+    return NULL;
+  }
   written = snprintf(NULL, 0,
                      "range:%lu:%s:%lu:%s:%d:%lu:%s:%d:%lu:%s:%d:%lu:%s:%d:%"
                      "lu:%s",
@@ -931,6 +938,7 @@ lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
                      term->lt != NULL ? 1 : 0, (unsigned long)lt_len, lt,
                      term->lte != NULL ? 1 : 0, (unsigned long)lte_len, lte);
   if (written < 0) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     return NULL;
   }
@@ -938,6 +946,7 @@ lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
   if (eq_unique_count > 0U) {
     written = snprintf(NULL, 0, ":eq:%lu", (unsigned long)eq_unique_count);
     if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, not_eq_terms);
       lc_pouch_free(allocator, eq_terms);
       return NULL;
     }
@@ -952,6 +961,35 @@ lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
                          eq_terms[eq_index].field, (unsigned long)eq_value_len,
                          eq_terms[eq_index].value);
       if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+        lc_pouch_free(allocator, not_eq_terms);
+        lc_pouch_free(allocator, eq_terms);
+        return NULL;
+      }
+      total_len += (size_t)written;
+    }
+  }
+  if (not_eq_unique_count > 0U) {
+    written =
+        snprintf(NULL, 0, ":not_eq:%lu", (unsigned long)not_eq_unique_count);
+    if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, not_eq_terms);
+      lc_pouch_free(allocator, eq_terms);
+      return NULL;
+    }
+    total_len += (size_t)written;
+    for (not_eq_index = 0U; not_eq_index < not_eq_unique_count;
+         ++not_eq_index) {
+      size_t not_eq_field_len;
+      size_t not_eq_value_len;
+
+      not_eq_field_len = strlen(not_eq_terms[not_eq_index].field);
+      not_eq_value_len = strlen(not_eq_terms[not_eq_index].value);
+      written = snprintf(
+          NULL, 0, ":%lu:%s:%lu:%s", (unsigned long)not_eq_field_len,
+          not_eq_terms[not_eq_index].field, (unsigned long)not_eq_value_len,
+          not_eq_terms[not_eq_index].value);
+      if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+        lc_pouch_free(allocator, not_eq_terms);
         lc_pouch_free(allocator, eq_terms);
         return NULL;
       }
@@ -959,12 +997,14 @@ lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
     }
   }
   if (total_len == (size_t)-1) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     return NULL;
   }
   needed = total_len + 1U;
   key = (char *)lc_pouch_alloc(allocator, needed);
   if (key == NULL) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     return NULL;
   }
@@ -999,6 +1039,27 @@ lc_pouch_index_range_result_plan_key(const lc_pouch_allocator *allocator,
       cursor = key + offset;
     }
   }
+  if (not_eq_unique_count > 0U) {
+    written = snprintf(cursor, needed - offset, ":not_eq:%lu",
+                       (unsigned long)not_eq_unique_count);
+    offset += (size_t)written;
+    cursor = key + offset;
+    for (not_eq_index = 0U; not_eq_index < not_eq_unique_count;
+         ++not_eq_index) {
+      size_t not_eq_field_len;
+      size_t not_eq_value_len;
+
+      not_eq_field_len = strlen(not_eq_terms[not_eq_index].field);
+      not_eq_value_len = strlen(not_eq_terms[not_eq_index].value);
+      written = snprintf(
+          cursor, needed - offset, ":%lu:%s:%lu:%s",
+          (unsigned long)not_eq_field_len, not_eq_terms[not_eq_index].field,
+          (unsigned long)not_eq_value_len, not_eq_terms[not_eq_index].value);
+      offset += (size_t)written;
+      cursor = key + offset;
+    }
+  }
+  lc_pouch_free(allocator, not_eq_terms);
   lc_pouch_free(allocator, eq_terms);
   return key;
 }
@@ -1009,11 +1070,14 @@ lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
                                     const char *kind, const char *field,
                                     const char *value, int ignore_case) {
   lc_pouch_index_eq_result_plan_key_term *eq_terms;
+  lc_pouch_index_eq_result_plan_key_term *not_eq_terms;
   size_t namespace_len;
   size_t field_len;
   size_t value_len;
   size_t eq_unique_count;
   size_t eq_index;
+  size_t not_eq_unique_count;
+  size_t not_eq_index;
   size_t total_len;
   int written;
   size_t needed;
@@ -1032,11 +1096,18 @@ lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
   if (req->document_eq_term_count > 0U && eq_terms == NULL) {
     return NULL;
   }
+  not_eq_terms = lc_pouch_index_result_sorted_not_eq_terms(
+      allocator, req, &not_eq_unique_count);
+  if (req->document_not_eq_term_count > 0U && not_eq_terms == NULL) {
+    lc_pouch_free(allocator, eq_terms);
+    return NULL;
+  }
   written = snprintf(NULL, 0, "%s:%lu:%s:%lu:%s:%d:%lu:%s", kind,
                      (unsigned long)namespace_len, req->namespace_name,
                      (unsigned long)field_len, field, ignore_case ? 1 : 0,
                      (unsigned long)value_len, value);
   if (written < 0) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     return NULL;
   }
@@ -1044,6 +1115,7 @@ lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
   if (eq_unique_count > 0U) {
     written = snprintf(NULL, 0, ":eq:%lu", (unsigned long)eq_unique_count);
     if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, not_eq_terms);
       lc_pouch_free(allocator, eq_terms);
       return NULL;
     }
@@ -1058,6 +1130,35 @@ lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
                          eq_terms[eq_index].field, (unsigned long)eq_value_len,
                          eq_terms[eq_index].value);
       if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+        lc_pouch_free(allocator, not_eq_terms);
+        lc_pouch_free(allocator, eq_terms);
+        return NULL;
+      }
+      total_len += (size_t)written;
+    }
+  }
+  if (not_eq_unique_count > 0U) {
+    written =
+        snprintf(NULL, 0, ":not_eq:%lu", (unsigned long)not_eq_unique_count);
+    if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+      lc_pouch_free(allocator, not_eq_terms);
+      lc_pouch_free(allocator, eq_terms);
+      return NULL;
+    }
+    total_len += (size_t)written;
+    for (not_eq_index = 0U; not_eq_index < not_eq_unique_count;
+         ++not_eq_index) {
+      size_t not_eq_field_len;
+      size_t not_eq_value_len;
+
+      not_eq_field_len = strlen(not_eq_terms[not_eq_index].field);
+      not_eq_value_len = strlen(not_eq_terms[not_eq_index].value);
+      written = snprintf(
+          NULL, 0, ":%lu:%s:%lu:%s", (unsigned long)not_eq_field_len,
+          not_eq_terms[not_eq_index].field, (unsigned long)not_eq_value_len,
+          not_eq_terms[not_eq_index].value);
+      if (written < 0 || total_len > ((size_t)-1) - (size_t)written) {
+        lc_pouch_free(allocator, not_eq_terms);
         lc_pouch_free(allocator, eq_terms);
         return NULL;
       }
@@ -1065,12 +1166,14 @@ lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
     }
   }
   if (total_len == (size_t)-1) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     return NULL;
   }
   needed = total_len + 1U;
   key = (char *)lc_pouch_alloc(allocator, needed);
   if (key == NULL) {
+    lc_pouch_free(allocator, not_eq_terms);
     lc_pouch_free(allocator, eq_terms);
     return NULL;
   }
@@ -1100,6 +1203,27 @@ lc_pouch_index_text_result_plan_key(const lc_pouch_allocator *allocator,
       cursor = key + offset;
     }
   }
+  if (not_eq_unique_count > 0U) {
+    written = snprintf(cursor, needed - offset, ":not_eq:%lu",
+                       (unsigned long)not_eq_unique_count);
+    offset += (size_t)written;
+    cursor = key + offset;
+    for (not_eq_index = 0U; not_eq_index < not_eq_unique_count;
+         ++not_eq_index) {
+      size_t not_eq_field_len;
+      size_t not_eq_value_len;
+
+      not_eq_field_len = strlen(not_eq_terms[not_eq_index].field);
+      not_eq_value_len = strlen(not_eq_terms[not_eq_index].value);
+      written = snprintf(
+          cursor, needed - offset, ":%lu:%s:%lu:%s",
+          (unsigned long)not_eq_field_len, not_eq_terms[not_eq_index].field,
+          (unsigned long)not_eq_value_len, not_eq_terms[not_eq_index].value);
+      offset += (size_t)written;
+      cursor = key + offset;
+    }
+  }
+  lc_pouch_free(allocator, not_eq_terms);
   lc_pouch_free(allocator, eq_terms);
   return key;
 }

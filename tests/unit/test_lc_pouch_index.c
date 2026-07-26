@@ -554,6 +554,20 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
       "range:7:default:2:/n:1:3:n:1:1:3:n:2:1:3:n:3:1:3:n:4:eq:2:7:/"
       "bucket:5:s:hot:5:/kind:9:s:include");
 
+  not_equal[0].field = "/kind";
+  not_equal[0].value = "s:block";
+  not_equal[1].field = "/bucket";
+  not_equal[1].value = "s:cold";
+  not_equal[2].field = "/kind";
+  not_equal[2].value = "s:block";
+  req.document_not_eq_terms = not_equal;
+  req.document_not_eq_term_count = sizeof(not_equal) / sizeof(not_equal[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_RANGE,
+      "range:7:default:2:/n:1:3:n:1:1:3:n:2:1:3:n:3:1:3:n:4:eq:2:7:/"
+      "bucket:5:s:hot:5:/kind:9:s:include:not_eq:2:7:/bucket:6:s:cold:5:/"
+      "kind:7:s:block");
+
   memset(&req, 0, sizeof(req));
   req.namespace_name = "default";
   prefix.field = "/name";
@@ -577,6 +591,13 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
       "prefix:7:default:5:/name:1:2:al:eq:2:7:/bucket:5:s:hot:5:/kind:9:s:"
       "include");
 
+  req.document_not_eq_terms = not_equal;
+  req.document_not_eq_term_count = sizeof(not_equal) / sizeof(not_equal[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_PREFIX,
+      "prefix:7:default:5:/name:1:2:al:eq:2:7:/bucket:5:s:hot:5:/kind:9:s:"
+      "include:not_eq:2:7:/bucket:6:s:cold:5:/kind:7:s:block");
+
   memset(&req, 0, sizeof(req));
   req.namespace_name = "default";
   contains.field = "/name";
@@ -593,6 +614,13 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
       &req, LC_POUCH_INDEX_RESULT_PLAN_CONTAINS,
       "contains:7:default:5:/name:0:3:pha:eq:2:7:/bucket:5:s:hot:5:/kind:9:s:"
       "include");
+
+  req.document_not_eq_terms = not_equal;
+  req.document_not_eq_term_count = sizeof(not_equal) / sizeof(not_equal[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_CONTAINS,
+      "contains:7:default:5:/name:0:3:pha:eq:2:7:/bucket:5:s:hot:5:/kind:9:s:"
+      "include:not_eq:2:7:/bucket:6:s:cold:5:/kind:7:s:block");
 }
 
 static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
@@ -600,7 +628,6 @@ static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
   lc_pouch_document_exists_term exists;
   lc_pouch_document_in_term not_in;
   lc_pouch_document_range_term range;
-  lc_pouch_document_eq_term not_equal;
   const char *values[] = {"s:beta"};
 
   (void)state;
@@ -628,10 +655,8 @@ static void test_result_plan_keys_reject_filtered_compound_views(void **state) {
   range.gte = "n:1";
   req.document_range_terms = &range;
   req.document_range_term_count = 1U;
-  not_equal.field = "/kind";
-  not_equal.value = "s:skip";
-  req.document_not_eq_terms = &not_equal;
-  req.document_not_eq_term_count = 1U;
+  req.document_not_in_terms = &not_in;
+  req.document_not_in_term_count = 1U;
   assert_null(lc_pouch_index_result_plan_key(NULL, &req,
                                              LC_POUCH_INDEX_RESULT_PLAN_RANGE));
 }
@@ -1477,6 +1502,46 @@ test_collect_range_term_with_eq_doc_ids_intersects_in_index(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_collect_range_term_with_eq_and_not_eq_doc_ids_filters_in_index(
+    void **state) {
+  lc_pouch_document_range_term range;
+  lc_pouch_document_eq_term eq[2];
+  lc_pouch_document_eq_term not_equal;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {5U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&range, 0, sizeof(range));
+  memset(&eq, 0, sizeof(eq));
+  memset(&not_equal, 0, sizeof(not_equal));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  range.field = "/score";
+  range.gte = "n:+:1:0";
+  range.lt = "n:+:9:0";
+  eq[0].field = "/region";
+  eq[0].value = "s:north";
+  eq[1].field = "/status";
+  eq[1].value = "s:paid";
+  not_equal.field = "/region";
+  not_equal.value = "s:south";
+  rc = lc_pouch_index_collect_range_term_with_eq_and_not_eq_doc_ids(
+      NULL, &range, eq, sizeof(eq) / sizeof(eq[0]), &not_equal, 1U,
+      fake_read_range_doc_ids, fake_read_exact_doc_ids, &reader, &doc_ids,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 4U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_collect_prefix_term_doc_ids_uses_reader_and_deduplicates(void **state) {
   lc_pouch_document_prefix_term term;
@@ -1541,6 +1606,47 @@ test_collect_prefix_term_with_eq_doc_ids_intersects_in_index(void **state) {
 }
 
 static void
+test_collect_prefix_term_with_eq_and_not_eq_doc_ids_filters_in_index(
+    void **state) {
+  lc_pouch_document_prefix_term prefix;
+  lc_pouch_document_eq_term eq[2];
+  lc_pouch_document_eq_term not_equal;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {5U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&prefix, 0, sizeof(prefix));
+  memset(&eq, 0, sizeof(eq));
+  memset(&not_equal, 0, sizeof(not_equal));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  prefix.field = "/owner";
+  prefix.value = "bench-";
+  prefix.ignore_case = 1;
+  eq[0].field = "/region";
+  eq[0].value = "s:north";
+  eq[1].field = "/status";
+  eq[1].value = "s:paid";
+  not_equal.field = "/region";
+  not_equal.value = "s:south";
+  rc = lc_pouch_index_collect_prefix_term_with_eq_and_not_eq_doc_ids(
+      NULL, &prefix, eq, sizeof(eq) / sizeof(eq[0]), &not_equal, 1U,
+      fake_read_prefix_doc_ids, fake_read_exact_doc_ids, &reader, &doc_ids,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 4U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_collect_contains_term_doc_ids_uses_reader_and_deduplicates(void **state) {
   lc_pouch_document_contains_term term;
   lc_pouch_index_doc_id_set doc_ids;
@@ -1562,6 +1668,47 @@ test_collect_contains_term_doc_ids_uses_reader_and_deduplicates(void **state) {
       NULL, &term, fake_read_contains_doc_ids, &reader, &doc_ids, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(reader.calls, 1U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_collect_contains_term_with_eq_and_not_eq_doc_ids_filters_in_index(
+    void **state) {
+  lc_pouch_document_contains_term contains;
+  lc_pouch_document_eq_term eq[2];
+  lc_pouch_document_eq_term not_equal;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {5U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&contains, 0, sizeof(contains));
+  memset(&eq, 0, sizeof(eq));
+  memset(&not_equal, 0, sizeof(not_equal));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  contains.field = "/body";
+  contains.value = "needle";
+  contains.ignore_case = 0;
+  eq[0].field = "/region";
+  eq[0].value = "s:north";
+  eq[1].field = "/status";
+  eq[1].value = "s:paid";
+  not_equal.field = "/region";
+  not_equal.value = "s:south";
+  rc = lc_pouch_index_collect_contains_term_with_eq_and_not_eq_doc_ids(
+      NULL, &contains, eq, sizeof(eq) / sizeof(eq[0]), &not_equal, 1U,
+      fake_read_contains_doc_ids, fake_read_exact_doc_ids, &reader, &doc_ids,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 4U);
   assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
@@ -1649,13 +1796,19 @@ int main(void) {
       cmocka_unit_test(
           test_collect_range_term_with_eq_doc_ids_intersects_in_index),
       cmocka_unit_test(
+          test_collect_range_term_with_eq_and_not_eq_doc_ids_filters_in_index),
+      cmocka_unit_test(
           test_collect_prefix_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
           test_collect_prefix_term_with_eq_doc_ids_intersects_in_index),
       cmocka_unit_test(
+          test_collect_prefix_term_with_eq_and_not_eq_doc_ids_filters_in_index),
+      cmocka_unit_test(
           test_collect_contains_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
           test_collect_contains_term_with_eq_doc_ids_intersects_in_index),
+      cmocka_unit_test(
+          test_collect_contains_term_with_eq_and_not_eq_doc_ids_filters_in_index),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

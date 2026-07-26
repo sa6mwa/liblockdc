@@ -7928,6 +7928,157 @@ test_query_index_text_eq_result_cache_reuses_compound_plans(void **state) {
   test_cleanup_root(root);
 }
 
+static void assert_query_scan_then_keys_hit_result_cache(
+    lc_pouch_allocator *allocator, lc_pouch_store *store,
+    lc_pouch_query_index_scan_req *req, const char *const *expected_keys,
+    size_t expected_count, lc_error *error) {
+  lc_pouch_query_index_scan_res scan;
+  lc_pouch_query_result_cache_status baseline;
+  lc_pouch_query_result_cache_status status;
+  scan_capture rows;
+  key_capture keys;
+  size_t index;
+  int rc;
+
+  memset(&scan, 0, sizeof(scan));
+  memset(&baseline, 0, sizeof(baseline));
+  memset(&status, 0, sizeof(status));
+  memset(&rows, 0, sizeof(rows));
+  memset(&keys, 0, sizeof(keys));
+
+  rc = store->query_result_cache_status(store, &baseline, error);
+  assert_int_equal(rc, LC_OK);
+  rc = store->query_index_scan(store, req, capture_scan_row, &rows, &scan,
+                               error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rows.count, expected_count);
+  for (index = 0U; index < expected_count; ++index) {
+    assert_string_equal(rows.keys[index], expected_keys[index]);
+  }
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+  assert_int_equal(status.puts, baseline.puts + 1UL);
+
+  rc = store->query_index_keys_scan(store, req, capture_query_key, &keys, &scan,
+                                    error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keys.count, expected_count);
+  for (index = 0U; index < expected_count; ++index) {
+    assert_string_equal(keys.keys[index], expected_keys[index]);
+  }
+  assert_false(scan.truncated);
+  lc_pouch_query_index_scan_res_cleanup(allocator, &scan);
+  rc = store->query_result_cache_status(store, &status, error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.hits, baseline.hits + 1UL);
+  assert_int_equal(status.misses, baseline.misses + 1UL);
+  assert_int_equal(status.puts, baseline.puts + 1UL);
+}
+
+static void
+test_query_index_range_text_not_eq_result_cache_subtracts_negative_terms(
+    void **state) {
+  char root[256];
+  lc_pouch_allocator allocator;
+  tracked_allocator tracked;
+  lc_pouch_store *store;
+  lc_pouch_document_range_term range;
+  lc_pouch_document_prefix_term prefix;
+  lc_pouch_document_contains_term contains;
+  lc_pouch_document_eq_term not_equal;
+  lc_pouch_query_index_scan_req req;
+  const char *expected_keys[] = {"alpha", "delta"};
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-range-text-not-eq-cache");
+  test_cleanup_root(root);
+  test_allocator_init(&allocator, &tracked);
+  memset(&error, 0, sizeof(error));
+  memset(&range, 0, sizeof(range));
+  memset(&prefix, 0, sizeof(prefix));
+  memset(&contains, 0, sizeof(contains));
+  memset(&not_equal, 0, sizeof(not_equal));
+  memset(&req, 0, sizeof(req));
+  store = NULL;
+
+  rc = lc_pouch_disk_open(root, &allocator, &store, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(store->query_result_cache_status);
+
+  write_query_range_number_state(
+      &allocator, store, "alpha",
+      "{\"score\":4,\"name\":\"bench-alpha\",\"body\":\"xxABCxx\",\"status\":"
+      "\"allow\"}",
+      &error);
+  write_query_range_number_state(
+      &allocator, store, "bravo",
+      "{\"score\":5,\"name\":\"bench-bravo\",\"body\":\"xxABCxx\",\"status\":"
+      "\"block\"}",
+      &error);
+  write_query_range_number_state(
+      &allocator, store, "charlie",
+      "{\"score\":9,\"name\":\"other-charlie\",\"body\":\"nomatch\","
+      "\"status\":\"allow\"}",
+      &error);
+  write_query_range_number_state(
+      &allocator, store, "delta",
+      "{\"score\":3,\"name\":\"bench-delta\",\"body\":\"yyABCyy\",\"status\":"
+      "\"allow\"}",
+      &error);
+
+  not_equal.field = "/status";
+  not_equal.value = "s:block";
+
+  range.field = "/score";
+  range.lt = "n:+:8:0";
+  req.namespace_name = "default";
+  req.limit = 8U;
+  req.document_range_terms = &range;
+  req.document_range_term_count = 1U;
+  req.document_not_eq_terms = &not_equal;
+  req.document_not_eq_term_count = 1U;
+  assert_query_scan_then_keys_hit_result_cache(
+      &allocator, store, &req, expected_keys,
+      sizeof(expected_keys) / sizeof(expected_keys[0]), &error);
+
+  memset(&req, 0, sizeof(req));
+  prefix.field = "/name";
+  prefix.value = "bench-";
+  req.namespace_name = "default";
+  req.limit = 8U;
+  req.document_prefix_terms = &prefix;
+  req.document_prefix_term_count = 1U;
+  req.document_not_eq_terms = &not_equal;
+  req.document_not_eq_term_count = 1U;
+  assert_query_scan_then_keys_hit_result_cache(
+      &allocator, store, &req, expected_keys,
+      sizeof(expected_keys) / sizeof(expected_keys[0]), &error);
+
+  memset(&req, 0, sizeof(req));
+  contains.field = "/body";
+  contains.value = "ABC";
+  req.namespace_name = "default";
+  req.limit = 8U;
+  req.document_contains_terms = &contains;
+  req.document_contains_term_count = 1U;
+  req.document_not_eq_terms = &not_equal;
+  req.document_not_eq_term_count = 1U;
+  assert_query_scan_then_keys_hit_result_cache(
+      &allocator, store, &req, expected_keys,
+      sizeof(expected_keys) / sizeof(expected_keys[0]), &error);
+
+  rc = store->close(store, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
 static void
 test_query_index_exists_eq_result_cache_reuses_compound_plan(void **state) {
   char root[256];
@@ -19260,6 +19411,8 @@ int main(void) {
           test_query_index_in_not_eq_result_cache_subtracts_negative_terms),
       cmocka_unit_test(
           test_query_index_text_eq_result_cache_reuses_compound_plans),
+      cmocka_unit_test(
+          test_query_index_range_text_not_eq_result_cache_subtracts_negative_terms),
       cmocka_unit_test(
           test_query_index_exists_eq_result_cache_reuses_compound_plan),
       cmocka_unit_test(

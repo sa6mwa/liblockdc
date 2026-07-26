@@ -320,6 +320,32 @@ int lc_pouch_index_collect_range_term_with_eq_doc_ids(
                                                   read_context, doc_ids, error);
 }
 
+int lc_pouch_index_collect_range_term_with_eq_and_not_eq_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_range_term *range_term,
+    const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
+    const lc_pouch_document_eq_term *not_eq_terms, size_t not_eq_term_count,
+    lc_pouch_index_range_term_doc_ids_fn read_range,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  int rc;
+
+  rc = lc_pouch_index_collect_range_term_doc_ids(
+      allocator, range_term, read_range, read_context, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
+                                                eq_term_count, read_exact,
+                                                read_context, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_index_subtract_eq_term_doc_ids(allocator, not_eq_terms,
+                                                 not_eq_term_count, read_exact,
+                                                 read_context, doc_ids, error);
+}
+
 int lc_pouch_index_collect_prefix_term_doc_ids(
     const lc_pouch_allocator *allocator,
     const lc_pouch_document_prefix_term *term,
@@ -362,6 +388,32 @@ int lc_pouch_index_collect_prefix_term_with_eq_doc_ids(
                                                   read_context, doc_ids, error);
 }
 
+int lc_pouch_index_collect_prefix_term_with_eq_and_not_eq_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_prefix_term *prefix_term,
+    const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
+    const lc_pouch_document_eq_term *not_eq_terms, size_t not_eq_term_count,
+    lc_pouch_index_prefix_term_doc_ids_fn read_prefix,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  int rc;
+
+  rc = lc_pouch_index_collect_prefix_term_doc_ids(
+      allocator, prefix_term, read_prefix, read_context, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
+                                                eq_term_count, read_exact,
+                                                read_context, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_index_subtract_eq_term_doc_ids(allocator, not_eq_terms,
+                                                 not_eq_term_count, read_exact,
+                                                 read_context, doc_ids, error);
+}
+
 int lc_pouch_index_collect_contains_term_doc_ids(
     const lc_pouch_allocator *allocator,
     const lc_pouch_document_contains_term *term,
@@ -402,4 +454,30 @@ int lc_pouch_index_collect_contains_term_with_eq_doc_ids(
   return lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
                                                   eq_term_count, read_exact,
                                                   read_context, doc_ids, error);
+}
+
+int lc_pouch_index_collect_contains_term_with_eq_and_not_eq_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_contains_term *contains_term,
+    const lc_pouch_document_eq_term *eq_terms, size_t eq_term_count,
+    const lc_pouch_document_eq_term *not_eq_terms, size_t not_eq_term_count,
+    lc_pouch_index_contains_term_doc_ids_fn read_contains,
+    lc_pouch_index_exact_term_doc_ids_fn read_exact, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  int rc;
+
+  rc = lc_pouch_index_collect_contains_term_doc_ids(
+      allocator, contains_term, read_contains, read_context, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_intersect_eq_term_doc_ids(allocator, eq_terms,
+                                                eq_term_count, read_exact,
+                                                read_context, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_index_subtract_eq_term_doc_ids(allocator, not_eq_terms,
+                                                 not_eq_term_count, read_exact,
+                                                 read_context, doc_ids, error);
 }

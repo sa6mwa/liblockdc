@@ -1382,6 +1382,10 @@ adapter reuses field-presence docID readers and exact-term docID readers while
 Negative equality filters on primary positive `exists` plans use the same
 bridge: field-presence docIDs are intersected with optional positive equality
 docIDs, then negative exact-term docID sets are subtracted in `lc_pouch_index`.
+Primary numeric `range`, `prefix`, and `contains` plans with negative equality
+filters now follow that same pattern: the primary candidate docIDs are
+intersected with optional positive equality docIDs, then the negative
+exact-term docID sets are subtracted before result paging.
 The index layer also owns the first result-cache primitive: a generation plus
 normalized-plan key maps to a sorted docID vector. The simple result-cache plan
 key constructors now live in `lc_pouch_index`, and disk supplies only the known
@@ -1432,6 +1436,10 @@ Primary positive `exists`/not-equality scans append the normalized `not_eq`
 suffix after the length-prefixed field-presence key and any positive equality
 suffix. The cached docID vector is the field-presence candidate set after
 index-owned intersection/subtraction.
+Primary numeric `range`, `prefix`, and `contains` not-equality scans append the
+same normalized `not_eq` suffix after their primary selector key and any
+positive equality suffix. Their cached docID vectors are the primary candidate
+sets after index-owned intersection/subtraction.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,
 simple positive numeric `range`, simple non-wildcard positive `in`, simple
