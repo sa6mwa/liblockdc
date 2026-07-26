@@ -1453,14 +1453,12 @@ Residual selectors such as date predicates use the same identity-keyed result
 cache for accepted candidate docIDs. DateAfter now first tries an
 identity-matched per-namespace temporal generation file: supported temporal
 strings are read as typed docID vectors newer than the bound and plausible
-unsupported temporal strings remain residual docIDs. The disk bridge then
-applies its existing live-state, owner, hidden, key, and secondary-predicate
-guards before paging. If the generation file is absent, stale, or invalid for
-the current index identity, the current disk bridge still scans sidecar field
-postings and narrows candidates by parsing supported temporal strings against
-the normalized bound while retaining plausible unsupported temporal strings as
-residual candidates. The client-level `liblql` filter remains authoritative for
-final acceptance and owns public cursor selection for residual pages.
+unsupported temporal strings remain residual docIDs. Indexed DateAfter treats
+that generation as authoritative after repair and then applies live-state,
+owner, hidden, key, and secondary-predicate guards before paging. It does not
+fall back to reparsing field postings on the query hot path. The client-level
+`liblql` filter remains authoritative for final acceptance and owns public
+cursor selection for residual pages.
 The temporal reader codec is intentionally private to pouch index generations:
 it writes a fixed magic/version header, sorted fields, normalized temporal
 docID entries, and residual docIDs. Decode rejects wrong versions, truncated
@@ -1477,8 +1475,9 @@ generations because the segmented-manifest identity changes. The reader trusts
 only files whose encoded identity equals the current index identity. When the
 file is absent, stale, or corrupt, DateAfter refreshes query-index replay,
 republishes the namespace generation, rereads the artifact, and uses the
-repaired file when it matches the refreshed identity; only unrepaired cases fall
-back to the sidecar scan.
+repaired file when it matches the refreshed identity. If repair still cannot
+produce an identity-matched generation, indexed DateAfter produces no
+candidates rather than scanning sidecar postings on the hot path.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every

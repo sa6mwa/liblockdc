@@ -5211,27 +5211,6 @@ static int lc_pouch_disk_query_field_number_matches_range(
   return 1;
 }
 
-static int lc_pouch_disk_query_field_matches_date_after_candidate(
-    const char *value, const lc_pouch_temporal *bound) {
-  lc_pouch_temporal candidate;
-  const char *date_value;
-
-  if (value == NULL || bound == NULL) {
-    return 0;
-  }
-  if (strncmp(value, "g:", 2U) == 0 || strncmp(value, "t:", 2U) == 0) {
-    return 0;
-  }
-  if (strncmp(value, "s:", 2U) != 0) {
-    return 0;
-  }
-  date_value = value + 2U;
-  if (!lc_pouch_temporal_parse(date_value, &candidate)) {
-    return lc_pouch_temporal_may_match_liblql(date_value);
-  }
-  return lc_pouch_temporal_compare(&candidate, bound) > 0;
-}
-
 static int lc_pouch_disk_query_field_key_matches_range_term(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const lc_pouch_document_range_term *term, const char *key) {
@@ -6546,39 +6525,6 @@ static int lc_pouch_disk_query_req_only_primary_range(
           req->document_exists_path_patterns == NULL);
 }
 
-static int lc_pouch_disk_query_req_only_primary_date_after(
-    const lc_pouch_query_index_scan_req *req) {
-  return req != NULL &&
-         (req->document_eq_term_count == 0U ||
-          req->document_eq_terms == NULL) &&
-         (req->document_not_eq_term_count == 0U ||
-          req->document_not_eq_terms == NULL) &&
-         (req->document_range_term_count == 0U ||
-          req->document_range_terms == NULL) &&
-         (req->document_not_range_term_count == 0U ||
-          req->document_not_range_terms == NULL) &&
-         (req->document_in_term_count == 0U ||
-          req->document_in_terms == NULL) &&
-         (req->document_not_in_term_count == 0U ||
-          req->document_not_in_terms == NULL) &&
-         (req->document_prefix_term_count == 0U ||
-          req->document_prefix_terms == NULL) &&
-         (req->document_not_prefix_term_count == 0U ||
-          req->document_not_prefix_terms == NULL) &&
-         (req->document_contains_term_count == 0U ||
-          req->document_contains_terms == NULL) &&
-         (req->document_not_contains_term_count == 0U ||
-          req->document_not_contains_terms == NULL) &&
-         (req->document_exists_term_count == 0U ||
-          req->document_exists_terms == NULL) &&
-         (req->document_not_exists_term_count == 0U ||
-          req->document_not_exists_terms == NULL) &&
-         (req->document_exists_path_pattern_count == 0U ||
-          req->document_exists_path_patterns == NULL) &&
-         req->document_date_after_term_count == 1U &&
-         req->document_date_after_terms != NULL;
-}
-
 static int lc_pouch_disk_query_field_add_simple_primary_doc_id(
     lc_pouch_disk_store *store, const lc_pouch_query_index_scan_req *req,
     const lc_pouch_disk_query_field_posting *posting,
@@ -7730,9 +7676,6 @@ static int lc_pouch_disk_query_compile_date_after_doc_ids(
   lc_pouch_index_doc_id_set generation_doc_ids;
   lc_pouch_index_identity identity;
   lc_pouch_temporal bound;
-  size_t position;
-  size_t index;
-  int simple_primary;
   int found_generation;
   int rc;
 
@@ -7784,45 +7727,6 @@ static int lc_pouch_disk_query_compile_date_after_doc_ids(
     lc_pouch_index_temporal_generation_cleanup(&reader->store->allocator,
                                                &generation);
     return rc;
-  }
-  simple_primary = lc_pouch_disk_query_req_only_primary_date_after(reader->req);
-  (void)lc_pouch_disk_query_field_find(reader->store,
-                                       reader->req->namespace_name, term->field,
-                                       "", "", &position);
-  for (index = position; index < reader->store->query_field_posting_count;
-       ++index) {
-    lc_pouch_disk_query_field_posting *posting;
-    int cmp;
-
-    posting = &reader->store->query_field_postings[index];
-    cmp = lc_pouch_disk_query_field_compare_values(
-        posting->namespace_name, posting->field, "", "",
-        reader->req->namespace_name, term->field, "", "");
-    if (cmp > 0) {
-      break;
-    }
-    if (cmp < 0 || !lc_pouch_disk_query_field_matches_date_after_candidate(
-                       posting->value, &bound)) {
-      continue;
-    }
-    if (simple_primary) {
-      rc = lc_pouch_disk_query_field_add_simple_primary_doc_id(
-          reader->store, reader->req, posting, doc_ids,
-          reader->require_summary_match, error, reader->alloc_message);
-    } else {
-      rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
-          reader->store, reader->req, posting, doc_ids, reader->eq_from,
-          reader->range_from, reader->in_from, 0U, 0U, 0U,
-          reader->require_summary_match,
-          reader->require_positive_terms_summary_match,
-          reader->skip_not_eq_match, error, reader->alloc_message);
-    }
-    if (rc != LC_OK) {
-      return rc;
-    }
-  }
-  if (!lc_pouch_index_doc_id_set_sort_unique(doc_ids)) {
-    return lc_pouch_set_nomem(error, reader->alloc_message);
   }
   return LC_OK;
 }

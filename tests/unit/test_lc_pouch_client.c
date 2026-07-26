@@ -193,6 +193,32 @@ static void test_corrupt_temporal_generation_file(const char *path) {
   assert_int_equal(close(fd), 0);
 }
 
+static void test_stale_temporal_generation_file(const char *path) {
+  lc_pouch_index_temporal_generation generation;
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t written;
+  int fd;
+
+  memset(&generation, 0, sizeof(generation));
+  test_read_temporal_generation_file(path, &generation);
+  assert_true(generation.identity.sequence > 0U);
+  generation.identity.sequence--;
+  assert_true(lc_pouch_index_temporal_generation_encoded_size(
+      &generation, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_temporal_generation_encode(
+      &generation, encoded, encoded_size, &written));
+  assert_int_equal(written, encoded_size);
+  fd = open(path, O_WRONLY | O_TRUNC);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, encoded, encoded_size), (ssize_t)encoded_size);
+  assert_int_equal(close(fd), 0);
+  free(encoded);
+  lc_pouch_index_temporal_generation_cleanup(NULL, &generation);
+}
+
 static unsigned long test_get_u64(const unsigned char *bytes) {
 #if ULONG_MAX > 0xffffffffUL
   return ((unsigned long)bytes[0]) | ((unsigned long)bytes[1] << 8) |
@@ -10541,6 +10567,33 @@ test_pouch_endpoint_index_rebuild_writes_temporal_generation(void **state) {
   memset(&generation, 0, sizeof(generation));
 
   test_corrupt_temporal_generation_file(generation_path);
+  client = open_pouch_client(endpoint);
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(capture.keys[1], "charlie");
+  assert_string_equal(capture.keys[2], "echo");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  lc_query_res_cleanup(&res);
+  client->close(client);
+
+  test_read_temporal_generation_file(generation_path, &generation);
+  assert_string_equal(generation.namespace_name, "default");
+  assert_true(lc_pouch_index_temporal_posting_table_append_after(
+      NULL, &generation.postings, "/created_at", 1735689600, 0, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_int_equal(doc_ids.count, 3U);
+  assert_true(generation.identity.sequence > 0U);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_temporal_generation_cleanup(NULL, &generation);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&generation, 0, sizeof(generation));
+
+  test_stale_temporal_generation_file(generation_path);
   client = open_pouch_client(endpoint);
   memset(&capture, 0, sizeof(capture));
   memset(&res, 0, sizeof(res));

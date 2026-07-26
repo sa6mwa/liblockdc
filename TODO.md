@@ -905,13 +905,15 @@ Latest release targets confirmed on 2026-07-23:
         - [x] Repair missing, stale, or corrupt temporal generation files on
           DateAfter reads by refreshing query-index replay, republishing the
           namespace generation, and rereading the identity-matched artifact
-          before considering the sidecar bridge.
-        - [ ] Make temporal generation files authoritative for DateAfter by
-          covering any remaining identity-changing non-query mutations and
-          removing the remaining sidecar-scan bridge. A query-time disk bridge
-          attempt was measured on 2026-07-26 and rejected because building the
-          temporal table on the hot path regressed 4096-document DateAfter
-          page-one latency to roughly 110-140 ms C-side.
+          before using the generation as the indexed DateAfter source.
+        - [x] Make temporal generation files authoritative for indexed
+          DateAfter and remove the remaining sidecar-scan bridge. If the
+          repaired identity-matched generation cannot be read, indexed DateAfter
+          returns the empty candidate set instead of reparsing field postings on
+          the hot path. A query-time disk bridge attempt was measured on
+          2026-07-26 and rejected because building the temporal table on the
+          hot path regressed 4096-document DateAfter page-one latency to
+          roughly 110-140 ms C-side.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not
