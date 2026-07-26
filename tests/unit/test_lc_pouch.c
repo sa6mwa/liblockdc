@@ -1836,6 +1836,153 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_client_attachments_roundtrip_and_delete(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list list;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_attachment_delete_op delete_op;
+  lc_attachment_delete_all_op delete_all_op;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  int deleted;
+  int deleted_count;
+  char root[512];
+  char key[96];
+  char beta_id[256];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  deleted = 0;
+  deleted_count = 0;
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&list, 0, sizeof(list));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_attach_op_init(&attach_op);
+  lc_attachment_list_req_init(&list_req);
+  lc_attachment_get_op_init(&get_op);
+  lc_attachment_delete_op_init(&delete_op);
+  lc_attachment_delete_all_op_init(&delete_all_op);
+  lc_error_init(&error);
+  make_root("client-attachments", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/attachments/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  attach_op.lease.key = key;
+  attach_op.name = "alpha.txt";
+  attach_op.content_type = "text/plain";
+  attach_op.prevent_overwrite = 1;
+  rc = lc_source_from_memory("alpha", strlen("alpha"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(attach_res.attachment.name, "alpha.txt");
+  assert_string_equal(attach_res.attachment.content_type, "text/plain");
+  assert_int_equal(attach_res.attachment.size, 5L);
+  assert_non_null(attach_res.attachment.id);
+  lc_attach_res_cleanup(&attach_res);
+
+  rc = lc_source_from_memory("again", strlen("again"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "already exists"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_attach_res_cleanup(&attach_res);
+
+  attach_op.name = "beta.bin";
+  attach_op.content_type = "application/octet-stream";
+  attach_op.prevent_overwrite = 0;
+  rc = lc_source_from_memory("beta", strlen("beta"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  snprintf(beta_id, sizeof(beta_id), "%s", attach_res.attachment.id);
+  lc_attach_res_cleanup(&attach_res);
+
+  list_req.lease.key = key;
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 2U);
+  assert_string_equal(list.items[0].name, "alpha.txt");
+  assert_string_equal(list.items[1].name, "beta.bin");
+  assert_string_equal(list.items[1].id, beta_id);
+  lc_attachment_list_cleanup(&list);
+
+  get_op.lease.key = key;
+  get_op.selector.name = "alpha.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(get_res.attachment.name, "alpha.txt");
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("alpha"));
+  assert_memory_equal(bytes, "alpha", strlen("alpha"));
+  sink->close(sink);
+  sink = NULL;
+  lc_attachment_get_res_cleanup(&get_res);
+
+  get_op.selector.name = NULL;
+  get_op.selector.id = beta_id;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(get_res.attachment.name, "beta.bin");
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("beta"));
+  assert_memory_equal(bytes, "beta", strlen("beta"));
+  sink->close(sink);
+  sink = NULL;
+  lc_attachment_get_res_cleanup(&get_res);
+
+  delete_op.lease.key = key;
+  delete_op.selector.name = "alpha.txt";
+  rc = client->delete_attachment(client, &delete_op, &deleted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted, 1);
+  deleted = 0;
+  rc = client->delete_attachment(client, &delete_op, &deleted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted, 0);
+
+  delete_all_op.lease.key = key;
+  rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted_count, 1);
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 0U);
+
+  lc_attachment_list_cleanup(&list);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_remove_tombstones_state_and_enforces_preconditions(
     void **state) {
   lc_client *client;
@@ -2213,6 +2360,91 @@ static void test_lease_mutate_and_local_mutate_refresh_state(void **state) {
   sink->close(sink);
 
   lc_get_res_cleanup(&get_res);
+  lease->close(lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_lease_attachments_use_pouch_object_store(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list list;
+  lc_attachment_get_req get_req;
+  lc_attachment_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  int deleted_count;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  deleted_count = 0;
+  lc_acquire_req_init(&acquire_req);
+  lc_attach_req_init(&attach_req);
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&list, 0, sizeof(list));
+  lc_attachment_get_req_init(&get_req);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("lease-attachments", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-attachments/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  attach_req.name = "lease.txt";
+  attach_req.content_type = "text/plain";
+  rc = lc_source_from_memory("lease-body", strlen("lease-body"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(attach_res.attachment.name, "lease.txt");
+  lc_attach_res_cleanup(&attach_res);
+
+  rc = lease->list_attachments(lease, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_string_equal(list.items[0].name, "lease.txt");
+
+  get_req.selector.name = "lease.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get_attachment(lease, &get_req, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("lease-body"));
+  assert_memory_equal(bytes, "lease-body", strlen("lease-body"));
+  sink->close(sink);
+
+  rc = lease->delete_all_attachments(lease, &deleted_count, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted_count, 1);
+
+  lc_attachment_get_res_cleanup(&get_res);
+  lc_attachment_list_cleanup(&list);
   lease->close(lease);
   lc_client_close(client);
   cleanup_root(root);
@@ -4185,6 +4417,7 @@ int main(void) {
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
       cmocka_unit_test(test_client_mutate_applies_plan_and_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
+      cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),
@@ -4198,6 +4431,7 @@ int main(void) {
           test_shared_state_projection_cache_refreshes_peer_markers),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_mutate_and_local_mutate_refresh_state),
+      cmocka_unit_test(test_lease_attachments_use_pouch_object_store),
       cmocka_unit_test(
           test_lease_save_streams_mapped_json_and_replays_after_reopen),
       cmocka_unit_test(test_lease_keepalive_and_release_use_local_lifecycle),

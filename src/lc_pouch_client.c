@@ -43,6 +43,22 @@ typedef struct lc_pouch_mutate_file {
   unsigned long version;
 } lc_pouch_mutate_file;
 
+typedef struct lc_pouch_attachment_key_ref {
+  char *key;
+  unsigned long version;
+} lc_pouch_attachment_key_ref;
+
+typedef struct lc_pouch_attachment_list_builder {
+  char *prefix;
+  size_t prefix_len;
+  lc_attachment_info *items;
+  size_t count;
+  size_t capacity;
+  lc_pouch_attachment_key_ref *keys;
+  size_t key_count;
+  size_t key_capacity;
+} lc_pouch_attachment_list_builder;
+
 typedef struct lc_pouch_txn_record {
   char *state;
   long expires_at_unix;
@@ -1075,15 +1091,6 @@ static int lc_pouch_query_run_index_predicate(
   return rc;
 }
 
-static int lc_pouch_lease_rebuilding(lc_error *error) {
-  return lc_error_set(
-      error, LC_ERR_INVALID, 0L,
-      "pouch lease operation is not implemented in the redesigned pouch backend",
-      "the bound lease state path is available; metadata, mutation, attachment, "
-      "keepalive, and removal subsystems are still being rebuilt",
-      NULL, "pouch-redesign");
-}
-
 static int lc_pouch_lease_refresh_state(lc_lease_handle *lease,
                                         const char *etag, long version,
                                         lc_error *error) {
@@ -1365,6 +1372,436 @@ cleanup:
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   if (plan != NULL) {
     lc_mutation_plan_close(plan);
+  }
+  return rc;
+}
+
+static char *lc_pouch_attachment_hex_encode(const char *value) {
+  static const char hex[] = "0123456789abcdef";
+  const unsigned char *src;
+  char *out;
+  size_t length;
+  size_t offset;
+
+  if (value == NULL) {
+    value = "";
+  }
+  length = strlen(value);
+  out = (char *)malloc(length * 2U + 1U);
+  if (out == NULL) {
+    return NULL;
+  }
+  src = (const unsigned char *)value;
+  offset = 0U;
+  while (*src != '\0') {
+    out[offset++] = hex[*src >> 4];
+    out[offset++] = hex[*src & 0x0fU];
+    ++src;
+  }
+  out[offset] = '\0';
+  return out;
+}
+
+static int lc_pouch_attachment_hex_value(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return ch - 'a' + 10;
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return ch - 'A' + 10;
+  }
+  return -1;
+}
+
+static char *lc_pouch_attachment_hex_decode(const char *value) {
+  char *out;
+  size_t length;
+  size_t i;
+
+  if (value == NULL) {
+    return NULL;
+  }
+  length = strlen(value);
+  if (length == 0U || length % 2U != 0U) {
+    return NULL;
+  }
+  out = (char *)malloc(length / 2U + 1U);
+  if (out == NULL) {
+    return NULL;
+  }
+  for (i = 0U; i < length; i += 2U) {
+    int hi;
+    int lo;
+
+    hi = lc_pouch_attachment_hex_value(value[i]);
+    lo = lc_pouch_attachment_hex_value(value[i + 1U]);
+    if (hi < 0 || lo < 0) {
+      free(out);
+      return NULL;
+    }
+    out[i / 2U] = (char)((hi << 4) | lo);
+  }
+  out[length / 2U] = '\0';
+  return out;
+}
+
+static char *lc_pouch_attachment_prefix(const char *namespace_name,
+                                        const char *key, lc_error *error) {
+  char *namespace_hex;
+  char *key_hex;
+  char *prefix;
+  size_t length;
+
+  namespace_hex = lc_pouch_attachment_hex_encode(namespace_name);
+  key_hex = lc_pouch_attachment_hex_encode(key);
+  if (namespace_hex == NULL || key_hex == NULL) {
+    free(namespace_hex);
+    free(key_hex);
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch attachment key prefix", NULL,
+                       NULL, NULL);
+    return NULL;
+  }
+  length = strlen("att//") + strlen(namespace_hex) + strlen(key_hex) + 1U;
+  prefix = (char *)malloc(length);
+  if (prefix == NULL) {
+    free(namespace_hex);
+    free(key_hex);
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch attachment key prefix", NULL,
+                       NULL, NULL);
+    return NULL;
+  }
+  snprintf(prefix, length, "att/%s/%s/", namespace_hex, key_hex);
+  free(namespace_hex);
+  free(key_hex);
+  return prefix;
+}
+
+static char *lc_pouch_attachment_key(const char *namespace_name,
+                                     const char *key, const char *name,
+                                     lc_error *error) {
+  char *prefix;
+  char *name_hex;
+  char *attachment_key;
+  size_t length;
+
+  prefix = lc_pouch_attachment_prefix(namespace_name, key, error);
+  name_hex = lc_pouch_attachment_hex_encode(name);
+  if (prefix == NULL || name_hex == NULL) {
+    free(prefix);
+    free(name_hex);
+    if (name_hex == NULL) {
+      (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                         "failed to allocate pouch attachment name", NULL,
+                         NULL, NULL);
+    }
+    return NULL;
+  }
+  length = strlen(prefix) + strlen(name_hex) + 1U;
+  attachment_key = (char *)malloc(length);
+  if (attachment_key == NULL) {
+    free(prefix);
+    free(name_hex);
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch attachment key", NULL, NULL,
+                       NULL);
+    return NULL;
+  }
+  snprintf(attachment_key, length, "%s%s", prefix, name_hex);
+  free(prefix);
+  free(name_hex);
+  return attachment_key;
+}
+
+static char *lc_pouch_attachment_id_from_name(const char *name,
+                                              lc_error *error) {
+  char *name_hex;
+  char *id;
+  size_t length;
+
+  name_hex = lc_pouch_attachment_hex_encode(name);
+  if (name_hex == NULL) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch attachment id", NULL, NULL,
+                       NULL);
+    return NULL;
+  }
+  length = strlen("pouch-att-") + strlen(name_hex) + 1U;
+  id = (char *)malloc(length);
+  if (id == NULL) {
+    free(name_hex);
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch attachment id", NULL, NULL,
+                       NULL);
+    return NULL;
+  }
+  snprintf(id, length, "pouch-att-%s", name_hex);
+  free(name_hex);
+  return id;
+}
+
+static char *lc_pouch_attachment_name_from_selector(
+    const lc_attachment_selector *selector, lc_error *error) {
+  const char *id_prefix;
+
+  if (selector == NULL) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch attachment selector is required", NULL, NULL,
+                       NULL);
+    return NULL;
+  }
+  if (selector->name != NULL && selector->name[0] != '\0') {
+    return lc_strdup_local(selector->name);
+  }
+  id_prefix = "pouch-att-";
+  if (selector->id != NULL &&
+      strncmp(selector->id, id_prefix, strlen(id_prefix)) == 0) {
+    char *name;
+
+    name = lc_pouch_attachment_hex_decode(selector->id + strlen(id_prefix));
+    if (name == NULL) {
+      (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                         "pouch attachment id is invalid", NULL, NULL, NULL);
+    }
+    return name;
+  }
+  (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                     "pouch attachment selector requires name or pouch id",
+                     NULL, NULL, NULL);
+  return NULL;
+}
+
+static int lc_pouch_attachment_info_fill(lc_attachment_info *info,
+                                         const char *name, long size,
+                                         const char *content_type,
+                                         unsigned long version,
+                                         lc_error *error) {
+  memset(info, 0, sizeof(*info));
+  info->id = lc_pouch_attachment_id_from_name(name, error);
+  info->name = lc_strdup_local(name);
+  info->content_type = lc_strdup_local(content_type);
+  if (info->id == NULL || info->name == NULL ||
+      (content_type != NULL && info->content_type == NULL)) {
+    lc_attachment_info_cleanup(info);
+    if (error != NULL && error->code != LC_OK) {
+      return error->code;
+    }
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch attachment metadata", NULL,
+                        NULL, NULL);
+  }
+  info->size = size;
+  info->created_at_unix = (long)version;
+  info->updated_at_unix = (long)version;
+  return LC_OK;
+}
+
+static int lc_pouch_attachment_copy_to_temp(lc_source *src, long max_bytes,
+                                            int has_max_bytes, FILE **out,
+                                            unsigned long *bytes_out,
+                                            lc_error *error) {
+  FILE *fp;
+  unsigned char buffer[8192];
+  unsigned long total;
+  int rc;
+
+  if (src == NULL || out == NULL || bytes_out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment copy requires source and output",
+                        NULL, NULL, NULL);
+  }
+  if (has_max_bytes && max_bytes < 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment max_bytes must be non-negative",
+                        NULL, NULL, NULL);
+  }
+  fp = tmpfile();
+  if (fp == NULL) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create pouch attachment scratch file",
+                        strerror(errno), NULL, NULL);
+  }
+  total = 0UL;
+  rc = LC_OK;
+  for (;;) {
+    size_t nread;
+
+    nread = src->read(src, buffer, sizeof(buffer), error);
+    if (nread == 0U) {
+      if (error != NULL && error->code != LC_OK) {
+        rc = error->code;
+      }
+      break;
+    }
+    if ((unsigned long)nread > ULONG_MAX - total) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment is too large", NULL, NULL, NULL);
+      break;
+    }
+    if (has_max_bytes && total + (unsigned long)nread > (unsigned long)max_bytes) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment exceeds max_bytes", NULL, NULL,
+                        NULL);
+      break;
+    }
+    if (fwrite(buffer, 1U, nread, fp) != nread) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to write pouch attachment scratch file",
+                        strerror(errno), NULL, NULL);
+      break;
+    }
+    total += (unsigned long)nread;
+  }
+  if (rc == LC_OK && fflush(fp) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to flush pouch attachment scratch file",
+                      strerror(errno), NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    rewind(fp);
+    *out = fp;
+    *bytes_out = total;
+    return LC_OK;
+  }
+  fclose(fp);
+  return rc;
+}
+
+static void lc_pouch_attachment_list_builder_cleanup(
+    lc_pouch_attachment_list_builder *builder) {
+  size_t i;
+
+  if (builder == NULL) {
+    return;
+  }
+  for (i = 0U; i < builder->count; ++i) {
+    lc_attachment_info_cleanup(&builder->items[i]);
+  }
+  for (i = 0U; i < builder->key_count; ++i) {
+    free(builder->keys[i].key);
+  }
+  free(builder->items);
+  free(builder->keys);
+  free(builder->prefix);
+  memset(builder, 0, sizeof(*builder));
+}
+
+static int lc_pouch_attachment_append_key(
+    lc_pouch_attachment_list_builder *builder, const char *key,
+    unsigned long version, lc_error *error) {
+  lc_pouch_attachment_key_ref *next;
+  char *copy;
+  size_t capacity;
+
+  if (builder->key_count == builder->key_capacity) {
+    capacity = builder->key_capacity == 0U ? 8U : builder->key_capacity * 2U;
+    next = (lc_pouch_attachment_key_ref *)realloc(
+        builder->keys, capacity * sizeof(builder->keys[0]));
+    if (next == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch attachment key list", NULL,
+                          NULL, NULL);
+    }
+    builder->keys = next;
+    builder->key_capacity = capacity;
+  }
+  copy = lc_strdup_local(key);
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch attachment key", NULL, NULL,
+                        NULL);
+  }
+  builder->keys[builder->key_count].key = copy;
+  builder->keys[builder->key_count].version = version;
+  ++builder->key_count;
+  return LC_OK;
+}
+
+static int lc_pouch_attachment_append_info(
+    lc_pouch_attachment_list_builder *builder, const char *name, long size,
+    const char *content_type, unsigned long version, lc_error *error) {
+  lc_attachment_info *next;
+  size_t capacity;
+  int rc;
+
+  if (builder->count == builder->capacity) {
+    capacity = builder->capacity == 0U ? 4U : builder->capacity * 2U;
+    next = (lc_attachment_info *)realloc(builder->items,
+                                         capacity * sizeof(builder->items[0]));
+    if (next == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch attachment list", NULL,
+                          NULL, NULL);
+    }
+    memset(next + builder->capacity, 0,
+           (capacity - builder->capacity) * sizeof(builder->items[0]));
+    builder->items = next;
+    builder->capacity = capacity;
+  }
+  rc = lc_pouch_attachment_info_fill(&builder->items[builder->count], name,
+                                     size, content_type, version, error);
+  if (rc == LC_OK) {
+    ++builder->count;
+  }
+  return rc;
+}
+
+static int lc_pouch_attachment_visit(
+    const lc_pouch_state_visit_entry *entry, void *context, lc_error *error) {
+  lc_pouch_attachment_list_builder *builder;
+  char *name;
+  int rc;
+
+  builder = (lc_pouch_attachment_list_builder *)context;
+  if (strncmp(entry->key, builder->prefix, builder->prefix_len) != 0) {
+    return LC_OK;
+  }
+  name = lc_pouch_attachment_hex_decode(entry->key + builder->prefix_len);
+  if (name == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment key is corrupt", entry->key, NULL,
+                        NULL);
+  }
+  rc = lc_pouch_attachment_append_info(builder, name, (long)entry->bytes,
+                                       entry->content_type, entry->version,
+                                       error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_attachment_append_key(builder, entry->key, entry->version,
+                                        error);
+  }
+  free(name);
+  return rc;
+}
+
+static int lc_pouch_attachment_info_compare(const void *left,
+                                            const void *right) {
+  const lc_attachment_info *a;
+  const lc_attachment_info *b;
+
+  a = (const lc_attachment_info *)left;
+  b = (const lc_attachment_info *)right;
+  return strcmp(a->name != NULL ? a->name : "", b->name != NULL ? b->name : "");
+}
+
+static int lc_pouch_collect_attachments(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    lc_pouch_attachment_list_builder *builder, lc_error *error) {
+  int rc;
+
+  memset(builder, 0, sizeof(*builder));
+  builder->prefix = lc_pouch_attachment_prefix(namespace_name, key, error);
+  if (builder->prefix == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  builder->prefix_len = strlen(builder->prefix);
+  rc = lc_pouch_state_visit(client->pouch, ".lockd/attachments",
+                            lc_pouch_attachment_visit, builder, error);
+  if (rc == LC_OK && builder->count > 1U) {
+    qsort(builder->items, builder->count, sizeof(builder->items[0]),
+          lc_pouch_attachment_info_compare);
   }
   return rc;
 }
@@ -2815,52 +3252,333 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
 int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
                                   lc_source *src, lc_attach_res *out,
                                   lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)src;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_state_read_result existing;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  lc_source *file_source;
+  const char *namespace_name;
+  const char *content_type;
+  char *attachment_key;
+  FILE *fp;
+  unsigned long bytes;
+  int rc;
+
+  if (self == NULL || req == NULL || src == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attach requires self, req, src, and out", NULL,
+                        NULL, NULL);
+  }
+  if (req->name == NULL || req->name[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attach requires attachment name", NULL, NULL,
+                        NULL);
+  }
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&existing, 0, sizeof(existing));
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  file_source = NULL;
+  attachment_key = NULL;
+  fp = NULL;
+  bytes = 0UL;
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  content_type = req->content_type != NULL && req->content_type[0] != '\0'
+                     ? req->content_type
+                     : "application/octet-stream";
+
+  attachment_key =
+      lc_pouch_attachment_key(namespace_name, req->lease.key, req->name, error);
+  if (attachment_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  if (req->prevent_overwrite) {
+    rc = lc_pouch_state_read(client->pouch, ".lockd/attachments",
+                             attachment_key, &existing, error);
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+    if (existing.found) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment already exists", NULL, NULL, NULL);
+      goto cleanup;
+    }
+  }
+  rc = lc_pouch_attachment_copy_to_temp(src, req->max_bytes,
+                                        req->has_max_bytes, &fp, &bytes,
+                                        error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  file_source = lc_source_from_open_file(fp, 0);
+  if (file_source == NULL) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to wrap pouch attachment source", NULL, NULL,
+                      NULL);
+    goto cleanup;
+  }
+  options.content_type = content_type;
+  rc = lc_pouch_state_write(client->pouch, ".lockd/attachments", attachment_key,
+                            file_source, &options, &result, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_attachment_info_fill(&out->attachment, req->name,
+                                       (long)bytes, content_type,
+                                       result.version, error);
+  }
+  if (rc == LC_OK) {
+    out->version = (long)result.version;
+    out->correlation_id = lc_strdup_local("pouch-attachment-put");
+    if (out->correlation_id == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch attachment response", NULL,
+                        NULL, NULL);
+    }
+  }
+
+cleanup:
+  if (file_source != NULL) {
+    lc_source_close(file_source);
+  }
+  if (fp != NULL) {
+    fclose(fp);
+  }
+  free(attachment_key);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &existing);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  if (rc != LC_OK) {
+    lc_attach_res_cleanup(out);
+  }
+  return rc;
 }
 
 int lc_pouch_client_list_attachments_method(
     lc_client *self, const lc_attachment_list_req *req,
     lc_attachment_list *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_attachment_list_builder builder;
+  const char *namespace_name;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch list_attachments requires self, req, and out",
+                        NULL, NULL, NULL);
+  }
+  if (req->public_read) {
+    return lc_pouch_client_public_read_unsupported(error);
+  }
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&builder, 0, sizeof(builder));
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_collect_attachments(client, namespace_name, req->lease.key,
+                                    &builder, error);
+  if (rc == LC_OK) {
+    out->items = builder.items;
+    out->count = builder.count;
+    out->correlation_id = lc_strdup_local("pouch-attachment-list");
+    builder.items = NULL;
+    builder.count = 0U;
+    if (out->correlation_id == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch attachment list response",
+                        NULL, NULL, NULL);
+    }
+  }
+  lc_pouch_attachment_list_builder_cleanup(&builder);
+  if (rc != LC_OK) {
+    lc_attachment_list_cleanup(out);
+  }
+  return rc;
 }
 
 int lc_pouch_client_get_attachment_method(
     lc_client *self, const lc_attachment_get_op *req, lc_sink *dst,
     lc_attachment_get_res *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)dst;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_state_read_result read_result;
+  const char *namespace_name;
+  char *name;
+  char *attachment_key;
+  int rc;
+
+  if (self == NULL || req == NULL || dst == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch get_attachment requires self, req, dst, and "
+                        "out",
+                        NULL, NULL, NULL);
+  }
+  if (req->public_read) {
+    return lc_pouch_client_public_read_unsupported(error);
+  }
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&read_result, 0, sizeof(read_result));
+  name = NULL;
+  attachment_key = NULL;
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+
+  name = lc_pouch_attachment_name_from_selector(&req->selector, error);
+  if (name == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  attachment_key =
+      lc_pouch_attachment_key(namespace_name, req->lease.key, name, error);
+  if (attachment_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  rc = lc_pouch_state_read(client->pouch, ".lockd/attachments",
+                           attachment_key, &read_result, error);
+  if (rc == LC_OK && !read_result.found) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch attachment not found", NULL, NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    rc = lc_copy(read_result.body, dst, NULL, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_attachment_info_fill(
+        &out->attachment, name, (long)read_result.bytes,
+        read_result.content_type, read_result.version, error);
+  }
+  if (rc == LC_OK) {
+    out->correlation_id = lc_strdup_local("pouch-attachment-get");
+    if (out->correlation_id == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch attachment get response",
+                        NULL, NULL, NULL);
+    }
+  }
+
+cleanup:
+  free(name);
+  free(attachment_key);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  if (rc != LC_OK) {
+    lc_attachment_get_res_cleanup(out);
+  }
+  return rc;
 }
 
 int lc_pouch_client_delete_attachment_method(
     lc_client *self, const lc_attachment_delete_op *req, int *deleted,
     lc_error *error) {
-  (void)self;
-  (void)req;
-  if (deleted != NULL) {
-    *deleted = 0;
+  lc_client_handle *client;
+  lc_pouch_state_read_result read_result;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  const char *namespace_name;
+  char *name;
+  char *attachment_key;
+  int rc;
+
+  if (self == NULL || req == NULL || deleted == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch delete_attachment requires self, req, and "
+                        "deleted",
+                        NULL, NULL, NULL);
   }
-  return lc_pouch_client_rebuilding(error);
+  *deleted = 0;
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  name = NULL;
+  attachment_key = NULL;
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+
+  name = lc_pouch_attachment_name_from_selector(&req->selector, error);
+  if (name == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  attachment_key =
+      lc_pouch_attachment_key(namespace_name, req->lease.key, name, error);
+  if (attachment_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  rc = lc_pouch_state_read(client->pouch, ".lockd/attachments",
+                           attachment_key, &read_result, error);
+  if (rc == LC_OK && read_result.found) {
+    options.expected_version = read_result.version;
+    options.has_expected_version = 1;
+    rc = lc_pouch_state_delete(client->pouch, ".lockd/attachments",
+                               attachment_key, &options, &write_result,
+                               error);
+    if (rc == LC_OK) {
+      *deleted = 1;
+    }
+  }
+
+cleanup:
+  free(name);
+  free(attachment_key);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
+  return rc;
 }
 
 int lc_pouch_client_delete_all_attachments_method(
     lc_client *self, const lc_attachment_delete_all_op *req,
     int *deleted_count, lc_error *error) {
-  (void)self;
-  (void)req;
-  if (deleted_count != NULL) {
-    *deleted_count = 0;
+  lc_client_handle *client;
+  lc_pouch_attachment_list_builder builder;
+  const char *namespace_name;
+  size_t i;
+  int rc;
+
+  if (self == NULL || req == NULL || deleted_count == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch delete_all_attachments requires self, req, "
+                        "and deleted_count",
+                        NULL, NULL, NULL);
   }
-  return lc_pouch_client_rebuilding(error);
+  *deleted_count = 0;
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_public_key(req->lease.key, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&builder, 0, sizeof(builder));
+  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_collect_attachments(client, namespace_name, req->lease.key,
+                                    &builder, error);
+  for (i = 0U; rc == LC_OK && i < builder.key_count; ++i) {
+    lc_pouch_state_write_options options;
+    lc_pouch_state_write_result result;
+
+    memset(&options, 0, sizeof(options));
+    memset(&result, 0, sizeof(result));
+    options.expected_version = builder.keys[i].version;
+    options.has_expected_version = 1;
+    rc = lc_pouch_state_delete(client->pouch, ".lockd/attachments",
+                               builder.keys[i].key, &options, &result, error);
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    if (rc == LC_OK) {
+      *deleted_count += 1;
+    }
+  }
+  lc_pouch_attachment_list_builder_cleanup(&builder);
+  return rc;
 }
 
 int lc_pouch_client_queue_stats_method(lc_client *self,
@@ -4137,19 +4855,50 @@ int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
 int lc_pouch_lease_attach_method(lc_lease *self, const lc_attach_req *req,
                                  lc_source *src, lc_attach_res *out,
                                  lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)src;
-  (void)out;
-  return lc_pouch_lease_rebuilding(error);
+  lc_lease_handle *lease;
+  lc_attach_op op;
+
+  if (self == NULL || req == NULL || src == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease attach requires self, req, src, and out",
+                        NULL, NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  lc_attach_op_init(&op);
+  op.lease.namespace_name = lease->namespace_name;
+  op.lease.key = lease->key;
+  op.lease.lease_id = lease->lease_id;
+  op.lease.txn_id = lease->txn_id;
+  op.lease.fencing_token = lease->fencing_token;
+  op.name = req->name;
+  op.content_type = req->content_type;
+  op.max_bytes = req->max_bytes;
+  op.has_max_bytes = req->has_max_bytes;
+  op.prevent_overwrite = req->prevent_overwrite;
+  return lc_pouch_client_attach_method(&lease->client->pub, &op, src, out,
+                                       error);
 }
 
 int lc_pouch_lease_list_attachments_method(lc_lease *self,
                                            lc_attachment_list *out,
                                            lc_error *error) {
-  (void)self;
-  (void)out;
-  return lc_pouch_lease_rebuilding(error);
+  lc_lease_handle *lease;
+  lc_attachment_list_req req;
+
+  if (self == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease list_attachments requires self and out",
+                        NULL, NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  lc_attachment_list_req_init(&req);
+  req.lease.namespace_name = lease->namespace_name;
+  req.lease.key = lease->key;
+  req.lease.lease_id = lease->lease_id;
+  req.lease.txn_id = lease->txn_id;
+  req.lease.fencing_token = lease->fencing_token;
+  return lc_pouch_client_list_attachments_method(&lease->client->pub, &req,
+                                                 out, error);
 }
 
 int lc_pouch_lease_get_attachment_method(lc_lease *self,
@@ -4157,30 +4906,71 @@ int lc_pouch_lease_get_attachment_method(lc_lease *self,
                                          lc_sink *dst,
                                          lc_attachment_get_res *out,
                                          lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)dst;
-  (void)out;
-  return lc_pouch_lease_rebuilding(error);
+  lc_lease_handle *lease;
+  lc_attachment_get_op op;
+
+  if (self == NULL || req == NULL || dst == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease get_attachment requires self, req, dst, "
+                        "and out",
+                        NULL, NULL, NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  lc_attachment_get_op_init(&op);
+  op.lease.namespace_name = lease->namespace_name;
+  op.lease.key = lease->key;
+  op.lease.lease_id = lease->lease_id;
+  op.lease.txn_id = lease->txn_id;
+  op.lease.fencing_token = lease->fencing_token;
+  op.selector = req->selector;
+  op.public_read = req->public_read;
+  return lc_pouch_client_get_attachment_method(&lease->client->pub, &op, dst,
+                                               out, error);
 }
 
 int lc_pouch_lease_delete_attachment_method(
     lc_lease *self, const lc_attachment_selector *selector, int *deleted,
     lc_error *error) {
-  (void)self;
-  (void)selector;
-  if (deleted != NULL) {
-    *deleted = 0;
+  lc_lease_handle *lease;
+  lc_attachment_delete_op op;
+
+  if (self == NULL || selector == NULL || deleted == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease delete_attachment requires self, "
+                        "selector, and deleted",
+                        NULL, NULL, NULL);
   }
-  return lc_pouch_lease_rebuilding(error);
+  lease = (lc_lease_handle *)self;
+  lc_attachment_delete_op_init(&op);
+  op.lease.namespace_name = lease->namespace_name;
+  op.lease.key = lease->key;
+  op.lease.lease_id = lease->lease_id;
+  op.lease.txn_id = lease->txn_id;
+  op.lease.fencing_token = lease->fencing_token;
+  op.selector = *selector;
+  return lc_pouch_client_delete_attachment_method(&lease->client->pub, &op,
+                                                  deleted, error);
 }
 
 int lc_pouch_lease_delete_all_attachments_method(lc_lease *self,
                                                  int *deleted_count,
                                                  lc_error *error) {
-  (void)self;
-  if (deleted_count != NULL) {
-    *deleted_count = 0;
+  lc_lease_handle *lease;
+  lc_attachment_delete_all_op op;
+
+  if (self == NULL || deleted_count == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch lease delete_all_attachments requires self and deleted_count",
+        NULL, NULL, NULL);
   }
-  return lc_pouch_lease_rebuilding(error);
+  lease = (lc_lease_handle *)self;
+  lc_attachment_delete_all_op_init(&op);
+  op.lease.namespace_name = lease->namespace_name;
+  op.lease.key = lease->key;
+  op.lease.lease_id = lease->lease_id;
+  op.lease.txn_id = lease->txn_id;
+  op.lease.fencing_token = lease->fencing_token;
+  return lc_pouch_client_delete_all_attachments_method(&lease->client->pub, &op,
+                                                       deleted_count, error);
 }

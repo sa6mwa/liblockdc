@@ -2351,6 +2351,15 @@ lockd metadata document, including staged attachment updates when transactions
 are used. Attachment payloads are immutable object records addressed by stable
 object keys. Deletes are log records.
 
+The current redesigned C backend implements the first public attachment surface
+by storing attachment payloads as durable internal records under
+`.lockd/attachments`, keyed by escaped namespace, state key, and attachment
+name. Client-level and bound-lease upload, list, get, delete, and delete-all
+operations now use that segmented durability path with deterministic pouch
+attachment ids. This is the first object-store slice; staged attachment
+transaction semantics, object copy, and full attachment metadata ownership still
+belong to the broader object-plane work.
+
 The backend must support:
 
 - put attachment with content type and descriptor

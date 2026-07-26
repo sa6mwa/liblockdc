@@ -38,6 +38,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     lease `mutate_local` through the redesigned state path by applying the
     shared mutation planner to current pouch state and persisting the result
     through segmented state writes or staged lease updates with CAS coverage.
+  - [x] Add the first redesigned pouch object surface by routing client and
+    bound-lease attachment upload/list/get/delete/delete-all through durable
+    internal attachment records in the segmented state path, with selector by
+    name or deterministic pouch attachment id and overwrite/max-size coverage.
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.
