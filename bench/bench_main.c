@@ -1,14 +1,14 @@
 #include "lc/lc.h"
 #include "lc_pouch.h"
+#include "../tests/support/lc_test_tmp.h"
 
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+#define BENCH_POUCH_TMP_PREFIX "/tmp/liblockdc-pouch-bench-"
 
 typedef struct bench_case {
   const char *name;
@@ -66,67 +66,21 @@ static int bench_stream_copy(long iterations) {
 static int bench_pouch_root_path(char *buffer, size_t buffer_size,
                                  const char *suffix) {
   char template_path[512];
-  char *created;
   int written;
 
   written = snprintf(template_path, sizeof(template_path),
-                     "/tmp/liblockdc-pouch-bench-%s-XXXXXX", suffix);
+                     BENCH_POUCH_TMP_PREFIX "%s-XXXXXX", suffix);
   if (written < 0 || (size_t)written >= sizeof(template_path)) {
     return 1;
   }
-  created = mkdtemp(template_path);
-  if (created == NULL) {
-    return 1;
-  }
-  written = snprintf(buffer, buffer_size, "%s", created);
-  if (written < 0 || (size_t)written >= buffer_size) {
-    rmdir(created);
-    return 1;
-  }
-  return 0;
-}
-
-static int bench_has_prefix(const char *value, const char *prefix) {
-  return value != NULL && strncmp(value, prefix, strlen(prefix)) == 0;
-}
-
-static void bench_remove_tree(const char *path) {
-  DIR *dir;
-  struct dirent *entry;
-  struct stat st;
-
-  if (lstat(path, &st) != 0) {
-    unlink(path);
-    return;
-  }
-  if (!S_ISDIR(st.st_mode)) {
-    unlink(path);
-    return;
-  }
-  dir = opendir(path);
-  if (dir == NULL) {
-    unlink(path);
-    return;
-  }
-  while ((entry = readdir(dir)) != NULL) {
-    char child[1024];
-
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-      continue;
-    }
-    snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-    bench_remove_tree(child);
-  }
-  closedir(dir);
-  rmdir(path);
+  return lc_test_tmp_mkdtemp(template_path, buffer, buffer_size,
+                            BENCH_POUCH_TMP_PREFIX)
+             ? 0
+             : 1;
 }
 
 static void bench_pouch_cleanup_root(const char *root) {
-  static const char prefix[] = "/tmp/liblockdc-pouch-bench-";
-
-  if (bench_has_prefix(root, prefix)) {
-    bench_remove_tree(root);
-  }
+  lc_test_tmp_cleanup_path(root, BENCH_POUCH_TMP_PREFIX);
 }
 
 static int bench_pouch_open(long iterations) {
@@ -249,6 +203,8 @@ int main(int argc, char **argv) {
   iterations = argc > 1 ? strtol(argv[1], NULL, 10) : 0L;
   name = argc > 2 ? argv[2] : "all";
   failed = 0;
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-pouch-bench-",
+                            BENCH_POUCH_TMP_PREFIX);
 
   if (strcmp(name, "all") == 0) {
     for (bench = bench_cases(); bench->name != NULL; ++bench) {

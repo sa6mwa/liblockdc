@@ -11,6 +11,9 @@
 #include "lc/lc.h"
 #include "lc_intcompat.h"
 #include "lc_mutate_stream.h"
+#include "../support/lc_test_tmp.h"
+
+#define MUTATE_BASE64FILE_TMP_PREFIX "/tmp/liblockdc-base64file-"
 
 typedef struct test_file_source {
   lc_source pub;
@@ -700,7 +703,7 @@ static void test_mutation_plan_streams_base64file_direct_path(void **state) {
   int rc;
 
   (void)state;
-  fd = mkstemp(path);
+  fd = lc_test_tmp_mkstemp(path, MUTATE_BASE64FILE_TMP_PREFIX);
   assert_true(fd >= 0);
   assert_int_equal(write(fd, payload, sizeof(payload)),
                    (ssize_t)sizeof(payload));
@@ -723,7 +726,7 @@ static void test_mutation_plan_streams_base64file_direct_path(void **state) {
   free(json_text);
   fclose(output);
   fclose(input);
-  assert_int_equal(unlink(path), 0);
+  lc_test_tmp_cleanup_path(path, MUTATE_BASE64FILE_TMP_PREFIX);
   lc_mutation_plan_close(plan);
   lc_error_cleanup(&error);
 }

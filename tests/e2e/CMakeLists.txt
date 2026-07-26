@@ -1,5 +1,8 @@
 function(lc_add_e2e_shard target_name group_macro)
-  add_executable(${target_name} test_lc_e2e.c)
+  add_executable(${target_name}
+    test_lc_e2e.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+  )
   target_link_libraries(${target_name} PRIVATE ${lc_test_link_target} lc::cmocka)
   target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
   target_compile_definitions(${target_name} PRIVATE ${group_macro})

@@ -3,7 +3,11 @@ if(NOT TARGET lc_static)
 endif()
 
 function(lc_add_fuzz_target target_name)
-  add_executable(${target_name} afl_fuzzer_main.c ${ARGN})
+  add_executable(${target_name}
+    afl_fuzzer_main.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+    ${ARGN}
+  )
   target_link_libraries(${target_name} PRIVATE lc_static)
   target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
   lc_configure_c_test_target(${target_name})

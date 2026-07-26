@@ -2,7 +2,10 @@ if(NOT TARGET lc_static)
     message(FATAL_ERROR "Benchmarks require lc_static.")
 endif()
 
-add_executable(lockdc_bench bench_main.c)
+add_executable(lockdc_bench
+    bench_main.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
 target_include_directories(lockdc_bench PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src

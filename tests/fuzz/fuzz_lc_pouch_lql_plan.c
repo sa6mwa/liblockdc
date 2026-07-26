@@ -4,12 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <dirent.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 #include "lc/lc.h"
+#include "../support/lc_test_tmp.h"
+
+#define FUZZ_POUCH_LQL_TMP_PREFIX "/tmp/liblockdc-pouch-lql-fuzz-"
 
 typedef struct fuzz_key_count {
   size_t rows;
@@ -39,39 +39,8 @@ static int fuzz_key_end(void *context, lc_error *error) {
   return 1;
 }
 
-static void fuzz_remove_tree(const char *path) {
-  DIR *dir;
-  struct dirent *entry;
-
-  dir = opendir(path);
-  if (dir == NULL) {
-    (void)unlink(path);
-    return;
-  }
-  while ((entry = readdir(dir)) != NULL) {
-    char child[1024];
-    struct stat st;
-
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-      continue;
-    }
-    (void)snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
-      fuzz_remove_tree(child);
-    } else {
-      (void)unlink(child);
-    }
-  }
-  (void)closedir(dir);
-  (void)rmdir(path);
-}
-
 static void fuzz_cleanup_root(const char *root) {
-  static const char prefix[] = "/tmp/liblockdc-pouch-lql-fuzz-";
-
-  if (root != NULL && strncmp(root, prefix, sizeof(prefix) - 1U) == 0) {
-    fuzz_remove_tree(root);
-  }
+  lc_test_tmp_cleanup_path(root, FUZZ_POUCH_LQL_TMP_PREFIX);
 }
 
 static lc_source *fuzz_source_from_text(const char *text, lc_error *error) {
@@ -236,7 +205,8 @@ static char *fuzz_selector_from_input(const uint8_t *data, size_t size) {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   char root_template[] = "/tmp/liblockdc-pouch-lql-fuzz-XXXXXX";
-  char *root;
+  char root_path[sizeof(root_template)];
+  const char *root;
   char *selector;
   lc_client *index_client;
   lc_client *scan_client;
@@ -251,11 +221,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (selector == NULL) {
     return 0;
   }
-  root = mkdtemp(root_template);
-  if (root == NULL) {
+  if (!lc_test_tmp_mkdtemp(root_template, root_path, sizeof(root_path),
+                           FUZZ_POUCH_LQL_TMP_PREFIX)) {
     free(selector);
     return 0;
   }
+  root = root_path;
 
   index_client = NULL;
   scan_client = NULL;

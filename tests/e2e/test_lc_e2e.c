@@ -1,5 +1,4 @@
 #include <errno.h>
-#include <dirent.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -14,6 +13,11 @@
 #include <cmocka.h>
 
 #include "lc/lc.h"
+#include "../support/lc_test_tmp.h"
+
+#define POUCH_E2E_TMP_PREFIX "/tmp/liblockdc-e2e-pouch-"
+#define LOCAL_MUTATE_TMP_PREFIX "/tmp/liblockdc-local-mutate-"
+#define S3_LOCAL_MUTATE_TMP_PREFIX "/tmp/liblockdc-s3-local-mutate-"
 
 typedef struct e2e_status_doc {
   char *status;
@@ -226,11 +230,12 @@ static int acquire_for_update_failing_handler(
 }
 
 static void write_temp_file_or_die(char *template_path,
+                                   const char *allowed_prefix,
                                    const unsigned char *bytes, size_t length) {
   int fd;
   FILE *fp;
 
-  fd = mkstemp(template_path);
+  fd = lc_test_tmp_mkstemp(template_path, allowed_prefix);
   assert_true(fd >= 0);
   fp = fdopen(fd, "wb");
   assert_non_null(fp);
@@ -409,10 +414,11 @@ static void assert_local_mutate_file_variants(lc_lease *lease,
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
 
-  missing_fd = mkstemp(missing_path);
+  missing_fd = lc_test_tmp_mkstemp(missing_path, LOCAL_MUTATE_TMP_PREFIX);
   assert_true(missing_fd >= 0);
   assert_int_equal(close(missing_fd), 0);
   assert_int_equal(unlink(missing_path), 0);
+  lc_test_tmp_untrack_path(missing_path);
   snprintf(missing_file_mutation, sizeof(missing_file_mutation),
            "base64file:/missing=%s", missing_path);
   failure_mutations[0] = missing_file_mutation;
@@ -459,93 +465,28 @@ static void make_pouch_root(const char *suffix, char *root,
                             size_t root_capacity, char *endpoint,
                             size_t endpoint_capacity) {
   char template_path[512];
-  char *created;
   int written;
 
   written = snprintf(template_path, sizeof(template_path),
-                     "/tmp/liblockdc-e2e-pouch-%s-XXXXXX", suffix);
+                     POUCH_E2E_TMP_PREFIX "%s-XXXXXX", suffix);
   assert_true(written > 0 && (size_t)written < sizeof(template_path));
-  created = mkdtemp(template_path);
-  assert_non_null(created);
-  written = snprintf(root, root_capacity, "%s", created);
-  assert_true(written > 0 && (size_t)written < root_capacity);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, root_capacity,
+                                  POUCH_E2E_TMP_PREFIX));
   written = snprintf(endpoint, endpoint_capacity, "pouch://%s", root);
   assert_true(written > 0 && (size_t)written < endpoint_capacity);
 }
 
-static void cleanup_pouch_tree(const char *path) {
-  DIR *dir;
-  struct dirent *entry;
-  struct stat root_st;
-
-  if (lstat(path, &root_st) != 0) {
-    (void)unlink(path);
-    return;
-  }
-  if (!S_ISDIR(root_st.st_mode)) {
-    (void)unlink(path);
-    return;
-  }
-  dir = opendir(path);
-  if (dir == NULL) {
-    (void)unlink(path);
-    return;
-  }
-  while ((entry = readdir(dir)) != NULL) {
-    char child[512];
-    struct stat st;
-    int written;
-
-    if (strcmp(entry->d_name, ".") == 0 ||
-        strcmp(entry->d_name, "..") == 0) {
-      continue;
-    }
-    written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-    if (written < 0 || (size_t)written >= sizeof(child)) {
-      continue;
-    }
-    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
-      cleanup_pouch_tree(child);
-    } else {
-      (void)unlink(child);
-    }
-  }
-  (void)closedir(dir);
-  (void)rmdir(path);
-}
-
 static void cleanup_pouch_root(const char *root) {
-  static const char prefix[] = "/tmp/liblockdc-e2e-pouch-";
-
-  if (root == NULL || strncmp(root, prefix, sizeof(prefix) - 1U) != 0) {
-    return;
-  }
-  cleanup_pouch_tree(root);
+  lc_test_tmp_cleanup_path(root, POUCH_E2E_TMP_PREFIX);
 }
 
 static void cleanup_all_pouch_roots(void) {
-  static const char prefix[] = "liblockdc-e2e-pouch-";
-  DIR *dir;
-  struct dirent *entry;
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-e2e-pouch-",
+                            POUCH_E2E_TMP_PREFIX);
+}
 
-  dir = opendir("/tmp");
-  if (dir == NULL) {
-    return;
-  }
-  while ((entry = readdir(dir)) != NULL) {
-    char path[1024];
-    int written;
-
-    if (strncmp(entry->d_name, prefix, sizeof(prefix) - 1U) != 0) {
-      continue;
-    }
-    written = snprintf(path, sizeof(path), "/tmp/%s", entry->d_name);
-    if (written < 0 || (size_t)written >= sizeof(path)) {
-      continue;
-    }
-    cleanup_pouch_root(path);
-  }
-  (void)closedir(dir);
+static void track_pouch_root(const char *root) {
+  assert_true(lc_test_tmp_track_path(root, POUCH_E2E_TMP_PREFIX));
 }
 
 static int setup_pouch_e2e_group(void **state) {
@@ -1556,10 +1497,12 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   lease = NULL;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
-  write_temp_file_or_die(text_template,
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-local-mutate-",
+                            LOCAL_MUTATE_TMP_PREFIX);
+  write_temp_file_or_die(text_template, LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char *)"hello\n\"quoted\"",
                          sizeof("hello\n\"quoted\"") - 1U);
-  write_temp_file_or_die(binary_template,
+  write_temp_file_or_die(binary_template, LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char[]){0x00, 0x01, 0x02, 'a'}, 4U);
 
   open_tcp_client(endpoint, bundle_path, &client, &error);
@@ -1581,8 +1524,8 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  unlink(text_template);
-  unlink(binary_template);
+  lc_test_tmp_cleanup_path(text_template, LOCAL_MUTATE_TMP_PREFIX);
+  lc_test_tmp_cleanup_path(binary_template, LOCAL_MUTATE_TMP_PREFIX);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
@@ -1610,10 +1553,12 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
   lease = NULL;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
-  write_temp_file_or_die(text_template,
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-s3-local-mutate-",
+                            S3_LOCAL_MUTATE_TMP_PREFIX);
+  write_temp_file_or_die(text_template, S3_LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char *)"hello\n\"quoted\"",
                          sizeof("hello\n\"quoted\"") - 1U);
-  write_temp_file_or_die(binary_template,
+  write_temp_file_or_die(binary_template, S3_LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char[]){0x00, 0x01, 0x02, 'a'}, 4U);
 
   open_tcp_client(endpoint, bundle_path, &client, &error);
@@ -1635,8 +1580,8 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  unlink(text_template);
-  unlink(binary_template);
+  lc_test_tmp_cleanup_path(text_template, S3_LOCAL_MUTATE_TMP_PREFIX);
+  lc_test_tmp_cleanup_path(binary_template, S3_LOCAL_MUTATE_TMP_PREFIX);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
@@ -3620,6 +3565,7 @@ static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   make_pouch_root("state-attachment", root, sizeof(root), endpoint,
                   sizeof(endpoint));
   cleanup_pouch_root(root);
+  track_pouch_root(root);
 
   client = NULL;
   reader = NULL;
@@ -3743,6 +3689,7 @@ static void test_pouch_direct_consumer_service_with_state(void **state) {
   (void)state;
   make_pouch_root("consumer", root, sizeof(root), endpoint, sizeof(endpoint));
   cleanup_pouch_root(root);
+  track_pouch_root(root);
 
   client = NULL;
   service = NULL;

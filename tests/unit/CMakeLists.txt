@@ -28,7 +28,10 @@ function(lc_add_unit_test target_name)
 endfunction()
 
 function(lc_add_https_unit_test_case target_name case_macro)
-  add_executable(${target_name} test_lc_transport_https.c)
+  add_executable(${target_name}
+    test_lc_transport_https.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+  )
   target_link_libraries(${target_name} PRIVATE
     ${lc_test_link_target}
     lc::cmocka
@@ -84,7 +87,16 @@ target_link_options(lc_unit_runtime PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lonejson_new>
 )
 lc_add_unit_test(lc_unit_mutate_stream test_lc_mutate_stream.c)
+target_sources(lc_unit_mutate_stream PRIVATE
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
 lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
+target_sources(lc_unit_pouch PRIVATE
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
+target_sources(lc_unit_streams PRIVATE
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
 
 lc_add_https_unit_test_case(
   lc_unit_transport_https_client_open_rejects_bundle_without_ca

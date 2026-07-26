@@ -10,11 +10,13 @@
 #include "lc/lc.h"
 #include "lc_pouch.h"
 #include "lc_pouch_namespace.h"
+#include "../support/lc_test_tmp.h"
 
-#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#define POUCH_UNIT_TMP_PREFIX "/tmp/liblockdc-unit-pouch-redesign-"
 
 typedef struct pouch_value_doc {
   lonejson_int64 value;
@@ -39,16 +41,14 @@ LONEJSON_MAP_DEFINE(pouch_value_map, pouch_value_doc, pouch_value_fields);
 
 static void make_root(const char *suffix, char *root, size_t root_size) {
   char template_path[512];
-  char *created;
   int written;
 
   written = snprintf(template_path, sizeof(template_path),
-                     "/tmp/liblockdc-unit-pouch-redesign-%s-XXXXXX", suffix);
+                     POUCH_UNIT_TMP_PREFIX "%s-XXXXXX", suffix);
   assert_true(written > 0 && (size_t)written < sizeof(template_path));
-  created = mkdtemp(template_path);
-  assert_non_null(created);
-  written = snprintf(root, root_size, "%s", created);
-  assert_true(written > 0 && (size_t)written < root_size);
+  assert_true(
+      lc_test_tmp_mkdtemp(template_path, root, root_size,
+                          POUCH_UNIT_TMP_PREFIX));
 }
 
 static void make_endpoint(const char *root, char *endpoint,
@@ -56,68 +56,13 @@ static void make_endpoint(const char *root, char *endpoint,
   snprintf(endpoint, endpoint_size, "pouch://%s", root);
 }
 
-static int has_prefix(const char *value, const char *prefix) {
-  return value != NULL && strncmp(value, prefix, strlen(prefix)) == 0;
-}
-
-static void cleanup_tree(const char *path) {
-  DIR *dir;
-  struct dirent *entry;
-  struct stat st;
-
-  if (lstat(path, &st) != 0) {
-    unlink(path);
-    return;
-  }
-  if (!S_ISDIR(st.st_mode)) {
-    unlink(path);
-    return;
-  }
-  dir = opendir(path);
-  if (dir == NULL) {
-    unlink(path);
-    return;
-  }
-  while ((entry = readdir(dir)) != NULL) {
-    char child[1024];
-
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-      continue;
-    }
-    snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-    cleanup_tree(child);
-  }
-  closedir(dir);
-  rmdir(path);
-}
-
 static void cleanup_root(const char *root) {
-  static const char prefix[] = "/tmp/liblockdc-unit-pouch-redesign-";
-
-  if (has_prefix(root, prefix)) {
-    cleanup_tree(root);
-  }
+  lc_test_tmp_cleanup_path(root, POUCH_UNIT_TMP_PREFIX);
 }
 
 static void cleanup_all_roots(void) {
-  static const char prefix[] = "liblockdc-unit-pouch-redesign-";
-  DIR *dir;
-  struct dirent *entry;
-
-  dir = opendir("/tmp");
-  if (dir == NULL) {
-    return;
-  }
-  while ((entry = readdir(dir)) != NULL) {
-    char path[1024];
-
-    if (!has_prefix(entry->d_name, prefix)) {
-      continue;
-    }
-    snprintf(path, sizeof(path), "/tmp/%s", entry->d_name);
-    cleanup_root(path);
-  }
-  closedir(dir);
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-pouch-redesign-",
+                            POUCH_UNIT_TMP_PREFIX);
 }
 
 static int setup_pouch_unit_group(void **state) {
