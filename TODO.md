@@ -157,9 +157,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     replayed state/index sequence cannot move backwards after compaction
     removes older segment history, while keeping the high-water control record
     out of user-visible state visits.
+  - [x] Add cleanup-only maintenance entry points and cleanup retry accounting:
+    maintenance now reports deleted and still-pending obsolete segment/snapshot
+    cleanup counts, can retry cleanup without running compaction, and preserves
+    retryable manifest obsolete entries until deletion succeeds.
   - [ ] Extend snapshot compaction to the full storage surface with durable
-    validation-drift aborts, cleanup retry accounting, cleanup-only maintenance
-    entry points, and expanded compaction diagnostics.
+    validation-drift abort diagnostics and expanded compaction diagnostics.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
   - [x] Add the first redesigned pouch `query_keys` scan path over the

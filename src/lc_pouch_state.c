@@ -1355,12 +1355,14 @@ static unsigned long lc_pouch_maintenance_now_seconds(void) {
 
 static int lc_pouch_state_compact_namespace(
     lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_namespace_manifest *manifest, lc_error *error);
+    lc_pouch_namespace_manifest *manifest, unsigned long *cleanup_deleted_count,
+    unsigned long *cleanup_pending_count, lc_error *error);
 
 static int lc_pouch_state_queue_compacted_files(
     lc_pouch *pouch, lc_pouch_namespace_manifest *manifest,
     const char *namespace_name, unsigned long compacted_segment_id,
-    const char *old_snapshot, lc_error *error) {
+    const char *old_snapshot, unsigned long *cleanup_deleted_count,
+    unsigned long *cleanup_pending_count, lc_error *error) {
   unsigned long segment_id;
   int rc;
 
@@ -1396,7 +1398,8 @@ static int lc_pouch_state_queue_compacted_files(
     return rc;
   }
   return lc_pouch_namespace_manifest_cleanup_obsolete(
-      &pouch->allocator, namespace_name, manifest, error);
+      &pouch->allocator, namespace_name, manifest, cleanup_deleted_count,
+      cleanup_pending_count, error);
 }
 
 static int lc_pouch_state_compact_namespace_if_needed(
@@ -1405,6 +1408,8 @@ static int lc_pouch_state_compact_namespace_if_needed(
     lc_pouch_maintenance_result *out, lc_error *error) {
   unsigned long candidate_count;
   unsigned long candidate_bytes;
+  unsigned long cleanup_deleted_count;
+  unsigned long cleanup_pending_count;
   unsigned long compacted_segment_id;
   unsigned long now_seconds;
   int rc;
@@ -1474,23 +1479,30 @@ static int lc_pouch_state_compact_namespace_if_needed(
                                                "interval-not-elapsed", error);
   }
   compacted_segment_id = manifest->max_segment_id;
+  cleanup_deleted_count = 0UL;
+  cleanup_pending_count = 0UL;
   if (!force && now_seconds != 0UL) {
     pouch->last_compaction_check_seconds = now_seconds;
   }
-  rc = lc_pouch_state_compact_namespace(pouch, namespace_name, manifest, error);
+  rc = lc_pouch_state_compact_namespace(
+      pouch, namespace_name, manifest, &cleanup_deleted_count,
+      &cleanup_pending_count, error);
   if (rc != LC_OK) {
     return rc;
   }
   if (out != NULL) {
     out->compacted = 1;
     out->compacted_segment_id = compacted_segment_id;
+    out->cleanup_deleted_count = cleanup_deleted_count;
+    out->cleanup_pending_count = cleanup_pending_count;
   }
   return lc_pouch_maintenance_set_diagnostic(pouch, out, "compacted", error);
 }
 
 static int lc_pouch_state_compact_namespace(
     lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_namespace_manifest *manifest, lc_error *error) {
+    lc_pouch_namespace_manifest *manifest, unsigned long *cleanup_deleted_count,
+    unsigned long *cleanup_pending_count, lc_error *error) {
   lc_pouch_state_cache_namespace snapshot_cache;
   char *snapshot_leaf;
   char *old_snapshot;
@@ -1540,7 +1552,7 @@ static int lc_pouch_state_compact_namespace(
   if (rc == LC_OK) {
     rc = lc_pouch_state_queue_compacted_files(
         pouch, manifest, namespace_name, compacted_segment_id, old_snapshot,
-        error);
+        cleanup_deleted_count, cleanup_pending_count, error);
   }
   if (rc == LC_OK) {
     (void)lc_pouch_state_touch_marker(pouch, manifest, error);
@@ -1581,6 +1593,8 @@ int lc_pouch_maintenance_run(lc_pouch *pouch,
                              lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   const char *namespace_name;
+  unsigned long cleanup_deleted_count;
+  unsigned long cleanup_pending_count;
   int force;
   int rc;
 
@@ -1595,17 +1609,46 @@ int lc_pouch_maintenance_run(lc_pouch *pouch,
   }
   namespace_name = options->namespace_name;
   force = options->force ? 1 : 0;
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  cleanup_deleted_count = 0UL;
+  cleanup_pending_count = 0UL;
+  rc = lc_pouch_namespace_ensure_layout(&pouch->allocator, pouch->root_path,
+                                        namespace_name, error);
   if (rc != LC_OK) {
     return rc;
   }
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest,
+                                        &cleanup_deleted_count,
+                                        &cleanup_pending_count, error);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_state_compact_namespace_if_needed(
-      pouch, namespace_name, &manifest, force, out, error);
+  if (out != NULL) {
+    out->cleanup_deleted_count = cleanup_deleted_count;
+    out->cleanup_pending_count = cleanup_pending_count;
+  }
+  if (options->cleanup_only) {
+    if (out != NULL) {
+      out->skipped = 1;
+      rc = lc_pouch_maintenance_set_string(pouch, &out->namespace_name,
+                                           namespace_name, error);
+      if (rc != LC_OK) {
+        lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+        return rc;
+      }
+    }
+    rc = lc_pouch_maintenance_set_diagnostic(
+        pouch, out,
+        cleanup_pending_count != 0UL ? "cleanup-pending" : "cleanup-complete",
+        error);
+  } else {
+    rc = lc_pouch_state_compact_namespace_if_needed(
+        pouch, namespace_name, &manifest, force, out, error);
+    if (out != NULL) {
+      out->cleanup_deleted_count += cleanup_deleted_count;
+      out->cleanup_pending_count += cleanup_pending_count;
+    }
+  }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;
 }
@@ -2006,7 +2049,8 @@ int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2088,7 +2132,8 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2225,7 +2270,8 @@ int lc_pouch_state_update_metadata(
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2312,7 +2358,8 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2444,7 +2491,8 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     lc_free_with_allocator(&pouch->allocator, staged_key);
     return rc;
@@ -2575,7 +2623,8 @@ int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     lc_free_with_allocator(&pouch->allocator, staged_key);
     return rc;
@@ -2689,7 +2738,8 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     lc_free_with_allocator(&pouch->allocator, staged_key);
     return rc;
@@ -2758,7 +2808,8 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2824,7 +2875,8 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2902,7 +2954,8 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, error);
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
   if (rc != LC_OK) {
     return rc;
   }

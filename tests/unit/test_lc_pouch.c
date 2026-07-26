@@ -1370,6 +1370,55 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_maintenance_creates_namespace_without_prior_writes(
+    void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_error error;
+  char *namespace_path;
+  char root[512];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  make_root("maintenance-empty-namespace", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  maintenance_options.namespace_name = "team/empty";
+  maintenance_options.cleanup_only = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.namespace_name, "team/empty");
+  assert_string_equal(maintenance_result.diagnostic, "cleanup-complete");
+  assert_true(maintenance_result.skipped);
+  assert_false(maintenance_result.compacted);
+  assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 0UL);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/empty");
+  assert_non_null(namespace_path);
+  assert_path_dir(namespace_path, "segments");
+  assert_path_dir(namespace_path, "snapshots");
+  assert_path_dir(namespace_path, "markers");
+  assert_path_dir(namespace_path, "index");
+  assert_path_file(namespace_path, "manifest");
+
+  free(namespace_path);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_maintenance_reports_threshold_skip(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -1652,20 +1701,41 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(maintenance_result.diagnostic, "compacted");
+  assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
   assert_true(path_is_file(segment_one_path));
   assert_true(path_is_file(segment_two_path));
   assert_file_contains(manifest_path,
                        "obsolete_segment=seg-00000000000000000001.log");
   assert_file_contains(manifest_path,
                        "obsolete_segment=seg-00000000000000000002.log");
-  assert_int_equal(chmod(segments_path, 0755), 0);
-  lc_pouch_close(pouch);
-  pouch = NULL;
 
-  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.cleanup_only = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_ensure_namespace(pouch, "team/alpha", &error);
+  assert_string_equal(maintenance_result.diagnostic, "cleanup-pending");
+  assert_true(maintenance_result.skipped);
+  assert_false(maintenance_result.compacted);
+  assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
+
+  assert_int_equal(chmod(segments_path, 0755), 0);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "cleanup-complete");
+  assert_true(maintenance_result.skipped);
+  assert_false(maintenance_result.compacted);
+  assert_int_equal(maintenance_result.cleanup_deleted_count, 2UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 0UL);
+
   assert_false(path_is_file(segment_one_path));
   assert_false(path_is_file(segment_two_path));
   assert_file_not_contains(manifest_path, "obsolete_segment=");
@@ -1678,8 +1748,14 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   append_text_file(
       manifest_path,
       "obsolete_snapshot=snapshot-00000000000000000099.log\n");
-  rc = lc_pouch_ensure_namespace(pouch, "team/alpha", &error);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "cleanup-complete");
+  assert_int_equal(maintenance_result.cleanup_deleted_count, 1UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 0UL);
   assert_false(path_is_file(stale_snapshot_path));
   assert_file_not_contains(manifest_path, "obsolete_snapshot=");
 
@@ -7009,6 +7085,8 @@ int main(void) {
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),
+      cmocka_unit_test(
+          test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
       cmocka_unit_test(test_maintenance_reports_interval_skip),

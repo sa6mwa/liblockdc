@@ -31,6 +31,7 @@ typedef struct lc_pouch_status {
 typedef struct lc_pouch_maintenance_options {
   const char *namespace_name;
   int force;
+  int cleanup_only;
 } lc_pouch_maintenance_options;
 
 typedef struct lc_pouch_maintenance_result {
@@ -39,6 +40,8 @@ typedef struct lc_pouch_maintenance_result {
   unsigned long candidate_segment_count;
   unsigned long candidate_bytes;
   unsigned long compacted_segment_id;
+  unsigned long cleanup_deleted_count;
+  unsigned long cleanup_pending_count;
   int compacted;
   int skipped;
 } lc_pouch_maintenance_result;

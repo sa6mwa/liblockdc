@@ -6,6 +6,10 @@
 int lc_pouch_namespace_ensure(const lc_allocator *allocator,
                               const char *root_path,
                               const char *namespace_name, lc_error *error);
+int lc_pouch_namespace_ensure_layout(const lc_allocator *allocator,
+                                     const char *root_path,
+                                     const char *namespace_name,
+                                     lc_error *error);
 char *lc_pouch_namespace_path(const lc_allocator *allocator,
                               const char *root_path,
                               const char *namespace_name);
@@ -57,6 +61,8 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
                                      const char *root_path,
                                      const char *namespace_name,
                                      lc_pouch_namespace_manifest *out,
+                                     unsigned long *cleanup_deleted_count,
+                                     unsigned long *cleanup_pending_count,
                                      lc_error *error);
 int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
                                        const char *namespace_name,
@@ -80,7 +86,8 @@ int lc_pouch_namespace_manifest_save(const lc_allocator *allocator,
                                      lc_error *error);
 int lc_pouch_namespace_manifest_cleanup_obsolete(
     const lc_allocator *allocator, const char *namespace_name,
-    lc_pouch_namespace_manifest *manifest, lc_error *error);
+    lc_pouch_namespace_manifest *manifest, unsigned long *deleted_count,
+    unsigned long *pending_count, lc_error *error);
 int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
                                     const char *namespace_path,
                                     const char *writer_marker_leaf,

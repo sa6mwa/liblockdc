@@ -774,6 +774,8 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
                                      const char *root_path,
                                      const char *namespace_name,
                                      lc_pouch_namespace_manifest *out,
+                                     unsigned long *cleanup_deleted_count,
+                                     unsigned long *cleanup_pending_count,
                                      lc_error *error) {
   char *manifest_path;
   char *manifest_snapshot;
@@ -789,6 +791,12 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch namespace manifest open requires out", NULL,
                         NULL, NULL);
+  }
+  if (cleanup_deleted_count != NULL) {
+    *cleanup_deleted_count = 0UL;
+  }
+  if (cleanup_pending_count != NULL) {
+    *cleanup_pending_count = 0UL;
   }
   memset(out, 0, sizeof(*out));
   out->namespace_path =
@@ -877,8 +885,9 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
       return rc;
     }
   }
-  rc = lc_pouch_namespace_manifest_cleanup_obsolete(allocator, namespace_name,
-                                                   out, error);
+  rc = lc_pouch_namespace_manifest_cleanup_obsolete(
+      allocator, namespace_name, out, cleanup_deleted_count,
+      cleanup_pending_count, error);
   if (rc != LC_OK) {
     lc_free_with_allocator(allocator, manifest_snapshot);
     lc_free_with_allocator(allocator, scanned_snapshot);
@@ -1047,7 +1056,8 @@ static int lc_pouch_namespace_unlink_obsolete(
 
 static int lc_pouch_namespace_manifest_prune_obsolete_list(
     const lc_allocator *allocator, char ***items, unsigned long *count,
-    const char *namespace_path, const char *directory, int *changed) {
+    const char *namespace_path, const char *directory, int *changed,
+    unsigned long *deleted_count, unsigned long *pending_count) {
   unsigned long read_index;
   unsigned long write_index;
 
@@ -1062,7 +1072,13 @@ static int lc_pouch_namespace_manifest_prune_obsolete_list(
         gone) {
       lc_free_with_allocator(allocator, (*items)[read_index]);
       *changed = 1;
+      if (deleted_count != NULL) {
+        ++*deleted_count;
+      }
       continue;
+    }
+    if (pending_count != NULL) {
+      ++*pending_count;
     }
     (*items)[write_index++] = (*items)[read_index];
   }
@@ -1072,7 +1088,8 @@ static int lc_pouch_namespace_manifest_prune_obsolete_list(
 
 int lc_pouch_namespace_manifest_cleanup_obsolete(
     const lc_allocator *allocator, const char *namespace_name,
-    lc_pouch_namespace_manifest *manifest, lc_error *error) {
+    lc_pouch_namespace_manifest *manifest, unsigned long *deleted_count,
+    unsigned long *pending_count, lc_error *error) {
   int changed;
   int rc;
 
@@ -1081,18 +1098,24 @@ int lc_pouch_namespace_manifest_cleanup_obsolete(
                         "pouch obsolete cleanup requires manifest", NULL,
                         NULL, NULL);
   }
+  if (deleted_count != NULL) {
+    *deleted_count = 0UL;
+  }
+  if (pending_count != NULL) {
+    *pending_count = 0UL;
+  }
   changed = 0;
   rc = lc_pouch_namespace_manifest_prune_obsolete_list(
       allocator, &manifest->obsolete_segments,
       &manifest->obsolete_segment_count, manifest->namespace_path, "segments",
-      &changed);
+      &changed, deleted_count, pending_count);
   if (rc != LC_OK) {
     return rc;
   }
   rc = lc_pouch_namespace_manifest_prune_obsolete_list(
       allocator, &manifest->obsolete_snapshots,
       &manifest->obsolete_snapshot_count, manifest->namespace_path, "snapshots",
-      &changed);
+      &changed, deleted_count, pending_count);
   if (rc != LC_OK) {
     return rc;
   }
@@ -1404,11 +1427,11 @@ void lc_pouch_namespace_manifest_cleanup(
   memset(manifest, 0, sizeof(*manifest));
 }
 
-int lc_pouch_namespace_ensure(const lc_allocator *allocator,
-                              const char *root_path,
-                              const char *namespace_name, lc_error *error) {
+int lc_pouch_namespace_ensure_layout(const lc_allocator *allocator,
+                                     const char *root_path,
+                                     const char *namespace_name,
+                                     lc_error *error) {
   char *namespace_path;
-  lc_pouch_namespace_manifest manifest;
   int rc;
 
   if (namespace_name == NULL || namespace_name[0] == '\0') {
@@ -1455,12 +1478,23 @@ int lc_pouch_namespace_ensure(const lc_allocator *allocator,
         "failed to create pouch namespace queue notification directory",
         error);
   }
+  lc_free_with_allocator(allocator, namespace_path);
+  return rc;
+}
+
+int lc_pouch_namespace_ensure(const lc_allocator *allocator,
+                              const char *root_path,
+                              const char *namespace_name, lc_error *error) {
+  lc_pouch_namespace_manifest manifest;
+  int rc;
+
+  rc = lc_pouch_namespace_ensure_layout(allocator, root_path, namespace_name,
+                                        error);
   if (rc == LC_OK) {
     memset(&manifest, 0, sizeof(manifest));
     rc = lc_pouch_namespace_manifest_open(allocator, root_path, namespace_name,
-                                          &manifest, error);
+                                          &manifest, NULL, NULL, error);
     lc_pouch_namespace_manifest_cleanup(allocator, &manifest);
   }
-  lc_free_with_allocator(allocator, namespace_path);
   return rc;
 }
