@@ -42,6 +42,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     bound-lease attachment upload/list/get/delete/delete-all through durable
     internal attachment records in the segmented state path, with selector by
     name or deterministic pouch attachment id and overwrite/max-size coverage.
+  - [x] Add the first redesigned pouch queue surface: durable enqueue records,
+    stats, ordinary dequeue, dequeue batch, ack, nack, extend, and pouch
+    message methods over internal segmented queue records with payload
+    roundtrip, visibility, redelivery, and ack coverage.
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.

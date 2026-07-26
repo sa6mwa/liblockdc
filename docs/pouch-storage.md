@@ -2279,6 +2279,15 @@ notification touch after a committed queue mutation must not roll back the
 mutation, and a missing notification file must not prevent pollers from
 discovering committed queue objects during their next refresh.
 
+The current redesigned C backend implements the first ordinary queue surface
+with internal `.lockd/queue` segmented records. Enqueue stores payload and
+delivery metadata durably; stats, ordinary dequeue, dequeue batch, ack, nack,
+extend, and pouch message methods operate over those records with visibility
+and redelivery state persisted through the same append/replay path. This is not
+full queue parity yet: dequeue-with-state, subscribe/watch loops, notification
+hints, transaction side effects, TTL/retry exhaustion hardening, and
+high-contention duplicate-delivery tests remain broader queue work.
+
 Current pouch backend milestone: the private storage interface exposes queue
 wake status. The pouch backend reports `polling`, marks queue marker files as
 best-effort hints, and reports filesystem notifications disabled. This is an

@@ -1983,6 +1983,201 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_extend_req extend_req;
+  lc_nack_req nack_req;
+  lc_ack_res ack_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  message = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_extend_req_init(&extend_req);
+  lc_nack_req_init(&nack_req);
+  memset(&ack_res, 0, sizeof(ack_res));
+  lc_error_init(&error);
+  make_root("client-queue", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.max_attempts = 3;
+  rc = lc_source_from_memory("job-1", strlen("job-1"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(enqueue_res.queue, "jobs");
+  assert_non_null(enqueue_res.message_id);
+  assert_int_equal(enqueue_res.payload_bytes, 5L);
+
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 1);
+  assert_string_equal(stats_res.head_message_id, enqueue_res.message_id);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-a";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->queue, "jobs");
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_int_equal(message->attempts, 1);
+  assert_string_equal(message->payload_content_type, "text/plain");
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = message->write_payload(message, sink, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("job-1"));
+  assert_memory_equal(bytes, "job-1", strlen("job-1"));
+  sink->close(sink);
+  sink = NULL;
+
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  extend_req.extend_by_seconds = 90L;
+  rc = message->extend(message, &extend_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(message->visibility_timeout_seconds, 90L);
+
+  nack_req.delay_seconds = 0L;
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  rc = message->nack(message, &nack_req, &error);
+  assert_int_equal(rc, LC_OK);
+  message->close(message);
+  message = NULL;
+
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 1);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_int_equal(message->attempts, 2);
+
+  {
+    lc_ack_op ack_op;
+
+    memset(&ack_op, 0, sizeof(ack_op));
+    ack_op.message.namespace_name = message->namespace_name;
+    ack_op.message.queue = message->queue;
+    ack_op.message.message_id = message->message_id;
+    ack_op.message.lease_id = message->lease_id;
+    ack_op.message.fencing_token = message->fencing_token;
+    ack_op.message.meta_etag = message->meta_etag;
+    rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(ack_res.acked, 1);
+  }
+  message->close(message);
+  message = NULL;
+
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 0);
+
+  lc_ack_res_cleanup(&ack_res);
+  lc_queue_stats_res_cleanup(&stats_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_queue_dequeue_batch_returns_page(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_batch_res batch;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&batch, 0, sizeof(batch));
+  lc_error_init(&error);
+  make_root("client-queue-batch", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "batch";
+  rc = lc_source_from_memory("one", strlen("one"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  rc = lc_source_from_memory("two", strlen("two"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "batch";
+  dequeue_req.page_size = 2;
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(batch.count, 2U);
+  assert_non_null(batch.messages[0]);
+  assert_non_null(batch.messages[1]);
+  assert_string_equal(batch.messages[0]->queue, "batch");
+  assert_string_equal(batch.messages[1]->queue, "batch");
+
+  lc_dequeue_batch_cleanup(&batch);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_remove_tombstones_state_and_enforces_preconditions(
     void **state) {
   lc_client *client;
@@ -4418,6 +4613,8 @@ int main(void) {
       cmocka_unit_test(test_client_mutate_applies_plan_and_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
+      cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
+      cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),
