@@ -2436,10 +2436,49 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                                        const lc_index_flush_req *req,
                                        lc_index_flush_res *out,
                                        lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  const char *namespace_name;
+  const char *mode;
+  unsigned long index_seq;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch flush_index requires self, req, and out", NULL,
+                        NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  if (req->mode != NULL && req->mode[0] != '\0' &&
+      strcmp(req->mode, "wait") != 0 && strcmp(req->mode, "sync") != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch flush_index mode must be wait or sync", NULL,
+                        NULL, "pouch-redesign");
+  }
+  client = (lc_client_handle *)self;
+  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  mode = req->mode != NULL && req->mode[0] != '\0' ? req->mode : "wait";
+  index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(client->pouch, namespace_name, &index_seq,
+                                error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  out->namespace_name = lc_strdup_local(namespace_name);
+  out->mode = lc_strdup_local(mode);
+  out->flush_id = lc_strdup_local("pouch-local-index-flush");
+  out->accepted = 1;
+  out->flushed = 1;
+  out->pending = 0;
+  out->index_seq = index_seq;
+  out->correlation_id = lc_strdup_local("pouch-index-flush");
+  if (out->namespace_name == NULL || out->mode == NULL ||
+      out->flush_id == NULL || out->correlation_id == NULL) {
+    lc_index_flush_res_cleanup(out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index flush response", NULL,
+                        NULL, NULL);
+  }
+  return LC_OK;
 }
 
 int lc_pouch_client_txn_replay_method(lc_client *self,

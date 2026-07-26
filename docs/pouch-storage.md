@@ -446,7 +446,10 @@ of rewritten JSON files.
   `query` have initial scan-mode paths over the segmented state projection.
   Both stream each candidate JSON body through `liblql` for final selector
   acceptance, skip `query_hidden` and staged records, and return paginated scan
-  metadata. Durable typed postings and indexed mode remain to be implemented.
+  metadata. `flush_index` synchronously refreshes the local redesigned state
+  projection and returns its storage high-water token, including tombstones and
+  peer-writer marker invalidation. Durable typed postings and indexed mode
+  remain to be implemented.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
@@ -1026,13 +1029,13 @@ filter that same ordered scan before limits and cursors are applied. Both
 `query` report local metadata such as `query_candidates`. `query` streams NDJSON
 document rows in the same ordered page, embeds JSON state payloads as
 `document`, emits `null` for non-JSON or empty state payloads, and returns
-`documents`. Pouch `flush_index` is synchronous for the current local
-projection: it replays query-index sidecar records when the sidecar changed,
-runs the lightweight query-field posting sort/deduplicate barrier, and returns
-accepted/flushed/not-pending plus the latest index sequence. That sequence is a
-logical monotonic token derived from the storage high-water mark, not a
-physical log record count, so compaction and reopen cannot make query tokens
-move backwards. Indexed match-all queries accept
+`documents`. The current redesigned pouch `flush_index` is synchronous for the
+local state projection: it refreshes from markers/segments/snapshots and returns
+accepted/flushed/not-pending plus the latest storage high-water sequence. The
+planned durable query-index implementation extends that same boundary by
+replaying query-index sidecar records, running the lightweight query-field
+posting sort/deduplicate barrier, and returning an index sequence that cannot
+move backwards across compaction or reopen. Indexed match-all queries accept
 `refresh=wait_for` by performing the same synchronous local index flush before
 scanning the indexed projection. Explicit scan mode remains available for
 full-log/full-summary scanning through the ordered metadata summary API, but it

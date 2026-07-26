@@ -119,6 +119,8 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
 int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
                          lc_pouch_state_visit_fn visitor, void *context,
                          lc_error *error);
+int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
+                             unsigned long *out, lc_error *error);
 void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
                                         lc_pouch_state_read_result *result);
 

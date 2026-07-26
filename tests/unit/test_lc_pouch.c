@@ -2719,6 +2719,77 @@ static void test_query_documents_scan_streams_rows(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_flush_index_reports_projection_high_water(void **state) {
+  lc_client *client;
+  lc_pouch *writer;
+  lc_source *source;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_error error;
+  char root[512];
+  unsigned long delete_version;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  writer = NULL;
+  source = NULL;
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_error_init(&error);
+  make_root("flush-index", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"kind\":\"flush\",\"n\":1}",
+                             strlen("{\"kind\":\"flush\",\"n\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "docs/flush", "doc/a", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_pouch_state_delete(writer, "docs/flush", "doc/a", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  delete_version = delete_result.version;
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_close(writer);
+  writer = NULL;
+
+  flush_req.namespace_name = "docs/flush";
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.namespace_name, "docs/flush");
+  assert_string_equal(flush_res.mode, "wait");
+  assert_string_equal(flush_res.flush_id, "pouch-local-index-flush");
+  assert_true(flush_res.accepted);
+  assert_true(flush_res.flushed);
+  assert_false(flush_res.pending);
+  assert_true(flush_res.index_seq >= delete_version);
+  assert_string_equal(flush_res.correlation_id, "pouch-index-flush");
+  lc_index_flush_res_cleanup(&flush_res);
+
+  flush_req.mode = "eventually";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch flush_index mode must be wait or sync");
+
+  lc_error_cleanup(&error);
+  lc_client_close(client);
+  cleanup_root(root);
+}
+
 static void test_txn_decisions_persist_participant_records(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -3319,6 +3390,7 @@ int main(void) {
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
       cmocka_unit_test(test_query_documents_scan_streams_rows),
+      cmocka_unit_test(test_flush_index_reports_projection_high_water),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),

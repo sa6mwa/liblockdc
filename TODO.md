@@ -93,6 +93,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add public document `query` row streaming over the redesigned state
     model in scan mode, with `liblql` selector evaluation, `query_hidden`
     filtering, staged-key exclusion, pagination, and scan metadata.
+  - [x] Add the first pouch `flush_index` implementation over the redesigned
+    state projection, returning a synchronous local high-water index token that
+    includes tombstones and peer-writer marker refreshes.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the

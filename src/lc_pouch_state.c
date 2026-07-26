@@ -2576,6 +2576,54 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
+int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
+                             unsigned long *out, lc_error *error) {
+  lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_cache_namespace *cache;
+  int force_refresh;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_state_index_seq requires pouch, namespace, "
+                        "and out",
+                        NULL, NULL, NULL);
+  }
+  *out = 0UL;
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  if (cache == NULL) {
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  force_refresh = 0;
+  if (!pouch->single_writer) {
+    rc = lc_pouch_namespace_marker_refresh_should_scan(
+        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
+        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+        &force_refresh, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
+                                      error);
+  }
+  if (rc == LC_OK) {
+    *out = cache->max_version;
+  }
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
 void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
                                         lc_pouch_state_read_result *result) {
   if (result == NULL) {
