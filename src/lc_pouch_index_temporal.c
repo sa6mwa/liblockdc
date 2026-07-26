@@ -8,6 +8,8 @@
 #define LC_POUCH_INDEX_TEMPORAL_FIELD_FIXED_SIZE 12U
 #define LC_POUCH_INDEX_TEMPORAL_VALUE_SIZE 16U
 #define LC_POUCH_INDEX_TEMPORAL_MAGIC "LCPTMP1\0"
+#define LC_POUCH_INDEX_TEMPORAL_GENERATION_MAGIC "LCPTGN1\0"
+#define LC_POUCH_INDEX_TEMPORAL_GENERATION_HEADER_SIZE 40U
 
 static int lc_pouch_index_temporal_doc_compare_value(
     int64_t left_seconds, int32_t left_nanosecond, uint32_t left_doc_id,
@@ -683,6 +685,155 @@ int lc_pouch_index_temporal_posting_table_decode(
   }
   lc_pouch_index_temporal_posting_table_cleanup(allocator, table);
   *table = decoded;
+  return 1;
+}
+
+void lc_pouch_index_temporal_generation_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_temporal_generation *generation) {
+  if (generation == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, generation->namespace_name);
+  lc_pouch_index_temporal_posting_table_cleanup(allocator,
+                                                &generation->postings);
+  memset(generation, 0, sizeof(*generation));
+}
+
+int lc_pouch_index_temporal_generation_encoded_size(
+    const lc_pouch_index_temporal_generation *generation, size_t *size_out) {
+  size_t total;
+  size_t namespace_len;
+  size_t table_size;
+
+  if (size_out != NULL) {
+    *size_out = 0U;
+  }
+  if (generation == NULL || generation->namespace_name == NULL ||
+      size_out == NULL ||
+      !lc_pouch_index_temporal_posting_table_encoded_size(
+          &generation->postings, &table_size)) {
+    return 0;
+  }
+  namespace_len = strlen(generation->namespace_name);
+  if (namespace_len > UINT32_MAX) {
+    return 0;
+  }
+  total = LC_POUCH_INDEX_TEMPORAL_GENERATION_HEADER_SIZE;
+  if (!lc_pouch_index_temporal_add_size(&total, namespace_len) ||
+      !lc_pouch_index_temporal_add_size(&total, table_size)) {
+    return 0;
+  }
+  *size_out = total;
+  return 1;
+}
+
+int lc_pouch_index_temporal_generation_encode(
+    const lc_pouch_index_temporal_generation *generation, unsigned char *dst,
+    size_t dst_size, size_t *written_out) {
+  unsigned char *cursor;
+  size_t needed;
+  size_t namespace_len;
+  size_t table_size;
+  size_t table_written;
+
+  if (written_out != NULL) {
+    *written_out = 0U;
+  }
+  if (generation == NULL || generation->namespace_name == NULL ||
+      dst == NULL || written_out == NULL ||
+      !lc_pouch_index_temporal_generation_encoded_size(generation, &needed) ||
+      dst_size < needed ||
+      !lc_pouch_index_temporal_posting_table_encoded_size(
+          &generation->postings, &table_size)) {
+    return 0;
+  }
+  namespace_len = strlen(generation->namespace_name);
+  cursor = dst;
+  memcpy(cursor, LC_POUCH_INDEX_TEMPORAL_GENERATION_MAGIC,
+         LC_POUCH_INDEX_TEMPORAL_MAGIC_LEN);
+  cursor += LC_POUCH_INDEX_TEMPORAL_MAGIC_LEN;
+  lc_pouch_index_temporal_put_u32(cursor, 1U);
+  cursor += 4U;
+  lc_pouch_index_temporal_put_u64(cursor, generation->identity.sequence);
+  cursor += 8U;
+  lc_pouch_index_temporal_put_u64(cursor,
+                                  generation->identity.manifest_generation);
+  cursor += 8U;
+  lc_pouch_index_temporal_put_u32(cursor, (uint32_t)namespace_len);
+  cursor += 4U;
+  lc_pouch_index_temporal_put_u64(cursor, (uint64_t)table_size);
+  cursor += 8U;
+  memcpy(cursor, generation->namespace_name, namespace_len);
+  cursor += namespace_len;
+  if (!lc_pouch_index_temporal_posting_table_encode(
+          &generation->postings, cursor, dst_size - (size_t)(cursor - dst),
+          &table_written) ||
+      table_written != table_size) {
+    return 0;
+  }
+  cursor += table_written;
+  *written_out = (size_t)(cursor - dst);
+  return *written_out == needed;
+}
+
+int lc_pouch_index_temporal_generation_decode(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_temporal_generation *generation, const unsigned char *src,
+    size_t src_size) {
+  lc_pouch_index_temporal_generation decoded;
+  size_t offset;
+  uint32_t version;
+  uint32_t namespace_len;
+  uint64_t table_size_u64;
+
+  if (generation == NULL || src == NULL ||
+      !lc_pouch_index_temporal_decode_require(
+          src_size, 0U, LC_POUCH_INDEX_TEMPORAL_GENERATION_HEADER_SIZE) ||
+      memcmp(src, LC_POUCH_INDEX_TEMPORAL_GENERATION_MAGIC,
+             LC_POUCH_INDEX_TEMPORAL_MAGIC_LEN) != 0) {
+    return 0;
+  }
+  offset = LC_POUCH_INDEX_TEMPORAL_MAGIC_LEN;
+  version = lc_pouch_index_temporal_get_u32(src + offset);
+  offset += 4U;
+  if (version != 1U) {
+    return 0;
+  }
+  memset(&decoded, 0, sizeof(decoded));
+  decoded.identity.sequence = lc_pouch_index_temporal_get_u64(src + offset);
+  offset += 8U;
+  decoded.identity.manifest_generation =
+      lc_pouch_index_temporal_get_u64(src + offset);
+  offset += 8U;
+  namespace_len = lc_pouch_index_temporal_get_u32(src + offset);
+  offset += 4U;
+  table_size_u64 = lc_pouch_index_temporal_get_u64(src + offset);
+  offset += 8U;
+  if (table_size_u64 > (uint64_t)((size_t)-1) ||
+      !lc_pouch_index_temporal_decode_require(src_size, offset,
+                                              namespace_len)) {
+    return 0;
+  }
+  decoded.namespace_name =
+      (char *)lc_pouch_alloc(allocator, (size_t)namespace_len + 1U);
+  if (decoded.namespace_name == NULL) {
+    return 0;
+  }
+  memcpy(decoded.namespace_name, src + offset, namespace_len);
+  decoded.namespace_name[namespace_len] = '\0';
+  offset += namespace_len;
+  if (!lc_pouch_index_temporal_decode_require(src_size, offset,
+                                              (size_t)table_size_u64) ||
+      offset + (size_t)table_size_u64 != src_size ||
+      !lc_pouch_index_temporal_posting_table_decode(
+          allocator, &decoded.postings, src + offset,
+          (size_t)table_size_u64)) {
+    lc_pouch_index_temporal_generation_cleanup(allocator, &decoded);
+    return 0;
+  }
+  lc_pouch_index_temporal_generation_cleanup(allocator, generation);
+  *generation = decoded;
   return 1;
 }
 

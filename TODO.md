@@ -883,6 +883,10 @@ Latest release targets confirmed on 2026-07-23:
           reader files. The codec stores sorted per-field normalized temporal
           docIDs plus residual docIDs with magic/version checks, round-trip
           coverage, and corruption/truncation rejection.
+        - [x] Add a file-level temporal generation container codec carrying
+          index identity, namespace, and the temporal table payload so disk can
+          persist immutable per-namespace DateAfter reader files without
+          rebuilding the table on the query hot path.
         - [ ] Move the bridge-stage temporal table into immutable compiled
           index generation files and wire DateAfter readers to those generation
           files. A query-time disk bridge attempt was measured on 2026-07-26
