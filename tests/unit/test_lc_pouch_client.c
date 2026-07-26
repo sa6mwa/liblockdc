@@ -10401,10 +10401,12 @@ static void test_pouch_endpoint_index_prefix_query_keys_pages(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
+  lc_client *other_client;
   lc_lease *alpha;
   lc_lease *bravo;
   lc_lease *charlie;
   lc_lease *delta;
+  lc_lease *other_doc;
   lc_query_req req;
   lc_query_res res;
   lc_query_key_handler handler;
@@ -10420,6 +10422,12 @@ static void test_pouch_endpoint_index_prefix_query_keys_pages(void **state) {
   memset(&res, 0, sizeof(res));
   memset(&handler, 0, sizeof(handler));
   memset(&capture, 0, sizeof(capture));
+  other_client = open_pouch_client_with_namespace(endpoint, "aard");
+  other_doc = pouch_acquire_query_key(other_client, "aardvark", &error);
+  pouch_save_query_json(other_doc, "{\"name\":\"alpha\"}", &error);
+  other_doc->close(other_doc);
+  other_client->close(other_client);
+
   client = open_pouch_client(endpoint);
   charlie = pouch_acquire_query_key(client, "charlie", &error);
   pouch_save_query_json(charlie, "{\"name\":\"alpine\"}", &error);
@@ -10470,10 +10478,12 @@ static void test_pouch_endpoint_index_contains_query_keys_pages(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
+  lc_client *other_client;
   lc_lease *alpha;
   lc_lease *bravo;
   lc_lease *charlie;
   lc_lease *delta;
+  lc_lease *other_doc;
   lc_query_req req;
   lc_query_res res;
   lc_query_key_handler handler;
@@ -10489,6 +10499,12 @@ static void test_pouch_endpoint_index_contains_query_keys_pages(void **state) {
   memset(&res, 0, sizeof(res));
   memset(&handler, 0, sizeof(handler));
   memset(&capture, 0, sizeof(capture));
+  other_client = open_pouch_client_with_namespace(endpoint, "aard");
+  other_doc = pouch_acquire_query_key(other_client, "aardvark", &error);
+  pouch_save_query_json(other_doc, "{\"body\":\"marked\"}", &error);
+  other_doc->close(other_doc);
+  other_client->close(other_client);
+
   client = open_pouch_client(endpoint);
   charlie = pouch_acquire_query_key(client, "charlie", &error);
   pouch_save_query_json(charlie, "{\"body\":\"landmark\"}", &error);
@@ -10540,10 +10556,12 @@ test_pouch_endpoint_index_text_query_streams_documents_pages(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
+  lc_client *other_client;
   lc_lease *alpha;
   lc_lease *bravo;
   lc_lease *charlie;
   lc_lease *delta;
+  lc_lease *other_doc;
   lc_query_req req;
   lc_query_res res;
   lc_sink *sink;
@@ -10557,6 +10575,13 @@ test_pouch_endpoint_index_text_query_streams_documents_pages(void **state) {
   test_endpoint(endpoint, sizeof(endpoint), root);
   memset(&error, 0, sizeof(error));
   memset(&res, 0, sizeof(res));
+  other_client = open_pouch_client_with_namespace(endpoint, "aard");
+  other_doc = pouch_acquire_query_key(other_client, "aardvark", &error);
+  pouch_save_query_json(other_doc, "{\"name\":\"alpha\",\"body\":\"marked\"}",
+                        &error);
+  other_doc->close(other_doc);
+  other_client->close(other_client);
+
   client = open_pouch_client(endpoint);
   charlie = pouch_acquire_query_key(client, "charlie", &error);
   pouch_save_query_json(charlie, "{\"name\":\"alpine\",\"body\":\"landmark\"}",
@@ -10584,6 +10609,7 @@ test_pouch_endpoint_index_text_query_streams_documents_pages(void **state) {
   assert_non_null(strstr(text, "\"body\":\"benchmark\""));
   assert_non_null(strstr(text, "{\"key\":\"bravo\""));
   assert_non_null(strstr(text, "\"body\":\"marked\""));
+  assert_null(strstr(text, "aardvark"));
   assert_null(strstr(text, "charlie"));
   assert_null(strstr(text, "delta"));
   assert_string_equal(res.cursor, "bravo");
@@ -10604,6 +10630,7 @@ test_pouch_endpoint_index_text_query_streams_documents_pages(void **state) {
   assert_non_null(strstr(text, "{\"key\":\"charlie\""));
   assert_non_null(strstr(text, "\"body\":\"landmark\""));
   assert_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_null(strstr(text, "aardvark"));
   assert_null(strstr(text, "bravo"));
   assert_null(strstr(text, "delta"));
   assert_null(res.cursor);
@@ -10624,6 +10651,7 @@ test_pouch_endpoint_index_text_query_streams_documents_pages(void **state) {
   assert_non_null(strstr(text, "\"body\":\"benchmark\""));
   assert_non_null(strstr(text, "{\"key\":\"bravo\""));
   assert_non_null(strstr(text, "\"body\":\"marked\""));
+  assert_null(strstr(text, "aardvark"));
   assert_null(strstr(text, "charlie"));
   assert_null(strstr(text, "delta"));
   assert_string_equal(res.cursor, "bravo");
@@ -10643,6 +10671,7 @@ test_pouch_endpoint_index_text_query_streams_documents_pages(void **state) {
   assert_non_null(strstr(text, "{\"key\":\"charlie\""));
   assert_non_null(strstr(text, "\"body\":\"landmark\""));
   assert_null(strstr(text, "{\"key\":\"alpha\""));
+  assert_null(strstr(text, "aardvark"));
   assert_null(strstr(text, "bravo"));
   assert_null(strstr(text, "delta"));
   assert_null(res.cursor);
