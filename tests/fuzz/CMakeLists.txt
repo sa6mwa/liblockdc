@@ -17,6 +17,7 @@ lc_add_fuzz_target(lc_fuzz_queue_meta fuzz_lc_queue_meta.c)
 lc_add_fuzz_target(lc_fuzz_query_keys_stream fuzz_lc_query_keys_stream.c)
 lc_add_fuzz_target(lc_fuzz_mutate_parse fuzz_lc_mutate_parse.c)
 lc_add_fuzz_target(lc_fuzz_mutate_apply fuzz_lc_mutate_apply.c)
+lc_add_fuzz_target(lc_fuzz_pouch_lql_plan fuzz_lc_pouch_lql_plan.c)
 
 set(LC_FUZZ_BINARY_CORPUS_DIR "${CMAKE_CURRENT_BINARY_DIR}/corpus")
 file(REMOVE_RECURSE "${LC_FUZZ_BINARY_CORPUS_DIR}")
@@ -28,6 +29,7 @@ file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/queue_meta" DESTINATION "${LC_FUZZ
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/query_keys_stream" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/mutate_parse" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/mutate_apply" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_lql_plan" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
 
 add_test(NAME lc_fuzz_streams_smoke COMMAND lc_fuzz_streams ${LC_FUZZ_BINARY_CORPUS_DIR}/streams/seed.json)
 set_tests_properties(lc_fuzz_streams_smoke PROPERTIES LABELS fuzz)
@@ -49,3 +51,6 @@ set_tests_properties(lc_fuzz_mutate_parse_smoke PROPERTIES LABELS fuzz)
 
 add_test(NAME lc_fuzz_mutate_apply_smoke COMMAND lc_fuzz_mutate_apply ${LC_FUZZ_BINARY_CORPUS_DIR}/mutate_apply/105064699aa30295ea0a31a6c95d2a7775a230cb)
 set_tests_properties(lc_fuzz_mutate_apply_smoke PROPERTIES LABELS fuzz)
+
+add_test(NAME lc_fuzz_pouch_lql_plan_smoke COMMAND lc_fuzz_pouch_lql_plan ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_lql_plan/compound.json)
+set_tests_properties(lc_fuzz_pouch_lql_plan_smoke PROPERTIES LABELS fuzz)

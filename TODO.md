@@ -910,3 +910,7 @@ Latest release targets confirmed on 2026-07-23:
   - [ ] Add pouch fuzz targets/corpora for segmented manifest repair, snapshot
     lifecycle replay, marker recovery, query index/search replay, and strict
     JSON Pointer LQL selector planning.
+    - [x] Add a `lc_fuzz_pouch_lql_plan` target with seed selectors for
+      match-all, strict equality, `/tags[]` array membership, and compound
+      range/presence/text planning; the harness runs accepted selectors through
+      both pouch index and scan `query_keys` paths and asserts row-count parity.
