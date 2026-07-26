@@ -96,6 +96,13 @@ static void test_query_temporal_generation_path(const char *root,
            namespace_name);
 }
 
+static void test_query_exact_generation_path(const char *root,
+                                             const char *namespace_name,
+                                             char *path, size_t path_size) {
+  snprintf(path, path_size, "%s/%%2elockd/logstore/query.index.exact/%s.lcpttg",
+           root, namespace_name);
+}
+
 static void test_cleanup_query_temporal_dir(const char *root) {
   char dir_path[512];
   DIR *dir;
@@ -103,6 +110,29 @@ static void test_cleanup_query_temporal_dir(const char *root) {
 
   snprintf(dir_path, sizeof(dir_path),
            "%s/%%2elockd/logstore/query.index.temporal", root);
+  dir = opendir(dir_path);
+  if (dir != NULL) {
+    while ((entry = readdir(dir)) != NULL) {
+      char path[800];
+
+      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        continue;
+      }
+      snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
+      unlink(path);
+    }
+    closedir(dir);
+  }
+  rmdir(dir_path);
+}
+
+static void test_cleanup_query_exact_dir(const char *root) {
+  char dir_path[512];
+  DIR *dir;
+  struct dirent *entry;
+
+  snprintf(dir_path, sizeof(dir_path),
+           "%s/%%2elockd/logstore/query.index.exact", root);
   dir = opendir(dir_path);
   if (dir != NULL) {
     while ((entry = readdir(dir)) != NULL) {
@@ -135,6 +165,7 @@ static void test_cleanup_root(const char *root) {
   test_query_index_path(root, path, sizeof(path));
   unlink(path);
   test_cleanup_query_temporal_dir(root);
+  test_cleanup_query_exact_dir(root);
   snprintf(path, sizeof(path), "%s/%%2elockd/logstore", root);
   rmdir(path);
   snprintf(path, sizeof(path), "%s/%%2elockd", root);
@@ -182,8 +213,48 @@ test_read_temporal_generation_file(const char *path,
   free(bytes);
 }
 
+static void
+test_read_exact_generation_file(const char *path,
+                                lc_pouch_index_term_generation *out) {
+  struct stat st;
+  unsigned char *bytes;
+  size_t offset;
+  int fd;
+
+  memset(out, 0, sizeof(*out));
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(st.st_size > 0);
+  bytes = (unsigned char *)malloc((size_t)st.st_size);
+  assert_non_null(bytes);
+  fd = open(path, O_RDONLY);
+  assert_true(fd >= 0);
+  offset = 0U;
+  while (offset < (size_t)st.st_size) {
+    ssize_t got;
+
+    got = read(fd, bytes + offset, (size_t)st.st_size - offset);
+    assert_true(got > 0);
+    offset += (size_t)got;
+  }
+  assert_int_equal(close(fd), 0);
+  assert_true(lc_pouch_index_term_generation_decode(NULL, out, bytes,
+                                                    (size_t)st.st_size));
+  free(bytes);
+}
+
 static void test_corrupt_temporal_generation_file(const char *path) {
   static const char corrupt[] = "not-a-temporal-generation";
+  int fd;
+
+  fd = open(path, O_WRONLY | O_TRUNC);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, corrupt, sizeof(corrupt) - 1U),
+                   (ssize_t)(sizeof(corrupt) - 1U));
+  assert_int_equal(close(fd), 0);
+}
+
+static void test_corrupt_exact_generation_file(const char *path) {
+  static const char corrupt[] = "not-an-exact-generation";
   int fd;
 
   fd = open(path, O_WRONLY | O_TRUNC);
@@ -217,6 +288,32 @@ static void test_stale_temporal_generation_file(const char *path) {
   assert_int_equal(close(fd), 0);
   free(encoded);
   lc_pouch_index_temporal_generation_cleanup(NULL, &generation);
+}
+
+static void test_stale_exact_generation_file(const char *path) {
+  lc_pouch_index_term_generation generation;
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t written;
+  int fd;
+
+  memset(&generation, 0, sizeof(generation));
+  test_read_exact_generation_file(path, &generation);
+  assert_true(generation.identity.sequence > 0U);
+  generation.identity.sequence--;
+  assert_true(
+      lc_pouch_index_term_generation_encoded_size(&generation, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_term_generation_encode(&generation, encoded,
+                                                    encoded_size, &written));
+  assert_int_equal(written, encoded_size);
+  fd = open(path, O_WRONLY | O_TRUNC);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, encoded, encoded_size), (ssize_t)encoded_size);
+  assert_int_equal(close(fd), 0);
+  free(encoded);
+  lc_pouch_index_term_generation_cleanup(NULL, &generation);
 }
 
 static unsigned long test_get_u64(const unsigned char *bytes) {
@@ -10656,6 +10753,161 @@ test_pouch_endpoint_index_rebuild_writes_temporal_generation(void **state) {
 }
 
 static void
+test_pouch_endpoint_index_rebuild_writes_exact_generation(void **state) {
+  char root[256];
+  char endpoint[320];
+  char query_path[512];
+  char generation_path[512];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_lease *delta;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_term_id term_id;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-exact-generation");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  memset(&generation, 0, sizeof(generation));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  client = open_pouch_client(endpoint);
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha, "{\"value\":\"hot\"}", &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo, "{\"value\":\"hot\"}", &error);
+  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  pouch_save_query_json(charlie, "{\"value\":\"cold\"}", &error);
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  client->close(client);
+
+  test_query_index_path(root, query_path, sizeof(query_path));
+  assert_int_equal(unlink(query_path), 0);
+
+  client = open_pouch_client(endpoint);
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{\"eq\":{\"field\":\"/value\",\"value\":\"hot\"}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 2U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  lc_query_res_cleanup(&res);
+  client->close(client);
+
+  test_query_exact_generation_path(root, "default", generation_path,
+                                   sizeof(generation_path));
+  test_read_exact_generation_file(generation_path, &generation);
+  assert_string_equal(generation.namespace_name, "default");
+  assert_true(generation.identity.sequence > 0U);
+  assert_true(lc_pouch_index_term_table_find(
+      &generation.terms, "7:default:6:/value", "s:hot", &term_id));
+  assert_true(lc_pouch_index_term_posting_table_decode(
+      NULL, &generation.postings, term_id, &doc_ids));
+  assert_int_equal(doc_ids.count, 2U);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_term_generation_cleanup(NULL, &generation);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&generation, 0, sizeof(generation));
+
+  client = open_pouch_client(endpoint);
+  delta = pouch_acquire_query_key(client, "delta", &error);
+  pouch_save_query_json(delta, "{\"value\":\"hot\"}", &error);
+  delta->close(delta);
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(capture.keys[2], "delta");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  lc_query_res_cleanup(&res);
+  client->close(client);
+
+  test_read_exact_generation_file(generation_path, &generation);
+  assert_true(lc_pouch_index_term_table_find(
+      &generation.terms, "7:default:6:/value", "s:hot", &term_id));
+  assert_true(lc_pouch_index_term_posting_table_decode(
+      NULL, &generation.postings, term_id, &doc_ids));
+  assert_int_equal(doc_ids.count, 3U);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_term_generation_cleanup(NULL, &generation);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&generation, 0, sizeof(generation));
+
+  test_corrupt_exact_generation_file(generation_path);
+  client = open_pouch_client(endpoint);
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(capture.keys[2], "delta");
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  test_read_exact_generation_file(generation_path, &generation);
+  assert_true(lc_pouch_index_term_table_find(
+      &generation.terms, "7:default:6:/value", "s:hot", &term_id));
+  assert_true(lc_pouch_index_term_posting_table_decode(
+      NULL, &generation.postings, term_id, &doc_ids));
+  assert_int_equal(doc_ids.count, 3U);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_term_generation_cleanup(NULL, &generation);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&generation, 0, sizeof(generation));
+
+  test_stale_exact_generation_file(generation_path);
+  client = open_pouch_client(endpoint);
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "alpha");
+  assert_string_equal(capture.keys[1], "bravo");
+  assert_string_equal(capture.keys[2], "delta");
+  lc_query_res_cleanup(&res);
+  client->close(client);
+  test_read_exact_generation_file(generation_path, &generation);
+  assert_true(generation.identity.sequence > 0U);
+  assert_true(lc_pouch_index_term_table_find(
+      &generation.terms, "7:default:6:/value", "s:hot", &term_id));
+  assert_true(lc_pouch_index_term_posting_table_decode(
+      NULL, &generation.postings, term_id, &doc_ids));
+  assert_int_equal(doc_ids.count, 3U);
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_term_generation_cleanup(NULL, &generation);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_pouch_endpoint_index_query_keys_filters_owner_selector(void **state) {
   char root[256];
   char endpoint[320];
@@ -13311,6 +13563,8 @@ int main(void) {
           test_pouch_endpoint_index_date_after_normalizes_temporal_values),
       cmocka_unit_test(
           test_pouch_endpoint_index_rebuild_writes_temporal_generation),
+      cmocka_unit_test(
+          test_pouch_endpoint_index_rebuild_writes_exact_generation),
       cmocka_unit_test(
           test_pouch_endpoint_index_query_keys_filters_owner_selector),
       cmocka_unit_test(

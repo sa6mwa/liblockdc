@@ -584,8 +584,11 @@ Latest release targets confirmed on 2026-07-23:
         `lc_pouch_index`: namespace-scoped term dictionaries and adaptive
         term-ID postings now round-trip under index sequence plus segmented
         manifest identity, with corruption/truncation rejection coverage.
-        Disk publication and consumption of these exact-term generation files
-        is still pending.
+      - [x] Publish and consume immutable exact-term generation files from the
+        disk bridge: full query-index rebuilds and compaction publish
+        per-namespace exact generations, prepared equality/`in` readers merge
+        identity-matched files before compiling sidecar fallbacks, and
+        missing/stale/corrupt files repair on the exact query path.
       - [x] Compile filtered exact sidecar candidates into a per-request
         term-ID posting table for equality and `in` docID readers, preserving
         existing live-state and secondary predicate guards while exercising

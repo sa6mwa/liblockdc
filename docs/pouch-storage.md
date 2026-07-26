@@ -1388,13 +1388,16 @@ a namespace-scoped dictionary plus term-ID posting table is wrapped with the
 same index sequence and segmented manifest identity used by prepared/result
 caches and temporal generations. Decode validates magic/version headers,
 lengths, term/posting references, posting payload shape, decoded count, sorted
-docID order, and max docID before a reader can trust the artifact. Disk still
-needs to publish and consume these exact-term generation files; current
-queries continue to populate exact postings from sidecar scans.
-The current disk adapter now builds that exact-term table per request from
-filtered sidecar candidates, so equality and `in` plans can use compiled
-postings without bypassing existing live-state, owner, hidden, generation, or
-secondary-predicate checks.
+docID order, and max docID before a reader can trust the artifact. Disk now
+publishes these files under
+`<root>/%2elockd/logstore/query.index.exact/<escaped-namespace>.lcpttg`
+during full query-index rebuilds and after successful compaction replay.
+Prepared exact readers load identity-matched namespace files into the
+generation-scoped exact cache before compiling from sidecar postings; absent,
+stale, or corrupt files trigger a namespace refresh and republish on the exact
+query path. Sidecar compilation remains the fallback when a current generation
+does not contain the requested term, and exists/range/text generations are
+still pending.
 For primary equality plans with negative equality filters, the disk adapter can
 now ask exact-term readers for unfiltered primary and negative term docIDs,
 then lets `lc_pouch_index` subtract sorted negative docID sets from the primary
