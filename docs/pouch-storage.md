@@ -1411,8 +1411,14 @@ are sorted canonical `n:` values plus residual docID postings under the same
 index sequence and segmented manifest identity. Range lookup uses canonical
 open/closed lower and upper bounds over the ordered value table, while residual
 docIDs preserve a conservative superset for values that still require higher
-level validation. Disk publication and prepared `range` reader consumption of
-that numeric generation are still pending, and text generations are still
+level validation. Disk publishes these files under
+`<root>/%2elockd/logstore/query.index.number/<escaped-namespace>.lcpngn`
+during full query-index rebuilds and after successful compaction replay.
+Prepared simple primary `range` readers load identity-matched numeric
+generations, materialize the requested open/closed bounds into query-bound
+adaptive postings, and repair absent, stale, or corrupt files on the simple
+range query path. Compound range paths still use the sidecar compiler so
+secondary predicate filtering stays explicit. Text generations are still
 pending.
 For primary equality plans with negative equality filters, the disk adapter can
 now ask exact-term readers for unfiltered primary and negative term docIDs,
@@ -1423,7 +1429,9 @@ filtered sidecar candidates are compiled into adaptive docID postings per
 request when the immutable exists generation cannot satisfy the term, then
 decoded through the index layer.
 Positive numeric `range` plans also compile filtered sidecar candidates into
-adaptive docID postings per request before decoding through the index layer.
+adaptive docID postings per request before decoding through the index layer
+when the immutable numeric generation cannot satisfy the simple primary range
+or when compound range filtering requires sidecar validation.
 The range term dictionary key records bound presence separately from bound
 values so open, closed, and absent bounds stay distinct inside the compiled
 reader bridge.

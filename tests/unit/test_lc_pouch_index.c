@@ -791,6 +791,15 @@ test_number_posting_table_appends_range_and_residuals(void **state) {
       NULL, &table, "/amount", "n:+:2:0", NULL, NULL, "n:+:15:0", &doc_ids));
   assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
   assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  assert_true(lc_pouch_index_number_posting_table_append_range(
+      NULL, &table, "/amount", "n:+:2:0", "n:-:5:0", "n:+:15:0", "n:+:2:0",
+      &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_int_equal(doc_ids.count, 1U);
+  assert_int_equal(doc_ids.items[0], 99U);
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
   lc_pouch_index_number_posting_table_cleanup(NULL, &table);

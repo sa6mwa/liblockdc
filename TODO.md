@@ -598,8 +598,14 @@ Latest release targets confirmed on 2026-07-23:
         `lc_pouch_index`: namespace-scoped field dictionaries store sorted
         canonical `n:` values plus residual docID postings under index sequence
         and segmented manifest identity, with range-bound lookup and
-        corruption/truncation rejection coverage. Disk publication and
-        prepared `range` reader consumption are still pending.
+        corruption/truncation rejection coverage.
+      - [x] Publish and consume immutable numeric-range generation files from
+        the disk bridge for simple primary `range` plans: full query-index
+        rebuilds and compaction publish per-namespace numeric generations,
+        prepared simple `range` readers materialize identity-matched files into
+        query-bound adaptive postings, and missing/stale/corrupt files repair
+        on the simple range query path. Compound range paths still use the
+        sidecar compiler so secondary predicate filtering remains explicit.
       - [x] Compile filtered exact sidecar candidates into a per-request
         term-ID posting table for equality and `in` docID readers, preserving
         existing live-state and secondary predicate guards while exercising

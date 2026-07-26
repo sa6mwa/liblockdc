@@ -423,10 +423,44 @@ int lc_pouch_index_number_posting_table_append_range(
       }
     }
   }
-  lower = gt != NULL ? gt : gte;
-  lower_exclusive = gt != NULL;
-  upper = lt != NULL ? lt : lte;
-  upper_inclusive = lt == NULL && lte != NULL;
+  lower = NULL;
+  lower_exclusive = 0;
+  if (gt != NULL) {
+    lower = gt;
+    lower_exclusive = 1;
+  }
+  if (gte != NULL) {
+    int cmp;
+
+    if (lower == NULL) {
+      lower = gte;
+      lower_exclusive = 0;
+    } else if (!lc_pouch_number_eq_key_compare(gte, lower, &cmp)) {
+      return 0;
+    } else if (cmp > 0) {
+      lower = gte;
+      lower_exclusive = 0;
+    }
+  }
+  upper = NULL;
+  upper_inclusive = 0;
+  if (lt != NULL) {
+    upper = lt;
+    upper_inclusive = 0;
+  }
+  if (lte != NULL) {
+    int cmp;
+
+    if (upper == NULL) {
+      upper = lte;
+      upper_inclusive = 1;
+    } else if (!lc_pouch_number_eq_key_compare(lte, upper, &cmp)) {
+      return 0;
+    } else if (cmp < 0) {
+      upper = lte;
+      upper_inclusive = 1;
+    }
+  }
   start = lower != NULL ? lc_pouch_index_number_field_lower_bound(
                               entry, lower, lower_exclusive)
                         : 0U;
