@@ -33,8 +33,17 @@ static const lonejson_field pouch_value_fields[] = {
 LONEJSON_MAP_DEFINE(pouch_value_map, pouch_value_doc, pouch_value_fields);
 
 static void make_root(const char *suffix, char *root, size_t root_size) {
-  snprintf(root, root_size, "/tmp/liblockdc-unit-pouch-redesign-%ld-%s",
-           (long)getpid(), suffix);
+  char template_path[512];
+  char *created;
+  int written;
+
+  written = snprintf(template_path, sizeof(template_path),
+                     "/tmp/liblockdc-unit-pouch-redesign-%s-XXXXXX", suffix);
+  assert_true(written > 0 && (size_t)written < sizeof(template_path));
+  created = mkdtemp(template_path);
+  assert_non_null(created);
+  written = snprintf(root, root_size, "%s", created);
+  assert_true(written > 0 && (size_t)written < root_size);
 }
 
 static void make_endpoint(const char *root, char *endpoint,
@@ -774,6 +783,78 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_client_remove_tombstones_state_and_enforces_preconditions(
+    void **state) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_remove_op remove_op;
+  lc_remove_res remove_res;
+  lc_get_res get_res;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&remove_res, 0, sizeof(remove_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_remove_op_init(&remove_op);
+  lc_error_init(&error);
+  make_root("client-remove", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/remove/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{\"value\":11}", NULL, 0L, 0, &update_res,
+                     &error);
+
+  remove_op.lease.key = key;
+  remove_op.if_state_etag = "wrong";
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(remove_res.removed, 0);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_remove_op_init(&remove_op);
+  memset(&remove_res, 0, sizeof(remove_res));
+  remove_op.lease.key = key;
+  remove_op.if_state_etag = update_res.new_state_etag;
+  remove_op.if_version = update_res.new_version;
+  remove_op.has_if_version = 1;
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(remove_res.removed, 1);
+  assert_int_equal(remove_res.new_version, 2L);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  lc_remove_op_init(&remove_op);
+  memset(&remove_res, 0, sizeof(remove_res));
+  remove_op.lease.key = "missing";
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(remove_res.removed, 0);
+  assert_int_equal(remove_res.new_version, 0L);
+
+  lc_remove_res_cleanup(&remove_res);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_lease_bound_state_update_get_and_release(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -875,6 +956,66 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
 
   lc_get_res_cleanup(&get_res);
   lc_client_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_lease_remove_tombstones_state_and_refreshes_view(
+    void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_get_res get_res;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("lease-remove", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-remove/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":12}", strlen("{\"value\":12}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_non_null(lease->state_etag);
+
+  rc = lease->remove(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 0L);
+  assert_null(lease->state_etag);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  sink->close(sink);
+
+  lc_get_res_cleanup(&get_res);
+  lease->close(lease);
+  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -1037,7 +1178,10 @@ int main(void) {
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
+      cmocka_unit_test(
+          test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
+      cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
   };

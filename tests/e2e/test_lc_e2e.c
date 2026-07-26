@@ -458,9 +458,19 @@ static void make_unique_name(const char *prefix, char *buffer,
 static void make_pouch_root(const char *suffix, char *root,
                             size_t root_capacity, char *endpoint,
                             size_t endpoint_capacity) {
-  snprintf(root, root_capacity, "/tmp/liblockdc-e2e-pouch-%ld-%s",
-           (long)getpid(), suffix);
-  snprintf(endpoint, endpoint_capacity, "pouch://%s", root);
+  char template_path[512];
+  char *created;
+  int written;
+
+  written = snprintf(template_path, sizeof(template_path),
+                     "/tmp/liblockdc-e2e-pouch-%s-XXXXXX", suffix);
+  assert_true(written > 0 && (size_t)written < sizeof(template_path));
+  created = mkdtemp(template_path);
+  assert_non_null(created);
+  written = snprintf(root, root_capacity, "%s", created);
+  assert_true(written > 0 && (size_t)written < root_capacity);
+  written = snprintf(endpoint, endpoint_capacity, "pouch://%s", root);
+  assert_true(written > 0 && (size_t)written < endpoint_capacity);
 }
 
 static void cleanup_pouch_tree(const char *path) {

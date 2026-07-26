@@ -63,10 +63,27 @@ static int bench_stream_copy(long iterations) {
   return 0;
 }
 
-static void bench_pouch_root_path(char *buffer, size_t buffer_size,
-                                  const char *suffix) {
-  snprintf(buffer, buffer_size, "/tmp/liblockdc-pouch-bench-%ld-%s",
-           (long)getpid(), suffix);
+static int bench_pouch_root_path(char *buffer, size_t buffer_size,
+                                 const char *suffix) {
+  char template_path[512];
+  char *created;
+  int written;
+
+  written = snprintf(template_path, sizeof(template_path),
+                     "/tmp/liblockdc-pouch-bench-%s-XXXXXX", suffix);
+  if (written < 0 || (size_t)written >= sizeof(template_path)) {
+    return 1;
+  }
+  created = mkdtemp(template_path);
+  if (created == NULL) {
+    return 1;
+  }
+  written = snprintf(buffer, buffer_size, "%s", created);
+  if (written < 0 || (size_t)written >= buffer_size) {
+    rmdir(created);
+    return 1;
+  }
+  return 0;
 }
 
 static int bench_has_prefix(const char *value, const char *prefix) {
@@ -118,8 +135,10 @@ static int bench_pouch_open(long iterations) {
   long i;
 
   lc_error_init(&error);
-  bench_pouch_root_path(root, sizeof(root), "open");
-  bench_pouch_cleanup_root(root);
+  if (bench_pouch_root_path(root, sizeof(root), "open") != 0) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
   for (i = 0; i < iterations; ++i) {
     lc_pouch *pouch;
 
@@ -143,8 +162,10 @@ static int bench_pouch_namespace(long iterations) {
   long i;
 
   lc_error_init(&error);
-  bench_pouch_root_path(root, sizeof(root), "namespace");
-  bench_pouch_cleanup_root(root);
+  if (bench_pouch_root_path(root, sizeof(root), "namespace") != 0) {
+    lc_error_cleanup(&error);
+    return 1;
+  }
   pouch = NULL;
   if (lc_pouch_open(root, NULL, NULL, &pouch, &error) != LC_OK) {
     lc_error_cleanup(&error);

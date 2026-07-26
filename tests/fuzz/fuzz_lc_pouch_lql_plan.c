@@ -66,6 +66,14 @@ static void fuzz_remove_tree(const char *path) {
   (void)rmdir(path);
 }
 
+static void fuzz_cleanup_root(const char *root) {
+  static const char prefix[] = "/tmp/liblockdc-pouch-lql-fuzz-";
+
+  if (root != NULL && strncmp(root, prefix, sizeof(prefix) - 1U) == 0) {
+    fuzz_remove_tree(root);
+  }
+}
+
 static lc_source *fuzz_source_from_text(const char *text, lc_error *error) {
   lc_source *source;
 
@@ -279,6 +287,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   lc_error_cleanup(&scan_error);
   lc_error_cleanup(&index_error);
   free(selector);
-  fuzz_remove_tree(root);
+  fuzz_cleanup_root(root);
   return 0;
 }

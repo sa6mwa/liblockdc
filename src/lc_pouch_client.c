@@ -684,10 +684,40 @@ int lc_pouch_client_metadata_method(lc_client *self,
 
 int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
                                   lc_remove_res *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  int rc;
+
+  if (self == NULL || req == NULL || req->lease.key == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch remove requires self, req with key, and out",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  memset(out, 0, sizeof(*out));
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  options.expected_etag = req->if_state_etag;
+  if (req->has_if_version) {
+    if (req->if_version < 0L) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch remove if_version must be non-negative",
+                          NULL, NULL, NULL);
+    }
+    options.expected_version = (unsigned long)req->if_version;
+    options.has_expected_version = 1;
+  }
+  rc = lc_pouch_state_delete(
+      client->pouch,
+      lc_pouch_client_namespace(client, req->lease.namespace_name),
+      req->lease.key, &options, &result, error);
+  if (rc == LC_OK) {
+    out->removed = result.version > 0UL;
+    out->new_version = (long)result.version;
+  }
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  return rc;
 }
 
 int lc_pouch_client_keepalive_method(lc_client *self,
@@ -1209,9 +1239,39 @@ int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
 
 int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
                                  lc_error *error) {
-  (void)self;
-  (void)req;
-  return lc_pouch_lease_rebuilding(error);
+  lc_lease_handle *lease;
+  lc_remove_op op;
+  lc_remove_res res;
+  int rc;
+
+  if (self == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease remove requires self", NULL, NULL,
+                        NULL);
+  }
+  lease = (lc_lease_handle *)self;
+  lc_remove_op_init(&op);
+  memset(&res, 0, sizeof(res));
+  op.lease.namespace_name = lease->namespace_name;
+  op.lease.key = lease->key;
+  op.lease.lease_id = lease->lease_id;
+  op.lease.txn_id = lease->txn_id;
+  op.lease.fencing_token = lease->fencing_token;
+  if (req != NULL) {
+    op.if_state_etag = req->if_state_etag;
+    op.if_version = req->if_version;
+    op.has_if_version = req->has_if_version;
+  }
+  if (!op.has_if_version && lease->version > 0L) {
+    op.if_version = lease->version;
+    op.has_if_version = 1;
+  }
+  rc = lc_pouch_client_remove_method(&lease->client->pub, &op, &res, error);
+  if (rc == LC_OK && res.removed) {
+    rc = lc_pouch_lease_refresh_state(lease, NULL, 0L, error);
+  }
+  lc_remove_res_cleanup(&res);
+  return rc;
 }
 
 int lc_pouch_lease_keepalive_method(lc_lease *self,
