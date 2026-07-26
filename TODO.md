@@ -144,6 +144,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     checks after state mutations, manifest-installed state snapshots, replay
     from snapshot plus later segment tails, manifest repair from snapshot files,
     and best-effort compacted segment/prior-snapshot cleanup.
+  - [x] Add the first explicit namespace maintenance entry point for pouch
+    snapshot compaction: `lc_pouch_maintenance_run()` supports forced
+    compaction, threshold-gated `if_needed` behavior, interval gating for
+    scheduled checks, and diagnostics for disabled, no-candidate,
+    below-threshold, interval, and compacted outcomes.
   - [ ] Extend snapshot compaction to the full storage surface with durable
     high-water records, manifest obsolete records, validation-drift aborts,
     cleanup retry accounting, explicit maintenance entry points, and

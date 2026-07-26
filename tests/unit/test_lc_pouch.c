@@ -1310,6 +1310,260 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_maintenance_reports_disabled_without_force(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  make_root("maintenance-disabled", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  maintenance_options.namespace_name = "team/alpha";
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.namespace_name, "team/alpha");
+  assert_string_equal(maintenance_result.diagnostic, "disabled");
+  assert_true(maintenance_result.skipped);
+  assert_false(maintenance_result.compacted);
+
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_maintenance_reports_threshold_skip(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  make_root("maintenance-threshold", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  open_options.compaction_min_segment_count = 4UL;
+  open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &first, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
+                            &second, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  maintenance_options.namespace_name = "team/alpha";
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic,
+                      "below-segment-threshold");
+  assert_true(maintenance_result.skipped);
+  assert_false(maintenance_result.compacted);
+  assert_true(maintenance_result.candidate_segment_count < 4UL);
+  assert_true(maintenance_result.candidate_bytes > 0UL);
+
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_maintenance_force_installs_snapshot(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char bytes[64];
+  char *namespace_path;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&read_result, 0, sizeof(read_result));
+  make_root("maintenance-force", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &first, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
+                            &second, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "compacted");
+  assert_true(maintenance_result.compacted);
+  assert_false(maintenance_result.skipped);
+  assert_int_equal(maintenance_result.compacted_segment_id, 2UL);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  assert_path_file(namespace_path,
+                   "snapshots/snapshot-00000000000000000002.log");
+  assert_path_file_contains(namespace_path, "manifest",
+                            "snapshot=snapshot-00000000000000000002.log");
+
+  lc_pouch_close(pouch);
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/b", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "two");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_maintenance_reports_interval_skip(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  int i;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  make_root("maintenance-interval", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.compaction_interval_seconds = 3600UL;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  for (i = 0; i < 4; ++i) {
+    char key[32];
+    char payload[32];
+
+    snprintf(key, sizeof(key), "state/%d", i);
+    snprintf(payload, sizeof(payload), "value-%d", i);
+    rc = lc_source_from_memory(payload, strlen(payload), &body, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, "team/alpha", key, body, NULL,
+                              &write_result, &error);
+    assert_int_equal(rc, LC_OK);
+    body->close(body);
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  }
+
+  maintenance_options.namespace_name = "team/alpha";
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "interval-not-elapsed");
+  assert_true(maintenance_result.skipped);
+  assert_false(maintenance_result.compacted);
+  assert_int_equal(maintenance_result.candidate_segment_count, 2UL);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  assert_path_file(namespace_path,
+                   "snapshots/snapshot-00000000000000000002.log");
+
+  free(namespace_path);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_state_metadata_survives_snapshot_compaction(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -6528,6 +6782,10 @@ int main(void) {
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
+      cmocka_unit_test(test_maintenance_reports_disabled_without_force),
+      cmocka_unit_test(test_maintenance_reports_threshold_skip),
+      cmocka_unit_test(test_maintenance_force_installs_snapshot),
+      cmocka_unit_test(test_maintenance_reports_interval_skip),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(
           test_namespace_manifest_repairs_from_existing_segments),

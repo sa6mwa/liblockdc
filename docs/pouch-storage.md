@@ -701,15 +701,15 @@ moved out of the foreground path whenever correctness allows it:
 - all hot allocations use pouch-owned buffers, pools, or slabs so allocation
   behavior is measurable and controllable.
 
-Current implementation milestone: the C disk backend writes authoritative
-records to per-namespace logstore segments and installs compacted live heads as
-manifested namespace snapshots. Compaction runs under the writer lock, backs up
-the active segment set, streams live payload spans with bounded buffers into
-fresh segment files, installs those files as snapshots, and marks superseded
-segments or snapshots obsolete in the manifest. The root `store.log` file is a
-non-authoritative placeholder and is not replaced during compaction. Monotonic
-tokens survive compaction through a private high-water record in the internal
-backend namespace logstore.
+Current implementation milestone: the redesigned pouch backend writes
+authoritative records to per-namespace segmented state logs and installs
+compacted live heads as manifested namespace snapshots. Compaction runs through
+the pouch writer path, captures the live namespace projection, writes a fresh
+snapshot file, installs it in the namespace manifest, advances the active
+segment, and best-effort deletes superseded segment and prior snapshot files.
+The root `store.log` file is a non-authoritative placeholder and is not replaced
+during compaction. The durable append-only obsolete-record and high-water
+lifecycle is still tracked as follow-on work.
 Idle read descriptors are cached separately from active read sources. The cache
 is a performance artifact only: entries are bounded, allocator-backed, reusable
 across state/object/queue payload reads, and discarded when their descriptor no
@@ -718,32 +718,19 @@ Opening a store also removes stale `store.compact.tmp`, internal-logstore
 `query.index.compact.tmp`, and earlier root-level query-index temp files while
 holding the writer lock, so crash leftovers from older or interrupted
 compaction attempts do not accumulate or confuse later runs.
-The private backend control surface now exposes explicit compaction diagnostics:
-`force` runs the same live-head rewrite immediately, while `if_needed` applies
-the auto-compaction thresholds and returns a concrete skip reason without
-rewriting below-threshold stores. Both modes report before/after log bytes,
-query-index bytes, record counts, and live-record counts so tests and future
-management tooling can treat compaction as observable behavior rather than an
-implicit side effect.
-The disk open options also expose the first scheduled-maintenance knobs:
-scheduled compaction can be enabled explicitly, and the minimum log byte and
-obsolete-record multiplier thresholds can be overridden. The private
-`maintenance("scheduled")` tick runs through the same foreground-safe writer
-lock path as manual `compact(if_needed)`, reports whether scheduling is disabled,
-skipped, or compacted, and does not create worker threads or hidden background
-I/O. Scheduled maintenance can be interval-throttled or held until a not-before
-Unix deadline through the private disk open options: interval skips report
-`interval-not-elapsed`, and not-before skips report `deadline-not-reached`,
-without entering compaction. Manual `compact(force|if_needed)` is not throttled.
-`maintenance("cleanup")` runs the store-owned replay/manifest cleanup path
-without entering compaction, so manifest-obsolete segment and snapshot file
-deletes can be retried even when scheduled compaction is disabled. Private disk
-open options can also apply delete grace to obsolete-file cleanup; files whose
-mtime is still inside the grace window stay tracked and are retried by a later
-replay or cleanup tick. Scheduled maintenance can also apply a maximum log-byte
-I/O budget per explicit tick; oversized compaction candidates report
-`io-throttled` without entering compaction. Manual `compact(force|if_needed)` is
-not throttled by scheduled-maintenance budgets.
+The private pouch maintenance surface now exposes namespace-scoped compaction
+diagnostics through `lc_pouch_maintenance_run()`. `force` runs the same
+live-head snapshot rewrite immediately, even when scheduled compaction is
+disabled. Non-forced maintenance applies the pouch open options for scheduled
+compaction, minimum compactable segment count, minimum reclaimable bytes, and
+interval throttling. The result reports the namespace, candidate segment count,
+candidate bytes, compacted segment id, and a concrete diagnostic such as
+`disabled`, `no-candidates`, `below-segment-threshold`,
+`below-reclaimable-threshold`, `interval-not-elapsed`, or `compacted`. This
+keeps lifecycle work observable without introducing hidden worker threads or
+background I/O. Cleanup-only maintenance, append-only manifest obsolete records,
+delete grace/retry accounting, and validation-drift abort diagnostics remain
+part of the open lifecycle work.
 
 Segmented storage alone is not the v1 search-performance shape. A searchable
 pouch store must not use full-history scanning as the preferred indexed-query

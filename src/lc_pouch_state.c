@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LC_POUCH_STATE_COPY_CHUNK 16384U
@@ -1282,6 +1283,46 @@ static int lc_pouch_state_compaction_candidate_bytes(
   return LC_OK;
 }
 
+static int lc_pouch_maintenance_set_string(lc_pouch *pouch, char **target,
+                                           const char *value,
+                                           lc_error *error) {
+  char *copy;
+
+  if (target == NULL) {
+    return LC_OK;
+  }
+  copy = lc_strdup_with_allocator(&pouch->allocator, value != NULL ? value : "");
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch maintenance diagnostic",
+                        NULL, NULL, NULL);
+  }
+  lc_free_with_allocator(&pouch->allocator, *target);
+  *target = copy;
+  return LC_OK;
+}
+
+static int lc_pouch_maintenance_set_diagnostic(
+    lc_pouch *pouch, lc_pouch_maintenance_result *out, const char *diagnostic,
+    lc_error *error) {
+  if (out == NULL) {
+    return LC_OK;
+  }
+  return lc_pouch_maintenance_set_string(pouch, &out->diagnostic, diagnostic,
+                                         error);
+}
+
+static unsigned long lc_pouch_maintenance_now_seconds(void) {
+  time_t now;
+
+  now = time(NULL);
+  return now > 0 ? (unsigned long)now : 0UL;
+}
+
+static int lc_pouch_state_compact_namespace(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_namespace_manifest *manifest, lc_error *error);
+
 static void lc_pouch_state_delete_compacted_files(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
     unsigned long compacted_segment_id, const char *old_snapshot) {
@@ -1318,6 +1359,95 @@ static void lc_pouch_state_delete_compacted_files(
       lc_free_with_allocator(&pouch->allocator, snapshot_path);
     }
   }
+}
+
+static int lc_pouch_state_compact_namespace_if_needed(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_namespace_manifest *manifest, int force,
+    lc_pouch_maintenance_result *out, lc_error *error) {
+  unsigned long candidate_count;
+  unsigned long candidate_bytes;
+  unsigned long compacted_segment_id;
+  unsigned long now_seconds;
+  int rc;
+
+  if (out != NULL) {
+    memset(out, 0, sizeof(*out));
+    rc = lc_pouch_maintenance_set_string(pouch, &out->namespace_name,
+                                         namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  if (!force && !pouch->background_compaction_enabled) {
+    if (out != NULL) {
+      out->skipped = 1;
+    }
+    return lc_pouch_maintenance_set_diagnostic(pouch, out, "disabled", error);
+  }
+  candidate_count =
+      manifest->max_segment_id > manifest->latest_snapshot_segment_id
+          ? manifest->max_segment_id - manifest->latest_snapshot_segment_id
+          : 0UL;
+  if (out != NULL) {
+    out->candidate_segment_count = candidate_count;
+  }
+  if (candidate_count == 0UL) {
+    if (out != NULL) {
+      out->skipped = 1;
+    }
+    return lc_pouch_maintenance_set_diagnostic(pouch, out, "no-candidates",
+                                               error);
+  }
+  rc = lc_pouch_state_compaction_candidate_bytes(pouch, manifest,
+                                                 &candidate_bytes, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (out != NULL) {
+    out->candidate_bytes = candidate_bytes;
+  }
+  if (!force &&
+      candidate_count < pouch->compaction_min_segment_count) {
+    if (out != NULL) {
+      out->skipped = 1;
+    }
+    return lc_pouch_maintenance_set_diagnostic(
+        pouch, out, "below-segment-threshold", error);
+  }
+  if (!force &&
+      candidate_bytes < pouch->compaction_min_reclaimable_bytes) {
+    if (out != NULL) {
+      out->skipped = 1;
+    }
+    return lc_pouch_maintenance_set_diagnostic(
+        pouch, out, "below-reclaimable-threshold", error);
+  }
+  now_seconds = lc_pouch_maintenance_now_seconds();
+  if (!force && pouch->compaction_interval_seconds != 0UL &&
+      pouch->last_compaction_check_seconds != 0UL &&
+      now_seconds >= pouch->last_compaction_check_seconds &&
+      now_seconds - pouch->last_compaction_check_seconds <
+          pouch->compaction_interval_seconds) {
+    if (out != NULL) {
+      out->skipped = 1;
+    }
+    return lc_pouch_maintenance_set_diagnostic(pouch, out,
+                                               "interval-not-elapsed", error);
+  }
+  compacted_segment_id = manifest->max_segment_id;
+  if (!force && now_seconds != 0UL) {
+    pouch->last_compaction_check_seconds = now_seconds;
+  }
+  rc = lc_pouch_state_compact_namespace(pouch, namespace_name, manifest, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (out != NULL) {
+    out->compacted = 1;
+    out->compacted_segment_id = compacted_segment_id;
+  }
+  return lc_pouch_maintenance_set_diagnostic(pouch, out, "compacted", error);
 }
 
 static int lc_pouch_state_compact_namespace(
@@ -1390,30 +1520,58 @@ static void lc_pouch_state_maybe_compact(lc_pouch *pouch,
                                          const char *namespace_name,
                                          lc_pouch_namespace_manifest *manifest) {
   lc_error ignored;
-  unsigned long candidate_count;
-  unsigned long candidate_bytes;
   int rc;
 
-  if (!pouch->background_compaction_enabled) {
-    return;
-  }
-  if (manifest->max_segment_id <= manifest->latest_snapshot_segment_id) {
-    return;
-  }
-  candidate_count =
-      manifest->max_segment_id - manifest->latest_snapshot_segment_id;
-  if (candidate_count < pouch->compaction_min_segment_count) {
-    return;
-  }
   lc_error_init(&ignored);
-  rc = lc_pouch_state_compaction_candidate_bytes(pouch, manifest,
-                                                 &candidate_bytes, &ignored);
-  if (rc == LC_OK &&
-      candidate_bytes >= pouch->compaction_min_reclaimable_bytes) {
-    (void)lc_pouch_state_compact_namespace(pouch, namespace_name, manifest,
-                                           &ignored);
-  }
+  rc = lc_pouch_state_compact_namespace_if_needed(
+      pouch, namespace_name, manifest, 0, NULL, &ignored);
+  (void)rc;
   lc_error_cleanup(&ignored);
+}
+
+int lc_pouch_maintenance_run(lc_pouch *pouch,
+                             const lc_pouch_maintenance_options *options,
+                             lc_pouch_maintenance_result *out,
+                             lc_error *error) {
+  lc_pouch_namespace_manifest manifest;
+  const char *namespace_name;
+  int force;
+  int rc;
+
+  if (out != NULL) {
+    memset(out, 0, sizeof(*out));
+  }
+  if (pouch == NULL || options == NULL || options->namespace_name == NULL ||
+      options->namespace_name[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch maintenance requires a namespace", NULL, NULL,
+                        NULL);
+  }
+  namespace_name = options->namespace_name;
+  force = options->force ? 1 : 0;
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_compact_namespace_if_needed(
+      pouch, namespace_name, &manifest, force, out, error);
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
+void lc_pouch_maintenance_result_cleanup(
+    const lc_allocator *allocator, lc_pouch_maintenance_result *result) {
+  if (result == NULL) {
+    return;
+  }
+  lc_free_with_allocator(allocator, result->namespace_name);
+  lc_free_with_allocator(allocator, result->diagnostic);
+  memset(result, 0, sizeof(*result));
 }
 
 static int lc_pouch_state_cache_apply_write(

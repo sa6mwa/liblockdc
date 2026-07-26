@@ -28,6 +28,21 @@ typedef struct lc_pouch_status {
   int single_writer;
 } lc_pouch_status;
 
+typedef struct lc_pouch_maintenance_options {
+  const char *namespace_name;
+  int force;
+} lc_pouch_maintenance_options;
+
+typedef struct lc_pouch_maintenance_result {
+  char *namespace_name;
+  char *diagnostic;
+  unsigned long candidate_segment_count;
+  unsigned long candidate_bytes;
+  unsigned long compacted_segment_id;
+  int compacted;
+  int skipped;
+} lc_pouch_maintenance_result;
+
 typedef struct lc_pouch_state_write_options {
   const char *content_type;
   const char *expected_etag;
@@ -77,6 +92,12 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
                          lc_error *error);
 void lc_pouch_status_cleanup(const lc_allocator *allocator,
                              lc_pouch_status *status);
+int lc_pouch_maintenance_run(lc_pouch *pouch,
+                             const lc_pouch_maintenance_options *options,
+                             lc_pouch_maintenance_result *out,
+                             lc_error *error);
+void lc_pouch_maintenance_result_cleanup(
+    const lc_allocator *allocator, lc_pouch_maintenance_result *result);
 int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
                               lc_error *error);
 int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
