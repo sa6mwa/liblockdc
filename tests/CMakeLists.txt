@@ -67,6 +67,16 @@ add_test(NAME release_fuzz_targeting_test
     -P "${CMAKE_SOURCE_DIR}/tests/release_fuzz_targeting_test.cmake"
 )
 
+add_test(NAME benchmark_go_timeout_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/benchmark_go_timeout_contract_test.cmake"
+)
+set_tests_properties(benchmark_go_timeout_contract_test PROPERTIES
+  LABELS "unit;local;benchmark"
+  TIMEOUT 10
+)
+
 add_test(NAME lua_binding_source_layout_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}

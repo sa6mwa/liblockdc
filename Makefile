@@ -346,7 +346,8 @@ __benchmark-pouch-go: __build-x86_64-linux-gnu-release
 	  LOCKDC_BENCH_SCALE_SCENARIOS="$(POUCH_GO_MEDIUM_SCALE_SCENARIOS)" \
 	  CGO_CFLAGS="$(POUCH_GO_BENCH_CFLAGS)" \
 	  CGO_LDFLAGS="$(POUCH_GO_BENCH_LDFLAGS)" \
-	  $(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)' -timeout '$(POUCH_GO_TEST_TIMEOUT)'
+	  timeout --kill-after=5s '$(POUCH_GO_TEST_TIMEOUT)' \
+	    $(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)' -timeout '$(POUCH_GO_TEST_TIMEOUT)'
 
 benchmark-pouch-go-fast:
 	$(TIMED) benchmark-pouch-go-fast $(MAKE) __benchmark-pouch-go-fast

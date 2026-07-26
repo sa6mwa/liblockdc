@@ -1039,7 +1039,7 @@ Latest release targets confirmed on 2026-07-23:
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not
       relational rows.
-    - [ ] Update pouch-vs-Go benchmarks to expose cache-warm page 1/page N
+    - [x] Update pouch-vs-Go benchmarks to expose cache-warm page 1/page N
       behavior, matched-key vector reuse, candidate docID counts, and document
       streaming/materialization cost separately.
       - [x] Report pouch C-side first-page and later-page latency, query
@@ -1069,16 +1069,22 @@ Latest release targets confirmed on 2026-07-23:
         4096-document pouch-vs-Go acceptance matrix so the opt-in comparison
         gate covers candidate-superset date planning plus final `liblql`
         acceptance across document/key and scan/index paths.
-        - [x] Add and verify `make benchmark-pouch-go-acceptance`, a 4096-doc
-          matrix over document/key returns, indexed/scan engines, and
-          `EqSparse`, `RangeHalf`, `InTags`, and the known slower
-          `ContainsMessage` text-search case; medium/acceptance pouch and
-          lockd disk harnesses should seed once per document-count/return-mode
-          group so the run measures query behavior instead of repeated setup.
-          Verified on 2026-07-26: the target completed in 2m14s. Pouch indexed
-          document-return cases measured about 0.84 ms (`EqSparse`), 24.6 ms
-          (`RangeHalf`), and 18.6 ms (`InTags`); key-return cases measured
-          about 0.83 ms, 6.34 ms, and 4.49 ms respectively.
+      - [x] Add and verify `make benchmark-pouch-go-acceptance`, a 4096-doc
+        matrix over document/key returns, indexed/scan engines, and
+        `EqSparse`, `RangeHalf`, `InTags`, and the known slower
+        `ContainsMessage` text-search case; medium/acceptance pouch and
+        lockd disk harnesses should seed once per document-count/return-mode
+        group so the run measures query behavior instead of repeated setup.
+        Verified on 2026-07-26: the target completed in 2m14s. Pouch indexed
+        document-return cases measured about 0.84 ms (`EqSparse`), 24.6 ms
+        (`RangeHalf`), and 18.6 ms (`InTags`); key-return cases measured
+        about 0.83 ms, 6.34 ms, and 4.49 ms respectively.
+      - [x] Harden the Go comparison benchmark target with an outer process
+        timeout after the 2026-07-26 acceptance run exceeded the intended
+        envelope without producing final results; a focused 64-document
+        indexed `EqSparse` smoke run proved the wrapper path.
+      - [ ] Re-run `make benchmark-pouch-go-acceptance` after timeout
+        hardening and use the completed output as acceptance evidence.
   - [x] Cut pouch disk storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

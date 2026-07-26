@@ -1,0 +1,17 @@
+if(NOT DEFINED LOCKDC_ROOT)
+    message(FATAL_ERROR "LOCKDC_ROOT is required")
+endif()
+
+file(READ "${LOCKDC_ROOT}/Makefile" root_makefile)
+
+foreach(snippet
+        "POUCH_GO_TEST_TIMEOUT ?= 10m"
+        "timeout --kill-after=5s '$(POUCH_GO_TEST_TIMEOUT)'"
+        "$(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)'"
+        "-timeout '$(POUCH_GO_TEST_TIMEOUT)'"
+        "POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_ACCEPTANCE_TIMEOUT)'")
+    string(FIND "${root_makefile}" "${snippet}" snippet_index)
+    if(snippet_index EQUAL -1)
+        message(FATAL_ERROR "Makefile is missing Go benchmark timeout contract snippet: ${snippet}")
+    endif()
+endforeach()
