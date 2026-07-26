@@ -16,6 +16,16 @@ typedef struct bench_case {
   int (*run)(long iterations);
 } bench_case;
 
+typedef struct bench_query_key_count {
+  size_t rows;
+} bench_query_key_count;
+
+typedef struct bench_pouch_query_case {
+  const char *selector;
+  const char *engine;
+  int documents;
+} bench_pouch_query_case;
+
 static double bench_now_seconds(void) {
   struct timespec ts;
 
@@ -81,6 +91,169 @@ static int bench_pouch_root_path(char *buffer, size_t buffer_size,
 
 static void bench_pouch_cleanup_root(const char *root) {
   lc_test_tmp_cleanup_path(root, BENCH_POUCH_TMP_PREFIX);
+}
+
+static int bench_query_key_begin(void *context, lc_error *error) {
+  (void)context;
+  (void)error;
+  return 1;
+}
+
+static int bench_query_key_chunk(void *context, const char *bytes, size_t len,
+                                 lc_error *error) {
+  (void)context;
+  (void)bytes;
+  (void)len;
+  (void)error;
+  return 1;
+}
+
+static int bench_query_key_end(void *context, lc_error *error) {
+  bench_query_key_count *count;
+
+  (void)error;
+  count = (bench_query_key_count *)context;
+  count->rows++;
+  return 1;
+}
+
+static int bench_pouch_client_open(const char *root, lc_client **out,
+                                   lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  char endpoint[640];
+
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  return lc_client_open(&config, out, error);
+}
+
+static int bench_pouch_seed_query_docs(lc_client *client, long count,
+                                       lc_error *error) {
+  lc_update_req req;
+  lc_update_res res;
+  long i;
+
+  for (i = 0; i < count; ++i) {
+    lc_source *source;
+    char key[64];
+    char json[256];
+    int match;
+    int written;
+    int rc;
+
+    match = (i % 2L) == 0L;
+    snprintf(key, sizeof(key), "doc/%08ld", i);
+    written = snprintf(
+        json, sizeof(json),
+        "{\"n\":%ld,\"owner\":\"%s\",\"tags\":[\"%s\",\"%s\"],"
+        "\"details\":{\"message\":\"%s benchmark document %ld\"}}",
+        i, match ? "alpha" : "beta", match ? "finance" : "runtime",
+        match ? "planning" : "ops", match ? "finance" : "ordinary", i);
+    if (written <= 0 || (size_t)written >= sizeof(json)) {
+      return 1;
+    }
+    source = NULL;
+    rc = lc_source_from_memory(json, strlen(json), &source, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    lc_update_req_init(&req);
+    memset(&res, 0, sizeof(res));
+    req.lease.namespace_name = "bench";
+    req.lease.key = key;
+    req.content_type = "application/json";
+    rc = client->update(client, &req, source, &res, error);
+    lc_source_close(source);
+    lc_update_res_cleanup(&res);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  return LC_OK;
+}
+
+static int bench_pouch_query_once(lc_client *client,
+                                  const bench_pouch_query_case *query_case,
+                                  long count, lc_error *error) {
+  lc_query_req req;
+  lc_query_res res;
+  int rc;
+
+  memset(&res, 0, sizeof(res));
+  lc_query_req_init(&req);
+  req.namespace_name = "bench";
+  req.selector_json = query_case->selector;
+  req.engine = query_case->engine;
+  req.limit = count > 0L ? count : 1L;
+  if (query_case->documents) {
+    lc_sink *sink;
+
+    sink = NULL;
+    rc = lc_sink_to_memory(&sink, error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, error);
+    }
+    if (sink != NULL) {
+      lc_sink_close(sink);
+    }
+  } else {
+    lc_query_key_handler handler;
+    bench_query_key_count key_count;
+
+    memset(&handler, 0, sizeof(handler));
+    memset(&key_count, 0, sizeof(key_count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &key_count, &res, error);
+  }
+  lc_query_res_cleanup(&res);
+  return rc;
+}
+
+static int bench_pouch_query_text(long iterations,
+                                  const bench_pouch_query_case *query_case) {
+  lc_client *client;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  lc_error_init(&error);
+  client = NULL;
+  root[0] = '\0';
+  rc = 0;
+  if (iterations <= 0L) {
+    iterations = 1L;
+  }
+  if (bench_pouch_root_path(root, sizeof(root), "query-text") != 0) {
+    rc = 1;
+    goto done;
+  }
+  if (bench_pouch_client_open(root, &client, &error) != LC_OK) {
+    rc = 1;
+    goto done;
+  }
+  if (bench_pouch_seed_query_docs(client, iterations, &error) != LC_OK) {
+    rc = 1;
+    goto done;
+  }
+  if (bench_pouch_query_once(client, query_case, iterations, &error) != LC_OK) {
+    rc = 1;
+    goto done;
+  }
+
+done:
+  if (client != NULL) {
+    client->close(client);
+  }
+  bench_pouch_cleanup_root(root);
+  lc_error_cleanup(&error);
+  return rc;
 }
 
 static int bench_pouch_open(long iterations) {
@@ -151,11 +324,83 @@ done:
   return rc;
 }
 
+static int bench_pouch_query_iprefix_index_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", "index", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_iprefix_scan_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", "scan", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_iprefix_index_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", "index", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_iprefix_scan_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", "scan", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_icontains_index_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", "index", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_icontains_scan_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", "scan", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_icontains_index_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", "index", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_icontains_scan_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", "scan", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
 static const bench_case *bench_cases(void) {
   static const bench_case cases[] = {
       {"stream-copy", 1000L, bench_stream_copy},
       {"pouch-open", 1000L, bench_pouch_open},
       {"pouch-namespace", 1000L, bench_pouch_namespace},
+      {"pouch-query-iprefix-index-keys", 1024L,
+       bench_pouch_query_iprefix_index_keys},
+      {"pouch-query-iprefix-scan-keys", 1024L,
+       bench_pouch_query_iprefix_scan_keys},
+      {"pouch-query-iprefix-index-documents", 1024L,
+       bench_pouch_query_iprefix_index_documents},
+      {"pouch-query-iprefix-scan-documents", 1024L,
+       bench_pouch_query_iprefix_scan_documents},
+      {"pouch-query-icontains-index-keys", 1024L,
+       bench_pouch_query_icontains_index_keys},
+      {"pouch-query-icontains-scan-keys", 1024L,
+       bench_pouch_query_icontains_scan_keys},
+      {"pouch-query-icontains-index-documents", 1024L,
+       bench_pouch_query_icontains_index_documents},
+      {"pouch-query-icontains-scan-documents", 1024L,
+       bench_pouch_query_icontains_scan_documents},
       {NULL, 0L, NULL}};
 
   return cases;
