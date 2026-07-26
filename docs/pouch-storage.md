@@ -729,8 +729,10 @@ non-wildcard `in`, and contains scans snapshot keys directly from the immutable
 document table, avoiding a summary-index translation layer when metadata rows
 are not needed. Prepared adaptive postings decode directly into caller-owned
 docID sets, so equality, `in`, exists, range, prefix, and contains readers avoid
-temporary decoded vectors on cache hits. The client planner also recognizes
-full-form `or`
+temporary decoded vectors on cache hits. Contains compilation checks raw text
+postings for the substring before consulting the trigram candidate key set,
+matching the Go lockd disk order so non-matching text values avoid the
+candidate-membership search. The client planner also recognizes full-form `or`
 selectors whose branches are exact equality predicates over the same strict
 field and lowers them to the existing storage-owned `in` candidate path; mixed
 field equality OR branches use a storage-owned branch-union posting path.

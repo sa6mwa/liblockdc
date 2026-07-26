@@ -759,6 +759,15 @@ Latest release targets confirmed on 2026-07-23:
         pouch `InTags` measured about 7.04 ms and `ContainsMessage` about 3.22
         ms; Go disk measured about 47.9 ms and 1.19 ms respectively in the
         same run, so contains key-return remains a pouch performance gap.
+      - [x] Match the Go lockd disk contains execution order more closely:
+        pouch now checks raw text postings for the substring before consulting
+        the trigram candidate key set, avoiding candidate-membership searches
+        for text values that cannot match.
+        Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
+        pouch `ContainsMessage` key-return measured about 2.71 ms. The matching
+        Go disk run measured about 47.5 ms and was noisy relative to earlier
+        runs, so this records pouch improvement without treating the broader
+        contains parity gap as closed.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

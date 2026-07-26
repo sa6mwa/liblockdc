@@ -10747,10 +10747,10 @@ static int lc_pouch_disk_query_compile_contains_term_doc_ids(
       break;
     }
     if (cmp < 0 || strncmp(posting->value, "t:", 2U) != 0 ||
-        (has_gram && !lc_pouch_disk_query_key_array_contains_sorted(
-                         candidate_keys, candidate_key_count, posting->key)) ||
         !lc_pouch_disk_query_field_text_contains(posting->value, term->value,
-                                                 term->ignore_case)) {
+                                                 term->ignore_case) ||
+        (has_gram && !lc_pouch_disk_query_key_array_contains_sorted(
+                         candidate_keys, candidate_key_count, posting->key))) {
       continue;
     }
     rc = lc_pouch_disk_query_field_add_candidate_doc_id_from(
