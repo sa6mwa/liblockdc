@@ -2,6 +2,7 @@
 #include "lc_internal.h"
 #include "lc_mutate_stream.h"
 #include "lc_pouch_number.h"
+#include "lc_pouch_temporal.h"
 
 #include <lql/lql.h>
 
@@ -18409,82 +18410,12 @@ static int lc_pouch_lql_view_absent(lql_string_view view) {
   return view.data == NULL || view.len == 0U;
 }
 
-static int lc_pouch_lql_ascii_digit(char ch) {
-  return ch >= '0' && ch <= '9';
-}
-
-static int lc_pouch_lql_decimal2(const char *text, size_t offset) {
-  return ((int)(text[offset] - '0') * 10) + (int)(text[offset + 1U] - '0');
-}
-
-static int lc_pouch_lql_decimal4(const char *text) {
-  return ((int)(text[0] - '0') * 1000) + ((int)(text[1] - '0') * 100) +
-         ((int)(text[2] - '0') * 10) + (int)(text[3] - '0');
-}
-
-static int lc_pouch_lql_leap_year(int year) {
-  return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-}
-
-static int lc_pouch_lql_month_days(int year, int month) {
-  static const int days[] = {31, 28, 31, 30, 31, 30,
-                             31, 31, 30, 31, 30, 31};
-
-  if (month < 1 || month > 12) {
-    return 0;
-  }
-  if (month == 2 && lc_pouch_lql_leap_year(year)) {
-    return 29;
-  }
-  return days[month - 1];
-}
-
-static int lc_pouch_lql_rfc3339_utc_second_is_supported(const char *text) {
-  int year;
-  int month;
-  int day;
-  int hour;
-  int minute;
-  int second;
-
-  if (text == NULL || strlen(text) != 20U || text[4] != '-' ||
-      text[7] != '-' || text[10] != 'T' || text[13] != ':' ||
-      text[16] != ':' || text[19] != 'Z') {
-    return 0;
-  }
-  if (!lc_pouch_lql_ascii_digit(text[0]) ||
-      !lc_pouch_lql_ascii_digit(text[1]) ||
-      !lc_pouch_lql_ascii_digit(text[2]) ||
-      !lc_pouch_lql_ascii_digit(text[3]) ||
-      !lc_pouch_lql_ascii_digit(text[5]) ||
-      !lc_pouch_lql_ascii_digit(text[6]) ||
-      !lc_pouch_lql_ascii_digit(text[8]) ||
-      !lc_pouch_lql_ascii_digit(text[9]) ||
-      !lc_pouch_lql_ascii_digit(text[11]) ||
-      !lc_pouch_lql_ascii_digit(text[12]) ||
-      !lc_pouch_lql_ascii_digit(text[14]) ||
-      !lc_pouch_lql_ascii_digit(text[15]) ||
-      !lc_pouch_lql_ascii_digit(text[17]) ||
-      !lc_pouch_lql_ascii_digit(text[18])) {
-    return 0;
-  }
-  year = lc_pouch_lql_decimal4(text);
-  month = lc_pouch_lql_decimal2(text, 5U);
-  day = lc_pouch_lql_decimal2(text, 8U);
-  hour = lc_pouch_lql_decimal2(text, 11U);
-  minute = lc_pouch_lql_decimal2(text, 14U);
-  second = lc_pouch_lql_decimal2(text, 17U);
-  return month >= 1 && month <= 12 && day >= 1 &&
-         day <= lc_pouch_lql_month_days(year, month) && hour >= 0 &&
-         hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 &&
-         second <= 59;
-}
-
 static int lc_pouch_lql_ast_fast_date_after_parse(
     lc_pouch_lql_document_filter *filter) {
   lql_selector_node root;
   lql_selector_date_term source;
   lc_pouch_document_date_after_term *term;
+  lc_pouch_temporal bound;
   lql_string_view after;
   lql_error lql_err;
 
@@ -18526,7 +18457,7 @@ static int lc_pouch_lql_ast_fast_date_after_parse(
   term->field = lc_pouch_lql_ast_view_copy(source.field);
   term->after = lc_pouch_lql_ast_view_copy(after);
   if (term->field == NULL || term->after == NULL ||
-      !lc_pouch_lql_rfc3339_utc_second_is_supported(term->after)) {
+      !lc_pouch_temporal_parse(term->after, &bound)) {
     lc_free_with_allocator(NULL, (char *)term->field);
     lc_free_with_allocator(NULL, (char *)term->after);
     lc_free_with_allocator(NULL, term);
@@ -19392,6 +19323,8 @@ lc_pouch_lql_fast_date_string_chunk(void *user, const lonejson_value_path *path,
 static lonejson_status
 lc_pouch_lql_fast_date_string_end(void *user, const lonejson_value_path *path,
                                   lonejson_error *error) {
+  lc_pouch_temporal bound;
+  lc_pouch_temporal candidate;
   lc_pouch_lql_fast_match_visit *visit;
   const lc_pouch_document_date_after_term *term;
 
@@ -19407,11 +19340,12 @@ lc_pouch_lql_fast_date_string_end(void *user, const lonejson_value_path *path,
   if (!lc_pouch_lql_fast_field_matches(term->field, visit->field)) {
     return LONEJSON_STATUS_OK;
   }
-  if (!lc_pouch_lql_rfc3339_utc_second_is_supported(visit->value)) {
+  if (!lc_pouch_temporal_parse(term->after, &bound) ||
+      !lc_pouch_temporal_parse(visit->value, &candidate)) {
     visit->fast_date_unsupported = 1;
     return LONEJSON_STATUS_OK;
   }
-  if (strcmp(visit->value, term->after) > 0) {
+  if (lc_pouch_temporal_compare(&candidate, &bound) > 0) {
     visit->fast_date_matched = 1;
   }
   return LONEJSON_STATUS_OK;

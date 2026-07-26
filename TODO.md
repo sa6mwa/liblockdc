@@ -861,12 +861,19 @@ Latest release targets confirmed on 2026-07-23:
         accepted, resumed-key, and resumed-document cases. The 2026-07-26
         4096-document `DateAfter` benchmark now reports 1,048 candidates and
         about 50.4 ms C-side for keys / 55.7 ms C-side for documents.
-      - [ ] Add a typed date/time posting representation that matches liblql's
-        selector datetime grammar closely enough to avoid routing plausible
-        non-canonical datetime values through the residual evaluator. Current
-        conservative narrowing keeps plausible non-canonical strings as residual
-        candidates while pruning non-strings and implausible date strings, so
-        this remains a pouch-vs-Go performance gap.
+      - [x] Add storage-owned temporal parsing for simple indexed `date after`
+        candidates and final fast filtering, matching liblql's date-only,
+        RFC3339/RFC3339Nano offset, fractional, and naive-UTC selector
+        semantics closely enough that supported non-canonical datetime strings
+        no longer route through the residual evaluator. Focused coverage now
+        proves normalized date-only, offset, fractional, and naive UTC
+        candidates plus a date-only selector bound; the 2026-07-26
+        4096-document `DateAfter` benchmark reported 1,048 candidates and about
+        43.4 ms C-side for keys / 60.7 ms C-side for documents.
+      - [ ] Persist typed temporal postings in immutable compiled index
+        generations instead of reparsing string field postings in the disk
+        bridge, so the final reader-cache architecture can avoid the remaining
+        DateAfter document-return cost.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not

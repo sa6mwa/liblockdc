@@ -10224,6 +10224,124 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
 }
 
 static void
+test_pouch_endpoint_index_date_after_normalizes_temporal_values(void **state) {
+  char root[256];
+  char endpoint[320];
+  lc_client *client;
+  lc_lease *alpha;
+  lc_lease *bravo;
+  lc_lease *charlie;
+  lc_lease *delta;
+  lc_lease *echo;
+  lc_lease *foxtrot;
+  lc_lease *golf;
+  lc_lease *hotel;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture_state capture;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  test_root_path(root, sizeof(root), "query-index-date-normalized");
+  test_cleanup_root(root);
+  test_endpoint(endpoint, sizeof(endpoint), root);
+  memset(&error, 0, sizeof(error));
+  memset(&res, 0, sizeof(res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  client = open_pouch_client(endpoint);
+  alpha = pouch_acquire_query_key(client, "alpha", &error);
+  pouch_save_query_json(alpha,
+                        "{\"created_at\":\"2025-01-01\","
+                        "\"value\":\"date-only-boundary\"}",
+                        &error);
+  bravo = pouch_acquire_query_key(client, "bravo", &error);
+  pouch_save_query_json(bravo,
+                        "{\"created_at\":\"2025-01-01T01:00:00+01:00\","
+                        "\"value\":\"offset-boundary\"}",
+                        &error);
+  charlie = pouch_acquire_query_key(client, "charlie", &error);
+  pouch_save_query_json(charlie,
+                        "{\"created_at\":\"2025-01-01T00:00:00.000000001Z\","
+                        "\"value\":\"fraction-match\"}",
+                        &error);
+  delta = pouch_acquire_query_key(client, "delta", &error);
+  pouch_save_query_json(delta,
+                        "{\"created_at\":\"2025-01-01T01:30:00+01:00\","
+                        "\"value\":\"offset-match\"}",
+                        &error);
+  echo = pouch_acquire_query_key(client, "echo", &error);
+  pouch_save_query_json(echo,
+                        "{\"created_at\":\"2025-01-01T00:30:00\","
+                        "\"value\":\"naive-match\"}",
+                        &error);
+  foxtrot = pouch_acquire_query_key(client, "foxtrot", &error);
+  pouch_save_query_json(foxtrot,
+                        "{\"created_at\":\"2025-01-02\","
+                        "\"value\":\"date-only-match\"}",
+                        &error);
+  golf = pouch_acquire_query_key(client, "golf", &error);
+  pouch_save_query_json(golf,
+                        "{\"created_at\":\"not-a-date\","
+                        "\"value\":\"invalid-date\"}",
+                        &error);
+  hotel = pouch_acquire_query_key(client, "hotel", &error);
+  pouch_save_query_json(hotel,
+                        "{\"created_at\":20250102,"
+                        "\"value\":\"numeric-date\"}",
+                        &error);
+
+  handler.begin = query_key_capture_begin;
+  handler.chunk = query_key_capture_chunk;
+  handler.end = query_key_capture_end;
+  lc_query_req_init(&req);
+  req.selector_json = "{\"date\":{\"field\":\"/created_at\","
+                      "\"after\":\"2025-01-01T00:00:00Z\"}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 4U);
+  assert_string_equal(capture.keys[0], "charlie");
+  assert_string_equal(capture.keys[1], "delta");
+  assert_string_equal(capture.keys[2], "echo");
+  assert_string_equal(capture.keys[3], "foxtrot");
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  memset(&capture, 0, sizeof(capture));
+  req.selector_json = "{\"date\":{\"field\":\"/created_at\","
+                      "\"after\":\"2025-01-01\"}}";
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 4U);
+  assert_string_equal(capture.keys[0], "charlie");
+  assert_string_equal(capture.keys[1], "delta");
+  assert_string_equal(capture.keys[2], "echo");
+  assert_string_equal(capture.keys[3], "foxtrot");
+  assert_null(res.cursor);
+  assert_string_equal(res.return_mode, "keys");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
+  assert_true(res.index_seq > 0UL);
+  lc_query_res_cleanup(&res);
+
+  alpha->close(alpha);
+  bravo->close(bravo);
+  charlie->close(charlie);
+  delta->close(delta);
+  echo->close(echo);
+  foxtrot->close(foxtrot);
+  golf->close(golf);
+  hotel->close(hotel);
+  client->close(client);
+  lc_error_cleanup(&error);
+  test_cleanup_root(root);
+}
+
+static void
 test_pouch_endpoint_index_query_keys_filters_owner_selector(void **state) {
   char root[256];
   char endpoint[320];
@@ -12875,6 +12993,8 @@ int main(void) {
           test_pouch_endpoint_index_text_query_streams_documents_pages),
       cmocka_unit_test(
           test_pouch_endpoint_index_date_superset_uses_liblql_paging),
+      cmocka_unit_test(
+          test_pouch_endpoint_index_date_after_normalizes_temporal_values),
       cmocka_unit_test(
           test_pouch_endpoint_index_query_keys_filters_owner_selector),
       cmocka_unit_test(

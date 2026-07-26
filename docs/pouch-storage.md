@@ -763,15 +763,16 @@ union ordered numeric and text postings. Full-form `and` selectors that combine
 a positive supported indexed predicate with a `not` exclusion use the positive
 predicate as the storage-owned candidate superset and leave exclusion semantics
 to final `liblql` acceptance. `date after` selectors over strict JSON Pointer
-fields narrow canonical UTC-second string postings before final acceptance:
-text-helper postings, exact-boundary canonical strings, and older canonical
-strings are skipped at candidate-collection time. Non-string values and
-implausible datetime strings are also rejected as non-candidates. Plausible
-non-canonical datetime strings remain residual candidates because pouch does not
-yet duplicate liblql's full selector datetime grammar. Other date forms,
-relative-date handling, and boundary comparisons remain final `liblql`
-acceptance. Unsupported selector families and path forms remain deterministic
-fallback rather than risking false negative candidate pruning.
+fields parse supported temporal string postings before final acceptance:
+date-only literals, RFC3339/RFC3339Nano offset timestamps, fractional
+timestamps, and naive UTC datetimes are normalized to an ordering instant.
+Text-helper postings, values older than or equal to the normalized boundary,
+non-string values, and strings that neither normalize nor look like possible
+`liblql` temporal literals are rejected as non-candidates. Plausible unsupported
+temporal strings remain residual candidates.
+Other date forms, relative-date handling, and boundary comparisons remain final
+`liblql` acceptance. Unsupported selector families and path forms remain
+deterministic fallback rather than risking false negative candidate pruning.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan
@@ -943,13 +944,14 @@ Scalar `not eq` leaves under recursive `and` composition similarly exclude keys
 with live exact string, boolean, or null equality postings for that field/value;
 selector semantics still remain final `liblql` acceptance.
 Date selectors use indexed postings for their strict JSON Pointer field as a
-candidate superset. For simple `after`/`gt` selectors, pouch can prove canonical
-UTC-second string values older than or equal to the boundary are non-matches and
-remove them before residual evaluation; it also removes non-string values and
-implausible datetime strings. Plausible unsupported date encodings still flow to
-`liblql`. When date selectors are paginated, cursors advance on accepted rows,
-not merely on candidates, so invalid or out-of-range date candidates cannot
-truncate a page or become the public cursor.
+candidate superset. For simple `after`/`gt` selectors, pouch normalizes
+supported temporal strings to UTC ordering instants and removes values older
+than or equal to the boundary before residual evaluation; it also removes
+non-string values and lexically implausible datetime strings. Unsupported date
+selector shapes and plausible unsupported temporal strings still flow to
+`liblql`. When date selectors are paginated, cursors advance on
+accepted rows, not merely on candidates, so invalid or out-of-range date
+candidates cannot truncate a page or become the public cursor.
 Negated `prefix` / `iprefix` and `contains` / `icontains` leaves under
 recursive `and` composition also act as storage-owned exclusions: candidate
 scans reject keys with live matching text postings before final `liblql`
@@ -1339,6 +1341,10 @@ private index primitives:
 - `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
   those primitives. It invokes disk-supplied reader callbacks and normalizes
   the resulting candidate docID sets.
+- `src/lc_pouch_temporal.c` owns private liblql-compatible temporal parsing and
+  ordering comparison for date-only, RFC3339/RFC3339Nano offset, fractional,
+  and naive UTC datetime strings used by indexed date planning and fast final
+  filtering.
 - `src/lc_pouch_disk.c` still owns the current disk bridge: sidecar scan
   adapters, live/hidden/owner/generation visibility checks, final summary
   translation, and final `liblql` acceptance. New index behavior should move
@@ -1439,10 +1445,11 @@ length-prefixed field-presence plan key.
 Residual selectors such as date predicates may deliberately reuse that
 field-presence cache as a candidate-superset cache. The cached vector contains
 documents with the field, and simple date-after planning can narrow that vector
-by dropping older canonical UTC-second strings, exact-boundary strings,
-non-strings, and implausible datetime strings. The client-level `liblql` filter
-remains authoritative for final acceptance and owns public cursor selection for
-residual pages.
+by dropping supported temporal strings older than or equal to the normalized
+boundary, non-strings, and values that cannot be parsed and do not look like
+possible `liblql` temporal literals. The client-level `liblql` filter remains
+authoritative for final acceptance and owns public cursor selection for residual
+pages.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every
