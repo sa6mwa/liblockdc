@@ -2208,8 +2208,11 @@ markers and preserves committed attachments. Queue dequeue records now carry a
 transaction id onto delivered messages; transaction-bound ack, nack, and extend
 operations write hidden staged queue records, transaction commit promotes those
 records, rollback discards them, and open-time transaction replay applies the
-same queue side effects. Queue watcher wakeups and broader mixed object/queue
-integration coverage remain targets for transaction integration.
+same queue side effects. The local polling `watch_queue` path observes
+transaction-bound queue ack commits as queue availability changes, and mixed
+transactions now cover staged attachment uploads plus staged queue acks for both
+commit and rollback. Restart and cross-process watcher wakeup coverage remains
+a target for transaction integration.
 
 The staging listing contract is narrower than generic object listing. It must
 include direct staged state objects only and exclude nested staged attachment
