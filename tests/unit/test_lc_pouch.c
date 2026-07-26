@@ -2545,6 +2545,16 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   lc_client_close(reader);
   reader = NULL;
 
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-pouch-records",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -2553,8 +2563,6 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   lc_client *client;
   lc_pouch *pouch;
   lc_source *source;
-  lc_txn_replay_req replay_req;
-  lc_txn_replay_res replay_res;
   lc_pouch_state_write_result write_result;
   lc_pouch_state_read_result read_result;
   lc_error error;
@@ -2571,10 +2579,8 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   client = NULL;
   pouch = NULL;
   source = NULL;
-  memset(&replay_res, 0, sizeof(replay_res));
   memset(&write_result, 0, sizeof(write_result));
   memset(&read_result, 0, sizeof(read_result));
-  lc_txn_replay_req_init(&replay_req);
   lc_error_init(&error);
   make_root("txn-recovery", root, sizeof(root));
   cleanup_root(root);
@@ -2663,15 +2669,19 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-recover-commit",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-recover-expired",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_close(pouch);
   pouch = NULL;
 
-  replay_req.txn_id = "txn-recover-expired";
-  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_string_equal(replay_res.state, "rollback");
-
-  lc_txn_replay_res_cleanup(&replay_res);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);

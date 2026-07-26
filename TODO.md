@@ -52,7 +52,7 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       - [x] Replay committed/rolled-back transaction participant records during
         client open and expire prepared transaction participant records into
         rollback cleanup on reopen.
-      - [ ] Add decided transaction record garbage collection after idempotent
+      - [x] Add decided transaction record garbage collection after idempotent
         replay no longer needs the durable decision body.
       - [ ] Extend transaction participant replay to queue/object side effects
         and query/index refresh wakeups.

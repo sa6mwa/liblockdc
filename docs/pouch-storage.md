@@ -2157,10 +2157,10 @@ The redesigned pouch backend currently has committed-state segment records,
 state tombstones, staged `acquire_for_update` writes, link-style promotion,
 staged discard over the segmented state log, durable transaction decision
 records, foreground participant commit/rollback, open-time committed/rolled-back
-participant replay, and expired prepared-transaction rollback cleanup. Queue
-transaction wakeups, query refresh coupling, decided decision-record garbage
-collection, and broader mixed object/queue transaction coverage remain targets
-for transaction integration.
+participant replay, expired prepared-transaction rollback cleanup, and
+open-time tombstone cleanup of recovered decided transaction records. Queue
+transaction wakeups, query refresh coupling, and broader mixed object/queue
+transaction coverage remain targets for transaction integration.
 
 The staging listing contract is narrower than generic object listing. It must
 include direct staged state objects only and exclude nested staged attachment

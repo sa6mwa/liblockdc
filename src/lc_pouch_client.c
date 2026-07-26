@@ -983,6 +983,35 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
   return LC_OK;
 }
 
+static int lc_pouch_txn_delete_recovered_record(lc_client_handle *client,
+                                                const char *key,
+                                                lc_error *error) {
+  lc_pouch_state_read_result read_result;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  int rc;
+
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  rc = lc_pouch_state_read(client->pouch, ".lockd/txn", key, &read_result,
+                           error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!read_result.found) {
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    return LC_OK;
+  }
+  options.has_expected_version = 1;
+  options.expected_version = read_result.version;
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  rc = lc_pouch_state_delete(client->pouch, ".lockd/txn", key, &options,
+                             &result, error);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  return rc;
+}
+
 static int lc_pouch_client_get_namespace(lc_client_handle *client,
                                          const char *namespace_name,
                                          const char *key,
@@ -2102,12 +2131,14 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
     const void *bytes;
     size_t length;
     char *body;
+    int cleanup_decision;
 
     memset(&read_result, 0, sizeof(read_result));
     memset(&record, 0, sizeof(record));
     lc_txn_decision_req_init(&req);
     sink = NULL;
     body = NULL;
+    cleanup_decision = 0;
     rc = lc_pouch_state_read(client->pouch, ".lockd/txn", keys.keys[i],
                              &read_result, error);
     if (rc == LC_OK && read_result.found) {
@@ -2144,6 +2175,9 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
           strcmp(record.state, "rollback") == 0) {
         rc = lc_pouch_txn_apply_participants(client, &req, record.state,
                                              error);
+        if (rc == LC_OK) {
+          cleanup_decision = 1;
+        }
       } else if (strcmp(record.state, "prepare") == 0 &&
                  record.expires_at_unix > 0L &&
                  record.expires_at_unix <= now) {
@@ -2152,8 +2186,14 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
         memset(&rollback_res, 0, sizeof(rollback_res));
         rc = lc_pouch_client_txn_decision(self, &req, "rollback",
                                           &rollback_res, error);
+        if (rc == LC_OK) {
+          cleanup_decision = 1;
+        }
         lc_txn_decision_res_cleanup(&rollback_res);
       }
+    }
+    if (rc == LC_OK && cleanup_decision) {
+      rc = lc_pouch_txn_delete_recovered_record(client, keys.keys[i], error);
     }
     if (sink != NULL) {
       lc_sink_close(sink);
