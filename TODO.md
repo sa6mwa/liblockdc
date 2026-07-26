@@ -531,9 +531,15 @@ Latest release targets confirmed on 2026-07-23:
         per-namespace document-table generation, prepared range readers require
         an identity-matched `.lcpdtg`, remap materialized range docIDs back into
         the current global in-memory doc table, and repair corrupt doc
-        generation files through the range query path. Text, temporal, and
-        result-page consumption still need the same
-        namespace-local doc table cutover.
+        generation files through the range query path.
+      - [x] Cut text/trigram generation files over to namespace-local docIDs:
+        text generation build stores raw text postings by the matching
+        per-namespace document-table generation, prepared prefix/contains
+        readers require an identity-matched `.lcpdtg`, remap materialized text
+        docIDs back into the current global in-memory doc table, and repair
+        corrupt doc generation files through the text query path. Temporal and
+        result-page consumption still need the same namespace-local doc table
+        cutover.
       - [x] Wire the disk query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
         namespace/key docIDs, candidate readers append table docIDs, and result
