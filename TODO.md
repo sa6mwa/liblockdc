@@ -648,6 +648,12 @@ Latest release targets confirmed on 2026-07-23:
         text/equality plans use the same sorted/deduplicated equality suffix
         in their plan keys and reuse cached filtered pages across document and
         key scans until the index generation advances.
+      - [x] Extend normalized result-cache planning and routing to primary
+        positive `exists` scans with positive equality filters: compound
+        exists/equality plans use the same sorted/deduplicated equality suffix,
+        intersect field-presence docIDs with exact-term docIDs in
+        `lc_pouch_index`, and reuse cached filtered pages across document and
+        key scans until the index generation advances.
       - [x] Add index-owned docID result paging over the document table and
         route the equality document/key scans through it, so cached equality
         result pages translate only the selected page of docIDs back through

@@ -7182,7 +7182,20 @@ lc_pouch_disk_collect_exists_result_doc_ids(void *context, int cacheable,
   if (collect == NULL) {
     return LC_OK;
   }
+  collect->reader.eq_from = collect->reader.req != NULL
+                                ? collect->reader.req->document_eq_term_count
+                                : 0U;
   collect->reader.use_prepared_exists_cache = cacheable;
+  if (collect->reader.req != NULL &&
+      collect->reader.req->document_eq_term_count > 0U) {
+    return lc_pouch_index_collect_exists_term_with_eq_doc_ids(
+        &collect->reader.store->allocator, collect->primary,
+        collect->reader.req->document_eq_terms,
+        collect->reader.req->document_eq_term_count,
+        lc_pouch_disk_query_read_exists_term_doc_ids,
+        lc_pouch_disk_query_read_exact_term_doc_ids, &collect->reader, doc_ids,
+        error);
+  }
   return lc_pouch_index_collect_exists_term_doc_ids(
       &collect->reader.store->allocator, collect->primary,
       lc_pouch_disk_query_read_exists_term_doc_ids, &collect->reader, doc_ids,
@@ -13676,6 +13689,15 @@ static int lc_pouch_disk_query_index_scan(
     return lc_pouch_disk_query_field_contains_scan_locked(
         store, req, visit, visit_context, out, error);
   }
+  if (req->document_exists_terms != NULL &&
+      req->document_exists_term_count > 0U &&
+      req->document_exists_terms[0].field != NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_exists_scan_locked(
+        store, req, visit, visit_context, out, error);
+  }
   if (req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
       req->document_eq_terms[0].field != NULL &&
       req->document_eq_terms[0].value != NULL) {
@@ -13999,6 +14021,15 @@ static int lc_pouch_disk_query_index_keys_scan(
       req->document_eq_terms[0].field != NULL &&
       req->document_eq_terms[0].value != NULL) {
     return lc_pouch_disk_query_field_contains_keys_scan_locked(
+        store, req, visit, visit_context, out, error);
+  }
+  if (req->document_exists_terms != NULL &&
+      req->document_exists_term_count > 0U &&
+      req->document_exists_terms[0].field != NULL &&
+      req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&
+      req->document_eq_terms[0].field != NULL &&
+      req->document_eq_terms[0].value != NULL) {
+    return lc_pouch_disk_query_field_exists_keys_scan_locked(
         store, req, visit, visit_context, out, error);
   }
   if (req->document_eq_terms != NULL && req->document_eq_term_count > 0U &&

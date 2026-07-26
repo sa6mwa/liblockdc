@@ -1365,6 +1365,9 @@ docIDs are compiled into adaptive postings before index-owned page selection.
 For primary `prefix` and `contains` plans with positive equality filters, the
 same index-owned intersection path used by compound range plans now combines
 the primary text candidate docIDs with exact-term docIDs before result paging.
+For primary positive `exists` plans with positive equality filters, the disk
+adapter reuses field-presence docID readers and exact-term docID readers while
+`lc_pouch_index` performs the sorted docID intersection before paging.
 The index layer also owns the first result-cache primitive: a generation plus
 normalized-plan key maps to a sorted docID vector. The simple result-cache plan
 key constructors now live in `lc_pouch_index`, and disk supplies only the known
@@ -1393,6 +1396,11 @@ text primary collectors before the generic equality path. Their normalized
 plan keys append the same sorted/deduplicated equality suffix used by compound
 range plans, so document scans and key scans share the filtered docID cache
 until a write advances the index generation.
+Compound `exists`/equality scans route through the exists collector before the
+generic equality path for the same reason. Their normalized plan keys append
+the sorted/deduplicated equality suffix to the length-prefixed field-presence
+key, so document scans and key scans share the filtered result cache until the
+index sequence advances.
 That layer owns cacheability and normalization for equality, exists, `in`,
 range, prefix, and contains result reuse. Equality, simple positive `exists`,
 simple positive numeric `range`, simple non-wildcard positive `in`, simple

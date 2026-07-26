@@ -452,6 +452,18 @@ static void test_result_plan_keys_are_normalized_by_index(void **state) {
   assert_result_plan_key(&req, LC_POUCH_INDEX_RESULT_PLAN_EXISTS,
                          "exists:7:default:4:/box");
 
+  compound_eq[0].field = "/kind";
+  compound_eq[0].value = "s:include";
+  compound_eq[1].field = "/bucket";
+  compound_eq[1].value = "s:hot";
+  compound_eq[2].field = "/kind";
+  compound_eq[2].value = "s:include";
+  req.document_eq_terms = compound_eq;
+  req.document_eq_term_count = sizeof(compound_eq) / sizeof(compound_eq[0]);
+  assert_result_plan_key(
+      &req, LC_POUCH_INDEX_RESULT_PLAN_EXISTS,
+      "exists:7:default:4:/box:eq:2:7:/bucket:5:s:hot:5:/kind:9:s:include");
+
   memset(&req, 0, sizeof(req));
   req.namespace_name = "default";
   in.field = "/value";
@@ -1001,11 +1013,20 @@ static int fake_read_exists_doc_ids(void *context, const char *field,
   (void)error;
   reader = (fake_exact_reader *)context;
   assert_non_null(reader);
-  assert_string_equal(field, "/tags/0");
   reader->calls++;
-  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 11U));
-  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 5U));
-  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 11U));
+  if (strcmp(field, "/tags/0") == 0) {
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 11U));
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 5U));
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 11U));
+  } else if (strcmp(field, "/tagged") == 0) {
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 13U));
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 3U));
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 5U));
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 13U));
+    assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 7U));
+  } else {
+    fail_msg("unexpected exists term: %s", field);
+  }
   return LC_OK;
 }
 
@@ -1154,6 +1175,39 @@ test_collect_exists_term_doc_ids_uses_reader_and_deduplicates(void **state) {
       NULL, &term, fake_read_exists_doc_ids, &reader, &doc_ids, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(reader.calls, 1U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_collect_exists_term_with_eq_doc_ids_intersects_in_index(void **state) {
+  lc_pouch_document_exists_term exists;
+  lc_pouch_document_eq_term eq[2];
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {3U, 5U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&exists, 0, sizeof(exists));
+  memset(&eq, 0, sizeof(eq));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  exists.field = "/tagged";
+  eq[0].field = "/region";
+  eq[0].value = "s:north";
+  eq[1].field = "/status";
+  eq[1].value = "s:paid";
+  rc = lc_pouch_index_collect_exists_term_with_eq_doc_ids(
+      NULL, &exists, eq, sizeof(eq) / sizeof(eq[0]), fake_read_exists_doc_ids,
+      fake_read_exact_doc_ids, &reader, &doc_ids, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 3U);
   assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
@@ -1380,6 +1434,8 @@ int main(void) {
           test_collect_eq_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
           test_collect_exists_term_doc_ids_uses_reader_and_deduplicates),
+      cmocka_unit_test(
+          test_collect_exists_term_with_eq_doc_ids_intersects_in_index),
       cmocka_unit_test(
           test_collect_range_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
