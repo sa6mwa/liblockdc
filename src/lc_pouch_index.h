@@ -275,6 +275,15 @@ int lc_pouch_index_temporal_posting_table_append_after(
     const lc_pouch_index_temporal_posting_table *table, const char *field,
     int64_t unix_seconds, int32_t nanosecond,
     lc_pouch_index_doc_id_set *dst);
+int lc_pouch_index_temporal_posting_table_encoded_size(
+    const lc_pouch_index_temporal_posting_table *table, size_t *size_out);
+int lc_pouch_index_temporal_posting_table_encode(
+    const lc_pouch_index_temporal_posting_table *table, unsigned char *dst,
+    size_t dst_size, size_t *written_out);
+int lc_pouch_index_temporal_posting_table_decode(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_temporal_posting_table *table, const unsigned char *src,
+    size_t src_size);
 void lc_pouch_index_prepared_term_cache_cleanup(
     const lc_pouch_allocator *allocator,
     lc_pouch_index_prepared_term_cache *cache);

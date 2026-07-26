@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <cmocka.h>
@@ -242,6 +243,88 @@ test_temporal_posting_table_appends_after_bound_and_residuals(void **state) {
   assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_temporal_posting_table_cleanup(NULL, &table);
+}
+
+static void test_temporal_posting_table_codec_round_trips(void **state) {
+  lc_pouch_index_temporal_posting_table table;
+  lc_pouch_index_temporal_posting_table decoded;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {4U, 7U};
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t written;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&decoded, 0, sizeof(decoded));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/created_at", 1200, 1, 7U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/created_at", 1000, 0, 9U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/created_at", 1100, 0, 3U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/created_at", 1200, 1, 7U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/other", 1300, 0, 8U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_residual_doc_id(
+      NULL, &table, "/created_at", 4U));
+  assert_true(lc_pouch_index_temporal_posting_table_build_postings(NULL,
+                                                                   &table));
+  assert_true(lc_pouch_index_temporal_posting_table_encoded_size(
+      &table, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_temporal_posting_table_encode(
+      &table, encoded, encoded_size, &written));
+  assert_int_equal(written, encoded_size);
+  assert_true(lc_pouch_index_temporal_posting_table_decode(
+      NULL, &decoded, encoded, encoded_size));
+  assert_true(lc_pouch_index_temporal_posting_table_append_after(
+      NULL, &decoded, "/created_at", 1100, 0, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  free(encoded);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_temporal_posting_table_cleanup(NULL, &decoded);
+  lc_pouch_index_temporal_posting_table_cleanup(NULL, &table);
+}
+
+static void test_temporal_posting_table_codec_rejects_corruption(void **state) {
+  lc_pouch_index_temporal_posting_table table;
+  lc_pouch_index_temporal_posting_table decoded;
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t written;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&decoded, 0, sizeof(decoded));
+
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/created_at", 1000, 0, 9U));
+  assert_true(lc_pouch_index_temporal_posting_table_build_postings(NULL,
+                                                                   &table));
+  assert_true(lc_pouch_index_temporal_posting_table_encoded_size(
+      &table, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_temporal_posting_table_encode(
+      &table, encoded, encoded_size, &written));
+  assert_int_equal(written, encoded_size);
+
+  assert_false(lc_pouch_index_temporal_posting_table_decode(
+      NULL, &decoded, encoded, encoded_size - 1U));
+  encoded[0] = 'x';
+  assert_false(lc_pouch_index_temporal_posting_table_decode(
+      NULL, &decoded, encoded, encoded_size));
+
+  free(encoded);
+  lc_pouch_index_temporal_posting_table_cleanup(NULL, &decoded);
   lc_pouch_index_temporal_posting_table_cleanup(NULL, &table);
 }
 
@@ -2008,6 +2091,8 @@ int main(void) {
       cmocka_unit_test(test_posting_dense_decodes_and_intersects),
       cmocka_unit_test(
           test_temporal_posting_table_appends_after_bound_and_residuals),
+      cmocka_unit_test(test_temporal_posting_table_codec_round_trips),
+      cmocka_unit_test(test_temporal_posting_table_codec_rejects_corruption),
       cmocka_unit_test(test_term_table_interns_sorted_terms_with_stable_ids),
       cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
       cmocka_unit_test(test_term_posting_table_appends_by_term_id),

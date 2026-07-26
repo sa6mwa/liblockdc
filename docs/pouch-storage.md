@@ -1341,8 +1341,9 @@ private index primitives:
 - `src/lc_pouch_index_temporal.c` owns the typed temporal reader primitive for
   normalized date values. It stores per-field normalized temporal docID vectors,
   keeps residual postings for plausible temporal strings that must remain under
-  final `liblql` authority, and exposes DateAfter collection for the immutable
-  generation reader cutover.
+  final `liblql` authority, exposes DateAfter collection for the immutable
+  generation reader cutover, and provides a private deterministic byte codec
+  for future generation-file persistence.
 - `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
   those primitives. It invokes disk-supplied reader callbacks and normalizes
   the resulting candidate docID sets.
@@ -1457,6 +1458,10 @@ strings should be compiled before query time and DateAfter should read typed
 docID vectors newer than the bound plus residual postings. The client-level
 `liblql` filter remains authoritative for final acceptance and owns public
 cursor selection for residual pages.
+The temporal reader codec is intentionally private to pouch index generations:
+it writes a fixed magic/version header, sorted fields, normalized temporal
+docID entries, and residual docIDs. Decode rejects wrong versions, truncated
+payloads, and malformed encoded values before rebuilding in-memory search aids.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every

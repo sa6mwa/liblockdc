@@ -879,6 +879,10 @@ Latest release targets confirmed on 2026-07-23:
           vectors with residual postings for plausible unsupported temporal
           strings, and `lc_pouch_index_collect_date_after_doc_ids` owns bound
           parsing plus sorted result normalization.
+        - [x] Add a deterministic private temporal table codec for immutable
+          reader files. The codec stores sorted per-field normalized temporal
+          docIDs plus residual docIDs with magic/version checks, round-trip
+          coverage, and corruption/truncation rejection.
         - [ ] Move the bridge-stage temporal table into immutable compiled
           index generation files and wire DateAfter readers to those generation
           files. A query-time disk bridge attempt was measured on 2026-07-26
