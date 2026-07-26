@@ -10,6 +10,7 @@
 #define TMP_CLEANUP_PREFIX "/tmp/liblockdc-unit-tmp-cleanup-"
 #define TMP_AUTO_CLEANUP_PREFIX "/tmp/liblockdc-unit-tmp-autocleanup-"
 #define TMP_GLOBAL_STALE_PREFIX "/tmp/liblockdc-unit-tmp-global-stale-"
+#define TMP_GLOBAL_LIVE_PREFIX "/tmp/liblockdc-unit-tmp-global-live-"
 
 static int path_exists(const char *path) {
   struct stat st;
@@ -78,6 +79,50 @@ static int run_auto_stale_cleanup_probe(void) {
   return 0;
 }
 
+static int run_explicit_global_stale_cleanup_probe(void) {
+  char stale_root[] = TMP_GLOBAL_STALE_PREFIX "explicit-abandoned";
+  char stale_child[] = TMP_GLOBAL_STALE_PREFIX "explicit-abandoned/child";
+  char live_root[] = TMP_GLOBAL_LIVE_PREFIX "explicit-live";
+  char live_child[] = TMP_GLOBAL_LIVE_PREFIX "explicit-live/child";
+
+  lc_test_tmp_cleanup_path(stale_root, TMP_GLOBAL_STALE_PREFIX);
+  lc_test_tmp_cleanup_path(live_root, TMP_GLOBAL_LIVE_PREFIX);
+  if (mkdir(stale_root, 0700) != 0) {
+    return 30;
+  }
+  if (mkdir(stale_child, 0700) != 0) {
+    lc_test_tmp_cleanup_path(stale_root, TMP_GLOBAL_STALE_PREFIX);
+    return 31;
+  }
+  if (mkdir(live_root, 0700) != 0) {
+    lc_test_tmp_cleanup_path(stale_root, TMP_GLOBAL_STALE_PREFIX);
+    return 32;
+  }
+  if (mkdir(live_child, 0700) != 0) {
+    lc_test_tmp_cleanup_path(stale_root, TMP_GLOBAL_STALE_PREFIX);
+    lc_test_tmp_cleanup_path(live_root, TMP_GLOBAL_LIVE_PREFIX);
+    return 33;
+  }
+  if (!lc_test_tmp_track_path(live_root, TMP_GLOBAL_LIVE_PREFIX)) {
+    lc_test_tmp_cleanup_path(stale_root, TMP_GLOBAL_STALE_PREFIX);
+    lc_test_tmp_cleanup_path(live_root, TMP_GLOBAL_LIVE_PREFIX);
+    return 34;
+  }
+
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-tmp-autocleanup-",
+                            TMP_AUTO_CLEANUP_PREFIX);
+  if (path_exists(stale_root)) {
+    lc_test_tmp_cleanup_path(stale_root, TMP_GLOBAL_STALE_PREFIX);
+    lc_test_tmp_cleanup_path(live_root, TMP_GLOBAL_LIVE_PREFIX);
+    return 35;
+  }
+  if (!path_exists(live_root)) {
+    return 36;
+  }
+  lc_test_tmp_cleanup_path(live_root, TMP_GLOBAL_LIVE_PREFIX);
+  return 0;
+}
+
 int main(void) {
   char template_path[] = TMP_CLEANUP_PREFIX "XXXXXX";
   char root[512];
@@ -89,6 +134,9 @@ int main(void) {
   mode = getenv("LOCKDC_TMP_CLEANUP_MODE");
   if (mode != NULL && strcmp(mode, "auto-stale") == 0) {
     return run_auto_stale_cleanup_probe();
+  }
+  if (mode != NULL && strcmp(mode, "explicit-global-stale") == 0) {
+    return run_explicit_global_stale_cleanup_probe();
   }
 
   path_file = getenv("LOCKDC_TMP_CLEANUP_PATH_FILE");

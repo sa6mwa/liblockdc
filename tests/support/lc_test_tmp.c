@@ -17,6 +17,9 @@
 #define LC_TEST_TMP_DEFAULT_AUTO_STALE_SECONDS 0L
 #define LC_TEST_TMP_OWNER_FILE ".liblockdc-test-tmp-owner"
 #define LC_TEST_TMP_OWNER_SUFFIX ".liblockdc-test-tmp-owner"
+#define LC_TEST_TMP_GLOBAL_PARENT "/tmp"
+#define LC_TEST_TMP_GLOBAL_NAME_PREFIX "liblockdc-"
+#define LC_TEST_TMP_GLOBAL_ALLOWED_PREFIX "/tmp/liblockdc-"
 
 static char lc_test_tmp_tracked[LC_TEST_TMP_MAX_TRACKED][LC_TEST_TMP_PATH_MAX];
 static char lc_test_tmp_swept[LC_TEST_TMP_MAX_SWEEP_PREFIXES]
@@ -379,7 +382,8 @@ static void lc_test_tmp_cleanup_stale_for_template(const char *template_path,
   if (!lc_test_tmp_global_stale_swept) {
     lc_test_tmp_global_stale_swept = 1;
     lc_test_tmp_cleanup_stale_older_than(
-        "/tmp", "liblockdc-", "/tmp/liblockdc-",
+        LC_TEST_TMP_GLOBAL_PARENT, LC_TEST_TMP_GLOBAL_NAME_PREFIX,
+        LC_TEST_TMP_GLOBAL_ALLOWED_PREFIX,
         lc_test_tmp_auto_stale_seconds());
   }
   if (!lc_test_tmp_prefix_parts(allowed_prefix, parent_dir, sizeof(parent_dir),
@@ -504,6 +508,25 @@ void lc_test_tmp_cleanup_path(const char *path, const char *allowed_prefix) {
   lc_test_tmp_untrack_path(path);
 }
 
+static int lc_test_tmp_is_global_stale_sweep(const char *parent_dir,
+                                             const char *name_prefix,
+                                             const char *allowed_prefix) {
+  return parent_dir != NULL && name_prefix != NULL && allowed_prefix != NULL &&
+         strcmp(parent_dir, LC_TEST_TMP_GLOBAL_PARENT) == 0 &&
+         strcmp(name_prefix, LC_TEST_TMP_GLOBAL_NAME_PREFIX) == 0 &&
+         strcmp(allowed_prefix, LC_TEST_TMP_GLOBAL_ALLOWED_PREFIX) == 0;
+}
+
+static void lc_test_tmp_cleanup_global_stale_once(void) {
+  if (lc_test_tmp_global_stale_swept) {
+    return;
+  }
+  lc_test_tmp_global_stale_swept = 1;
+  lc_test_tmp_cleanup_stale_older_than(
+      LC_TEST_TMP_GLOBAL_PARENT, LC_TEST_TMP_GLOBAL_NAME_PREFIX,
+      LC_TEST_TMP_GLOBAL_ALLOWED_PREFIX, lc_test_tmp_auto_stale_seconds());
+}
+
 void lc_test_tmp_cleanup_stale(const char *parent_dir,
                                const char *name_prefix,
                                const char *allowed_prefix) {
@@ -518,6 +541,10 @@ void lc_test_tmp_cleanup_stale_older_than(const char *parent_dir,
   DIR *dir;
   struct dirent *entry;
 
+  if (!lc_test_tmp_is_global_stale_sweep(parent_dir, name_prefix,
+                                        allowed_prefix)) {
+    lc_test_tmp_cleanup_global_stale_once();
+  }
   dir = opendir(parent_dir);
   if (dir == NULL) {
     return;
