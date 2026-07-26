@@ -567,6 +567,8 @@ static int lc_pouch_disk_visit_scan_meta_copy(
     lc_pouch_scan_meta_visit_fn visit, void *visit_context, lc_error *error);
 static int lc_pouch_disk_replay_query_index(lc_pouch_disk_store *store,
                                             lc_error *error);
+static int lc_pouch_disk_refresh_and_publish_query_temporal_generation(
+    lc_pouch_disk_store *store, const char *namespace_name, lc_error *error);
 static int lc_pouch_disk_query_summary_upsert(
     lc_pouch_disk_store *store, const char *namespace_name, const char *key,
     const char *etag, long version, const lc_pouch_meta *meta, int deleted);
@@ -7752,6 +7754,20 @@ static int lc_pouch_disk_query_compile_date_after_doc_ids(
       &found_generation, error);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (!found_generation && reader->req->namespace_name != NULL) {
+    rc = lc_pouch_disk_refresh_and_publish_query_temporal_generation(
+        reader->store, reader->req->namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    identity = lc_pouch_disk_query_index_identity(reader->store);
+    rc = lc_pouch_disk_read_query_temporal_generation(
+        reader->store, reader->req->namespace_name, identity, &generation,
+        &found_generation, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
   if (found_generation) {
     generation_reader.postings = &generation.postings;

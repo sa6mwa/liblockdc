@@ -1473,10 +1473,12 @@ state/metadata mutations, the disk backend compiles live per-namespace temporal
 postings and atomically publishes
 `<root>/%2elockd/logstore/query.index.temporal/<escaped-namespace>.lcptgn`
 files. Successful compaction replay republishes all namespace temporal
-generations because the segmented-manifest identity changes. Until recovery can
-repair missing or corrupt generation files for every current identity, the
-reader trusts only files whose encoded identity equals the current index
-identity and otherwise falls back to the sidecar scan.
+generations because the segmented-manifest identity changes. The reader trusts
+only files whose encoded identity equals the current index identity. When the
+file is absent, stale, or corrupt, DateAfter refreshes query-index replay,
+republishes the namespace generation, rereads the artifact, and uses the
+repaired file when it matches the refreshed identity; only unrepaired cases fall
+back to the sidecar scan.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every

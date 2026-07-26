@@ -182,6 +182,17 @@ test_read_temporal_generation_file(const char *path,
   free(bytes);
 }
 
+static void test_corrupt_temporal_generation_file(const char *path) {
+  static const char corrupt[] = "not-a-temporal-generation";
+  int fd;
+
+  fd = open(path, O_WRONLY | O_TRUNC);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, corrupt, sizeof(corrupt) - 1U),
+                   (ssize_t)(sizeof(corrupt) - 1U));
+  assert_int_equal(close(fd), 0);
+}
+
 static unsigned long test_get_u64(const unsigned char *bytes) {
 #if ULONG_MAX > 0xffffffffUL
   return ((unsigned long)bytes[0]) | ((unsigned long)bytes[1] << 8) |
@@ -10520,6 +10531,32 @@ test_pouch_endpoint_index_rebuild_writes_temporal_generation(void **state) {
   test_read_temporal_generation_file(generation_path, &generation);
   assert_string_equal(generation.namespace_name, "default");
   assert_true(generation.identity.sequence > 0U);
+  assert_true(lc_pouch_index_temporal_posting_table_append_after(
+      NULL, &generation.postings, "/created_at", 1735689600, 0, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_int_equal(doc_ids.count, 3U);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_temporal_generation_cleanup(NULL, &generation);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&generation, 0, sizeof(generation));
+
+  test_corrupt_temporal_generation_file(generation_path);
+  client = open_pouch_client(endpoint);
+  memset(&capture, 0, sizeof(capture));
+  memset(&res, 0, sizeof(res));
+  rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.key_count, 3U);
+  assert_string_equal(capture.keys[0], "bravo");
+  assert_string_equal(capture.keys[1], "charlie");
+  assert_string_equal(capture.keys[2], "echo");
+  assert_null(res.cursor);
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
+  lc_query_res_cleanup(&res);
+  client->close(client);
+
+  test_read_temporal_generation_file(generation_path, &generation);
+  assert_string_equal(generation.namespace_name, "default");
   assert_true(lc_pouch_index_temporal_posting_table_append_after(
       NULL, &generation.postings, "/created_at", 1735689600, 0, &doc_ids));
   assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));

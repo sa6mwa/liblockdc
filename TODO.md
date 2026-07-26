@@ -902,9 +902,12 @@ Latest release targets confirmed on 2026-07-23:
           writes/removes, metadata identity changes, and successful compaction
           replay so the DateAfter reader can keep using current immutable
           generation files across normal mutation paths.
+        - [x] Repair missing, stale, or corrupt temporal generation files on
+          DateAfter reads by refreshing query-index replay, republishing the
+          namespace generation, and rereading the identity-matched artifact
+          before considering the sidecar bridge.
         - [ ] Make temporal generation files authoritative for DateAfter by
-          repairing them during recovery/open when missing or corrupt,
-          covering any remaining identity-changing non-query mutations, and
+          covering any remaining identity-changing non-query mutations and
           removing the remaining sidecar-scan bridge. A query-time disk bridge
           attempt was measured on 2026-07-26 and rejected because building the
           temporal table on the hot path regressed 4096-document DateAfter
