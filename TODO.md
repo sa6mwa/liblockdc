@@ -22,8 +22,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   retention.
   - [x] Add committed-state tombstones, public state remove, and pouch
     `acquire_for_update` success/rollback over the segmented state log.
-  - [ ] Replace the interim committed-log rollback path with true staged-state
-    writes, promotion, discard, and transaction recovery.
+  - [x] Replace the interim `acquire_for_update` committed-log rollback path
+    with staged-state writes, link-style promotion, discard, and public
+    staging-key rejection.
+  - [ ] Add durable transaction decision records, replay, staged participant
+    recovery, and expired staged-state cleanup on reopen.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

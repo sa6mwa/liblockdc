@@ -22,8 +22,13 @@ typedef struct pouch_value_doc {
 
 typedef struct pouch_acquire_for_update_state {
   const char *expected_snapshot;
+  const char *expected_visible_during_update;
   const char *replacement;
+  lc_client *observer;
+  const char *key;
   int saw_snapshot;
+  int saw_staged_invisible;
+  int saw_staging_key_rejected;
   int fail;
 } pouch_acquire_for_update_state;
 
@@ -273,6 +278,62 @@ static int pouch_acquire_for_update_handler(
   rc = update->lease->update(update->lease, source, NULL, error);
   source->close(source);
   assert_int_equal(rc, LC_OK);
+  if (state->observer != NULL) {
+    lc_sink *sink;
+    lc_get_res get_res;
+    lc_error observer_error;
+    const void *bytes;
+    size_t length;
+
+    sink = NULL;
+    bytes = NULL;
+    length = 0U;
+    memset(&get_res, 0, sizeof(get_res));
+    lc_error_init(&observer_error);
+    rc = lc_sink_to_memory(&sink, &observer_error);
+    assert_int_equal(rc, LC_OK);
+    rc = state->observer->get(state->observer, state->key, NULL, sink,
+                              &get_res, &observer_error);
+    assert_int_equal(rc, LC_OK);
+    if (state->expected_visible_during_update != NULL) {
+      assert_false(get_res.no_content);
+      rc = lc_sink_memory_bytes(sink, &bytes, &length, &observer_error);
+      assert_int_equal(rc, LC_OK);
+      assert_int_equal(length, strlen(state->expected_visible_during_update));
+      assert_memory_equal(bytes, state->expected_visible_during_update,
+                          strlen(state->expected_visible_during_update));
+    } else {
+      assert_true(get_res.no_content);
+    }
+    sink->close(sink);
+    lc_get_res_cleanup(&get_res);
+    {
+      char staging_key[256];
+      const char *stage_id;
+
+      stage_id = update->lease->txn_id != NULL &&
+                         update->lease->txn_id[0] != '\0'
+                     ? update->lease->txn_id
+                     : update->lease->lease_id;
+      snprintf(staging_key, sizeof(staging_key), "%s/.staging/%s",
+               state->key, stage_id);
+      sink = NULL;
+      rc = lc_sink_to_memory(&sink, &observer_error);
+      assert_int_equal(rc, LC_OK);
+      rc = state->observer->get(state->observer, staging_key, NULL, sink,
+                                &get_res, &observer_error);
+      assert_int_equal(rc, LC_ERR_INVALID);
+      assert_string_equal(observer_error.message,
+                          "pouch staging keys are reserved for internal state");
+      sink->close(sink);
+      lc_get_res_cleanup(&get_res);
+      lc_error_cleanup(&observer_error);
+      lc_error_init(&observer_error);
+    }
+    state->saw_staged_invisible = 1;
+    state->saw_staging_key_rejected = 1;
+    lc_error_cleanup(&observer_error);
+  }
   if (state->fail) {
     if (error != NULL) {
       error->code = LC_ERR_INVALID;
@@ -1054,7 +1115,10 @@ static void test_acquire_for_update_success_and_rollback(void **state) {
 
   memset(&handler_state, 0, sizeof(handler_state));
   handler_state.expected_snapshot = "\"value\":1";
+  handler_state.expected_visible_during_update = "{\"value\":1}";
   handler_state.replacement = "{\"value\":2}";
+  handler_state.observer = client;
+  handler_state.key = key;
   acquire_req.key = key;
   acquire_req.owner = "lc-unit-pouch";
   acquire_req.ttl_seconds = 30L;
@@ -1067,6 +1131,8 @@ static void test_acquire_for_update_success_and_rollback(void **state) {
   }
   assert_int_equal(rc, LC_OK);
   assert_int_equal(handler_state.saw_snapshot, 1);
+  assert_int_equal(handler_state.saw_staged_invisible, 1);
+  assert_int_equal(handler_state.saw_staging_key_rejected, 1);
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -1085,7 +1151,10 @@ static void test_acquire_for_update_success_and_rollback(void **state) {
   lc_error_init(&error);
   memset(&handler_state, 0, sizeof(handler_state));
   handler_state.expected_snapshot = "\"value\":2";
+  handler_state.expected_visible_during_update = "{\"value\":2}";
   handler_state.replacement = "{\"value\":3}";
+  handler_state.observer = client;
+  handler_state.key = key;
   handler_state.fail = 1;
   rc = client->acquire_for_update(client, &acquire_req,
                                   pouch_acquire_for_update_handler,
@@ -1093,6 +1162,8 @@ static void test_acquire_for_update_success_and_rollback(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
                       "intentional pouch acquire_for_update failure");
+  assert_int_equal(handler_state.saw_staged_invisible, 1);
+  assert_int_equal(handler_state.saw_staging_key_rejected, 1);
 
   lc_error_cleanup(&error);
   lc_error_init(&error);
@@ -1138,6 +1209,8 @@ static void test_acquire_for_update_rollback_removes_new_state(void **state) {
   open_pouch_client(root, &client, &error);
   memset(&handler_state, 0, sizeof(handler_state));
   handler_state.replacement = "{\"value\":9}";
+  handler_state.observer = client;
+  handler_state.key = key;
   handler_state.fail = 1;
   acquire_req.key = key;
   acquire_req.owner = "lc-unit-pouch";
@@ -1148,6 +1221,8 @@ static void test_acquire_for_update_rollback_removes_new_state(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
                       "intentional pouch acquire_for_update failure");
+  assert_int_equal(handler_state.saw_staged_invisible, 1);
+  assert_int_equal(handler_state.saw_staging_key_rejected, 1);
 
   lc_error_cleanup(&error);
   lc_error_init(&error);
