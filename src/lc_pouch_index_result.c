@@ -200,6 +200,15 @@ static int lc_pouch_index_result_plan_contains_cacheable(
          lc_pouch_index_result_plan_has_no_exists_filters(req);
 }
 
+static int lc_pouch_index_result_plan_date_after_cacheable(
+    const lc_pouch_query_index_scan_req *req) {
+  return lc_pouch_index_result_plan_cacheable_common(req) &&
+         req->document_date_after_terms != NULL &&
+         req->document_date_after_term_count == 1U &&
+         req->document_date_after_terms[0].field != NULL &&
+         req->document_date_after_terms[0].after != NULL;
+}
+
 typedef struct lc_pouch_index_eq_result_plan_key_term {
   const char *field;
   const char *value;
@@ -1254,6 +1263,43 @@ static char *lc_pouch_index_contains_result_plan_key(
       allocator, req, "contains", term->field, term->value, term->ignore_case);
 }
 
+static char *lc_pouch_index_date_after_result_plan_key(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_query_index_scan_req *req) {
+  const lc_pouch_document_date_after_term *term;
+  size_t namespace_len;
+  size_t field_len;
+  size_t after_len;
+  int written;
+  size_t needed;
+  char *key;
+
+  if (!lc_pouch_index_result_plan_date_after_cacheable(req)) {
+    return NULL;
+  }
+  term = &req->document_date_after_terms[0];
+  namespace_len = strlen(req->namespace_name);
+  field_len = strlen(term->field);
+  after_len = strlen(term->after);
+  written = snprintf(NULL, 0, "date_after:%lu:%s:%lu:%s:%lu:%s",
+                     (unsigned long)namespace_len, req->namespace_name,
+                     (unsigned long)field_len, term->field,
+                     (unsigned long)after_len, term->after);
+  if (written < 0) {
+    return NULL;
+  }
+  needed = (size_t)written + 1U;
+  key = (char *)lc_pouch_alloc(allocator, needed);
+  if (key == NULL) {
+    return NULL;
+  }
+  (void)snprintf(key, needed, "date_after:%lu:%s:%lu:%s:%lu:%s",
+                 (unsigned long)namespace_len, req->namespace_name,
+                 (unsigned long)field_len, term->field,
+                 (unsigned long)after_len, term->after);
+  return key;
+}
+
 char *lc_pouch_index_result_plan_key(const lc_pouch_allocator *allocator,
                                      const lc_pouch_query_index_scan_req *req,
                                      lc_pouch_index_result_plan_kind kind) {
@@ -1270,6 +1316,8 @@ char *lc_pouch_index_result_plan_key(const lc_pouch_allocator *allocator,
     return lc_pouch_index_prefix_result_plan_key(allocator, req);
   case LC_POUCH_INDEX_RESULT_PLAN_CONTAINS:
     return lc_pouch_index_contains_result_plan_key(allocator, req);
+  case LC_POUCH_INDEX_RESULT_PLAN_DATE_AFTER:
+    return lc_pouch_index_date_after_result_plan_key(allocator, req);
   }
   return NULL;
 }

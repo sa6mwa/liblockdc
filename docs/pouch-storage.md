@@ -762,12 +762,15 @@ that combine numeric `range` selectors with strict JSON Pointer `prefix` /
 union ordered numeric and text postings. Full-form `and` selectors that combine
 a positive supported indexed predicate with a `not` exclusion use the positive
 predicate as the storage-owned candidate superset and leave exclusion semantics
-to final `liblql` acceptance. `date` selectors use strict JSON Pointer
-field-presence postings as a storage-owned candidate superset, including inside
-supported OR groups, while datetime parsing, relative-date handling, and
-boundary comparisons remain final `liblql` acceptance. Unsupported selector
-families and path forms remain deterministic fallback rather than risking false
-negative candidate pruning.
+to final `liblql` acceptance. `date after` selectors over strict JSON Pointer
+fields narrow canonical UTC-second string postings before final acceptance:
+text-helper postings, exact-boundary canonical strings, and older canonical
+strings are skipped at candidate-collection time. Non-canonical strings and
+non-string values remain residual candidates because pouch does not yet duplicate
+liblql's full selector datetime grammar. Other date forms, relative-date
+handling, and boundary comparisons remain final `liblql` acceptance. Unsupported
+selector families and path forms remain deterministic fallback rather than
+risking false negative candidate pruning.
 
 Full log-backed ordered scanning remains a supported backend mode, just not the
 preferred default. Pouch configuration must be able to select indexed mode, scan
@@ -938,11 +941,12 @@ excluded JSON Pointer field before final `liblql` acceptance.
 Scalar `not eq` leaves under recursive `and` composition similarly exclude keys
 with live exact string, boolean, or null equality postings for that field/value;
 selector semantics still remain final `liblql` acceptance.
-Date selectors use indexed field-presence postings for their strict JSON
-Pointer field as a candidate superset. Pouch does not duplicate liblql's
-datetime parser or comparison rules; final date acceptance remains in `liblql`.
-When date selectors are paginated, cursors advance on accepted rows, not merely
-on presence candidates, so invalid or out-of-range date candidates cannot
+Date selectors use indexed postings for their strict JSON Pointer field as a
+candidate superset. For simple `after`/`gt` selectors, pouch can prove canonical
+UTC-second string values older than or equal to the boundary are non-matches and
+remove them before residual evaluation; unsupported date encodings still flow to
+`liblql`. When date selectors are paginated, cursors advance on accepted rows,
+not merely on candidates, so invalid or out-of-range date candidates cannot
 truncate a page or become the public cursor.
 Negated `prefix` / `iprefix` and `contains` / `icontains` leaves under
 recursive `and` composition also act as storage-owned exclusions: candidate

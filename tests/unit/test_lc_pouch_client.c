@@ -6282,7 +6282,7 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_null(strstr(text, "{\"key\":\"bravo\""));
   assert_null(strstr(text, "{\"key\":\"charlie\""));
   assert_null(strstr(text, "{\"key\":\"delta\""));
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   free(text);
   lc_sink_close(sink);
@@ -8407,7 +8407,7 @@ static void test_pouch_endpoint_query_filters_full_form_lql_document_selector(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.key_count, 1U);
   assert_string_equal(capture.keys[0], "alpha");
-  assert_string_equal(res.metadata_json, "{\"query_candidates\":2}");
+  assert_string_equal(res.metadata_json, "{\"query_candidates\":1}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
 
@@ -10066,6 +10066,8 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   lc_lease *charlie;
   lc_lease *delta;
   lc_lease *echo;
+  lc_lease *foxtrot;
+  lc_lease *golf;
   lc_query_req req;
   lc_query_res res;
   lc_query_key_handler handler;
@@ -10110,6 +10112,16 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
                         &error);
   echo = pouch_acquire_query_key(client, "echo", &error);
   pouch_save_query_json(echo, "{\"value\":\"missing-date\"}", &error);
+  foxtrot = pouch_acquire_query_key(client, "foxtrot", &error);
+  pouch_save_query_json(foxtrot,
+                        "{\"created_at\":\"2025-01-01T00:00:00Z\","
+                        "\"value\":\"boundary-date\"}",
+                        &error);
+  golf = pouch_acquire_query_key(client, "golf", &error);
+  pouch_save_query_json(golf,
+                        "{\"created_at\":20260101,"
+                        "\"value\":\"numeric-date\"}",
+                        &error);
 
   handler.begin = query_key_capture_begin;
   handler.chunk = query_key_capture_chunk;
@@ -10160,6 +10172,8 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_null(strstr(text, "invalid-date"));
   assert_null(strstr(text, "old-date"));
   assert_null(strstr(text, "missing-date"));
+  assert_null(strstr(text, "boundary-date"));
+  assert_null(strstr(text, "numeric-date"));
   assert_string_equal(res.cursor, "alpha");
   assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
   assert_true(res.index_seq > 0UL);
@@ -10184,6 +10198,8 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_null(strstr(text, "invalid-date"));
   assert_null(strstr(text, "old-date"));
   assert_null(strstr(text, "missing-date"));
+  assert_null(strstr(text, "boundary-date"));
+  assert_null(strstr(text, "numeric-date"));
   assert_null(res.cursor);
   assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
   assert_true(res.index_seq > 0UL);
@@ -10200,6 +10216,8 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   charlie->close(charlie);
   delta->close(delta);
   echo->close(echo);
+  foxtrot->close(foxtrot);
+  golf->close(golf);
   client->close(client);
   lc_error_cleanup(&error);
   test_cleanup_root(root);

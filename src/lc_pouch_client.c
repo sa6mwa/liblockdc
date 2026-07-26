@@ -17013,6 +17013,8 @@ typedef struct lc_pouch_lql_document_filter {
   size_t document_exists_path_pattern_count;
   lc_pouch_document_exists_term *document_or_exists_path_patterns;
   size_t document_or_exists_path_pattern_count;
+  lc_pouch_document_date_after_term *document_fast_date_after_terms;
+  size_t document_fast_date_after_term_count;
   int enabled;
   int index_covers_selector;
 } lc_pouch_lql_document_filter;
@@ -17312,6 +17314,14 @@ lc_pouch_lql_document_filter_cleanup(lc_pouch_lql_document_filter *filter) {
         NULL, (char *)filter->document_or_exists_path_patterns[index].field);
   }
   lc_free_with_allocator(NULL, filter->document_or_exists_path_patterns);
+  for (index = 0U; index < filter->document_fast_date_after_term_count;
+       ++index) {
+    lc_free_with_allocator(
+        NULL, (char *)filter->document_fast_date_after_terms[index].field);
+    lc_free_with_allocator(
+        NULL, (char *)filter->document_fast_date_after_terms[index].after);
+  }
+  lc_free_with_allocator(NULL, filter->document_fast_date_after_terms);
   memset(filter, 0, sizeof(*filter));
 }
 
@@ -18395,6 +18405,138 @@ lc_pouch_lql_ast_date_exists_hint_parse(lc_pouch_lql_document_filter *filter) {
   return 1;
 }
 
+static int lc_pouch_lql_view_absent(lql_string_view view) {
+  return view.data == NULL || view.len == 0U;
+}
+
+static int lc_pouch_lql_ascii_digit(char ch) {
+  return ch >= '0' && ch <= '9';
+}
+
+static int lc_pouch_lql_decimal2(const char *text, size_t offset) {
+  return ((int)(text[offset] - '0') * 10) + (int)(text[offset + 1U] - '0');
+}
+
+static int lc_pouch_lql_decimal4(const char *text) {
+  return ((int)(text[0] - '0') * 1000) + ((int)(text[1] - '0') * 100) +
+         ((int)(text[2] - '0') * 10) + (int)(text[3] - '0');
+}
+
+static int lc_pouch_lql_leap_year(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+static int lc_pouch_lql_month_days(int year, int month) {
+  static const int days[] = {31, 28, 31, 30, 31, 30,
+                             31, 31, 30, 31, 30, 31};
+
+  if (month < 1 || month > 12) {
+    return 0;
+  }
+  if (month == 2 && lc_pouch_lql_leap_year(year)) {
+    return 29;
+  }
+  return days[month - 1];
+}
+
+static int lc_pouch_lql_rfc3339_utc_second_is_supported(const char *text) {
+  int year;
+  int month;
+  int day;
+  int hour;
+  int minute;
+  int second;
+
+  if (text == NULL || strlen(text) != 20U || text[4] != '-' ||
+      text[7] != '-' || text[10] != 'T' || text[13] != ':' ||
+      text[16] != ':' || text[19] != 'Z') {
+    return 0;
+  }
+  if (!lc_pouch_lql_ascii_digit(text[0]) ||
+      !lc_pouch_lql_ascii_digit(text[1]) ||
+      !lc_pouch_lql_ascii_digit(text[2]) ||
+      !lc_pouch_lql_ascii_digit(text[3]) ||
+      !lc_pouch_lql_ascii_digit(text[5]) ||
+      !lc_pouch_lql_ascii_digit(text[6]) ||
+      !lc_pouch_lql_ascii_digit(text[8]) ||
+      !lc_pouch_lql_ascii_digit(text[9]) ||
+      !lc_pouch_lql_ascii_digit(text[11]) ||
+      !lc_pouch_lql_ascii_digit(text[12]) ||
+      !lc_pouch_lql_ascii_digit(text[14]) ||
+      !lc_pouch_lql_ascii_digit(text[15]) ||
+      !lc_pouch_lql_ascii_digit(text[17]) ||
+      !lc_pouch_lql_ascii_digit(text[18])) {
+    return 0;
+  }
+  year = lc_pouch_lql_decimal4(text);
+  month = lc_pouch_lql_decimal2(text, 5U);
+  day = lc_pouch_lql_decimal2(text, 8U);
+  hour = lc_pouch_lql_decimal2(text, 11U);
+  minute = lc_pouch_lql_decimal2(text, 14U);
+  second = lc_pouch_lql_decimal2(text, 17U);
+  return month >= 1 && month <= 12 && day >= 1 &&
+         day <= lc_pouch_lql_month_days(year, month) && hour >= 0 &&
+         hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 &&
+         second <= 59;
+}
+
+static int lc_pouch_lql_ast_fast_date_after_parse(
+    lc_pouch_lql_document_filter *filter) {
+  lql_selector_node root;
+  lql_selector_date_term source;
+  lc_pouch_document_date_after_term *term;
+  lql_string_view after;
+  lql_error lql_err;
+
+  if (filter == NULL || filter->runtime == NULL || filter->selector == NULL ||
+      filter->document_fast_date_after_term_count > 0U) {
+    return 0;
+  }
+  memset(&root, 0, sizeof(root));
+  lql_error_init(&lql_err);
+  if (filter->runtime->selector_root(filter->runtime, filter->selector, &root,
+                                     &lql_err) != LQL_STATUS_OK ||
+      root.kind != LQL_SELECTOR_NODE_DATE) {
+    return 0;
+  }
+  memset(&source, 0, sizeof(source));
+  lql_error_init(&lql_err);
+  if (filter->runtime->selector_node_date_term(filter->runtime, root, &source,
+                                               &lql_err) != LQL_STATUS_OK ||
+      !lc_pouch_lql_ast_view_is_pointer(source.field) ||
+      !lc_pouch_lql_view_absent(source.value) ||
+      !lc_pouch_lql_view_absent(source.since) ||
+      !lc_pouch_lql_view_absent(source.before) ||
+      !lc_pouch_lql_view_absent(source.gte) ||
+      !lc_pouch_lql_view_absent(source.lt) ||
+      !lc_pouch_lql_view_absent(source.lte)) {
+    return 0;
+  }
+  after = !lc_pouch_lql_view_absent(source.after) ? source.after : source.gt;
+  if (!lc_pouch_lql_ast_view_is_cstr(after) || after.len == 0U ||
+      (!lc_pouch_lql_view_absent(source.after) &&
+       !lc_pouch_lql_view_absent(source.gt))) {
+    return 0;
+  }
+  term = (lc_pouch_document_date_after_term *)lc_calloc_with_allocator(
+      NULL, 1U, sizeof(term[0]));
+  if (term == NULL) {
+    return 0;
+  }
+  term->field = lc_pouch_lql_ast_view_copy(source.field);
+  term->after = lc_pouch_lql_ast_view_copy(after);
+  if (term->field == NULL || term->after == NULL ||
+      !lc_pouch_lql_rfc3339_utc_second_is_supported(term->after)) {
+    lc_free_with_allocator(NULL, (char *)term->field);
+    lc_free_with_allocator(NULL, (char *)term->after);
+    lc_free_with_allocator(NULL, term);
+    return 0;
+  }
+  filter->document_fast_date_after_terms = term;
+  filter->document_fast_date_after_term_count = 1U;
+  return 1;
+}
+
 static int lc_pouch_lql_ast_index_cover_count(const lql *runtime,
                                               lql_selector_node node,
                                               size_t *leaf_count) {
@@ -18548,6 +18690,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
                                    &filter->document_not_eq_terms,
                                    &filter->document_not_eq_term_count);
     (void)lc_pouch_lql_ast_date_exists_hint_parse(filter);
+    (void)lc_pouch_lql_ast_fast_date_after_parse(filter);
     (void)lc_pouch_lql_ast_not_range_in_hint_parse(filter);
     (void)lc_pouch_lql_ast_not_text_hint_parse(filter);
     (void)lc_pouch_lql_ast_not_exists_hint_parse(filter);
@@ -18707,6 +18850,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
   }
   (void)lc_pouch_lql_ast_or_hint_parse(filter);
   (void)lc_pouch_lql_ast_date_exists_hint_parse(filter);
+  (void)lc_pouch_lql_ast_fast_date_after_parse(filter);
   lc_pouch_lql_not_eq_hint_parse(selector_json, &filter->document_not_eq_terms,
                                  &filter->document_not_eq_term_count);
   (void)lc_pouch_lql_ast_not_range_in_hint_parse(filter);
@@ -18739,6 +18883,8 @@ typedef struct lc_pouch_lql_fast_match_visit {
   uint64_t in_bits;
   uint64_t exists_bits;
   int or_matched;
+  int fast_date_matched;
+  int fast_date_unsupported;
 } lc_pouch_lql_fast_match_visit;
 
 static int lc_pouch_lql_fast_bit_capacity(size_t count) {
@@ -19202,6 +19348,130 @@ lc_pouch_lql_fast_array_begin(void *user, const lonejson_value_path *path,
   return lc_pouch_lql_fast_container_begin(user, path, error, "a:");
 }
 
+static lonejson_status
+lc_pouch_lql_fast_date_string_begin(void *user, const lonejson_value_path *path,
+                                    lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  visit->value_len = 0U;
+  if (visit->value != NULL) {
+    visit->value[0] = '\0';
+  }
+  if (!lc_pouch_lql_fast_set_path(visit, path)) {
+    visit->failed = 1;
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_date_string_chunk(void *user, const lonejson_value_path *path,
+                                    const char *data, size_t len,
+                                    lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  if (!lc_pouch_lql_fast_append(visit, &visit->value, &visit->value_len,
+                                &visit->value_capacity, data, len)) {
+    visit->failed = 1;
+    return LONEJSON_STATUS_ALLOCATION_FAILED;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status
+lc_pouch_lql_fast_date_string_end(void *user, const lonejson_value_path *path,
+                                  lonejson_error *error) {
+  lc_pouch_lql_fast_match_visit *visit;
+  const lc_pouch_document_date_after_term *term;
+
+  (void)path;
+  (void)error;
+  visit = (lc_pouch_lql_fast_match_visit *)user;
+  if (visit == NULL || visit->filter == NULL || visit->field == NULL ||
+      visit->value == NULL ||
+      visit->filter->document_fast_date_after_term_count != 1U) {
+    return LONEJSON_STATUS_INVALID_ARGUMENT;
+  }
+  term = &visit->filter->document_fast_date_after_terms[0];
+  if (!lc_pouch_lql_fast_field_matches(term->field, visit->field)) {
+    return LONEJSON_STATUS_OK;
+  }
+  if (!lc_pouch_lql_rfc3339_utc_second_is_supported(visit->value)) {
+    visit->fast_date_unsupported = 1;
+    return LONEJSON_STATUS_OK;
+  }
+  if (strcmp(visit->value, term->after) > 0) {
+    visit->fast_date_matched = 1;
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static int lc_pouch_lql_document_filter_match_fast_date_bytes(
+    lc_client_handle *client, lc_pouch_lql_document_filter *filter,
+    const unsigned char *payload, size_t payload_len, int *matched,
+    int *handled, lc_error *error) {
+  lc_pouch_lql_fast_match_visit visit;
+  lonejson_path_value_visitor visitor;
+  lonejson_error lj_error;
+  lonejson_status status;
+  lonejson *runtime;
+
+  if (handled != NULL) {
+    *handled = 0;
+  }
+  if (matched != NULL) {
+    *matched = 0;
+  }
+  if (handled == NULL || matched == NULL || filter == NULL ||
+      filter->document_fast_date_after_term_count != 1U) {
+    return LC_OK;
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query JSON runtime", NULL,
+                        NULL, NULL);
+  }
+  memset(&visit, 0, sizeof(visit));
+  visit.client = client;
+  visit.filter = filter;
+  visitor = lonejson_default_path_value_visitor();
+  visitor.string_begin = lc_pouch_lql_fast_date_string_begin;
+  visitor.string_chunk = lc_pouch_lql_fast_date_string_chunk;
+  visitor.string_end = lc_pouch_lql_fast_date_string_end;
+  lonejson_error_init(&lj_error);
+  status = runtime->visit_path_value_buffer(runtime, payload, payload_len,
+                                            &visitor, &visit, &lj_error);
+  lc_client_free(client, visit.field);
+  lc_client_free(client, visit.value);
+  if (visit.failed) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to evaluate pouch LQL selector", NULL, NULL,
+                        NULL);
+  }
+  if (status != LONEJSON_STATUS_OK) {
+    return lc_pouch_lonejson_error(error, status, &lj_error,
+                                   "failed to evaluate pouch LQL selector");
+  }
+  if (visit.fast_date_unsupported) {
+    return LC_OK;
+  }
+  *handled = 1;
+  *matched = visit.fast_date_matched;
+  return LC_OK;
+}
+
 static uint64_t lc_pouch_lql_fast_all_bits(size_t count) {
   return count == 0U ? 0U : ((UINT64_C(1) << count) - UINT64_C(1));
 }
@@ -19316,6 +19586,13 @@ static int lc_pouch_lql_document_filter_match_bytes(
                         "pouch LQL document filter requires client, payload, "
                         "and matched output",
                         NULL, NULL, NULL);
+  }
+
+  handled = 0;
+  rc = lc_pouch_lql_document_filter_match_fast_date_bytes(
+      client, filter, payload, payload_len, matched, &handled, error);
+  if (rc != LC_OK || handled) {
+    return rc;
   }
 
   handled = 0;
@@ -20663,6 +20940,9 @@ static int lc_pouch_client_query_index(lc_client_handle *client,
       filter.document_or_exists_path_patterns;
   scan_req.document_or_exists_path_pattern_count =
       filter.document_or_exists_path_pattern_count;
+  scan_req.document_date_after_terms = filter.document_fast_date_after_terms;
+  scan_req.document_date_after_term_count =
+      filter.document_fast_date_after_term_count;
   visit.scan.client = client;
   visit.scan.dst = dst;
   visit.scan.filter = residual_filter ? &filter : NULL;
@@ -21065,6 +21345,9 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
       filter.document_or_exists_path_patterns;
   scan_req.document_or_exists_path_pattern_count =
       filter.document_or_exists_path_pattern_count;
+  scan_req.document_date_after_terms = filter.document_fast_date_after_terms;
+  scan_req.document_date_after_term_count =
+      filter.document_fast_date_after_term_count;
   scan_context.handler = handler;
   scan_context.handler_context = context;
   scan_context.filter = residual_filter ? &filter : NULL;

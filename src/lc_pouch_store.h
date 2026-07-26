@@ -166,6 +166,11 @@ typedef struct lc_pouch_document_exists_term {
   const char *field;
 } lc_pouch_document_exists_term;
 
+typedef struct lc_pouch_document_date_after_term {
+  const char *field;
+  const char *after;
+} lc_pouch_document_date_after_term;
+
 typedef struct lc_pouch_query_index_scan_req {
   const char *namespace_name;
   const char *key;
@@ -210,6 +215,8 @@ typedef struct lc_pouch_query_index_scan_req {
   size_t document_exists_path_pattern_count;
   const lc_pouch_document_exists_term *document_or_exists_path_patterns;
   size_t document_or_exists_path_pattern_count;
+  const lc_pouch_document_date_after_term *document_date_after_terms;
+  size_t document_date_after_term_count;
   const char *start_after;
   size_t limit;
 } lc_pouch_query_index_scan_req;

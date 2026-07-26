@@ -44,7 +44,8 @@ typedef enum lc_pouch_index_result_plan_kind {
   LC_POUCH_INDEX_RESULT_PLAN_IN = 3,
   LC_POUCH_INDEX_RESULT_PLAN_RANGE = 4,
   LC_POUCH_INDEX_RESULT_PLAN_PREFIX = 5,
-  LC_POUCH_INDEX_RESULT_PLAN_CONTAINS = 6
+  LC_POUCH_INDEX_RESULT_PLAN_CONTAINS = 6,
+  LC_POUCH_INDEX_RESULT_PLAN_DATE_AFTER = 7
 } lc_pouch_index_result_plan_kind;
 
 typedef struct lc_pouch_index_identity {
