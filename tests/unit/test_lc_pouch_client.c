@@ -370,6 +370,24 @@ static void pouch_backend_hash_free(lc_client *client, char *hash) {
   lc_pouch_free(&handle->pouch_allocator, hash);
 }
 
+static void
+pouch_query_result_cache_status(lc_client *client,
+                                lc_pouch_query_result_cache_status *out,
+                                lc_error *error) {
+  lc_client_handle *handle;
+  int rc;
+
+  assert_non_null(client);
+  assert_non_null(out);
+  handle = (lc_client_handle *)client;
+  assert_non_null(handle->pouch_store);
+  assert_non_null(handle->pouch_store->query_result_cache_status);
+  memset(out, 0, sizeof(*out));
+  rc = handle->pouch_store->query_result_cache_status(handle->pouch_store, out,
+                                                      error);
+  assert_int_equal(rc, LC_OK);
+}
+
 static void partial_pouch_rollback_participant(lc_client *client,
                                                const char *namespace_name,
                                                const char *key,
@@ -10052,6 +10070,8 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   lc_query_res res;
   lc_query_key_handler handler;
   query_key_capture_state capture;
+  lc_pouch_query_result_cache_status cache_baseline;
+  lc_pouch_query_result_cache_status cache_status;
   lc_sink *sink;
   lc_error error;
   char *text;
@@ -10065,6 +10085,8 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   memset(&res, 0, sizeof(res));
   memset(&handler, 0, sizeof(handler));
   memset(&capture, 0, sizeof(capture));
+  memset(&cache_baseline, 0, sizeof(cache_baseline));
+  memset(&cache_status, 0, sizeof(cache_status));
   client = open_pouch_client(endpoint);
   alpha = pouch_acquire_query_key(client, "alpha", &error);
   pouch_save_query_json(alpha,
@@ -10096,6 +10118,7 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   req.selector_json = "{\"date\":{\"field\":\"/created_at\","
                       "\"after\":\"2025-01-01T00:00:00Z\"}}";
   req.limit = 1L;
+  pouch_query_result_cache_status(client, &cache_baseline, &error);
   rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.key_count, 1U);
@@ -10104,6 +10127,10 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_string_equal(res.metadata_json, "{\"query_candidates\":4}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
+  pouch_query_result_cache_status(client, &cache_status, &error);
+  assert_int_equal(cache_status.hits, cache_baseline.hits);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 1UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 1UL);
 
   memset(&capture, 0, sizeof(capture));
   req.cursor = "alpha";
@@ -10115,6 +10142,10 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   assert_string_equal(res.metadata_json, "{\"query_candidates\":3}");
   assert_true(res.index_seq > 0UL);
   lc_query_res_cleanup(&res);
+  pouch_query_result_cache_status(client, &cache_status, &error);
+  assert_int_equal(cache_status.hits, cache_baseline.hits + 1UL);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 1UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 1UL);
 
   sink = NULL;
   rc = lc_sink_to_memory(&sink, &error);
@@ -10135,6 +10166,10 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   free(text);
   lc_sink_close(sink);
   lc_query_res_cleanup(&res);
+  pouch_query_result_cache_status(client, &cache_status, &error);
+  assert_int_equal(cache_status.hits, cache_baseline.hits + 2UL);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 1UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 1UL);
 
   sink = NULL;
   rc = lc_sink_to_memory(&sink, &error);
@@ -10155,6 +10190,10 @@ test_pouch_endpoint_index_date_superset_uses_liblql_paging(void **state) {
   free(text);
   lc_sink_close(sink);
   lc_query_res_cleanup(&res);
+  pouch_query_result_cache_status(client, &cache_status, &error);
+  assert_int_equal(cache_status.hits, cache_baseline.hits + 3UL);
+  assert_int_equal(cache_status.misses, cache_baseline.misses + 1UL);
+  assert_int_equal(cache_status.puts, cache_baseline.puts + 1UL);
 
   alpha->close(alpha);
   bravo->close(bravo);

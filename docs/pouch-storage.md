@@ -1430,6 +1430,11 @@ converts the selected page back to summary entries. Updates advance the index
 sequence, so stale cached results miss the cache.
 Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
+Residual selectors such as date predicates may deliberately reuse that
+field-presence cache as a candidate-superset cache. The cached vector contains
+documents with the field, including values that are invalid or outside the
+requested date window; the client-level `liblql` filter remains authoritative
+for final acceptance and owns public cursor selection for residual pages.
 Simple non-wildcard positive `in` scans also use the result cache; their plan
 key sorts and deduplicates typed values before key construction, so duplicate
 or reordered value lists reuse the same cached docID vector.

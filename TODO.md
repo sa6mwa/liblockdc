@@ -843,6 +843,11 @@ Latest release targets confirmed on 2026-07-23:
         field-presence candidates include invalid, old, and accepted date
         documents, but both `query_keys` and document `query` emit and cursor
         only rows accepted by `liblql`.
+      - [x] Add residual date selector cache-reuse coverage: the first
+        `/created_at` field-presence candidate collection populates the
+        normalized result cache, resumed key pages and document pages reuse the
+        cached candidate vector, and final visible rows still come only from
+        `liblql` acceptance.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not
