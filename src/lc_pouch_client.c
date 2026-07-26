@@ -26,6 +26,22 @@ typedef struct lc_pouch_txn_buffer {
   size_t capacity;
 } lc_pouch_txn_buffer;
 
+typedef struct lc_pouch_txn_key_list {
+  char **keys;
+  size_t count;
+  size_t capacity;
+} lc_pouch_txn_key_list;
+
+typedef struct lc_pouch_txn_record {
+  char *state;
+  long expires_at_unix;
+  unsigned long tc_term;
+  char *target_backend_hash;
+  lc_txn_participant *participants;
+  size_t participant_count;
+  size_t participant_capacity;
+} lc_pouch_txn_record;
+
 static size_t lc_pouch_lonejson_source_read(void *context, void *buffer,
                                             size_t count, lc_error *error) {
   lc_pouch_lonejson_source *source;
@@ -353,6 +369,104 @@ static void lc_pouch_txn_buffer_cleanup(lc_pouch_txn_buffer *buffer) {
   memset(buffer, 0, sizeof(*buffer));
 }
 
+static void lc_pouch_txn_key_list_cleanup(lc_pouch_txn_key_list *list) {
+  size_t i;
+
+  if (list == NULL) {
+    return;
+  }
+  for (i = 0U; i < list->count; ++i) {
+    free(list->keys[i]);
+  }
+  free(list->keys);
+  memset(list, 0, sizeof(*list));
+}
+
+static int lc_pouch_txn_key_list_append(lc_pouch_txn_key_list *list,
+                                        const char *key, lc_error *error) {
+  char **next;
+  char *copy;
+  size_t capacity;
+
+  if (list->count == list->capacity) {
+    capacity = list->capacity != 0U ? list->capacity * 2U : 8U;
+    next = (char **)realloc(list->keys, capacity * sizeof(*next));
+    if (next == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch transaction key list",
+                          NULL, NULL, NULL);
+    }
+    list->keys = next;
+    list->capacity = capacity;
+  }
+  copy = lc_strdup_local(key);
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch transaction key", NULL, NULL,
+                        NULL);
+  }
+  list->keys[list->count++] = copy;
+  return LC_OK;
+}
+
+static int lc_pouch_txn_collect_key(const lc_pouch_state_visit_entry *entry,
+                                    void *context, lc_error *error) {
+  const char *prefix;
+
+  prefix = "txn/";
+  if (entry->key == NULL ||
+      strncmp(entry->key, prefix, strlen(prefix)) != 0) {
+    return LC_OK;
+  }
+  return lc_pouch_txn_key_list_append((lc_pouch_txn_key_list *)context,
+                                      entry->key, error);
+}
+
+static void lc_pouch_txn_record_cleanup(lc_pouch_txn_record *record) {
+  size_t i;
+
+  if (record == NULL) {
+    return;
+  }
+  free(record->state);
+  free(record->target_backend_hash);
+  for (i = 0U; i < record->participant_count; ++i) {
+    free((char *)record->participants[i].namespace_name);
+    free((char *)record->participants[i].key);
+    free((char *)record->participants[i].backend_hash);
+  }
+  free(record->participants);
+  memset(record, 0, sizeof(*record));
+}
+
+static int lc_pouch_txn_record_add_participant(
+    lc_pouch_txn_record *record, char *namespace_name, char *key,
+    char *backend_hash, lc_error *error) {
+  lc_txn_participant *next;
+  size_t capacity;
+
+  if (record->participant_count == record->participant_capacity) {
+    capacity = record->participant_capacity != 0U
+                   ? record->participant_capacity * 2U
+                   : 4U;
+    next = (lc_txn_participant *)realloc(record->participants,
+                                         capacity * sizeof(*next));
+    if (next == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch transaction participants",
+                          NULL, NULL, NULL);
+    }
+    record->participants = next;
+    record->participant_capacity = capacity;
+  }
+  record->participants[record->participant_count].namespace_name =
+      namespace_name;
+  record->participants[record->participant_count].key = key;
+  record->participants[record->participant_count].backend_hash = backend_hash;
+  ++record->participant_count;
+  return LC_OK;
+}
+
 static int lc_pouch_txn_buffer_reserve(lc_pouch_txn_buffer *buffer,
                                        size_t needed, lc_error *error) {
   char *next;
@@ -498,6 +612,151 @@ static char *lc_pouch_txn_hex_decode(const char *value, size_t length,
   }
   out[length / 2U] = '\0';
   return out;
+}
+
+static int lc_pouch_txn_parse_participant(lc_pouch_txn_record *record,
+                                          const char *line,
+                                          size_t line_length,
+                                          lc_error *error) {
+  const char *body;
+  const char *first_space;
+  const char *second_space;
+  char *namespace_name;
+  char *key;
+  char *backend_hash;
+  int rc;
+
+  body = line + strlen("participant ");
+  first_space = memchr(body, ' ', line_length - strlen("participant "));
+  if (first_space == NULL) {
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch transaction participant is malformed", NULL,
+                        NULL, NULL);
+  }
+  second_space = memchr(first_space + 1, ' ',
+                        (size_t)((line + line_length) - (first_space + 1)));
+  if (second_space == NULL) {
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch transaction participant is malformed", NULL,
+                        NULL, NULL);
+  }
+  namespace_name =
+      lc_pouch_txn_hex_decode(body, (size_t)(first_space - body), error);
+  key = lc_pouch_txn_hex_decode(first_space + 1,
+                                (size_t)(second_space - first_space - 1),
+                                error);
+  backend_hash = lc_pouch_txn_hex_decode(
+      second_space + 1, (size_t)((line + line_length) - (second_space + 1)),
+      error);
+  if (namespace_name == NULL || key == NULL || backend_hash == NULL) {
+    free(namespace_name);
+    free(key);
+    free(backend_hash);
+    return error != NULL ? error->code : LC_ERR_PROTOCOL;
+  }
+  rc = lc_pouch_txn_record_add_participant(record, namespace_name, key,
+                                           backend_hash, error);
+  if (rc != LC_OK) {
+    free(namespace_name);
+    free(key);
+    free(backend_hash);
+  }
+  return rc;
+}
+
+static int lc_pouch_txn_parse_record(const char *bytes, size_t length,
+                                     lc_pouch_txn_record *record,
+                                     lc_error *error) {
+  const char *cursor;
+  const char *end;
+  unsigned long expected_participants;
+  int has_expected_participants;
+  int rc;
+
+  memset(record, 0, sizeof(*record));
+  cursor = bytes;
+  end = bytes + length;
+  expected_participants = 0UL;
+  has_expected_participants = 0;
+  rc = LC_OK;
+  while (cursor < end && rc == LC_OK) {
+    const char *line_end;
+    size_t line_length;
+
+    line_end = memchr(cursor, '\n', (size_t)(end - cursor));
+    if (line_end == NULL) {
+      line_end = end;
+    }
+    line_length = (size_t)(line_end - cursor);
+    if (line_length > strlen("state ") &&
+        strncmp(cursor, "state ", strlen("state ")) == 0) {
+      free(record->state);
+      record->state =
+          lc_pouch_txn_hex_decode(cursor + strlen("state "),
+                                  line_length - strlen("state "), error);
+      rc = record->state != NULL ? LC_OK
+                                 : (error != NULL ? error->code
+                                                  : LC_ERR_PROTOCOL);
+    } else if (line_length > strlen("expires_at_unix ") &&
+               strncmp(cursor, "expires_at_unix ",
+                       strlen("expires_at_unix ")) == 0) {
+      if (sscanf(cursor + strlen("expires_at_unix "), "%ld",
+                 &record->expires_at_unix) != 1) {
+        rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "pouch transaction expiry is malformed", NULL,
+                          NULL, NULL);
+      }
+    } else if (line_length > strlen("tc_term ") &&
+               strncmp(cursor, "tc_term ", strlen("tc_term ")) == 0) {
+      if (sscanf(cursor + strlen("tc_term "), "%lu",
+                 &record->tc_term) != 1) {
+        rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "pouch transaction term is malformed", NULL, NULL,
+                          NULL);
+      }
+    } else if (line_length > strlen("target_backend_hash ") &&
+               strncmp(cursor, "target_backend_hash ",
+                       strlen("target_backend_hash ")) == 0) {
+      free(record->target_backend_hash);
+      record->target_backend_hash = lc_pouch_txn_hex_decode(
+          cursor + strlen("target_backend_hash "),
+          line_length - strlen("target_backend_hash "), error);
+      rc = record->target_backend_hash != NULL
+               ? LC_OK
+               : (error != NULL ? error->code : LC_ERR_PROTOCOL);
+    } else if (line_length > strlen("participant_count ") &&
+               strncmp(cursor, "participant_count ",
+                       strlen("participant_count ")) == 0) {
+      if (sscanf(cursor + strlen("participant_count "), "%lu",
+                 &expected_participants) != 1) {
+        rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "pouch transaction participant count is malformed",
+                          NULL, NULL, NULL);
+      } else {
+        has_expected_participants = 1;
+      }
+    } else if (line_length > strlen("participant ") &&
+               strncmp(cursor, "participant ", strlen("participant ")) == 0) {
+      rc = lc_pouch_txn_parse_participant(record, cursor, line_length,
+                                          error);
+    }
+    cursor = line_end < end ? line_end + 1 : end;
+  }
+  if (rc == LC_OK && record->state == NULL) {
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "pouch transaction record is missing state", NULL, NULL,
+                      NULL);
+  }
+  if (rc == LC_OK && has_expected_participants &&
+      expected_participants != (unsigned long)record->participant_count) {
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "pouch transaction participant count does not match",
+                      NULL, NULL, NULL);
+  }
+  if (rc != LC_OK) {
+    lc_pouch_txn_record_cleanup(record);
+  }
+  return rc;
 }
 
 static char *lc_pouch_txn_key(const char *txn_id, lc_error *error) {
@@ -1815,9 +2074,96 @@ int lc_pouch_client_txn_rollback_method(lc_client *self,
 }
 
 int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
-  (void)self;
-  (void)error;
-  return LC_OK;
+  lc_client_handle *client;
+  lc_pouch_txn_key_list keys;
+  long now;
+  size_t i;
+  int rc;
+
+  if (self == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction recovery requires self", NULL,
+                        NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  memset(&keys, 0, sizeof(keys));
+  rc = lc_pouch_state_visit(client->pouch, ".lockd/txn",
+                            lc_pouch_txn_collect_key, &keys, error);
+  if (rc != LC_OK) {
+    lc_pouch_txn_key_list_cleanup(&keys);
+    return rc;
+  }
+  rc = lc_pouch_now_unix(&now, error);
+  for (i = 0U; rc == LC_OK && i < keys.count; ++i) {
+    lc_pouch_state_read_result read_result;
+    lc_pouch_txn_record record;
+    lc_txn_decision_req req;
+    lc_sink *sink;
+    const void *bytes;
+    size_t length;
+    char *body;
+
+    memset(&read_result, 0, sizeof(read_result));
+    memset(&record, 0, sizeof(record));
+    lc_txn_decision_req_init(&req);
+    sink = NULL;
+    body = NULL;
+    rc = lc_pouch_state_read(client->pouch, ".lockd/txn", keys.keys[i],
+                             &read_result, error);
+    if (rc == LC_OK && read_result.found) {
+      rc = lc_sink_to_memory(&sink, error);
+    }
+    if (rc == LC_OK && read_result.found) {
+      rc = lc_copy(read_result.body, sink, NULL, error);
+    }
+    if (rc == LC_OK && read_result.found) {
+      rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+    }
+    if (rc == LC_OK && read_result.found) {
+      body = (char *)malloc(length + 1U);
+      if (body == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch transaction recovery "
+                          "record",
+                          NULL, NULL, NULL);
+      }
+    }
+    if (rc == LC_OK && read_result.found) {
+      memcpy(body, bytes, length);
+      body[length] = '\0';
+      rc = lc_pouch_txn_parse_record(body, length, &record, error);
+    }
+    if (rc == LC_OK && read_result.found) {
+      req.txn_id = keys.keys[i] + strlen("txn/");
+      req.participants = record.participants;
+      req.participant_count = record.participant_count;
+      req.expires_at_unix = record.expires_at_unix;
+      req.tc_term = record.tc_term;
+      req.target_backend_hash = record.target_backend_hash;
+      if (strcmp(record.state, "commit") == 0 ||
+          strcmp(record.state, "rollback") == 0) {
+        rc = lc_pouch_txn_apply_participants(client, &req, record.state,
+                                             error);
+      } else if (strcmp(record.state, "prepare") == 0 &&
+                 record.expires_at_unix > 0L &&
+                 record.expires_at_unix <= now) {
+        lc_txn_decision_res rollback_res;
+
+        memset(&rollback_res, 0, sizeof(rollback_res));
+        rc = lc_pouch_client_txn_decision(self, &req, "rollback",
+                                          &rollback_res, error);
+        lc_txn_decision_res_cleanup(&rollback_res);
+      }
+    }
+    if (sink != NULL) {
+      lc_sink_close(sink);
+    }
+    free(body);
+    lc_pouch_txn_record_cleanup(&record);
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  }
+  lc_pouch_txn_key_list_cleanup(&keys);
+  return rc;
 }
 
 int lc_pouch_client_tc_lease_acquire_method(

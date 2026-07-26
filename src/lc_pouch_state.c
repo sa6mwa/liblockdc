@@ -2510,6 +2510,72 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
+int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
+                         lc_pouch_state_visit_fn visitor, void *context,
+                         lc_error *error) {
+  lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_state_cache_record *record;
+  int force_refresh;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      visitor == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_state_visit requires pouch, namespace, and "
+                        "visitor",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  if (cache == NULL) {
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  force_refresh = 0;
+  if (!pouch->single_writer) {
+    rc = lc_pouch_namespace_marker_refresh_should_scan(
+        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
+        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+        &force_refresh, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
+                                      error);
+  }
+  for (record = rc == LC_OK ? cache->records : NULL; record != NULL;
+       record = record->next) {
+    lc_pouch_state_visit_entry entry;
+
+    if (!record->found) {
+      continue;
+    }
+    memset(&entry, 0, sizeof(entry));
+    entry.key = record->key;
+    entry.content_type = record->content_type;
+    entry.etag = record->etag;
+    entry.version = record->version;
+    entry.bytes = record->bytes;
+    entry.has_query_hidden = record->has_query_hidden;
+    entry.query_hidden = record->query_hidden;
+    rc = visitor(&entry, context, error);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
 void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
                                         lc_pouch_state_read_result *result) {
   if (result == NULL) {

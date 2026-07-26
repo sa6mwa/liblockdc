@@ -37,20 +37,25 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.
-  - [ ] Add durable transaction decision records, replay, staged participant
+  - [x] Add durable transaction decision records, replay, staged participant
     recovery, and expired staged-state cleanup on reopen.
     - [x] Add private segmented state-log decision records for staged commit
       and discard, replay them without projecting them as user state, and
       recover decided staged participants whose tombstone was interrupted.
-    - [ ] Add full transaction participant records and expired undecided staged
+    - [x] Add full transaction participant records and expired undecided staged
       cleanup policy on reopen.
       - [x] Persist pouch transaction coordinator prepare/commit/rollback
         records with participant namespace/key/backend tuples in the internal
         segmented `.lockd/txn` namespace and replay them after reopen.
       - [x] Apply foreground `txn_commit` and `txn_rollback` participant
         records to staged state promotion/discard.
-      - [ ] Replay committed/rolled-back transaction participant records during
-        client open and add expired undecided staged-state cleanup on reopen.
+      - [x] Replay committed/rolled-back transaction participant records during
+        client open and expire prepared transaction participant records into
+        rollback cleanup on reopen.
+      - [ ] Add decided transaction record garbage collection after idempotent
+        replay no longer needs the durable decision body.
+      - [ ] Extend transaction participant replay to queue/object side effects
+        and query/index refresh wakeups.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

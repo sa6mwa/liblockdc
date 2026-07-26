@@ -2390,7 +2390,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   decision_req.txn_id = "txn-pouch-records";
   decision_req.participants = participants;
   decision_req.participant_count = 2U;
-  decision_req.expires_at_unix = 123456789L;
+  decision_req.expires_at_unix = 2147483647L;
   decision_req.tc_term = 7UL;
   decision_req.target_backend_hash = "target-backend";
 
@@ -2539,6 +2539,140 @@ static void test_txn_decisions_persist_participant_records(void **state) {
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &reader, &error);
+  lc_client_close(reader);
+  reader = NULL;
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char record[1024];
+  char namespace_hex[128];
+  char key_hex[128];
+  char backend_hex[128];
+  char bytes[128];
+  int written;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  memset(&replay_res, 0, sizeof(replay_res));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_txn_replay_req_init(&replay_req);
+  lc_error_init(&error);
+  make_root("txn-recovery", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  hex_encode_string("orders/recover", namespace_hex, sizeof(namespace_hex));
+  hex_encode_string("state/recover-commit", key_hex, sizeof(key_hex));
+  hex_encode_string("backend-recover", backend_hex, sizeof(backend_hex));
+  written = snprintf(record, sizeof(record),
+                     "format pouch-txn-v1\nstate 636f6d6d6974\n"
+                     "expires_at_unix 0\ntc_term 1\n"
+                     "target_backend_hash \nparticipant_count 1\n"
+                     "participant %s %s %s\n",
+                     namespace_hex, key_hex, backend_hex);
+  assert_true(written > 0 && (size_t)written < sizeof(record));
+  rc = lc_source_from_memory("recovered-commit", strlen("recovered-commit"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "orders/recover",
+                                  "state/recover-commit",
+                                  "txn-recover-commit", source, NULL,
+                                  &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory(record, strlen(record), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ".lockd/txn", "txn/txn-recover-commit",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  hex_encode_string("state/recover-expired", key_hex, sizeof(key_hex));
+  written = snprintf(record, sizeof(record),
+                     "format pouch-txn-v1\nstate 70726570617265\n"
+                     "expires_at_unix 1\ntc_term 1\n"
+                     "target_backend_hash \nparticipant_count 1\n"
+                     "participant %s %s %s\n",
+                     namespace_hex, key_hex, backend_hex);
+  assert_true(written > 0 && (size_t)written < sizeof(record));
+  rc = lc_source_from_memory("expired-stage", strlen("expired-stage"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "orders/recover",
+                                  "state/recover-expired",
+                                  "txn-recover-expired", source, NULL,
+                                  &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory(record, strlen(record), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ".lockd/txn", "txn/txn-recover-expired",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "orders/recover", "state/recover-commit",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "recovered-commit");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(
+      pouch, "orders/recover",
+      "state/recover-expired/.staging/txn-recover-expired", &read_result,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, "orders/recover", "state/recover-expired",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  replay_req.txn_id = "txn-recover-expired";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(replay_res.state, "rollback");
+
+  lc_txn_replay_res_cleanup(&replay_res);
+  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -2799,6 +2933,7 @@ int main(void) {
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
+      cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),

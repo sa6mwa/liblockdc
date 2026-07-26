@@ -56,6 +56,19 @@ typedef struct lc_pouch_state_read_result {
   lc_source *body;
 } lc_pouch_state_read_result;
 
+typedef struct lc_pouch_state_visit_entry {
+  const char *key;
+  const char *content_type;
+  const char *etag;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
+} lc_pouch_state_visit_entry;
+
+typedef int (*lc_pouch_state_visit_fn)(
+    const lc_pouch_state_visit_entry *entry, void *context, lc_error *error);
+
 int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   const lc_pouch_open_options *options, lc_pouch **out,
                   lc_error *error);
@@ -103,6 +116,9 @@ void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
 int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                         const char *key, lc_pouch_state_read_result *out,
                         lc_error *error);
+int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
+                         lc_pouch_state_visit_fn visitor, void *context,
+                         lc_error *error);
 void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
                                         lc_pouch_state_read_result *result);
 
