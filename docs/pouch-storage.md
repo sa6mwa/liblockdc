@@ -454,10 +454,10 @@ of rewritten JSON files.
   first durable scalar field plus field-presence postings. Selectorless
   `query_keys` can use the validated summary as the first indexed path;
   explicit indexed `query_keys` and document `query` can use scalar equality,
-  scalar `in`, simple case-sensitive `prefix`, including `/tags[]` array
-  membership, and field `exists` postings before final `liblql` acceptance.
-  Broader typed/range/text postings and richer indexed selector plans remain to
-  be implemented.
+  scalar `in`, simple case-sensitive `prefix` and `contains`, including
+  `/tags[]` array membership, and field `exists` postings before final
+  `liblql` acceptance. Broader typed/range/text postings and richer indexed
+  selector plans remain to be implemented.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,

@@ -87,6 +87,7 @@ typedef struct lc_pouch_query_index_term_reader {
   const char *field_hex;
   const char *value_hex;
   int prefix_match;
+  int contains_match;
   lc_pouch_query_index_key_visit_fn visit;
   void *context;
 } lc_pouch_query_index_term_reader;
@@ -1278,6 +1279,7 @@ static int lc_pouch_query_index_parse_and_visit_term(
       ((reader->prefix_match &&
         strncmp(value_hex, reader->value_hex, strlen(reader->value_hex)) ==
             0) ||
+       (reader->contains_match && strstr(value_hex, reader->value_hex) != NULL) ||
        (!reader->prefix_match && strcmp(value_hex, reader->value_hex) == 0))) {
     key = lc_pouch_query_index_hex_decode(reader->allocator, key_hex, error);
     if (key == NULL) {
@@ -2078,7 +2080,7 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
 
 static int lc_pouch_query_index_visit_term_match(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *value, int prefix_match,
+    const char *value, int prefix_match, int contains_match,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
@@ -2116,6 +2118,7 @@ static int lc_pouch_query_index_visit_term_match(
   reader.field_hex = field_hex;
   reader.value_hex = value_hex;
   reader.prefix_match = prefix_match;
+  reader.contains_match = contains_match;
   reader.visit = visit;
   reader.context = context;
   rc = lc_pouch_query_index_read(sidecar_path, &sidecar, error);
@@ -2151,7 +2154,8 @@ int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
                                       unsigned long *index_seq,
                                       lc_error *error) {
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, value, 0, visit, context, index_seq, error);
+      pouch, namespace_name, field, value, 0, 0, visit, context, index_seq,
+      error);
 }
 
 int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
@@ -2169,7 +2173,22 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, prefix, 1, visit, context, index_seq,
+      pouch, namespace_name, field, prefix, 1, 0, visit, context, index_seq,
+      error);
+}
+
+int lc_pouch_query_index_visit_contains(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *needle, lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error) {
+  if (needle == NULL || needle[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index contains lookup requires non-empty "
+                        "needle",
+                        NULL, NULL, NULL);
+  }
+  return lc_pouch_query_index_visit_term_match(
+      pouch, namespace_name, field, needle, 0, 1, visit, context, index_seq,
       error);
 }
 

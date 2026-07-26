@@ -5220,6 +5220,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   pouch_query_key_capture second_page;
   pouch_query_key_capture exists_page;
   pouch_query_key_capture prefix_page;
+  pouch_query_key_capture contains_page;
   pouch_query_key_capture unsupported_page;
   lc_pouch_state_write_options hidden_options;
   lc_pouch_state_write_result write_result;
@@ -5241,6 +5242,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   memset(&second_page, 0, sizeof(second_page));
   memset(&exists_page, 0, sizeof(exists_page));
   memset(&prefix_page, 0, sizeof(prefix_page));
+  memset(&contains_page, 0, sizeof(contains_page));
   memset(&unsupported_page, 0, sizeof(unsupported_page));
   memset(&hidden_options, 0, sizeof(hidden_options));
   memset(&write_result, 0, sizeof(write_result));
@@ -5410,13 +5412,33 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
   query_req.selector_json =
+      "{\"contains\":{\"field\":\"/tags[]\",\"value\":\"nan\"}}";
+  query_req.limit = 0L;
+  rc = client->query_keys(client, &query_req, &handler, &contains_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(contains_page.count, 2);
+  assert_null(query_res.cursor);
+  assert_true(pouch_query_capture_has(&contains_page, "doc/a"));
+  assert_true(pouch_query_capture_has(&contains_page, "doc/c"));
+  assert_false(pouch_query_capture_has(&contains_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&contains_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&contains_page, "doc/deleted"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
       "{\"and\":[{\"eq\":{\"field\":\"/n\",\"value\":\"1\"}}]}";
   rc = client->query_keys(client, &query_req, &handler, &unsupported_page,
                           &query_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_true(bytes_contain_text(error.message, strlen(error.message),
                                  "supports exact scalar equality, in, exists, "
-                                 "and prefix"));
+                                 "prefix, and contains"));
 
   free(namespace_path);
   lc_query_res_cleanup(&query_res);
@@ -5592,6 +5614,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   lc_sink *second_sink;
   lc_sink *exists_sink;
   lc_sink *prefix_sink;
+  lc_sink *contains_sink;
   lc_sink *unsupported_sink;
   lc_query_req query_req;
   lc_query_res query_res;
@@ -5603,10 +5626,12 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   const void *second_bytes;
   const void *exists_bytes;
   const void *prefix_bytes;
+  const void *contains_bytes;
   size_t first_length;
   size_t second_length;
   size_t exists_length;
   size_t prefix_length;
+  size_t contains_length;
   char root[512];
   char cursor[64];
   int rc;
@@ -5619,15 +5644,18 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   second_sink = NULL;
   exists_sink = NULL;
   prefix_sink = NULL;
+  contains_sink = NULL;
   unsupported_sink = NULL;
   first_bytes = NULL;
   second_bytes = NULL;
   exists_bytes = NULL;
   prefix_bytes = NULL;
+  contains_bytes = NULL;
   first_length = 0U;
   second_length = 0U;
   exists_length = 0U;
   prefix_length = 0U;
+  contains_length = 0U;
   memset(&query_res, 0, sizeof(query_res));
   memset(&hidden_options, 0, sizeof(hidden_options));
   memset(&write_result, 0, sizeof(write_result));
@@ -5774,6 +5802,30 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
   query_req.selector_json =
+      "{\"contains\":{\"field\":\"/tags[]\",\"value\":\"nan\"}}";
+  query_req.limit = 0L;
+  rc = lc_sink_to_memory(&contains_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, contains_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(contains_sink, &contains_bytes, &contains_length,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(contains_length > 0U);
+  assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(contains_bytes, contains_length, "\"n\":1"));
+  assert_true(bytes_contain_text(contains_bytes, contains_length, "\"n\":3"));
+  assert_false(bytes_contain_text(contains_bytes, contains_length, "\"n\":2"));
+  assert_false(bytes_contain_text(contains_bytes, contains_length, "\"n\":4"));
+  assert_false(bytes_contain_text(contains_bytes, contains_length, "\"n\":5"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
       "{\"prefix\":{\"field\":\"/tags[]\",\"value\":\"fin\"}}";
   query_req.limit = 0L;
   rc = lc_sink_to_memory(&prefix_sink, &error);
@@ -5805,12 +5857,13 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_true(bytes_contain_text(error.message, strlen(error.message),
                                  "supports exact scalar equality, in, exists, "
-                                 "and prefix"));
+                                 "prefix, and contains"));
 
   lc_sink_close(first_sink);
   lc_sink_close(second_sink);
   lc_sink_close(exists_sink);
   lc_sink_close(prefix_sink);
+  lc_sink_close(contains_sink);
   lc_sink_close(unsupported_sink);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
