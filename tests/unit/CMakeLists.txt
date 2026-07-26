@@ -81,6 +81,17 @@ set_tests_properties(lc_unit_tmp_cleanup_signal PROPERTIES
   LABELS "unit;local"
   TIMEOUT 15
 )
+add_test(NAME lc_unit_tmp_cleanup_abort
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_TMP_CLEANUP_PROBE=$<TARGET_FILE:lc_unit_tmp_cleanup_probe>
+    -DLOCKDC_TMP_PATH_FILE=${CMAKE_BINARY_DIR}/tmp-cleanup-abort.path
+    -DLOCKDC_TMP_CLEANUP_SIGNAL=ABRT
+    -P "${CMAKE_SOURCE_DIR}/tests/tmp_cleanup_signal_test.cmake"
+)
+set_tests_properties(lc_unit_tmp_cleanup_abort PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
 add_test(NAME lc_unit_tmp_cleanup_auto_stale
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TMP_CLEANUP_MODE=auto-stale"

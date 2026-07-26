@@ -129,6 +129,9 @@ static void lc_test_tmp_install_signal_handlers(void) {
   if (lc_test_tmp_signal_handlers_installed) {
     return;
   }
+#ifdef SIGABRT
+  lc_test_tmp_install_one_signal_handler(SIGABRT);
+#endif
 #ifdef SIGHUP
   lc_test_tmp_install_one_signal_handler(SIGHUP);
 #endif

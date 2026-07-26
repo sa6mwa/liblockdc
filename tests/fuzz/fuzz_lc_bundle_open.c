@@ -1,6 +1,7 @@
-#include "lc/lc.h"
-
 #define _POSIX_C_SOURCE 200809L
+
+#include "lc/lc.h"
+#include "../support/lc_test_tmp.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -9,6 +10,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#define BUNDLE_FUZZ_TMP_PREFIX "/tmp/liblockdc-bundle-fuzz-"
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   static const char *endpoints[] = {"https://127.0.0.1:1"};
   lc_client_config config;
@@ -16,12 +19,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   lc_error error;
   int fd;
   FILE *fp;
-  char path_template[] = "/tmp/lc-bundle-fuzz-XXXXXX";
+  char path_template[] = BUNDLE_FUZZ_TMP_PREFIX "XXXXXX";
 
   lc_client_config_init(&config);
   lc_error_init(&error);
   client = NULL;
-  fd = mkstemp(path_template);
+  fd = lc_test_tmp_mkstemp(path_template, BUNDLE_FUZZ_TMP_PREFIX);
   if (fd < 0) {
     lc_error_cleanup(&error);
     return 0;
@@ -30,7 +33,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   fp = fdopen(fd, "wb");
   if (fp == NULL) {
     close(fd);
-    unlink(path_template);
+    lc_test_tmp_cleanup_path(path_template, BUNDLE_FUZZ_TMP_PREFIX);
     lc_error_cleanup(&error);
     return 0;
   }
@@ -49,6 +52,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   (void)lc_client_open(&config, &client, &error);
   lc_client_close(client);
   lc_error_cleanup(&error);
-  unlink(path_template);
+  lc_test_tmp_cleanup_path(path_template, BUNDLE_FUZZ_TMP_PREFIX);
   return 0;
 }

@@ -49,6 +49,7 @@ int main(void) {
   char root[512];
   const char *path_file;
   const char *mode;
+  const char *signal_name;
   FILE *fp;
 
   mode = getenv("LOCKDC_TMP_CLEANUP_MODE");
@@ -76,8 +77,15 @@ int main(void) {
     return 6;
   }
 
-#ifdef SIGTERM
-  (void)raise(SIGTERM);
+  signal_name = getenv("LOCKDC_TMP_CLEANUP_SIGNAL");
+  if (signal_name != NULL && strcmp(signal_name, "ABRT") == 0) {
+#ifdef SIGABRT
+    (void)raise(SIGABRT);
 #endif
+  } else {
+#ifdef SIGTERM
+    (void)raise(SIGTERM);
+#endif
+  }
   return 7;
 }
