@@ -356,6 +356,7 @@ set(lc_sources
     src/lc_pouch_index_doc.c
     src/lc_pouch_index_posting.c
     src/lc_pouch_index_result.c
+    src/lc_pouch_index_temporal.c
     src/lc_pouch_index_terms.c
     src/lc_pouch_number.c
     src/lc_pouch_temporal.c

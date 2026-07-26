@@ -1338,6 +1338,11 @@ private index primitives:
 - `src/lc_pouch_index_result.c` owns cacheable plan-key normalization,
   identity-scoped result-cache lookup/insert, and docID page selection over the
   document table.
+- `src/lc_pouch_index_temporal.c` owns the typed temporal reader primitive for
+  normalized date values. It stores per-field normalized temporal docID vectors,
+  keeps residual postings for plausible temporal strings that must remain under
+  final `liblql` authority, and exposes DateAfter collection for the immutable
+  generation reader cutover.
 - `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
   those primitives. It invokes disk-supplied reader callbacks and normalizes
   the resulting candidate docID sets.
@@ -1442,14 +1447,16 @@ converts the selected page back to summary entries. Updates advance the index
 sequence, so stale cached results miss the cache.
 Simple positive `exists` scans use the same identity-keyed cache with a
 length-prefixed field-presence plan key.
-Residual selectors such as date predicates may deliberately reuse that
-field-presence cache as a candidate-superset cache. The cached vector contains
-documents with the field, and simple date-after planning can narrow that vector
-by dropping supported temporal strings older than or equal to the normalized
-boundary, non-strings, and values that cannot be parsed and do not look like
-possible `liblql` temporal literals. The client-level `liblql` filter remains
-authoritative for final acceptance and owns public cursor selection for residual
-pages.
+Residual selectors such as date predicates use the same identity-keyed result
+cache for accepted candidate docIDs. The current disk bridge still scans
+sidecar field postings for DateAfter and narrows candidates by parsing supported
+temporal strings against the normalized bound while retaining plausible
+unsupported temporal strings as residual candidates. The typed temporal reader
+primitive exists for the immutable generation cutover, where supported temporal
+strings should be compiled before query time and DateAfter should read typed
+docID vectors newer than the bound plus residual postings. The client-level
+`liblql` filter remains authoritative for final acceptance and owns public
+cursor selection for residual pages.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every

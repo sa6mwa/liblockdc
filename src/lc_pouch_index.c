@@ -1,4 +1,5 @@
 #include "lc_pouch_index.h"
+#include "lc_pouch_temporal.h"
 
 #include <string.h>
 
@@ -520,4 +521,32 @@ int lc_pouch_index_collect_contains_term_with_eq_and_not_eq_doc_ids(
   return lc_pouch_index_filter_eq_and_not_eq_term_doc_ids(
       allocator, eq_terms, eq_term_count, not_eq_terms, not_eq_term_count,
       read_exact, read_context, doc_ids, error);
+}
+
+int lc_pouch_index_collect_date_after_doc_ids(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_document_date_after_term *term,
+    lc_pouch_index_date_after_doc_ids_fn read_date_after, void *read_context,
+    lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  lc_pouch_temporal bound;
+  int rc;
+
+  if (term == NULL || term->field == NULL || term->after == NULL ||
+      read_date_after == NULL || doc_ids == NULL) {
+    return LC_OK;
+  }
+  if (!lc_pouch_temporal_parse(term->after, &bound)) {
+    return LC_OK;
+  }
+  rc = read_date_after(read_context, term->field, bound.unix_seconds,
+                       bound.nanosecond, doc_ids, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!lc_pouch_index_doc_id_set_sort_unique(doc_ids)) {
+    return LC_ERR_NOMEM;
+  }
+  (void)allocator;
+  (void)error;
+  return LC_OK;
 }

@@ -211,6 +211,40 @@ static void test_doc_id_set_algebra_allows_alias_destination(void **state) {
   lc_pouch_index_doc_id_set_cleanup(NULL, &left);
 }
 
+static void
+test_temporal_posting_table_appends_after_bound_and_residuals(void **state) {
+  lc_pouch_index_temporal_posting_table table;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {4U, 7U};
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/created_at", 1000, 0, 9U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/created_at", 1100, 0, 3U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/created_at", 1200, 1, 7U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &table, "/other", 1300, 0, 8U));
+  assert_true(lc_pouch_index_temporal_posting_table_add_residual_doc_id(
+      NULL, &table, "/created_at", 4U));
+  assert_true(lc_pouch_index_temporal_posting_table_build_postings(NULL,
+                                                                   &table));
+  assert_true(lc_pouch_index_temporal_posting_table_has_field(
+      &table, "/created_at"));
+
+  assert_true(lc_pouch_index_temporal_posting_table_append_after(
+      NULL, &table, "/created_at", 1100, 0, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_temporal_posting_table_cleanup(NULL, &table);
+}
+
 static int set_from_values(lc_pouch_index_doc_id_set *set,
                            const lc_pouch_index_doc_id *values, size_t count) {
   size_t index;
@@ -804,6 +838,48 @@ static void test_prepared_term_cache_refreshes_by_generation(void **state) {
   lc_pouch_index_prepared_term_cache_cleanup(NULL, &cache);
 }
 
+static void test_prepared_temporal_cache_refreshes_by_identity(void **state) {
+  lc_pouch_index_prepared_temporal_cache cache;
+  lc_pouch_index_doc_id_set decoded;
+  lc_pouch_index_doc_id expected[] = {5U};
+  lc_pouch_index_identity identity;
+
+  (void)state;
+  memset(&cache, 0, sizeof(cache));
+  memset(&decoded, 0, sizeof(decoded));
+  memset(&identity, 0, sizeof(identity));
+
+  identity.sequence = 7U;
+  identity.manifest_generation = 1U;
+  lc_pouch_index_prepared_temporal_cache_refresh_identity(NULL, &cache,
+                                                          identity);
+  assert_int_equal(cache.generation, 7U);
+  assert_int_equal(cache.identity.sequence, 7U);
+  assert_int_equal(cache.identity.manifest_generation, 1U);
+  assert_true(lc_pouch_index_temporal_posting_table_add_value_doc_id(
+      NULL, &cache.postings, "default:/created_at", 1000, 0, 5U));
+  assert_true(lc_pouch_index_temporal_posting_table_build_postings(
+      NULL, &cache.postings));
+
+  lc_pouch_index_prepared_temporal_cache_refresh_identity(NULL, &cache,
+                                                          identity);
+  assert_true(lc_pouch_index_temporal_posting_table_append_after(
+      NULL, &cache.postings, "default:/created_at", 900, 0, &decoded));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&decoded));
+  assert_doc_ids(&decoded, expected, sizeof(expected) / sizeof(expected[0]));
+  lc_pouch_index_doc_id_set_cleanup(NULL, &decoded);
+
+  identity.manifest_generation = 2U;
+  lc_pouch_index_prepared_temporal_cache_refresh_identity(NULL, &cache,
+                                                          identity);
+  assert_int_equal(cache.generation, 7U);
+  assert_int_equal(cache.identity.sequence, 7U);
+  assert_int_equal(cache.identity.manifest_generation, 2U);
+  assert_int_equal(cache.postings.field_count, 0U);
+
+  lc_pouch_index_prepared_temporal_cache_cleanup(NULL, &cache);
+}
+
 static void test_result_cache_replaces_existing_entry(void **state) {
   lc_pouch_index_result_cache cache;
   lc_pouch_index_doc_id_set first;
@@ -1294,6 +1370,25 @@ static int fake_read_contains_doc_ids(
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 21U));
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 3U));
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 5U));
+  return LC_OK;
+}
+
+static int fake_read_date_after_doc_ids(
+    void *context, const char *field, int64_t unix_seconds,
+    int32_t nanosecond, lc_pouch_index_doc_id_set *doc_ids, lc_error *error) {
+  fake_exact_reader *reader;
+
+  (void)error;
+  reader = (fake_exact_reader *)context;
+  assert_non_null(reader);
+  assert_string_equal(field, "/created_at");
+  assert_int_equal(unix_seconds, 1735689600);
+  assert_int_equal(nanosecond, 0);
+  reader->calls++;
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 11U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 5U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 11U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 3U));
   return LC_OK;
 }
 
@@ -1874,6 +1969,33 @@ test_collect_contains_term_with_eq_doc_ids_intersects_in_index(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_collect_date_after_doc_ids_uses_reader_and_deduplicates(
+    void **state) {
+  lc_pouch_document_date_after_term term;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {3U, 5U, 11U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&term, 0, sizeof(term));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  term.field = "/created_at";
+  term.after = "2025-01-01";
+  rc = lc_pouch_index_collect_date_after_doc_ids(
+      NULL, &term, fake_read_date_after_doc_ids, &reader, &doc_ids, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 1U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_doc_table_assigns_dense_ids_by_namespace_key),
@@ -1884,6 +2006,8 @@ int main(void) {
       cmocka_unit_test(test_posting_sparse_decodes_sorted_unique_doc_ids),
       cmocka_unit_test(test_posting_sparse_handles_max_doc_id),
       cmocka_unit_test(test_posting_dense_decodes_and_intersects),
+      cmocka_unit_test(
+          test_temporal_posting_table_appends_after_bound_and_residuals),
       cmocka_unit_test(test_term_table_interns_sorted_terms_with_stable_ids),
       cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
       cmocka_unit_test(test_term_posting_table_appends_by_term_id),
@@ -1892,6 +2016,7 @@ int main(void) {
       cmocka_unit_test(test_result_plan_keys_are_normalized_by_index),
       cmocka_unit_test(test_result_plan_keys_reject_filtered_compound_views),
       cmocka_unit_test(test_prepared_term_cache_refreshes_by_generation),
+      cmocka_unit_test(test_prepared_temporal_cache_refreshes_by_identity),
       cmocka_unit_test(test_result_cache_replaces_existing_entry),
       cmocka_unit_test(
           test_result_page_doc_ids_applies_namespace_cursor_and_limit),
@@ -1934,6 +2059,8 @@ int main(void) {
           test_collect_contains_term_with_eq_doc_ids_intersects_in_index),
       cmocka_unit_test(
           test_collect_contains_term_with_eq_and_not_eq_doc_ids_filters_in_index),
+      cmocka_unit_test(
+          test_collect_date_after_doc_ids_uses_reader_and_deduplicates),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

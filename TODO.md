@@ -874,6 +874,17 @@ Latest release targets confirmed on 2026-07-23:
         generations instead of reparsing string field postings in the disk
         bridge, so the final reader-cache architecture can avoid the remaining
         DateAfter document-return cost.
+        - [x] Add the index-owned temporal primitive and collector API:
+          normalized temporal values are stored as per-field sorted docID
+          vectors with residual postings for plausible unsupported temporal
+          strings, and `lc_pouch_index_collect_date_after_doc_ids` owns bound
+          parsing plus sorted result normalization.
+        - [ ] Move the bridge-stage temporal table into immutable compiled
+          index generation files and wire DateAfter readers to those generation
+          files. A query-time disk bridge attempt was measured on 2026-07-26
+          and rejected because building the temporal table on the hot path
+          regressed 4096-document DateAfter page-one latency to roughly
+          110-140 ms C-side.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not
