@@ -28,6 +28,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add the first rebuildable in-memory state projection cache for
     single-writer reads, with local mutation updates and segment replay rebuild
     on first use.
+  - [x] Implement bound lease typed `save()` by streaming lonejson-generated
+    mapped JSON through the segmented state update path, with lease load and
+    reopen replay coverage.
   - [ ] Add durable transaction decision records, replay, staged participant
     recovery, and expired staged-state cleanup on reopen.
     - [x] Add private segmented state-log decision records for staged commit

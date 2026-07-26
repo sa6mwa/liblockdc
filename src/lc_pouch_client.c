@@ -12,6 +12,93 @@ typedef struct lc_pouch_acquire_for_update_file {
   FILE *fp;
 } lc_pouch_acquire_for_update_file;
 
+typedef struct lc_pouch_lonejson_source {
+  lonejson_generator generator;
+  int initialized;
+} lc_pouch_lonejson_source;
+
+static size_t lc_pouch_lonejson_source_read(void *context, void *buffer,
+                                            size_t count, lc_error *error) {
+  lc_pouch_lonejson_source *source;
+  lonejson_status status;
+  size_t out_len;
+  int out_eof;
+
+  source = (lc_pouch_lonejson_source *)context;
+  if (source == NULL || !source->initialized) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch JSON generator source is closed", NULL, NULL, NULL);
+    return 0U;
+  }
+  out_len = 0U;
+  out_eof = 0;
+  status = lonejson_generator_read(&source->generator,
+                                   (unsigned char *)buffer, count, &out_len,
+                                   &out_eof);
+  if (status != LONEJSON_STATUS_OK) {
+    (void)lc_lonejson_error_from_status(error, status, NULL,
+                                        "failed to stream pouch JSON value");
+    return 0U;
+  }
+  (void)out_eof;
+  return out_len;
+}
+
+static void lc_pouch_lonejson_source_close(void *context) {
+  lc_pouch_lonejson_source *source;
+
+  source = (lc_pouch_lonejson_source *)context;
+  if (source == NULL) {
+    return;
+  }
+  if (source->initialized) {
+    lonejson_generator_cleanup(&source->generator);
+  }
+  free(source);
+}
+
+static int lc_pouch_lonejson_source_open(const lonejson_map *map,
+                                         const void *src, lc_source **out,
+                                         lc_error *error) {
+  lc_pouch_lonejson_source *context;
+  lonejson *runtime;
+  lonejson_status status;
+  int rc;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch JSON source requires output storage", NULL,
+                        NULL, NULL);
+  }
+  *out = NULL;
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize pouch JSON runtime", NULL, NULL,
+                        NULL);
+  }
+  context = (lc_pouch_lonejson_source *)calloc(1U, sizeof(*context));
+  if (context == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch JSON source", NULL, NULL,
+                        NULL);
+  }
+  status = lonejson_generator_init(runtime, &context->generator, map, src);
+  if (status != LONEJSON_STATUS_OK) {
+    free(context);
+    return lc_lonejson_error_from_status(
+        error, status, NULL, "failed to initialize pouch JSON generator");
+  }
+  context->initialized = 1;
+  rc = lc_source_from_callbacks(lc_pouch_lonejson_source_read, NULL,
+                                lc_pouch_lonejson_source_close, context, out,
+                                error);
+  if (rc != LC_OK) {
+    lc_pouch_lonejson_source_close(context);
+  }
+  return rc;
+}
+
 static int lc_pouch_acquire_for_update_sink_write(lc_sink *self,
                                                   const void *bytes,
                                                   size_t count,
@@ -1211,10 +1298,25 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
 
 static int lc_pouch_lease_save_method(lc_lease *self, const lonejson_map *map,
                                       const void *src, lc_error *error) {
-  (void)self;
-  (void)map;
-  (void)src;
-  return lc_pouch_lease_rebuilding(error);
+  lc_source *source;
+  lc_update_opts opts;
+  int rc;
+
+  if (self == NULL || map == NULL || src == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease save requires self, map, and source",
+                        NULL, NULL, NULL);
+  }
+  source = NULL;
+  rc = lc_pouch_lonejson_source_open(map, src, &source, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&opts, 0, sizeof(opts));
+  opts.content_type = "application/json";
+  rc = lc_pouch_lease_update_method(self, source, &opts, error);
+  lc_source_close(source);
+  return rc;
 }
 
 static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,

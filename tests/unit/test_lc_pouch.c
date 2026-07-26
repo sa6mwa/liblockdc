@@ -1899,6 +1899,78 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_lease_save_streams_mapped_json_and_replays_after_reopen(
+    void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_get_res get_res;
+  lc_error error;
+  pouch_value_doc saved;
+  pouch_value_doc loaded;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&saved, 0, sizeof(saved));
+  memset(&loaded, 0, sizeof(loaded));
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_error_init(&error);
+  make_root("lease-save", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-save/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  saved.value = 42;
+  rc = lease->save(lease, &pouch_value_map, &saved, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_string_equal(lease->state_etag, "pouch-state-1");
+
+  rc = lease->load(lease, &pouch_value_map, &loaded, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_int_equal(loaded.value, 42);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_string_equal(get_res.etag, "pouch-state-1");
+  lc_get_res_cleanup(&get_res);
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  lc_client_close(client);
+  client = NULL;
+
+  memset(&loaded, 0, sizeof(loaded));
+  memset(&get_res, 0, sizeof(get_res));
+  open_pouch_client(root, &reader, &error);
+  rc = reader->load(reader, key, &pouch_value_map, &loaded, NULL, &get_res,
+                    &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_int_equal(loaded.value, 42);
+  assert_string_equal(get_res.etag, "pouch-state-1");
+
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_lease_remove_tombstones_state_and_refreshes_view(
     void **state) {
   lc_client *client;
@@ -2147,6 +2219,8 @@ int main(void) {
       cmocka_unit_test(
           test_shared_state_projection_cache_refreshes_peer_markers),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
+      cmocka_unit_test(
+          test_lease_save_streams_mapped_json_and_replays_after_reopen),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
