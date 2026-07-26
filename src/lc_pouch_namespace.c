@@ -5,6 +5,7 @@
 #include "lc_pouch_path.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -583,6 +584,103 @@ int lc_pouch_namespace_marker_snapshot_changed(
   return strcmp(before_fingerprint, after_fingerprint) != 0;
 }
 
+int lc_pouch_namespace_marker_directory_snapshot_read(
+    const lc_allocator *allocator, const char *namespace_path,
+    lc_pouch_namespace_marker_directory_snapshot *out, lc_error *error) {
+  char *markers_path;
+  struct stat st;
+
+  if (namespace_path == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch marker directory snapshot requires namespace "
+                        "path and out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  markers_path = lc_pouch_path_join(allocator, namespace_path, "markers");
+  if (markers_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch markers path", NULL, NULL,
+                        NULL);
+  }
+  if (stat(markers_path, &st) != 0) {
+    lc_free_with_allocator(allocator, markers_path);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to stat pouch marker directory",
+                        strerror(errno), NULL, NULL);
+  }
+  lc_free_with_allocator(allocator, markers_path);
+  if (!S_ISDIR(st.st_mode)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch marker path is not a directory", NULL, NULL,
+                        NULL);
+  }
+  out->size = (long)st.st_size;
+  out->mtime = (long)st.st_mtime;
+  return LC_OK;
+}
+
+int lc_pouch_namespace_marker_directory_snapshot_changed(
+    const lc_pouch_namespace_marker_directory_snapshot *before,
+    const lc_pouch_namespace_marker_directory_snapshot *after) {
+  if (before == NULL || after == NULL) {
+    return 1;
+  }
+  return before->size != after->size || before->mtime != after->mtime;
+}
+
+int lc_pouch_namespace_marker_refresh_should_scan(
+    const lc_allocator *allocator, const char *namespace_path,
+    lc_pouch_namespace_marker_refresh_state *state,
+    unsigned long force_after_skips, int *should_scan, lc_error *error) {
+  lc_pouch_namespace_marker_directory_snapshot directory;
+  lc_pouch_namespace_marker_snapshot peers;
+  int directory_changed;
+  int forced;
+  int peers_changed;
+  int rc;
+
+  if (state == NULL || should_scan == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch marker refresh requires state and scan output",
+                        NULL, NULL, NULL);
+  }
+  memset(&directory, 0, sizeof(directory));
+  memset(&peers, 0, sizeof(peers));
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(
+      allocator, namespace_path, &directory, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  directory_changed =
+      !state->initialized ||
+      lc_pouch_namespace_marker_directory_snapshot_changed(&state->directory,
+                                                           &directory);
+  forced = state->initialized && force_after_skips > 0UL &&
+           state->skipped_refreshes >= force_after_skips;
+  if (!directory_changed && !forced) {
+    ++state->skipped_refreshes;
+    *should_scan = 0;
+    return LC_OK;
+  }
+  rc = lc_pouch_namespace_marker_snapshot_read(allocator, namespace_path,
+                                               &peers, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  peers_changed =
+      !state->initialized ||
+      lc_pouch_namespace_marker_snapshot_changed(&state->peers, &peers);
+  lc_pouch_namespace_marker_snapshot_cleanup(allocator, &state->peers);
+  state->peers = peers;
+  memset(&peers, 0, sizeof(peers));
+  state->directory = directory;
+  state->initialized = 1;
+  state->skipped_refreshes = 0UL;
+  *should_scan = forced || peers_changed;
+  return LC_OK;
+}
+
 void lc_pouch_namespace_marker_snapshot_cleanup(
     const lc_allocator *allocator,
     lc_pouch_namespace_marker_snapshot *snapshot) {
@@ -591,6 +689,16 @@ void lc_pouch_namespace_marker_snapshot_cleanup(
   }
   lc_free_with_allocator(allocator, snapshot->fingerprint);
   memset(snapshot, 0, sizeof(*snapshot));
+}
+
+void lc_pouch_namespace_marker_refresh_state_cleanup(
+    const lc_allocator *allocator,
+    lc_pouch_namespace_marker_refresh_state *state) {
+  if (state == NULL) {
+    return;
+  }
+  lc_pouch_namespace_marker_snapshot_cleanup(allocator, &state->peers);
+  memset(state, 0, sizeof(*state));
 }
 
 void lc_pouch_namespace_manifest_cleanup(

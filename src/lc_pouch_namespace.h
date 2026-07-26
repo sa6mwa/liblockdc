@@ -23,6 +23,18 @@ typedef struct lc_pouch_namespace_marker_snapshot {
   unsigned long marker_count;
 } lc_pouch_namespace_marker_snapshot;
 
+typedef struct lc_pouch_namespace_marker_directory_snapshot {
+  long size;
+  long mtime;
+} lc_pouch_namespace_marker_directory_snapshot;
+
+typedef struct lc_pouch_namespace_marker_refresh_state {
+  int initialized;
+  unsigned long skipped_refreshes;
+  lc_pouch_namespace_marker_directory_snapshot directory;
+  lc_pouch_namespace_marker_snapshot peers;
+} lc_pouch_namespace_marker_refresh_state;
+
 char *lc_pouch_namespace_segment_leaf(const lc_allocator *allocator,
                                       unsigned long segment_id);
 int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
@@ -44,8 +56,21 @@ int lc_pouch_namespace_marker_snapshot_read(
 int lc_pouch_namespace_marker_snapshot_changed(
     const lc_pouch_namespace_marker_snapshot *before,
     const lc_pouch_namespace_marker_snapshot *after);
+int lc_pouch_namespace_marker_directory_snapshot_read(
+    const lc_allocator *allocator, const char *namespace_path,
+    lc_pouch_namespace_marker_directory_snapshot *out, lc_error *error);
+int lc_pouch_namespace_marker_directory_snapshot_changed(
+    const lc_pouch_namespace_marker_directory_snapshot *before,
+    const lc_pouch_namespace_marker_directory_snapshot *after);
+int lc_pouch_namespace_marker_refresh_should_scan(
+    const lc_allocator *allocator, const char *namespace_path,
+    lc_pouch_namespace_marker_refresh_state *state,
+    unsigned long force_after_skips, int *should_scan, lc_error *error);
 void lc_pouch_namespace_marker_snapshot_cleanup(
     const lc_allocator *allocator, lc_pouch_namespace_marker_snapshot *snapshot);
+void lc_pouch_namespace_marker_refresh_state_cleanup(
+    const lc_allocator *allocator,
+    lc_pouch_namespace_marker_refresh_state *state);
 void lc_pouch_namespace_manifest_cleanup(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest);
 

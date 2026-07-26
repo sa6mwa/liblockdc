@@ -1756,8 +1756,10 @@ The redesigned pouch backend currently writes per-namespace
 payloads include a monotonic writer sequence and alternate payload size across
 adjacent writes. It also has deterministic reader-side peer-marker snapshots
 that ignore the current writer marker and compare peer markers by name, size,
-and modification time. Marker-directory fast paths and periodic forced refresh
-remain to be rebuilt on top of these primitives.
+and modification time. Marker-directory snapshot state now provides a fast path
+for unchanged marker directories and a forced-refresh counter so marker hints
+cannot suppress validation indefinitely. Wiring this decision state into cached
+namespace projections remains to be rebuilt on top of these primitives.
 
 Refresh needs two modes:
 

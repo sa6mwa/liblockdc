@@ -286,6 +286,92 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_marker_refresh_uses_directory_fast_path_and_force(
+    void **state) {
+  lc_pouch *pouch;
+  lc_pouch_namespace_marker_refresh_state refresh;
+  lc_pouch_namespace_marker_directory_snapshot before_dir;
+  lc_pouch_namespace_marker_directory_snapshot after_dir;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char peer_path[1024];
+  int should_scan;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  namespace_path = NULL;
+  memset(&refresh, 0, sizeof(refresh));
+  memset(&before_dir, 0, sizeof(before_dir));
+  memset(&after_dir, 0, sizeof(after_dir));
+  should_scan = 0;
+  lc_error_init(&error);
+  make_root("marker-refresh", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_ensure_namespace(pouch, "default", &error);
+  assert_int_equal(rc, LC_OK);
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  assert_non_null(namespace_path);
+
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(should_scan, 1);
+  assert_int_equal(refresh.initialized, 1);
+
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(should_scan, 0);
+
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(
+      NULL, namespace_path, &before_dir, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_namespace_touch_marker(NULL, namespace_path, 1UL, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(should_scan, 0);
+
+  make_peer_marker_path(root, "default", "writer-000000000009.marker",
+                        peer_path, sizeof(peer_path));
+  write_text_file(peer_path, "writer_pid=9\nsequence=1\n");
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(
+      NULL, namespace_path, &after_dir, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lc_pouch_namespace_marker_directory_snapshot_changed(
+                       &before_dir, &after_dir),
+                   1);
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(should_scan, 1);
+
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(should_scan, 0);
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(should_scan, 0);
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      NULL, namespace_path, &refresh, 2UL, &should_scan, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(should_scan, 1);
+
+  lc_pouch_namespace_marker_refresh_state_cleanup(NULL, &refresh);
+  free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void read_source_to_string(lc_source *source, char *buffer,
                                   size_t buffer_size) {
   lc_error error;
@@ -1478,6 +1564,8 @@ int main(void) {
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),
       cmocka_unit_test(test_marker_snapshots_detect_peer_changes),
+      cmocka_unit_test(
+          test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
