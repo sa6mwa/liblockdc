@@ -42,7 +42,16 @@ static int has_prefix(const char *value, const char *prefix) {
 static void cleanup_tree(const char *path) {
   DIR *dir;
   struct dirent *entry;
+  struct stat st;
 
+  if (lstat(path, &st) != 0) {
+    unlink(path);
+    return;
+  }
+  if (!S_ISDIR(st.st_mode)) {
+    unlink(path);
+    return;
+  }
   dir = opendir(path);
   if (dir == NULL) {
     unlink(path);
@@ -719,6 +728,111 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_lease_bound_state_update_get_and_release(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  memset(&get_res, 0, sizeof(get_res));
+  make_root("lease-state", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  assert_string_equal(lease->key, key);
+  assert_string_equal(lease->owner, "lc-unit-pouch");
+  assert_int_equal(lease->version, 0L);
+
+  rc = lc_source_from_memory("{\"value\":7}", strlen("{\"value\":7}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  assert_string_equal(lease->state_etag, "pouch-state-1");
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_int_equal(get_res.version, 1L);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"value\":7}"));
+  assert_memory_equal(bytes, "{\"value\":7}", strlen("{\"value\":7}"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.if_not_exists = 1;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(lease);
+
+  lc_client_close(client);
+  client = NULL;
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  memset(&get_res, 0, sizeof(get_res));
+  open_pouch_client(root, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reader->get(reader, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_int_equal(get_res.version, 1L);
+  sink->close(sink);
+
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_open_creates_segmented_root_layout),
@@ -733,6 +847,7 @@ int main(void) {
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
+      cmocka_unit_test(test_lease_bound_state_update_get_and_release),
   };
 
   return cmocka_run_group_tests(tests, setup_pouch_unit_group,

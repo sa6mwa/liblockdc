@@ -76,7 +76,16 @@ static int bench_has_prefix(const char *value, const char *prefix) {
 static void bench_remove_tree(const char *path) {
   DIR *dir;
   struct dirent *entry;
+  struct stat st;
 
+  if (lstat(path, &st) != 0) {
+    unlink(path);
+    return;
+  }
+  if (!S_ISDIR(st.st_mode)) {
+    unlink(path);
+    return;
+  }
   dir = opendir(path);
   if (dir == NULL) {
     unlink(path);

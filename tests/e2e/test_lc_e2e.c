@@ -466,7 +466,16 @@ static void make_pouch_root(const char *suffix, char *root,
 static void cleanup_pouch_tree(const char *path) {
   DIR *dir;
   struct dirent *entry;
+  struct stat root_st;
 
+  if (lstat(path, &root_st) != 0) {
+    (void)unlink(path);
+    return;
+  }
+  if (!S_ISDIR(root_st.st_mode)) {
+    (void)unlink(path);
+    return;
+  }
   dir = opendir(path);
   if (dir == NULL) {
     (void)unlink(path);
@@ -502,6 +511,43 @@ static void cleanup_pouch_root(const char *root) {
     return;
   }
   cleanup_pouch_tree(root);
+}
+
+static void cleanup_all_pouch_roots(void) {
+  static const char prefix[] = "liblockdc-e2e-pouch-";
+  DIR *dir;
+  struct dirent *entry;
+
+  dir = opendir("/tmp");
+  if (dir == NULL) {
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    char path[1024];
+    int written;
+
+    if (strncmp(entry->d_name, prefix, sizeof(prefix) - 1U) != 0) {
+      continue;
+    }
+    written = snprintf(path, sizeof(path), "/tmp/%s", entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+      continue;
+    }
+    cleanup_pouch_root(path);
+  }
+  (void)closedir(dir);
+}
+
+static int setup_pouch_e2e_group(void **state) {
+  (void)state;
+  cleanup_all_pouch_roots();
+  return 0;
+}
+
+static int teardown_pouch_e2e_group(void **state) {
+  (void)state;
+  cleanup_all_pouch_roots();
+  return 0;
 }
 
 static void open_tcp_client(const char *endpoint, const char *bundle_path,
@@ -3801,7 +3847,8 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_direct_state_attachment_reopen_roundtrip),
       cmocka_unit_test(test_pouch_direct_consumer_service_with_state)};
-  return cmocka_run_group_tests(tests, NULL, NULL);
+  return cmocka_run_group_tests(tests, setup_pouch_e2e_group,
+                                teardown_pouch_e2e_group);
 }
 #elif defined(LC_E2E_GROUP_S3_DIRECT)
 int main(void) {

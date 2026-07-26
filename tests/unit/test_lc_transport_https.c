@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <netinet/in.h>
@@ -1409,6 +1410,70 @@ static int read_file_bytes(const char *path, unsigned char **out,
   return 1;
 }
 
+static int https_has_prefix(const char *value, const char *prefix) {
+  return value != NULL && strncmp(value, prefix, strlen(prefix)) == 0;
+}
+
+static void https_remove_tree(const char *path) {
+  DIR *dir;
+  struct dirent *entry;
+  struct stat st;
+
+  if (lstat(path, &st) != 0) {
+    unlink(path);
+    return;
+  }
+  if (!S_ISDIR(st.st_mode)) {
+    unlink(path);
+    return;
+  }
+  dir = opendir(path);
+  if (dir == NULL) {
+    unlink(path);
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    char child[1024];
+    int written;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(child)) {
+      continue;
+    }
+    https_remove_tree(child);
+  }
+  closedir(dir);
+  rmdir(path);
+}
+
+static void https_cleanup_stale_transport_roots(void) {
+  static const char prefix[] = "liblockdc-transport-";
+  DIR *dir;
+  struct dirent *entry;
+
+  dir = opendir("/tmp");
+  if (dir == NULL) {
+    return;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    char path[1024];
+    int written;
+
+    if (!https_has_prefix(entry->d_name, prefix)) {
+      continue;
+    }
+    written = snprintf(path, sizeof(path), "/tmp/%s", entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+      continue;
+    }
+    https_remove_tree(path);
+  }
+  closedir(dir);
+}
+
 static int https_tls_material_init_shared(void) {
   char template_path[] = "/tmp/liblockdc-transport-XXXXXX";
   https_tls_material *material;
@@ -1416,6 +1481,7 @@ static int https_tls_material_init_shared(void) {
   if (shared_tls_material_initialized) {
     return 1;
   }
+  https_cleanup_stale_transport_roots();
   material = &shared_tls_material;
   memset(material, 0, sizeof(*material));
   if (mkdtemp(template_path) == NULL) {
