@@ -138,6 +138,7 @@ typedef struct lc_pouch_query_index_plan {
   size_t value_count;
   size_t value_capacity;
   int exists;
+  int prefix;
 } lc_pouch_query_index_plan;
 
 typedef struct lc_pouch_query_index_key_set {
@@ -817,6 +818,30 @@ static int lc_pouch_query_index_plan_from_selector(
     }
     return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
   }
+  if (root.kind == LQL_SELECTOR_NODE_PREFIX) {
+    memset(&string_term, 0, sizeof(string_term));
+    status = runtime->selector_node_string_term(runtime, root, &string_term,
+                                                &lql_error_value);
+    if (status != LQL_STATUS_OK) {
+      return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                      "failed to inspect pouch prefix selector");
+    }
+    if (!string_term.value_present || string_term.any_count != 0U ||
+        string_term.field.len == 0U || string_term.value.len == 0U ||
+        string_term.ignore_case) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query index engine supports non-empty "
+                          "case-sensitive prefix selectors only",
+                          NULL, NULL, "pouch-redesign");
+    }
+    plan->field = lc_pouch_query_dup_lql_string(string_term.field, error);
+    if (plan->field == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    plan->prefix = 1;
+    return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
+  }
   if (root.kind == LQL_SELECTOR_NODE_IN) {
     memset(&in_term, 0, sizeof(in_term));
     status = runtime->selector_node_in_term(runtime, root, &in_term,
@@ -879,7 +904,7 @@ static int lc_pouch_query_index_plan_from_selector(
   }
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch query index engine supports exact scalar "
-                      "equality, in, and exists selectors only",
+                      "equality, in, exists, and prefix selectors only",
                       NULL, NULL, "pouch-redesign");
 }
 
@@ -1106,10 +1131,17 @@ static int lc_pouch_query_run_index_predicate(
   for (value_index = 0U; rc == LC_OK && value_index < plan.value_count;
        ++value_index) {
     value_seq = 0UL;
-    rc = lc_pouch_query_index_visit_scalar(
-        scan->client->pouch, scan->namespace_name, plan.field,
-        plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
-        &value_seq, error);
+    if (plan.prefix) {
+      rc = lc_pouch_query_index_visit_prefix(
+          scan->client->pouch, scan->namespace_name, plan.field,
+          plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
+          &value_seq, error);
+    } else {
+      rc = lc_pouch_query_index_visit_scalar(
+          scan->client->pouch, scan->namespace_name, plan.field,
+          plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
+          &value_seq, error);
+    }
     if (rc == LC_OK && value_seq > scan->index_seq) {
       scan->index_seq = value_seq;
     }

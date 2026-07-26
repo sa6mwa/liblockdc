@@ -451,11 +451,11 @@ of rewritten JSON files.
   sidecar, and returns its storage high-water token, including tombstones and
   peer-writer marker invalidation. The sidecar now carries deterministic live
   summary rows with row-count/hash validation, query-hidden flags, and the
-  first durable scalar field plus field-presence postings. Selectorless `query_keys` can use the
-  validated summary as the first indexed path; explicit indexed `query_keys`
-  and document `query` can use scalar equality and scalar `in` postings,
-  including `/tags[]` array membership, and field `exists` postings before
-  final `liblql` acceptance.
+  first durable scalar field plus field-presence postings. Selectorless
+  `query_keys` can use the validated summary as the first indexed path;
+  explicit indexed `query_keys` and document `query` can use scalar equality,
+  scalar `in`, simple case-sensitive `prefix`, including `/tags[]` array
+  membership, and field `exists` postings before final `liblql` acceptance.
   Broader typed/range/text postings and richer indexed selector plans remain to
   be implemented.
 - Avoid hidden memory allocation. Storage code must allocate only through a

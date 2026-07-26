@@ -86,6 +86,7 @@ typedef struct lc_pouch_query_index_term_reader {
   const lc_allocator *allocator;
   const char *field_hex;
   const char *value_hex;
+  int prefix_match;
   lc_pouch_query_index_key_visit_fn visit;
   void *context;
 } lc_pouch_query_index_term_reader;
@@ -1274,7 +1275,10 @@ static int lc_pouch_query_index_parse_and_visit_term(
   }
   rc = LC_OK;
   if (strcmp(field_hex, reader->field_hex) == 0 &&
-      strcmp(value_hex, reader->value_hex) == 0) {
+      ((reader->prefix_match &&
+        strncmp(value_hex, reader->value_hex, strlen(reader->value_hex)) ==
+            0) ||
+       (!reader->prefix_match && strcmp(value_hex, reader->value_hex) == 0))) {
     key = lc_pouch_query_index_hex_decode(reader->allocator, key_hex, error);
     if (key == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -2072,14 +2076,11 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
-int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
-                                      const char *namespace_name,
-                                      const char *field,
-                                      const char *value,
-                                      lc_pouch_query_index_key_visit_fn visit,
-                                      void *context,
-                                      unsigned long *index_seq,
-                                      lc_error *error) {
+static int lc_pouch_query_index_visit_term_match(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *value, int prefix_match,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
   lc_pouch_query_index_term_reader reader;
   char *sidecar_path;
@@ -2091,7 +2092,7 @@ int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
       field == NULL || field[0] == '\0' || value == NULL || visit == NULL ||
       index_seq == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "lc_pouch_query_index_visit_scalar requires pouch, "
+                        "pouch query-index term lookup requires pouch, "
                         "namespace, field, value, visitor, and index_seq",
                         NULL, NULL, NULL);
   }
@@ -2114,6 +2115,7 @@ int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
   reader.allocator = &pouch->allocator;
   reader.field_hex = field_hex;
   reader.value_hex = value_hex;
+  reader.prefix_match = prefix_match;
   reader.visit = visit;
   reader.context = context;
   rc = lc_pouch_query_index_read(sidecar_path, &sidecar, error);
@@ -2138,6 +2140,37 @@ int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
   lc_free_with_allocator(&pouch->allocator, value_hex);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
   return rc;
+}
+
+int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
+                                      const char *namespace_name,
+                                      const char *field,
+                                      const char *value,
+                                      lc_pouch_query_index_key_visit_fn visit,
+                                      void *context,
+                                      unsigned long *index_seq,
+                                      lc_error *error) {
+  return lc_pouch_query_index_visit_term_match(
+      pouch, namespace_name, field, value, 0, visit, context, index_seq, error);
+}
+
+int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
+                                      const char *namespace_name,
+                                      const char *field,
+                                      const char *prefix,
+                                      lc_pouch_query_index_key_visit_fn visit,
+                                      void *context,
+                                      unsigned long *index_seq,
+                                      lc_error *error) {
+  if (prefix == NULL || prefix[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index prefix lookup requires non-empty "
+                        "prefix",
+                        NULL, NULL, NULL);
+  }
+  return lc_pouch_query_index_visit_term_match(
+      pouch, namespace_name, field, prefix, 1, visit, context, index_seq,
+      error);
 }
 
 int lc_pouch_query_index_visit_exists(lc_pouch *pouch,
