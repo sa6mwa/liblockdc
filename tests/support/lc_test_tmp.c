@@ -22,6 +22,7 @@ static size_t lc_test_tmp_tracked_count;
 static size_t lc_test_tmp_swept_count;
 static int lc_test_tmp_atexit_installed;
 static int lc_test_tmp_signal_handlers_installed;
+static int lc_test_tmp_global_stale_swept;
 
 static int lc_test_tmp_has_prefix(const char *value, const char *prefix) {
   return value != NULL && prefix != NULL &&
@@ -278,6 +279,12 @@ static void lc_test_tmp_cleanup_stale_for_template(const char *template_path,
   char parent_dir[LC_TEST_TMP_PATH_MAX];
   char name_prefix[LC_TEST_TMP_PATH_MAX];
 
+  if (!lc_test_tmp_global_stale_swept) {
+    lc_test_tmp_global_stale_swept = 1;
+    lc_test_tmp_cleanup_stale_older_than(
+        "/tmp", "liblockdc-", "/tmp/liblockdc-",
+        lc_test_tmp_auto_stale_seconds());
+  }
   if (!lc_test_tmp_prefix_parts(allowed_prefix, parent_dir, sizeof(parent_dir),
                                 name_prefix, sizeof(name_prefix)) &&
       !lc_test_tmp_template_parts(template_path, parent_dir, sizeof(parent_dir),

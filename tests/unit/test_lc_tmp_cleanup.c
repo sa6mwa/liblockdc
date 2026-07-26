@@ -9,6 +9,7 @@
 
 #define TMP_CLEANUP_PREFIX "/tmp/liblockdc-unit-tmp-cleanup-"
 #define TMP_AUTO_CLEANUP_PREFIX "/tmp/liblockdc-unit-tmp-autocleanup-"
+#define TMP_GLOBAL_STALE_PREFIX "/tmp/liblockdc-unit-tmp-global-stale-"
 
 static int path_exists(const char *path) {
   struct stat st;
@@ -19,10 +20,13 @@ static int path_exists(const char *path) {
 static int run_auto_stale_cleanup_probe(void) {
   char stale_root[] = TMP_AUTO_CLEANUP_PREFIX "abandoned";
   char stale_child[] = TMP_AUTO_CLEANUP_PREFIX "abandoned/child";
+  char global_stale_root[] = TMP_GLOBAL_STALE_PREFIX "abandoned";
+  char global_stale_child[] = TMP_GLOBAL_STALE_PREFIX "abandoned/child";
   char template_path[] = TMP_AUTO_CLEANUP_PREFIX "fresh-XXXXXX";
   char root[512];
 
   lc_test_tmp_cleanup_path(stale_root, TMP_AUTO_CLEANUP_PREFIX);
+  lc_test_tmp_cleanup_path(global_stale_root, TMP_GLOBAL_STALE_PREFIX);
   if (mkdir(stale_root, 0700) != 0) {
     return 10;
   }
@@ -30,15 +34,31 @@ static int run_auto_stale_cleanup_probe(void) {
     lc_test_tmp_cleanup_path(stale_root, TMP_AUTO_CLEANUP_PREFIX);
     return 11;
   }
+  if (mkdir(global_stale_root, 0700) != 0) {
+    lc_test_tmp_cleanup_path(stale_root, TMP_AUTO_CLEANUP_PREFIX);
+    return 12;
+  }
+  if (mkdir(global_stale_child, 0700) != 0) {
+    lc_test_tmp_cleanup_path(stale_root, TMP_AUTO_CLEANUP_PREFIX);
+    lc_test_tmp_cleanup_path(global_stale_root, TMP_GLOBAL_STALE_PREFIX);
+    return 13;
+  }
   if (!lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
                           TMP_AUTO_CLEANUP_PREFIX)) {
     lc_test_tmp_cleanup_path(stale_root, TMP_AUTO_CLEANUP_PREFIX);
-    return 12;
+    lc_test_tmp_cleanup_path(global_stale_root, TMP_GLOBAL_STALE_PREFIX);
+    return 14;
   }
   if (path_exists(stale_root)) {
     lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
     lc_test_tmp_cleanup_path(stale_root, TMP_AUTO_CLEANUP_PREFIX);
-    return 13;
+    lc_test_tmp_cleanup_path(global_stale_root, TMP_GLOBAL_STALE_PREFIX);
+    return 15;
+  }
+  if (path_exists(global_stale_root)) {
+    lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
+    lc_test_tmp_cleanup_path(global_stale_root, TMP_GLOBAL_STALE_PREFIX);
+    return 16;
   }
   lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
   return 0;
