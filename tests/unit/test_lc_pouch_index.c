@@ -73,6 +73,103 @@ static void test_doc_table_assigns_dense_ids_by_namespace_key(void **state) {
   lc_pouch_index_doc_table_cleanup(NULL, &table);
 }
 
+static void test_doc_generation_codec_round_trips(void **state) {
+  lc_pouch_index_doc_generation generation;
+  lc_pouch_index_doc_generation decoded;
+  lc_pouch_index_doc_id id;
+  const char *namespace_name;
+  const char *key;
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t written;
+
+  (void)state;
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  generation.identity.sequence = 123U;
+  generation.identity.manifest_generation = 456U;
+  generation.namespace_name = (char *)malloc(8U);
+  assert_non_null(generation.namespace_name);
+  memcpy(generation.namespace_name, "default", 8U);
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &generation.docs,
+                                                   "default", "bravo", &id));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &generation.docs,
+                                                   "default", "alpha", &id));
+
+  assert_true(
+      lc_pouch_index_doc_generation_encoded_size(&generation, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_doc_generation_encode(&generation, encoded,
+                                                   encoded_size, &written));
+  assert_int_equal(written, encoded_size);
+
+  assert_true(lc_pouch_index_doc_generation_decode(NULL, &decoded, encoded,
+                                                   encoded_size));
+  assert_int_equal(decoded.identity.sequence, 123U);
+  assert_int_equal(decoded.identity.manifest_generation, 456U);
+  assert_string_equal(decoded.namespace_name, "default");
+  assert_int_equal(decoded.docs.count, 2U);
+  assert_true(lc_pouch_index_doc_table_lookup(&decoded.docs, 0U,
+                                              &namespace_name, &key));
+  assert_string_equal(namespace_name, "default");
+  assert_string_equal(key, "alpha");
+  assert_true(lc_pouch_index_doc_table_lookup(&decoded.docs, 1U,
+                                              &namespace_name, &key));
+  assert_string_equal(namespace_name, "default");
+  assert_string_equal(key, "bravo");
+  assert_true(
+      lc_pouch_index_doc_table_find(&decoded.docs, "default", "bravo", &id));
+  assert_int_equal(id, 1U);
+
+  free(encoded);
+  lc_pouch_index_doc_generation_cleanup(NULL, &decoded);
+  lc_pouch_index_doc_generation_cleanup(NULL, &generation);
+}
+
+static void test_doc_generation_codec_rejects_corruption(void **state) {
+  lc_pouch_index_doc_generation generation;
+  lc_pouch_index_doc_generation decoded;
+  lc_pouch_index_doc_id id;
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t first_key_offset;
+  size_t written;
+
+  (void)state;
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  generation.namespace_name = (char *)malloc(8U);
+  assert_non_null(generation.namespace_name);
+  memcpy(generation.namespace_name, "default", 8U);
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &generation.docs,
+                                                   "default", "alpha", &id));
+  assert_true(lc_pouch_index_doc_table_find_or_add(NULL, &generation.docs,
+                                                   "default", "bravo", &id));
+  assert_true(
+      lc_pouch_index_doc_generation_encoded_size(&generation, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_doc_generation_encode(&generation, encoded,
+                                                   encoded_size, &written));
+
+  assert_false(lc_pouch_index_doc_generation_decode(NULL, &decoded, encoded,
+                                                    encoded_size - 1U));
+  encoded[0] = 'x';
+  assert_false(lc_pouch_index_doc_generation_decode(NULL, &decoded, encoded,
+                                                    encoded_size));
+  encoded[0] = 'L';
+
+  first_key_offset = 40U + strlen(generation.namespace_name) + 4U;
+  memcpy(encoded + first_key_offset, "zebra", 5U);
+  assert_false(lc_pouch_index_doc_generation_decode(NULL, &decoded, encoded,
+                                                    encoded_size));
+
+  free(encoded);
+  lc_pouch_index_doc_generation_cleanup(NULL, &decoded);
+  lc_pouch_index_doc_generation_cleanup(NULL, &generation);
+}
+
 static void test_doc_id_set_sort_unique(void **state) {
   lc_pouch_index_doc_id_set set;
   lc_pouch_index_doc_id expected[] = {1U, 2U, 3U, 5U, 8U};
@@ -2668,6 +2765,8 @@ test_collect_date_after_doc_ids_uses_reader_and_deduplicates(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_doc_table_assigns_dense_ids_by_namespace_key),
+      cmocka_unit_test(test_doc_generation_codec_round_trips),
+      cmocka_unit_test(test_doc_generation_codec_rejects_corruption),
       cmocka_unit_test(test_doc_id_set_sort_unique),
       cmocka_unit_test(test_doc_id_scratch_reuses_reset_buffers),
       cmocka_unit_test(test_doc_id_set_algebra),

@@ -505,8 +505,13 @@ Latest release targets confirmed on 2026-07-23:
       merge-based union/intersection/subtraction.
       - [x] Add the first private document table primitive in
         `lc_pouch_index`: namespace/key pairs are sorted into dense docIDs with
-        forward and reverse lookup coverage. Persisted immutable segment doc
-        tables are still pending.
+        forward and reverse lookup coverage.
+      - [x] Add the first private immutable document-table generation codec in
+        `lc_pouch_index`: per-namespace document tables round-trip under index
+        sequence plus segmented manifest identity with sorted key order,
+        implicit dense docIDs, duplicate rejection, and corruption/truncation
+        rejection coverage. Disk publication and consumption are still
+        pending.
       - [x] Wire the disk query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
         namespace/key docIDs, candidate readers append table docIDs, and result

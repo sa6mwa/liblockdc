@@ -53,6 +53,12 @@ typedef struct lc_pouch_index_identity {
   uint64_t manifest_generation;
 } lc_pouch_index_identity;
 
+typedef struct lc_pouch_index_doc_generation {
+  lc_pouch_index_identity identity;
+  char *namespace_name;
+  lc_pouch_index_doc_table docs;
+} lc_pouch_index_doc_generation;
+
 typedef struct lc_pouch_index_posting {
   lc_pouch_index_posting_encoding encoding;
   size_t count;
@@ -244,6 +250,9 @@ void lc_pouch_index_doc_id_scratch_cleanup(
     lc_pouch_index_doc_id_scratch *scratch);
 void lc_pouch_index_doc_table_cleanup(const lc_pouch_allocator *allocator,
                                       lc_pouch_index_doc_table *table);
+void lc_pouch_index_doc_generation_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_doc_generation *generation);
 int lc_pouch_index_doc_table_find(const lc_pouch_index_doc_table *table,
                                   const char *namespace_name, const char *key,
                                   lc_pouch_index_doc_id *id_out);
@@ -275,6 +284,15 @@ int lc_pouch_index_doc_id_set_subtract(const lc_pouch_allocator *allocator,
                                        lc_pouch_index_doc_id_set *dst,
                                        const lc_pouch_index_doc_id_set *left,
                                        const lc_pouch_index_doc_id_set *right);
+int lc_pouch_index_doc_generation_encoded_size(
+    const lc_pouch_index_doc_generation *generation, size_t *size_out);
+int lc_pouch_index_doc_generation_encode(
+    const lc_pouch_index_doc_generation *generation, unsigned char *dst,
+    size_t dst_size, size_t *written_out);
+int lc_pouch_index_doc_generation_decode(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_doc_generation *generation, const unsigned char *src,
+    size_t src_size);
 
 void lc_pouch_index_posting_cleanup(const lc_pouch_allocator *allocator,
                                     lc_pouch_index_posting *posting);

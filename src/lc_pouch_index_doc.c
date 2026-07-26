@@ -4,6 +4,55 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define LC_POUCH_INDEX_DOC_GENERATION_MAGIC "LCPDTG1\0"
+#define LC_POUCH_INDEX_DOC_MAGIC_LEN 8U
+#define LC_POUCH_INDEX_DOC_GENERATION_HEADER_SIZE 40U
+#define LC_POUCH_INDEX_DOC_ENTRY_FIXED_SIZE 4U
+
+static int lc_pouch_index_doc_add_size(size_t *total, size_t add) {
+  if (total == NULL || *total > ((size_t)-1) - add) {
+    return 0;
+  }
+  *total += add;
+  return 1;
+}
+
+static void lc_pouch_index_doc_put_u32(unsigned char *dst, uint32_t value) {
+  dst[0] = (unsigned char)(value & UINT32_C(0xff));
+  dst[1] = (unsigned char)((value >> 8U) & UINT32_C(0xff));
+  dst[2] = (unsigned char)((value >> 16U) & UINT32_C(0xff));
+  dst[3] = (unsigned char)((value >> 24U) & UINT32_C(0xff));
+}
+
+static void lc_pouch_index_doc_put_u64(unsigned char *dst, uint64_t value) {
+  size_t index;
+
+  for (index = 0U; index < 8U; ++index) {
+    dst[index] = (unsigned char)((value >> (index * 8U)) & UINT64_C(0xff));
+  }
+}
+
+static uint32_t lc_pouch_index_doc_get_u32(const unsigned char *src) {
+  return ((uint32_t)src[0]) | (((uint32_t)src[1]) << 8U) |
+         (((uint32_t)src[2]) << 16U) | (((uint32_t)src[3]) << 24U);
+}
+
+static uint64_t lc_pouch_index_doc_get_u64(const unsigned char *src) {
+  uint64_t value;
+  size_t index;
+
+  value = 0U;
+  for (index = 0U; index < 8U; ++index) {
+    value |= ((uint64_t)src[index]) << (index * 8U);
+  }
+  return value;
+}
+
+static int lc_pouch_index_doc_decode_require(size_t src_size, size_t offset,
+                                             size_t needed) {
+  return offset <= src_size && needed <= src_size - offset;
+}
+
 static int lc_pouch_index_doc_id_compare(const void *left, const void *right) {
   lc_pouch_index_doc_id left_id;
   lc_pouch_index_doc_id right_id;
@@ -130,6 +179,17 @@ void lc_pouch_index_doc_table_cleanup(const lc_pouch_allocator *allocator,
   memset(table, 0, sizeof(*table));
 }
 
+void lc_pouch_index_doc_generation_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_doc_generation *generation) {
+  if (generation == NULL) {
+    return;
+  }
+  lc_pouch_free(allocator, generation->namespace_name);
+  lc_pouch_index_doc_table_cleanup(allocator, &generation->docs);
+  memset(generation, 0, sizeof(*generation));
+}
+
 int lc_pouch_index_doc_table_find(const lc_pouch_index_doc_table *table,
                                   const char *namespace_name, const char *key,
                                   lc_pouch_index_doc_id *id_out) {
@@ -201,6 +261,194 @@ int lc_pouch_index_doc_table_lookup(const lc_pouch_index_doc_table *table,
   if (key_out != NULL) {
     *key_out = table->entries[id].key;
   }
+  return 1;
+}
+
+int lc_pouch_index_doc_generation_encoded_size(
+    const lc_pouch_index_doc_generation *generation, size_t *size_out) {
+  size_t namespace_len;
+  size_t total;
+  size_t index;
+
+  if (size_out != NULL) {
+    *size_out = 0U;
+  }
+  if (generation == NULL || generation->namespace_name == NULL ||
+      size_out == NULL || generation->docs.count > (size_t)UINT32_MAX) {
+    return 0;
+  }
+  namespace_len = strlen(generation->namespace_name);
+  if (namespace_len > UINT32_MAX) {
+    return 0;
+  }
+  total = LC_POUCH_INDEX_DOC_GENERATION_HEADER_SIZE;
+  if (!lc_pouch_index_doc_add_size(&total, namespace_len)) {
+    return 0;
+  }
+  for (index = 0U; index < generation->docs.count; ++index) {
+    const lc_pouch_index_doc_entry *entry;
+    size_t key_len;
+
+    entry = &generation->docs.entries[index];
+    if (entry->namespace_name == NULL || entry->key == NULL ||
+        strcmp(entry->namespace_name, generation->namespace_name) != 0 ||
+        entry->id != (lc_pouch_index_doc_id)index) {
+      return 0;
+    }
+    if (index > 0U && lc_pouch_index_doc_table_compare_entry(
+                          &generation->docs.entries[index - 1U],
+                          entry->namespace_name, entry->key) >= 0) {
+      return 0;
+    }
+    key_len = strlen(entry->key);
+    if (key_len > UINT32_MAX ||
+        !lc_pouch_index_doc_add_size(&total,
+                                     LC_POUCH_INDEX_DOC_ENTRY_FIXED_SIZE) ||
+        !lc_pouch_index_doc_add_size(&total, key_len)) {
+      return 0;
+    }
+  }
+  *size_out = total;
+  return 1;
+}
+
+int lc_pouch_index_doc_generation_encode(
+    const lc_pouch_index_doc_generation *generation, unsigned char *dst,
+    size_t dst_size, size_t *written_out) {
+  unsigned char *cursor;
+  size_t needed;
+  size_t namespace_len;
+  size_t index;
+
+  if (written_out != NULL) {
+    *written_out = 0U;
+  }
+  if (generation == NULL || dst == NULL || written_out == NULL ||
+      !lc_pouch_index_doc_generation_encoded_size(generation, &needed) ||
+      dst_size < needed) {
+    return 0;
+  }
+  namespace_len = strlen(generation->namespace_name);
+  cursor = dst;
+  memcpy(cursor, LC_POUCH_INDEX_DOC_GENERATION_MAGIC,
+         LC_POUCH_INDEX_DOC_MAGIC_LEN);
+  cursor += LC_POUCH_INDEX_DOC_MAGIC_LEN;
+  lc_pouch_index_doc_put_u32(cursor, 1U);
+  cursor += 4U;
+  lc_pouch_index_doc_put_u32(cursor, (uint32_t)namespace_len);
+  cursor += 4U;
+  lc_pouch_index_doc_put_u32(cursor, (uint32_t)generation->docs.count);
+  cursor += 4U;
+  lc_pouch_index_doc_put_u32(cursor, 0U);
+  cursor += 4U;
+  lc_pouch_index_doc_put_u64(cursor, generation->identity.sequence);
+  cursor += 8U;
+  lc_pouch_index_doc_put_u64(cursor, generation->identity.manifest_generation);
+  cursor += 8U;
+  memcpy(cursor, generation->namespace_name, namespace_len);
+  cursor += namespace_len;
+  for (index = 0U; index < generation->docs.count; ++index) {
+    const lc_pouch_index_doc_entry *entry;
+    size_t key_len;
+
+    entry = &generation->docs.entries[index];
+    key_len = strlen(entry->key);
+    lc_pouch_index_doc_put_u32(cursor, (uint32_t)key_len);
+    cursor += 4U;
+    memcpy(cursor, entry->key, key_len);
+    cursor += key_len;
+  }
+  *written_out = (size_t)(cursor - dst);
+  return *written_out == needed;
+}
+
+int lc_pouch_index_doc_generation_decode(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_doc_generation *generation, const unsigned char *src,
+    size_t src_size) {
+  lc_pouch_index_doc_generation decoded;
+  size_t offset;
+  uint32_t version;
+  uint32_t namespace_len;
+  uint32_t doc_count;
+  uint32_t index;
+
+  if (generation == NULL || src == NULL ||
+      !lc_pouch_index_doc_decode_require(
+          src_size, 0U, LC_POUCH_INDEX_DOC_GENERATION_HEADER_SIZE) ||
+      memcmp(src, LC_POUCH_INDEX_DOC_GENERATION_MAGIC,
+             LC_POUCH_INDEX_DOC_MAGIC_LEN) != 0) {
+    return 0;
+  }
+  memset(&decoded, 0, sizeof(decoded));
+  offset = LC_POUCH_INDEX_DOC_MAGIC_LEN;
+  version = lc_pouch_index_doc_get_u32(src + offset);
+  offset += 4U;
+  namespace_len = lc_pouch_index_doc_get_u32(src + offset);
+  offset += 4U;
+  doc_count = lc_pouch_index_doc_get_u32(src + offset);
+  offset += 4U;
+  if (lc_pouch_index_doc_get_u32(src + offset) != 0U) {
+    return 0;
+  }
+  offset += 4U;
+  decoded.identity.sequence = lc_pouch_index_doc_get_u64(src + offset);
+  offset += 8U;
+  decoded.identity.manifest_generation =
+      lc_pouch_index_doc_get_u64(src + offset);
+  offset += 8U;
+  if (version != 1U ||
+      !lc_pouch_index_doc_decode_require(src_size, offset, namespace_len)) {
+    return 0;
+  }
+  decoded.namespace_name =
+      (char *)lc_pouch_alloc(allocator, (size_t)namespace_len + 1U);
+  if (decoded.namespace_name == NULL) {
+    return 0;
+  }
+  memcpy(decoded.namespace_name, src + offset, namespace_len);
+  decoded.namespace_name[namespace_len] = '\0';
+  offset += namespace_len;
+  for (index = 0U; index < doc_count; ++index) {
+    lc_pouch_index_doc_id doc_id;
+    char *key;
+    uint32_t key_len;
+
+    if (!lc_pouch_index_doc_decode_require(
+            src_size, offset, LC_POUCH_INDEX_DOC_ENTRY_FIXED_SIZE)) {
+      lc_pouch_index_doc_generation_cleanup(allocator, &decoded);
+      return 0;
+    }
+    key_len = lc_pouch_index_doc_get_u32(src + offset);
+    offset += 4U;
+    if (!lc_pouch_index_doc_decode_require(src_size, offset, key_len)) {
+      lc_pouch_index_doc_generation_cleanup(allocator, &decoded);
+      return 0;
+    }
+    key = (char *)lc_pouch_alloc(allocator, (size_t)key_len + 1U);
+    if (key == NULL) {
+      lc_pouch_index_doc_generation_cleanup(allocator, &decoded);
+      return 0;
+    }
+    memcpy(key, src + offset, key_len);
+    key[key_len] = '\0';
+    offset += key_len;
+    if (!lc_pouch_index_doc_table_find_or_add(
+            allocator, &decoded.docs, decoded.namespace_name, key, &doc_id) ||
+        doc_id != (lc_pouch_index_doc_id)index ||
+        decoded.docs.count != (size_t)index + 1U) {
+      lc_pouch_free(allocator, key);
+      lc_pouch_index_doc_generation_cleanup(allocator, &decoded);
+      return 0;
+    }
+    lc_pouch_free(allocator, key);
+  }
+  if (offset != src_size) {
+    lc_pouch_index_doc_generation_cleanup(allocator, &decoded);
+    return 0;
+  }
+  lc_pouch_index_doc_generation_cleanup(allocator, generation);
+  *generation = decoded;
   return 1;
 }
 

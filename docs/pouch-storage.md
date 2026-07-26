@@ -1327,7 +1327,9 @@ private index primitives:
   union/intersection/subtraction helpers. Query-time equality
   intersection/subtraction uses an internal docID scratch object so repeated
   positive and negative equality terms can reuse temporary term and merge
-  buffers within one collector invocation.
+  buffers within one collector invocation. It also provides the first private
+  per-namespace document-table generation codec: sorted keys round-trip under
+  index sequence plus segmented manifest identity with implicit dense docIDs.
 - `src/lc_pouch_index_posting.c` owns adaptive sparse/dense posting encoding.
   Sparse postings are delta-varint docID streams; dense postings are bitsets
   selected when density and encoded size justify them.
@@ -1376,16 +1378,19 @@ Prepared bridge readers refresh against the same private identity shape the
 final compiled readers should use: an index sequence plus segmented manifest
 generation. That prevents the bridge contract from depending on a naked write
 counter while persisted immutable reader files are still pending.
-The index layer now has the first private document table primitive:
-namespace/key pairs are sorted into dense docIDs with forward and reverse
-lookup. The document table is the cutover target for immutable compiled
-generation readers.
+The index layer now has the first private document table primitive and
+generation codec: namespace/key pairs are sorted into dense docIDs with
+forward and reverse lookup, and per-namespace document-table generations can
+persist sorted keys under the same index sequence plus segmented manifest
+identity used by compiled reader files. The document table is the cutover
+target for immutable compiled generation readers.
 The disk bridge now maintains that document table alongside query summaries
 and routes field-predicate candidate docIDs through it before converting
 results back to summary entries. The table is still rebuilt from current
 summary refresh state rather than persisted as an immutable compiled segment,
-but the query path no longer depends on direct summary-array-position casts for
-field predicate candidate sets.
+and disk publication/consumption of document-table generation files is still
+pending, but the query path no longer depends on direct summary-array-position
+casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
 `(field,value)` pairs are interned into stable term IDs with sorted lookup so
 compiled readers can stop carrying raw string scans through the planner.
