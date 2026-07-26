@@ -779,7 +779,8 @@ Latest release targets confirmed on 2026-07-23:
         while still covering the slow/representative indexed and scan cases.
         - [x] Add and verify `make benchmark-pouch-go-acceptance`, a 4096-doc
           matrix over document/key returns, indexed/scan engines, and
-          `EqSparse`, `RangeHalf`, and `InTags`; medium/acceptance pouch and
+          `EqSparse`, `RangeHalf`, `InTags`, and the known slower
+          `ContainsMessage` text-search case; medium/acceptance pouch and
           lockd disk harnesses should seed once per document-count/return-mode
           group so the run measures query behavior instead of repeated setup.
           Verified on 2026-07-26: the target completed in 2m14s. Pouch indexed
