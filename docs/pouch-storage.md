@@ -2270,9 +2270,9 @@ backend must still expose operations needed by the client adapter:
 - tolerate multi-consumer contention and high fan-in/fan-out without duplicate
   acked delivery
 
-Queue change notification files may be touched after enqueue/nack/visibility
-changes as a future optimization. Correctness must come from polling and log
-refresh.
+Queue change notification files are touched after committed enqueue,
+dequeue/visibility, nack, ack, and extend mutations as an optimization.
+Correctness must still come from polling and log refresh.
 
 Queue notification files are per queue and are not the queue state. A failed
 notification touch after a committed queue mutation must not roll back the
@@ -2293,9 +2293,12 @@ Direct `subscribe` and `subscribe_with_state` use the polling dequeue path for
 bounded pages and enforce the public explicit ack/nack callback contract.
 `watch_queue` now provides the baseline polling watch path: it emits an initial
 snapshot, then emits changed availability/head events from local stats without
-filesystem notifications. This is not full queue parity yet: notification-file
-hints, transaction side effects, stateful commit/rollback, and high-contention
-duplicate-delivery tests remain broader queue work.
+filesystem notifications. Queue mutations now also touch best-effort
+per-queue marker files under the public namespace `queue-notify/` directory so
+future dispatchers can observe wake hints without treating those files as
+authoritative queue state. This is not full queue parity yet: filesystem
+notification integration, transaction side effects, stateful commit/rollback,
+and high-contention duplicate-delivery tests remain broader queue work.
 
 Current pouch backend milestone: the private storage interface exposes queue
 wake status. The pouch backend reports `polling`, marks queue marker files as

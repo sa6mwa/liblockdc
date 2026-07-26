@@ -1087,6 +1087,12 @@ int lc_pouch_namespace_ensure(const lc_allocator *allocator,
         "failed to create pouch namespace index directory", error);
   }
   if (rc == LC_OK) {
+    rc = lc_pouch_namespace_ensure_child(
+        allocator, namespace_path, "queue-notify",
+        "failed to create pouch namespace queue notification directory",
+        error);
+  }
+  if (rc == LC_OK) {
     memset(&manifest, 0, sizeof(manifest));
     rc = lc_pouch_namespace_manifest_open(allocator, root_path, namespace_name,
                                           &manifest, error);

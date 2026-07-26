@@ -1,6 +1,9 @@
 #include "lc_api_internal.h"
 #include "lc_mutate_stream.h"
 #include "lc_pouch.h"
+#include "lc_pouch_internal.h"
+#include "lc_pouch_namespace.h"
+#include "lc_pouch_path.h"
 #include "lc_pouch_query_index.h"
 
 #include "lc_internal.h"
@@ -1179,6 +1182,7 @@ static int lc_pouch_expiration_from_ttl(long ttl_seconds, long *out,
                         "pouch ttl_seconds must be positive", NULL, NULL,
                         NULL);
   }
+  now = 0L;
   rc = lc_pouch_now_unix(&now, error);
   if (rc != LC_OK) {
     return rc;
@@ -2585,6 +2589,71 @@ static int lc_pouch_queue_record_available(
          record->not_visible_until_unix <= now;
 }
 
+static void lc_pouch_queue_touch_notification(lc_client_handle *client,
+                                              const char *namespace_name,
+                                              const char *queue) {
+  lc_error ignored;
+  char text[256];
+  char *namespace_path;
+  char *notify_dir;
+  char *escaped_queue;
+  char *notify_leaf;
+  char *notify_path;
+  size_t leaf_len;
+  unsigned long sequence;
+
+  if (client == NULL || client->pouch == NULL || namespace_name == NULL ||
+      namespace_name[0] == '\0' || queue == NULL || queue[0] == '\0') {
+    return;
+  }
+  lc_error_init(&ignored);
+  namespace_path = NULL;
+  notify_dir = NULL;
+  escaped_queue = NULL;
+  notify_leaf = NULL;
+  notify_path = NULL;
+  if (lc_pouch_namespace_ensure(&client->allocator, client->pouch->root_path,
+                                namespace_name, &ignored) != LC_OK) {
+    goto cleanup;
+  }
+  namespace_path = lc_pouch_namespace_path(&client->allocator,
+                                           client->pouch->root_path,
+                                           namespace_name);
+  notify_dir = namespace_path != NULL
+                   ? lc_pouch_path_join(&client->allocator, namespace_path,
+                                        "queue-notify")
+                   : NULL;
+  escaped_queue = lc_pouch_path_escape_name(&client->allocator, queue);
+  if (notify_dir == NULL || escaped_queue == NULL) {
+    goto cleanup;
+  }
+  leaf_len = strlen(escaped_queue) + strlen(".notify") + 1U;
+  notify_leaf = (char *)lc_alloc_with_allocator(&client->allocator, leaf_len);
+  if (notify_leaf == NULL) {
+    goto cleanup;
+  }
+  snprintf(notify_leaf, leaf_len, "%s.notify", escaped_queue);
+  notify_path = lc_pouch_path_join(&client->allocator, notify_dir,
+                                   notify_leaf);
+  if (notify_path == NULL) {
+    goto cleanup;
+  }
+  sequence = ++client->pouch->marker_sequence;
+  snprintf(text, sizeof(text),
+           "queue=%s\nsequence=%020lu\n%s",
+           escaped_queue, sequence,
+           (sequence % 2UL) == 0UL ? "pad=x\n" : "");
+  (void)lc_pouch_path_write_text_file(notify_path, text, NULL);
+
+cleanup:
+  lc_free_with_allocator(&client->allocator, notify_path);
+  lc_free_with_allocator(&client->allocator, notify_leaf);
+  lc_free_with_allocator(&client->allocator, escaped_queue);
+  lc_free_with_allocator(&client->allocator, notify_dir);
+  lc_free_with_allocator(&client->allocator, namespace_path);
+  lc_error_cleanup(&ignored);
+}
+
 static int lc_pouch_queue_write_record(lc_client_handle *client,
                                        lc_pouch_queue_record *record,
                                        lc_error *error) {
@@ -2607,6 +2676,10 @@ static int lc_pouch_queue_write_record(lc_client_handle *client,
   }
   if (source != NULL) {
     lc_source_close(source);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_queue_touch_notification(client, record->namespace_name,
+                                      record->queue);
   }
   if (rc == LC_OK) {
     free(record->meta_etag);
@@ -4334,6 +4407,7 @@ int lc_pouch_client_queue_stats_method(lc_client *self,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch queue_stats requires queue", NULL, NULL, NULL);
   }
+  now = 0L;
   client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
   memset(&scan, 0, sizeof(scan));
@@ -4446,6 +4520,7 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
                         "pouch queue_nack delay_seconds must be non-negative",
                         NULL, NULL, NULL);
   }
+  now = 0L;
   client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
   memset(&record, 0, sizeof(record));
@@ -4520,6 +4595,7 @@ int lc_pouch_client_queue_extend_method(lc_client *self,
                         "positive",
                         NULL, NULL, NULL);
   }
+  now = 0L;
   client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
   memset(&record, 0, sizeof(record));
@@ -4582,6 +4658,7 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
                         "pouch enqueue timing values must be non-negative",
                         NULL, NULL, NULL);
   }
+  now = 0L;
   client = (lc_client_handle *)self;
   namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
   memset(out, 0, sizeof(*out));
@@ -4639,6 +4716,9 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
                               &result, error);
   }
   if (rc == LC_OK) {
+    lc_pouch_queue_touch_notification(client, namespace_name, req->queue);
+  }
+  if (rc == LC_OK) {
     out->namespace_name = lc_strdup_local(namespace_name);
     out->queue = lc_strdup_local(req->queue);
     out->message_id = lc_strdup_local(record.message_id);
@@ -4689,6 +4769,7 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch dequeue requires queue", NULL, NULL, NULL);
   }
+  now = 0L;
   client = (lc_client_handle *)self;
   memset(&scan, 0, sizeof(scan));
   namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
@@ -5621,6 +5702,7 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
   size_t i;
   int rc;
 
+  now = 0L;
   if (self == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch transaction recovery requires self", NULL,

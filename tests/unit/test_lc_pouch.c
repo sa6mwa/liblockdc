@@ -12,6 +12,7 @@
 #include "lc_pouch.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
+#include "lc_pouch_path.h"
 #include "../support/lc_test_tmp.h"
 
 #include <dirent.h>
@@ -284,6 +285,25 @@ static void make_peer_marker_path(const char *root, const char *namespace_name,
   assert_non_null(namespace_path);
   written = snprintf(path, path_size, "%s/markers/%s", namespace_path, leaf);
   assert_true(written > 0 && (size_t)written < path_size);
+  free(namespace_path);
+}
+
+static void make_queue_notify_path(const char *root,
+                                   const char *namespace_name,
+                                   const char *queue, char *path,
+                                   size_t path_size) {
+  char *namespace_path;
+  char *escaped_queue;
+  int written;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
+  escaped_queue = lc_pouch_path_escape_name(NULL, queue);
+  assert_non_null(namespace_path);
+  assert_non_null(escaped_queue);
+  written = snprintf(path, path_size, "%s/queue-notify/%s.notify",
+                     namespace_path, escaped_queue);
+  assert_true(written > 0 && (size_t)written < path_size);
+  free(escaped_queue);
   free(namespace_path);
 }
 
@@ -974,6 +994,7 @@ static void test_ensure_namespace_creates_per_namespace_layout(void **state) {
   assert_path_dir(namespace_path, "snapshots");
   assert_path_dir(namespace_path, "markers");
   assert_path_dir(namespace_path, "index");
+  assert_path_dir(namespace_path, "queue-notify");
   assert_path_file(namespace_path, "manifest");
   assert_path_file_contains(namespace_path, "manifest",
                             "active_segment=seg-00000000000000000001.log");
@@ -2115,6 +2136,66 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
 
   lc_ack_res_cleanup(&ack_res);
   lc_queue_stats_res_cleanup(&stats_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_queue_mutations_touch_notification_marker(
+    void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_error error;
+  char root[512];
+  char marker_path[1024];
+  unsigned long enqueue_sequence;
+  unsigned long dequeue_sequence;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_error_init(&error);
+  make_root("client-queue-notify", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.namespace_name = "team/notify";
+  enqueue_req.queue = "jobs/main";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  rc = lc_source_from_memory("job", strlen("job"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  make_queue_notify_path(root, "team/notify", "jobs/main", marker_path,
+                         sizeof(marker_path));
+  assert_file_contains(marker_path, "queue=jobs%2fmain");
+  enqueue_sequence = read_marker_sequence(marker_path, NULL);
+  assert_true(enqueue_sequence > 0UL);
+
+  dequeue_req.namespace_name = "team/notify";
+  dequeue_req.queue = "jobs/main";
+  dequeue_req.owner = "worker-notify";
+  dequeue_req.visibility_timeout_seconds = 45L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  dequeue_sequence = read_marker_sequence(marker_path, NULL);
+  assert_true(dequeue_sequence > enqueue_sequence);
+
+  message->close(message);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -5062,6 +5143,8 @@ int main(void) {
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
+      cmocka_unit_test(
+          test_client_queue_mutations_touch_notification_marker),
       cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),

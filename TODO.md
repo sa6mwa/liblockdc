@@ -62,6 +62,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       initial polling snapshot, polls local queue stats for signature changes,
       emits changed availability/head events without filesystem notifications,
       and surfaces callback stop/error semantics.
+    - [x] Touch best-effort per-queue notification hint files under the public
+      namespace `queue-notify/` directory after committed enqueue, dequeue
+      visibility, nack, ack, and extend mutations, without letting notification
+      failures roll back durable queue state.
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.
