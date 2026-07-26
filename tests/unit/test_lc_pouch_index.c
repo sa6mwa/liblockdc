@@ -1028,6 +1028,8 @@ static int fake_read_prefix_doc_ids(void *context,
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 13U));
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 4U));
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 13U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 3U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 5U));
   return LC_OK;
 }
 
@@ -1047,6 +1049,8 @@ static int fake_read_contains_doc_ids(
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 21U));
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 6U));
   assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 21U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 3U));
+  assert_true(lc_pouch_index_doc_id_set_append(NULL, doc_ids, 5U));
   return LC_OK;
 }
 
@@ -1203,7 +1207,7 @@ static void
 test_collect_prefix_term_doc_ids_uses_reader_and_deduplicates(void **state) {
   lc_pouch_document_prefix_term term;
   lc_pouch_index_doc_id_set doc_ids;
-  lc_pouch_index_doc_id expected[] = {4U, 13U};
+  lc_pouch_index_doc_id expected[] = {3U, 4U, 5U, 13U};
   fake_exact_reader reader;
   lc_error error;
   int rc;
@@ -1228,10 +1232,45 @@ test_collect_prefix_term_doc_ids_uses_reader_and_deduplicates(void **state) {
 }
 
 static void
+test_collect_prefix_term_with_eq_doc_ids_intersects_in_index(void **state) {
+  lc_pouch_document_prefix_term prefix;
+  lc_pouch_document_eq_term eq[2];
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {3U, 5U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&prefix, 0, sizeof(prefix));
+  memset(&eq, 0, sizeof(eq));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  prefix.field = "/owner";
+  prefix.value = "bench-";
+  prefix.ignore_case = 1;
+  eq[0].field = "/region";
+  eq[0].value = "s:north";
+  eq[1].field = "/status";
+  eq[1].value = "s:paid";
+  rc = lc_pouch_index_collect_prefix_term_with_eq_doc_ids(
+      NULL, &prefix, eq, sizeof(eq) / sizeof(eq[0]), fake_read_prefix_doc_ids,
+      fake_read_exact_doc_ids, &reader, &doc_ids, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 3U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_collect_contains_term_doc_ids_uses_reader_and_deduplicates(void **state) {
   lc_pouch_document_contains_term term;
   lc_pouch_index_doc_id_set doc_ids;
-  lc_pouch_index_doc_id expected[] = {6U, 21U};
+  lc_pouch_index_doc_id expected[] = {3U, 5U, 6U, 21U};
   fake_exact_reader reader;
   lc_error error;
   int rc;
@@ -1249,6 +1288,42 @@ test_collect_contains_term_doc_ids_uses_reader_and_deduplicates(void **state) {
       NULL, &term, fake_read_contains_doc_ids, &reader, &doc_ids, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(reader.calls, 1U);
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_collect_contains_term_with_eq_doc_ids_intersects_in_index(void **state) {
+  lc_pouch_document_contains_term contains;
+  lc_pouch_document_eq_term eq[2];
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {3U, 5U};
+  fake_exact_reader reader;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&contains, 0, sizeof(contains));
+  memset(&eq, 0, sizeof(eq));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  memset(&reader, 0, sizeof(reader));
+  memset(&error, 0, sizeof(error));
+
+  contains.field = "/body";
+  contains.value = "needle";
+  contains.ignore_case = 0;
+  eq[0].field = "/region";
+  eq[0].value = "s:north";
+  eq[1].field = "/status";
+  eq[1].value = "s:paid";
+  rc = lc_pouch_index_collect_contains_term_with_eq_doc_ids(
+      NULL, &contains, eq, sizeof(eq) / sizeof(eq[0]),
+      fake_read_contains_doc_ids, fake_read_exact_doc_ids, &reader, &doc_ids,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reader.calls, 3U);
   assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
 
   lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
@@ -1292,7 +1367,11 @@ int main(void) {
       cmocka_unit_test(
           test_collect_prefix_term_doc_ids_uses_reader_and_deduplicates),
       cmocka_unit_test(
+          test_collect_prefix_term_with_eq_doc_ids_intersects_in_index),
+      cmocka_unit_test(
           test_collect_contains_term_doc_ids_uses_reader_and_deduplicates),
+      cmocka_unit_test(
+          test_collect_contains_term_with_eq_doc_ids_intersects_in_index),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

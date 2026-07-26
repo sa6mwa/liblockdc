@@ -525,6 +525,10 @@ Latest release targets confirmed on 2026-07-23:
         supplies range and exact docID readers, while `lc_pouch_index`
         intersects the primary range docID set with secondary equality
         postings before result-cache paging.
+      - [x] Move positive equality filtering for primary `prefix` and
+        `contains` candidates into private index collectors as well: disk now
+        adapts text/trigram and exact-term readers, while `lc_pouch_index`
+        performs sorted docID intersections before page selection.
     - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
       delta-varint docID streams and dense bitsets selected by posting
       density/encoded size.

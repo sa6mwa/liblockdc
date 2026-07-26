@@ -1362,6 +1362,9 @@ Primary positive `contains` plans also use a docID reader bridge. The disk
 adapter still chooses a selective trigram candidate when possible and performs
 final substring validation against text postings, but the accepted summary
 docIDs are compiled into adaptive postings before index-owned page selection.
+For primary `prefix` and `contains` plans with positive equality filters, the
+same index-owned intersection path used by compound range plans now combines
+the primary text candidate docIDs with exact-term docIDs before result paging.
 The index layer also owns the first result-cache primitive: a generation plus
 normalized-plan key maps to a sorted docID vector. The simple result-cache plan
 key constructors now live in `lc_pouch_index`, and disk supplies only the known
