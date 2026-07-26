@@ -1526,9 +1526,9 @@ contains, and `DateAfter` scans cache docIDs by the current index identity and
 a length-prefixed plan key, then ask the index layer to page the cached docIDs
 over the document table before disk converts the selected page back to summary
 entries or key snapshots. Updates advance the index sequence, so stale cached
-results miss the cache. DateAfter and simple equality have started the
-result-page local-docID cutover: disk stores namespace-local docIDs in the
-normalized result cache, pages over the identity-matched document-table
+results miss the cache. DateAfter, simple equality, and simple `exists` have
+started the result-page local-docID cutover: disk stores namespace-local docIDs
+in the normalized result cache, pages over the identity-matched document-table
 generation, and converts only the selected local page back to summaries or key
 snapshots. The other simple result-cache families still page over the live
 global in-memory document table until they receive the same cutover.
