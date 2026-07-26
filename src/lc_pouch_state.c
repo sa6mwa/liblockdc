@@ -54,6 +54,16 @@ typedef struct lc_pouch_state_cache_record {
   struct lc_pouch_state_cache_record *next;
 } lc_pouch_state_cache_record;
 
+typedef struct lc_pouch_state_visit_snapshot {
+  char *key;
+  char *content_type;
+  char *etag;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
+} lc_pouch_state_visit_snapshot;
+
 struct lc_pouch_state_cache_namespace {
   char *namespace_name;
   unsigned long max_segment_id;
@@ -121,6 +131,80 @@ static void lc_pouch_state_cache_records_cleanup(
     lc_pouch_state_cache_record_cleanup(allocator, record);
     record = next;
   }
+}
+
+static void lc_pouch_state_visit_snapshot_cleanup(
+    const lc_allocator *allocator, lc_pouch_state_visit_snapshot *snapshot) {
+  if (snapshot == NULL) {
+    return;
+  }
+  lc_free_with_allocator(allocator, snapshot->key);
+  lc_free_with_allocator(allocator, snapshot->content_type);
+  lc_free_with_allocator(allocator, snapshot->etag);
+  memset(snapshot, 0, sizeof(*snapshot));
+}
+
+static void lc_pouch_state_visit_snapshots_cleanup(
+    const lc_allocator *allocator, lc_pouch_state_visit_snapshot *snapshots,
+    size_t count) {
+  size_t i;
+
+  if (snapshots == NULL) {
+    return;
+  }
+  for (i = 0U; i < count; ++i) {
+    lc_pouch_state_visit_snapshot_cleanup(allocator, &snapshots[i]);
+  }
+  lc_free_with_allocator(allocator, snapshots);
+}
+
+static int lc_pouch_state_visit_snapshot_append(
+    const lc_allocator *allocator, lc_pouch_state_visit_snapshot **snapshots,
+    size_t *count, size_t *capacity,
+    const lc_pouch_state_cache_record *record, lc_error *error) {
+  lc_pouch_state_visit_snapshot *next;
+  lc_pouch_state_visit_snapshot *snapshot;
+  size_t next_capacity;
+
+  if (*count == *capacity) {
+    next_capacity = *capacity == 0U ? 16U : *capacity * 2U;
+    next = (lc_pouch_state_visit_snapshot *)lc_calloc_with_allocator(
+        allocator, next_capacity, sizeof(**snapshots));
+    if (next == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch state visit snapshot",
+                          NULL, NULL, NULL);
+    }
+    if (*snapshots != NULL) {
+      memcpy(next, *snapshots, *count * sizeof(**snapshots));
+      lc_free_with_allocator(allocator, *snapshots);
+    }
+    *snapshots = next;
+    *capacity = next_capacity;
+  }
+  snapshot = &(*snapshots)[*count];
+  snapshot->key = lc_strdup_with_allocator(allocator, record->key);
+  snapshot->content_type =
+      record->content_type != NULL
+          ? lc_strdup_with_allocator(allocator, record->content_type)
+          : NULL;
+  snapshot->etag = record->etag != NULL
+                       ? lc_strdup_with_allocator(allocator, record->etag)
+                       : NULL;
+  if (snapshot->key == NULL ||
+      (record->content_type != NULL && snapshot->content_type == NULL) ||
+      (record->etag != NULL && snapshot->etag == NULL)) {
+    lc_pouch_state_visit_snapshot_cleanup(allocator, snapshot);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch state visit entry", NULL,
+                        NULL, NULL);
+  }
+  snapshot->version = record->version;
+  snapshot->bytes = record->bytes;
+  snapshot->has_query_hidden = record->has_query_hidden;
+  snapshot->query_hidden = record->query_hidden;
+  ++*count;
+  return LC_OK;
 }
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch) {
@@ -2516,6 +2600,10 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_cache_record *record;
+  lc_pouch_state_visit_snapshot *snapshots;
+  size_t snapshot_count;
+  size_t snapshot_capacity;
+  size_t i;
   int force_refresh;
   int rc;
 
@@ -2536,6 +2624,9 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
   if (rc != LC_OK) {
     return rc;
   }
+  snapshots = NULL;
+  snapshot_count = 0U;
+  snapshot_capacity = 0U;
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
@@ -2554,24 +2645,34 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
   }
   for (record = rc == LC_OK ? cache->records : NULL; record != NULL;
        record = record->next) {
-    lc_pouch_state_visit_entry entry;
-
     if (!record->found) {
       continue;
     }
+    rc = lc_pouch_state_visit_snapshot_append(
+        &pouch->allocator, &snapshots, &snapshot_count, &snapshot_capacity,
+        record, error);
+    if (rc != LC_OK) {
+      break;
+    }
+  }
+  for (i = 0U; rc == LC_OK && i < snapshot_count; ++i) {
+    lc_pouch_state_visit_entry entry;
+
     memset(&entry, 0, sizeof(entry));
-    entry.key = record->key;
-    entry.content_type = record->content_type;
-    entry.etag = record->etag;
-    entry.version = record->version;
-    entry.bytes = record->bytes;
-    entry.has_query_hidden = record->has_query_hidden;
-    entry.query_hidden = record->query_hidden;
+    entry.key = snapshots[i].key;
+    entry.content_type = snapshots[i].content_type;
+    entry.etag = snapshots[i].etag;
+    entry.version = snapshots[i].version;
+    entry.bytes = snapshots[i].bytes;
+    entry.has_query_hidden = snapshots[i].has_query_hidden;
+    entry.query_hidden = snapshots[i].query_hidden;
     rc = visitor(&entry, context, error);
     if (rc != LC_OK) {
       break;
     }
   }
+  lc_pouch_state_visit_snapshots_cleanup(&pouch->allocator, snapshots,
+                                         snapshot_count);
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;
 }

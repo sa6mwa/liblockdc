@@ -3323,6 +3323,66 @@ static void test_client_queue_watch_detects_transaction_ack_commit(
   lc_error_cleanup(&error);
 }
 
+static void test_client_queue_watch_detects_peer_transaction_ack_commit(
+    void **state) {
+  lc_client *watcher;
+  lc_client *actor;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_watch_queue_req watch_req;
+  lc_watch_handler handler;
+  pouch_watch_txn_ack_capture capture;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  watcher = NULL;
+  actor = NULL;
+  source = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_watch_queue_req_init(&watch_req);
+  lc_watch_handler_init(&handler);
+  memset(&capture, 0, sizeof(capture));
+  lc_error_init(&error);
+  make_root("client-queue-watch-peer-txn", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &watcher, &error);
+  open_pouch_client(root, &actor, &error);
+  enqueue_req.queue = "watch-peer-txn";
+  enqueue_req.visibility_timeout_seconds = 120L;
+  rc = lc_source_from_memory("watch-peer-txn", strlen("watch-peer-txn"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = actor->enqueue(actor, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  capture.client = actor;
+  capture.queue = "watch-peer-txn";
+  watch_req.queue = "watch-peer-txn";
+  handler.handle = pouch_watch_commit_txn_ack_on_initial_available;
+  handler.context = &capture;
+  rc = watcher->watch_queue(watcher, &watch_req, &handler, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_string_equal(error.message,
+                      "pouch watch observed transaction ack commit");
+  assert_int_equal(capture.event_count, 2);
+  assert_int_equal(capture.saw_available, 1);
+  assert_int_equal(capture.saw_unavailable_after_commit, 1);
+  assert_true(capture.head_message_id[0] != '\0');
+
+  lc_client_close(actor);
+  lc_client_close(watcher);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_remove_tombstones_state_and_enforces_preconditions(
     void **state) {
   lc_client *client;
@@ -6359,6 +6419,8 @@ int main(void) {
       cmocka_unit_test(test_client_queue_watch_polling_detects_change),
       cmocka_unit_test(
           test_client_queue_watch_detects_transaction_ack_commit),
+      cmocka_unit_test(
+          test_client_queue_watch_detects_peer_transaction_ack_commit),
       cmocka_unit_test(
           test_client_remove_tombstones_state_and_enforces_preconditions),
       cmocka_unit_test(test_state_mutations_touch_writer_marker),

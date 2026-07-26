@@ -110,11 +110,15 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       - [x] Cover transaction side effects through queue watch polling:
         `watch_queue` observes a transaction-bound queue ack after participant
         commit changes the queue head from available to unavailable.
+      - [x] Cover independent-handle watcher refresh for transaction side
+        effects: one pouch client can watch while another client on the same
+        root commits the transaction-bound queue ack, forcing state visit
+        callbacks to tolerate peer marker cache refresh.
       - [x] Cover mixed object/queue transaction composition: one transaction
         can commit staged attachment upload plus staged queue ack, and another
         can roll both side-effect types back together.
-      - [ ] Extend transaction participant replay to remaining restart and
-        cross-process watcher wakeup coverage.
+      - [ ] Extend transaction participant replay to remaining restart/forked
+        process watcher wakeup coverage.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.
