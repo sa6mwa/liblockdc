@@ -144,6 +144,33 @@ typedef struct lc_pouch_index_number_generation {
   lc_pouch_index_number_posting_table postings;
 } lc_pouch_index_number_generation;
 
+typedef struct lc_pouch_index_text_doc_entry {
+  char *text;
+  lc_pouch_index_doc_id doc_id;
+} lc_pouch_index_text_doc_entry;
+
+typedef struct lc_pouch_index_text_field_entry {
+  char *field;
+  lc_pouch_index_text_doc_entry *values;
+  size_t value_count;
+  size_t value_capacity;
+  int values_sorted;
+} lc_pouch_index_text_field_entry;
+
+typedef struct lc_pouch_index_text_posting_table {
+  lc_pouch_index_text_field_entry *fields;
+  size_t field_count;
+  size_t field_capacity;
+  lc_pouch_index_term_table grams;
+  lc_pouch_index_term_posting_table gram_postings;
+} lc_pouch_index_text_posting_table;
+
+typedef struct lc_pouch_index_text_generation {
+  lc_pouch_index_identity identity;
+  char *namespace_name;
+  lc_pouch_index_text_posting_table postings;
+} lc_pouch_index_text_generation;
+
 typedef struct lc_pouch_index_prepared_term_cache {
   uint64_t generation;
   lc_pouch_index_identity identity;
@@ -392,6 +419,50 @@ int lc_pouch_index_number_generation_encode(
 int lc_pouch_index_number_generation_decode(
     const lc_pouch_allocator *allocator,
     lc_pouch_index_number_generation *generation, const unsigned char *src,
+    size_t src_size);
+void lc_pouch_index_text_posting_table_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_text_posting_table *table);
+int lc_pouch_index_text_posting_table_mark_field(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_text_posting_table *table, const char *field);
+int lc_pouch_index_text_posting_table_has_field(
+    const lc_pouch_index_text_posting_table *table, const char *field);
+int lc_pouch_index_text_posting_table_add_value_doc_id(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_text_posting_table *table, const char *field,
+    const char *text, lc_pouch_index_doc_id doc_id);
+int lc_pouch_index_text_posting_table_build_postings(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_text_posting_table *table);
+int lc_pouch_index_text_posting_table_append_prefix(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_text_posting_table *table, const char *field,
+    const char *prefix, int ignore_case, lc_pouch_index_doc_id_set *dst);
+int lc_pouch_index_text_posting_table_append_contains(
+    const lc_pouch_allocator *allocator,
+    const lc_pouch_index_text_posting_table *table, const char *field,
+    const char *needle, int ignore_case, lc_pouch_index_doc_id_set *dst);
+int lc_pouch_index_text_posting_table_encoded_size(
+    const lc_pouch_index_text_posting_table *table, size_t *size_out);
+int lc_pouch_index_text_posting_table_encode(
+    const lc_pouch_index_text_posting_table *table, unsigned char *dst,
+    size_t dst_size, size_t *written_out);
+int lc_pouch_index_text_posting_table_decode(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_text_posting_table *table, const unsigned char *src,
+    size_t src_size);
+void lc_pouch_index_text_generation_cleanup(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_text_generation *generation);
+int lc_pouch_index_text_generation_encoded_size(
+    const lc_pouch_index_text_generation *generation, size_t *size_out);
+int lc_pouch_index_text_generation_encode(
+    const lc_pouch_index_text_generation *generation, unsigned char *dst,
+    size_t dst_size, size_t *written_out);
+int lc_pouch_index_text_generation_decode(
+    const lc_pouch_allocator *allocator,
+    lc_pouch_index_text_generation *generation, const unsigned char *src,
     size_t src_size);
 void lc_pouch_index_prepared_term_cache_cleanup(
     const lc_pouch_allocator *allocator,

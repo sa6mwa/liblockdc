@@ -606,6 +606,13 @@ Latest release targets confirmed on 2026-07-23:
         query-bound adaptive postings, and missing/stale/corrupt files repair
         on the simple range query path. Compound range paths still use the
         sidecar compiler so secondary predicate filtering remains explicit.
+      - [x] Add the first immutable text/trigram generation codec in
+        `lc_pouch_index`: namespace-scoped field dictionaries store raw text
+        docID vectors, rebuild lowercase ASCII `g:` trigram term postings on
+        build/decode, preserve existing prefix/contains case-folding semantics,
+        and round-trip under index sequence plus segmented manifest identity
+        with corruption/truncation rejection coverage. Disk publication and
+        prepared-reader consumption are still pending.
       - [x] Compile filtered exact sidecar candidates into a per-request
         term-ID posting table for equality and `in` docID readers, preserving
         existing live-state and secondary predicate guards while exercising

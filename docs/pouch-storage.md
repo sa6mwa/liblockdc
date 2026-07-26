@@ -1345,6 +1345,14 @@ private index primitives:
   generation reader cutover, and provides a private deterministic byte codec
   plus a file-level generation container carrying identity and namespace for
   persisted generation files.
+- `src/lc_pouch_index_text.c` owns the compiled text reader primitive for
+  prefix and contains planning. It stores per-field raw text docID vectors,
+  derives lowercase ASCII `g:` trigram postings into term-ID adaptive postings
+  during build/decode, preserves the existing ASCII-only case-insensitive
+  matching semantics, and provides a private deterministic byte codec plus a
+  file-level generation container carrying identity and namespace for persisted
+  generation files. The disk bridge still needs to publish and consume these
+  text generation files.
 - `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
   those primitives. It invokes disk-supplied reader callbacks and normalizes
   the resulting candidate docID sets.
@@ -1418,8 +1426,13 @@ Prepared simple primary `range` readers load identity-matched numeric
 generations, materialize the requested open/closed bounds into query-bound
 adaptive postings, and repair absent, stale, or corrupt files on the simple
 range query path. Compound range paths still use the sidecar compiler so
-secondary predicate filtering stays explicit. Text generations are still
-pending.
+secondary predicate filtering stays explicit.
+Text prefix/contains now have the corresponding private index-layer generation
+foundation: `lc_pouch_index` can encode a namespace-scoped field dictionary of
+raw text values, rebuild deterministic lowercase ASCII trigram postings on
+decode, and answer prefix or contains requests as docID sets. Disk publication,
+identity-matched prepared-reader loading, and stale/corrupt text generation
+repair are still pending.
 For primary equality plans with negative equality filters, the disk adapter can
 now ask exact-term readers for unfiltered primary and negative term docIDs,
 then lets `lc_pouch_index` subtract sorted negative docID sets from the primary

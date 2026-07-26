@@ -415,6 +415,192 @@ static void test_temporal_generation_codec_rejects_corruption(void **state) {
   lc_pouch_index_temporal_generation_cleanup(NULL, &generation);
 }
 
+static void test_text_posting_table_appends_prefix_and_contains(void **state) {
+  lc_pouch_index_text_posting_table table;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id prefix_expected[] = {2U};
+  lc_pouch_index_doc_id contains_expected[] = {4U, 7U};
+  lc_pouch_index_doc_id icontains_expected[] = {2U, 4U, 7U};
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &table, "/body", "benchmark", 4U));
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &table, "/body", "Marked", 2U));
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &table, "/body", "landmark", 7U));
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &table, "/body", "landmark", 7U));
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &table, "/other", "market", 9U));
+  assert_true(lc_pouch_index_text_posting_table_build_postings(NULL, &table));
+  assert_true(lc_pouch_index_text_posting_table_has_field(&table, "/body"));
+
+  assert_true(lc_pouch_index_text_posting_table_append_prefix(
+      NULL, &table, "/body", "mar", 1, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, prefix_expected,
+                 sizeof(prefix_expected) / sizeof(prefix_expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  assert_true(lc_pouch_index_text_posting_table_append_contains(
+      NULL, &table, "/body", "mark", 0, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, contains_expected,
+                 sizeof(contains_expected) / sizeof(contains_expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  assert_true(lc_pouch_index_text_posting_table_append_contains(
+      NULL, &table, "/body", "MARK", 1, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, icontains_expected,
+                 sizeof(icontains_expected) / sizeof(icontains_expected[0]));
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  memset(&doc_ids, 0, sizeof(doc_ids));
+  assert_true(lc_pouch_index_text_posting_table_append_contains(
+      NULL, &table, "/body", "zzz", 1, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, NULL, 0U);
+
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_text_posting_table_cleanup(NULL, &table);
+}
+
+static void test_text_posting_table_codec_round_trips(void **state) {
+  lc_pouch_index_text_posting_table table;
+  lc_pouch_index_text_posting_table decoded;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {4U, 7U};
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t written;
+
+  (void)state;
+  memset(&table, 0, sizeof(table));
+  memset(&decoded, 0, sizeof(decoded));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &table, "/body", "landmark", 7U));
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &table, "/body", "benchmark", 4U));
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &table, "/body", "Marked", 2U));
+  assert_true(lc_pouch_index_text_posting_table_build_postings(NULL, &table));
+  assert_true(
+      lc_pouch_index_text_posting_table_encoded_size(&table, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_text_posting_table_encode(&table, encoded,
+                                                       encoded_size, &written));
+  assert_int_equal(written, encoded_size);
+
+  assert_true(lc_pouch_index_text_posting_table_decode(NULL, &decoded, encoded,
+                                                       encoded_size));
+  assert_true(lc_pouch_index_text_posting_table_append_contains(
+      NULL, &decoded, "/body", "mark", 0, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  free(encoded);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_text_posting_table_cleanup(NULL, &decoded);
+  lc_pouch_index_text_posting_table_cleanup(NULL, &table);
+}
+
+static void test_text_generation_codec_round_trips(void **state) {
+  lc_pouch_index_text_generation generation;
+  lc_pouch_index_text_generation decoded;
+  lc_pouch_index_doc_id_set doc_ids;
+  lc_pouch_index_doc_id expected[] = {2U, 4U, 7U};
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t written;
+
+  (void)state;
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  memset(&doc_ids, 0, sizeof(doc_ids));
+
+  generation.identity.sequence = 123U;
+  generation.identity.manifest_generation = 456U;
+  generation.namespace_name = (char *)malloc(8U);
+  assert_non_null(generation.namespace_name);
+  memcpy(generation.namespace_name, "default", 8U);
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/body", "benchmark", 4U));
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/body", "Marked", 2U));
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/body", "landmark", 7U));
+  assert_true(lc_pouch_index_text_posting_table_build_postings(
+      NULL, &generation.postings));
+  assert_true(
+      lc_pouch_index_text_generation_encoded_size(&generation, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_text_generation_encode(&generation, encoded,
+                                                    encoded_size, &written));
+  assert_int_equal(written, encoded_size);
+
+  assert_true(lc_pouch_index_text_generation_decode(NULL, &decoded, encoded,
+                                                    encoded_size));
+  assert_int_equal(decoded.identity.sequence, 123U);
+  assert_int_equal(decoded.identity.manifest_generation, 456U);
+  assert_string_equal(decoded.namespace_name, "default");
+  assert_true(lc_pouch_index_text_posting_table_append_contains(
+      NULL, &decoded.postings, "/body", "MARK", 1, &doc_ids));
+  assert_true(lc_pouch_index_doc_id_set_sort_unique(&doc_ids));
+  assert_doc_ids(&doc_ids, expected, sizeof(expected) / sizeof(expected[0]));
+
+  free(encoded);
+  lc_pouch_index_doc_id_set_cleanup(NULL, &doc_ids);
+  lc_pouch_index_text_generation_cleanup(NULL, &decoded);
+  lc_pouch_index_text_generation_cleanup(NULL, &generation);
+}
+
+static void test_text_generation_codec_rejects_corruption(void **state) {
+  lc_pouch_index_text_generation generation;
+  lc_pouch_index_text_generation decoded;
+  unsigned char *encoded;
+  size_t encoded_size;
+  size_t written;
+
+  (void)state;
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+
+  generation.namespace_name = (char *)malloc(8U);
+  assert_non_null(generation.namespace_name);
+  memcpy(generation.namespace_name, "default", 8U);
+  assert_true(lc_pouch_index_text_posting_table_add_value_doc_id(
+      NULL, &generation.postings, "/body", "benchmark", 4U));
+  assert_true(lc_pouch_index_text_posting_table_build_postings(
+      NULL, &generation.postings));
+  assert_true(
+      lc_pouch_index_text_generation_encoded_size(&generation, &encoded_size));
+  encoded = (unsigned char *)malloc(encoded_size);
+  assert_non_null(encoded);
+  assert_true(lc_pouch_index_text_generation_encode(&generation, encoded,
+                                                    encoded_size, &written));
+
+  assert_false(lc_pouch_index_text_generation_decode(NULL, &decoded, encoded,
+                                                     encoded_size - 1U));
+  encoded[0] = 'x';
+  assert_false(lc_pouch_index_text_generation_decode(NULL, &decoded, encoded,
+                                                     encoded_size));
+
+  free(encoded);
+  lc_pouch_index_text_generation_cleanup(NULL, &decoded);
+  lc_pouch_index_text_generation_cleanup(NULL, &generation);
+}
+
 static int set_from_values(lc_pouch_index_doc_id_set *set,
                            const lc_pouch_index_doc_id *values, size_t count) {
   size_t index;
@@ -2495,6 +2681,10 @@ int main(void) {
       cmocka_unit_test(test_temporal_posting_table_codec_rejects_corruption),
       cmocka_unit_test(test_temporal_generation_codec_round_trips),
       cmocka_unit_test(test_temporal_generation_codec_rejects_corruption),
+      cmocka_unit_test(test_text_posting_table_appends_prefix_and_contains),
+      cmocka_unit_test(test_text_posting_table_codec_round_trips),
+      cmocka_unit_test(test_text_generation_codec_round_trips),
+      cmocka_unit_test(test_text_generation_codec_rejects_corruption),
       cmocka_unit_test(test_term_table_interns_sorted_terms_with_stable_ids),
       cmocka_unit_test(test_term_posting_table_decodes_by_term_id),
       cmocka_unit_test(test_term_posting_table_appends_by_term_id),

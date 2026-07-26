@@ -359,6 +359,7 @@ set(lc_sources
     src/lc_pouch_index_result.c
     src/lc_pouch_index_temporal.c
     src/lc_pouch_index_terms.c
+    src/lc_pouch_index_text.c
     src/lc_pouch_number.c
     src/lc_pouch_temporal.c
     src/lc_queue_api.c
