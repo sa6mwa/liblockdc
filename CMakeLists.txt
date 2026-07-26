@@ -735,6 +735,24 @@ endif()
 if(LOCKDC_BUILD_TESTS)
     add_subdirectory(tests)
 
+    if(TARGET lockdc_bench)
+        add_test(NAME lockdc_bench_help COMMAND lockdc_bench --help)
+        set_tests_properties(lockdc_bench_help PROPERTIES
+            LABELS "local;smoke"
+            TIMEOUT 10
+            PASS_REGULAR_EXPRESSION "usage: .*lockdc_bench"
+            FAIL_REGULAR_EXPRESSION "benchmark[ ]+iterations|failed during"
+        )
+
+        add_test(NAME lockdc_bench_short_help COMMAND lockdc_bench -h)
+        set_tests_properties(lockdc_bench_short_help PROPERTIES
+            LABELS "local;smoke"
+            TIMEOUT 10
+            PASS_REGULAR_EXPRESSION "usage: .*lockdc_bench"
+            FAIL_REGULAR_EXPRESSION "benchmark[ ]+iterations|failed during"
+        )
+    endif()
+
     if(TARGET lc_shared AND TARGET lc_static)
         add_test(NAME package_archives_test
             COMMAND ${CMAKE_COMMAND}
