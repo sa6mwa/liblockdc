@@ -6917,6 +6917,7 @@ static void test_query_documents_scan_streams_rows(void **state) {
   lc_source *source;
   lc_sink *first_sink;
   lc_sink *second_sink;
+  lc_sink *invalid_sink;
   lc_query_req query_req;
   lc_query_res query_res;
   lc_pouch_state_write_options options;
@@ -6936,6 +6937,7 @@ static void test_query_documents_scan_streams_rows(void **state) {
   source = NULL;
   first_sink = NULL;
   second_sink = NULL;
+  invalid_sink = NULL;
   first_bytes = NULL;
   second_bytes = NULL;
   first_length = 0U;
@@ -7020,6 +7022,7 @@ static void test_query_documents_scan_streams_rows(void **state) {
   query_req.limit = 1L;
   query_req.return_mode = "documents";
   query_req.engine = "scan";
+  query_req.fields_json = "{\"n\":true}";
   rc = client->query(client, &query_req, first_sink, &query_res, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(first_sink, &first_bytes, &first_length, &error);
@@ -7058,8 +7061,20 @@ static void test_query_documents_scan_streams_rows(void **state) {
   assert_false(bytes_contain_text(first_bytes, first_length, "\"n\":5"));
   assert_false(bytes_contain_text(second_bytes, second_length, "\"n\":5"));
 
+  query_req.cursor = NULL;
+  query_req.fields_json = "[\"n\"]";
+  lc_query_res_cleanup(&query_res);
+  rc = lc_sink_to_memory(&invalid_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, invalid_sink, &query_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "fields_json must be a JSON object"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
   lc_sink_close(first_sink);
   lc_sink_close(second_sink);
+  lc_sink_close(invalid_sink);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -7220,6 +7235,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   query_req.return_mode = "documents";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
+  query_req.fields_json = "{\"n\":true}";
   rc = client->query(client, &query_req, first_sink, &query_res, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(first_sink, &first_bytes, &first_length, &error);

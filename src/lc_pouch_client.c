@@ -652,6 +652,41 @@ static int lc_pouch_query_request_validate_selector(const lc_query_req *req,
   return LC_OK;
 }
 
+static int lc_pouch_query_validate_fields_json(const lc_query_req *req,
+                                               lc_error *error) {
+  const char *cursor;
+  lonejson *runtime;
+  lonejson_error lj_error;
+  lonejson_status status;
+
+  if (req == NULL || req->fields_json == NULL || req->fields_json[0] == '\0') {
+    return LC_OK;
+  }
+  cursor = req->fields_json;
+  while (*cursor == ' ' || *cursor == '\t' || *cursor == '\n' ||
+         *cursor == '\r') {
+    ++cursor;
+  }
+  if (*cursor != '{') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query fields_json must be a JSON object", NULL,
+                        NULL, "pouch-redesign");
+  }
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize pouch query fields parser", NULL,
+                        NULL, NULL);
+  }
+  lonejson_error_init(&lj_error);
+  status = runtime->validate_cstr(runtime, req->fields_json, &lj_error);
+  if (status != LONEJSON_STATUS_OK) {
+    return lc_lonejson_error_from_status(
+        error, status, &lj_error, "failed to parse pouch query fields_json");
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_query_parse_selector(lql *runtime, const lc_query_req *req,
                                          lql_selector **out,
                                          lc_error *error) {
@@ -6668,16 +6703,15 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_query_validate_fields_json(req, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (!lc_pouch_query_request_has_selector(req)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query requires selector_json or selector_lql",
                         NULL, NULL,
                         "pouch-redesign");
-  }
-  if (req->fields_json != NULL && req->fields_json[0] != '\0') {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query fields_json is not implemented yet", NULL,
-                        NULL, "pouch-redesign");
   }
   if (req->return_mode != NULL && req->return_mode[0] != '\0' &&
       strcmp(req->return_mode, "documents") != 0) {
