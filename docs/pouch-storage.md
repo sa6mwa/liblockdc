@@ -1081,8 +1081,12 @@ paths for both `query_keys` and document `query` handle single-node scalar
 equality, scalar `in`, and field `exists` selectors by looking up durable
 sidecar postings, sorting/de-duplicating candidate keys, then loading only
 candidate documents for final `liblql` acceptance and `query_hidden`
-suppression. Unsupported indexed selector shapes fail closed instead of falling
-back to scan.
+suppression when the index predicate is not exact. Exact key-only scalar
+queries preserve liblql JSON scalar semantics in the index itself: strings,
+numbers, booleans, and null do not coerce into each other, while numeric
+equality compares parsed JSON number values so equivalent spellings such as
+`1` and `1.0` match the same numeric selector. Unsupported indexed selector
+shapes fail closed instead of falling back to scan.
 Explicit scan mode remains available for full-log/full-summary scanning through
 the ordered metadata summary API, but it does not accept refresh hints because
 no durable query index is consulted.
@@ -1424,10 +1428,12 @@ fuller compiled-index module map remains the target for the remaining work:
 - `src/lc_pouch_index_terms.c` currently owns the first term dictionary
   boundary: sidecar term field/value table records, cleanup, and sorted binary
   lookup, sidecar `term_field`/`term_value` line parsing, sorted exact term-key
-  compare/find/cleanup, simple equality exact scalar construction,
-  single-field `in` value-set construction, plus exact value range collection
-  and merged field span selection for sidecar term readers. It should grow into
-  the owner for term
+  compare/find/cleanup, simple equality exact scalar construction with JSON
+  scalar type bytes, single-field `in` value-set construction, plus exact value
+  range collection and merged field span selection for sidecar term readers.
+  Numeric exact readers scan the relevant field span so parsed-number equality
+  stays aligned with liblql when equivalent numeric spellings have different
+  stored term bytes. It should grow into the owner for term
   dictionaries, term-ID posting tables, and prepared-term cache identity
   refresh/cleanup. Prepared bridge caches are keyed by an explicit private
   index identity containing the current index sequence and segmented manifest

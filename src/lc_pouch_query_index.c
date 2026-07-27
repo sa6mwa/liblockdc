@@ -98,6 +98,7 @@ typedef struct lc_pouch_query_index_term_reader {
   const char *value_hex;
   const lc_pouch_index_term_key *exact_terms;
   size_t exact_term_count;
+  int exact_numeric;
   const char *value_text;
   int prefix_match;
   int contains_match;
@@ -1656,6 +1657,111 @@ static int lc_pouch_query_index_term_reader_matches_value(
   return LC_OK;
 }
 
+static int lc_pouch_query_index_parse_number_hex_value(
+    lc_pouch_query_index_term_reader *reader, const char *value_hex,
+    double *out, lc_error *error) {
+  char *value_text;
+
+  if (lc_pouch_query_index_parse_integer_hex_value(value_hex, out)) {
+    return LC_OK;
+  }
+  value_text = lc_pouch_query_index_hex_decode_scratch(reader, value_hex,
+                                                       error);
+  if (value_text == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  if (!lc_pouch_query_index_parse_number_value(value_text, out)) {
+    return LC_ERR_INVALID;
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_term_reader_number_equal(
+    lc_pouch_query_index_term_reader *reader, const char *left_hex,
+    const char *right_hex, int *matched, lc_error *error) {
+  double left;
+  double right;
+  int rc;
+
+  if (matched == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index numeric exact match requires "
+                        "output",
+                        NULL, NULL, NULL);
+  }
+  *matched = 0;
+  rc = lc_pouch_query_index_parse_number_hex_value(reader, left_hex, &left,
+                                                   error);
+  if (rc == LC_ERR_INVALID) {
+    return LC_OK;
+  }
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_query_index_parse_number_hex_value(reader, right_hex, &right,
+                                                   error);
+  if (rc == LC_ERR_INVALID) {
+    return LC_OK;
+  }
+  if (rc != LC_OK) {
+    return rc;
+  }
+  *matched = left == right;
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_term_reader_matches_exact(
+    lc_pouch_query_index_term_reader *reader, const char *field_hex,
+    const char *value_hex, char value_type, size_t *value_index,
+    int *matched, lc_error *error) {
+  size_t index;
+  int same_number;
+  int rc;
+
+  if (matched == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index exact match requires output", NULL,
+                        NULL, NULL);
+  }
+  *matched = 0;
+  if (reader == NULL || field_hex == NULL || value_hex == NULL ||
+      reader->exact_terms == NULL || reader->exact_term_count == 0U) {
+    return LC_OK;
+  }
+  if (!reader->exact_numeric) {
+    *matched = lc_pouch_index_term_keys_find(
+        reader->exact_terms, reader->exact_term_count, field_hex, value_hex,
+        value_type, value_index);
+    return LC_OK;
+  }
+  for (index = 0U; index < reader->exact_term_count; ++index) {
+    if (strcmp(field_hex, reader->exact_terms[index].field_hex) != 0 ||
+        value_type != reader->exact_terms[index].value_type) {
+      continue;
+    }
+    if (value_type == 'n') {
+      same_number = 0;
+      rc = lc_pouch_query_index_term_reader_number_equal(
+          reader, value_hex, reader->exact_terms[index].value_hex,
+          &same_number, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      if (!same_number) {
+        continue;
+      }
+    } else if (strcmp(value_hex, reader->exact_terms[index].value_hex) != 0) {
+      continue;
+    }
+    if (value_index != NULL) {
+      *value_index = index;
+    }
+    *matched = 1;
+    return LC_OK;
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_query_index_parse_and_visit_term(
     char *line, lc_pouch_query_index_term_reader *reader,
     lc_error *error) {
@@ -1726,15 +1832,19 @@ static int lc_pouch_query_index_parse_and_visit_term(
   matched = 0;
   field_cmp = 0;
   if (rc == LC_OK && reader->exact_term_count > 0U) {
-    field_cmp = lc_pouch_index_term_key_compare_pair(
-        field_hex, value_hex,
-        &reader->exact_terms[reader->exact_term_count - 1U]);
+    field_cmp = reader->exact_numeric
+                    ? strcmp(field_hex,
+                             reader->exact_terms[reader->exact_term_count - 1U]
+                                 .field_hex)
+                    : lc_pouch_index_term_key_compare_pair(
+                          field_hex, value_hex,
+                          &reader->exact_terms[reader->exact_term_count - 1U]);
     if (field_cmp > 0) {
       reader->stop = 1;
     } else {
-      matched = lc_pouch_index_term_keys_find(
-          reader->exact_terms, reader->exact_term_count,
-          field_hex, value_hex, &value_index);
+      rc = lc_pouch_query_index_term_reader_matches_exact(
+          reader, field_hex, value_hex, value_type, &value_index, &matched,
+          error);
     }
   } else if (rc == LC_OK &&
              (field_cmp = strcmp(field_hex, reader->field_hex)) > 0) {
@@ -2260,9 +2370,27 @@ static int lc_pouch_query_index_term_reader_exact_ranges(
   if (reader == NULL || reader->exact_term_count == 0U) {
     return LC_OK;
   }
+  if (reader->exact_numeric) {
+    return LC_OK;
+  }
   return lc_pouch_index_term_values_collect_ranges(
       values, value_count, reader->exact_terms, reader->exact_term_count,
       out_ranges, out_count, allocator, error);
+}
+
+static int lc_pouch_query_index_term_keys_have_numeric(
+    const lc_pouch_index_term_key *terms, size_t term_count) {
+  size_t index;
+
+  if (terms == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < term_count; ++index) {
+    if (terms[index].value_type == 'n') {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static int lc_pouch_query_index_term_reader_range(
@@ -2603,7 +2731,8 @@ static int lc_pouch_query_index_read_with_reader(
               &term_valid, error);
         }
       } else if (rc == LC_OK && term_reader != NULL &&
-                 term_reader->exact_term_count > 0U) {
+                 term_reader->exact_term_count > 0U &&
+                 !term_reader->exact_numeric) {
         term_valid = 1;
         if (want_rows || want_presences) {
           rc = lc_pouch_query_index_skip_lines(
@@ -3518,8 +3647,8 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
 
 static int lc_pouch_query_index_visit_term_match(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *value, int prefix_match, int contains_match, int ignore_case,
-    const lc_pouch_query_index_range_bounds *range_bounds,
+    const char *value, char value_type, int prefix_match, int contains_match,
+    int ignore_case, const lc_pouch_query_index_range_bounds *range_bounds,
     const lc_pouch_query_index_date_bounds *date_bounds,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
@@ -3553,9 +3682,21 @@ static int lc_pouch_query_index_visit_term_match(
   value_hex = NULL;
   exact_scalar = !prefix_match && !contains_match && !ignore_case &&
                  range_bounds == NULL && date_bounds == NULL;
+  if (exact_scalar &&
+      (value_type != 's' && value_type != 'n' && value_type != 'b' &&
+       value_type != 'z')) {
+    lc_free_with_allocator(&pouch->allocator, sidecar_path);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index scalar lookup requires a JSON "
+                        "scalar value type",
+                        NULL, NULL, NULL);
+  }
   if (exact_scalar) {
+    char value_types[1];
+
+    value_types[0] = value_type;
     rc = lc_pouch_index_term_keys_build_exact_for_field(
-        field, &value, 1U, &exact_terms, &exact_term_count,
+        field, &value, value_types, 1U, &exact_terms, &exact_term_count,
         &pouch->allocator, error);
   } else {
     field_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, field);
@@ -3582,6 +3723,9 @@ static int lc_pouch_query_index_visit_term_match(
   reader.value_hex = value_hex;
   reader.exact_terms = exact_terms;
   reader.exact_term_count = exact_term_count;
+  reader.exact_numeric =
+      lc_pouch_query_index_term_keys_have_numeric(exact_terms,
+                                                  exact_term_count);
   reader.value_text = value;
   reader.prefix_match = prefix_match;
   reader.contains_match = contains_match;
@@ -3632,19 +3776,19 @@ static int lc_pouch_query_index_visit_term_match(
 int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
                                       const char *namespace_name,
                                       const char *field,
-                                      const char *value,
+                                      const char *value, char value_type,
                                       lc_pouch_query_index_key_visit_fn visit,
                                       void *context,
                                       unsigned long *index_seq,
                                       lc_error *error) {
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, value, 0, 0, 0, NULL, NULL, visit, context,
-      index_seq, error);
+      pouch, namespace_name, field, value, value_type, 0, 0, 0, NULL, NULL,
+      visit, context, index_seq, error);
 }
 
 int lc_pouch_query_index_visit_scalar_any(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *const *values, size_t value_count,
+    const char *const *values, const char *value_types, size_t value_count,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
@@ -3656,7 +3800,8 @@ int lc_pouch_query_index_visit_scalar_any(
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
       field == NULL || field[0] == '\0' || values == NULL ||
-      value_count == 0U || visit == NULL || index_seq == NULL) {
+      value_types == NULL || value_count == 0U || visit == NULL ||
+      index_seq == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index multi-scalar lookup requires "
                         "pouch, namespace, field, values, visitor, and "
@@ -3665,8 +3810,8 @@ int lc_pouch_query_index_visit_scalar_any(
   }
   if (value_count == 1U) {
     return lc_pouch_query_index_visit_scalar(
-        pouch, namespace_name, field, values[0], visit, context, index_seq,
-        error);
+        pouch, namespace_name, field, values[0], value_types[0], visit,
+        context, index_seq, error);
   }
   memset(&reader, 0, sizeof(reader));
   *index_seq = 0UL;
@@ -3677,12 +3822,15 @@ int lc_pouch_query_index_visit_scalar_any(
   exact_terms = NULL;
   exact_term_count = 0U;
   rc = lc_pouch_index_term_keys_build_exact_for_field(
-      field, values, value_count, &exact_terms, &exact_term_count,
+      field, values, value_types, value_count, &exact_terms, &exact_term_count,
       &pouch->allocator, error);
   if (rc == LC_OK) {
     reader.allocator = &pouch->allocator;
     reader.exact_terms = exact_terms;
     reader.exact_term_count = exact_term_count;
+    reader.exact_numeric =
+        lc_pouch_query_index_term_keys_have_numeric(exact_terms,
+                                                    exact_term_count);
     reader.visit = visit;
     reader.context = context;
     rc = lc_pouch_query_index_read_with_reader(sidecar_path, &sidecar, NULL,
@@ -3730,8 +3878,8 @@ int lc_pouch_query_index_visit_scalar_terms(
   }
   if (term_count == 1U) {
     return lc_pouch_query_index_visit_scalar(
-        pouch, namespace_name, terms[0].field, terms[0].value, visit, context,
-        index_seq, error);
+        pouch, namespace_name, terms[0].field, terms[0].value,
+        terms[0].value_type, visit, context, index_seq, error);
   }
   memset(&reader, 0, sizeof(reader));
   *index_seq = 0UL;
@@ -3748,6 +3896,9 @@ int lc_pouch_query_index_visit_scalar_terms(
     reader.allocator = &pouch->allocator;
     reader.exact_terms = exact_terms;
     reader.exact_term_count = exact_term_count;
+    reader.exact_numeric =
+        lc_pouch_query_index_term_keys_have_numeric(exact_terms,
+                                                    exact_term_count);
     reader.visit = visit;
     reader.context = context;
     rc = lc_pouch_query_index_read_with_reader(sidecar_path, &sidecar, NULL,
@@ -3932,7 +4083,7 @@ static int lc_pouch_query_index_any_merge_emit(
 
 int lc_pouch_query_index_visit_scalar_any_merged(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *const *values, size_t value_count,
+    const char *const *values, const char *value_types, size_t value_count,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_any_merge_context merge_context;
@@ -3942,13 +4093,13 @@ int lc_pouch_query_index_visit_scalar_any_merged(
   memset(&merge_context, 0, sizeof(merge_context));
   if (pouch == NULL || value_count == 0U) {
     return lc_pouch_query_index_visit_scalar_any(
-        pouch, namespace_name, field, values, value_count, visit, context,
-        index_seq, error);
+        pouch, namespace_name, field, values, value_types, value_count, visit,
+        context, index_seq, error);
   }
   if (value_count == 1U) {
     return lc_pouch_query_index_visit_scalar(
-        pouch, namespace_name, field, values[0], visit, context, index_seq,
-        error);
+        pouch, namespace_name, field, values[0], value_types[0], visit,
+        context, index_seq, error);
   }
   merge_context.allocator = &pouch->allocator;
   merge_context.list_count = value_count;
@@ -3962,7 +4113,7 @@ int lc_pouch_query_index_visit_scalar_any_merged(
   memset(merge_context.lists, 0,
          value_count * sizeof(*merge_context.lists));
   rc = lc_pouch_query_index_visit_scalar_any(
-      pouch, namespace_name, field, values, value_count,
+      pouch, namespace_name, field, values, value_types, value_count,
       lc_pouch_query_index_any_merge_collect, &merge_context, index_seq, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_any_merge_emit(&merge_context, visit, context,
@@ -3993,8 +4144,8 @@ int lc_pouch_query_index_visit_scalar_terms_merged(
   }
   if (term_count == 1U) {
     return lc_pouch_query_index_visit_scalar(
-        pouch, namespace_name, terms[0].field, terms[0].value, visit, context,
-        index_seq, error);
+        pouch, namespace_name, terms[0].field, terms[0].value,
+        terms[0].value_type, visit, context, index_seq, error);
   }
   merge_context.allocator = &pouch->allocator;
   merge_context.list_count = term_count;
@@ -4045,11 +4196,6 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
                         "pouch, namespace, terms, visitor, and index_seq",
                         NULL, NULL, NULL);
   }
-  if (term_count == 1U) {
-    return lc_pouch_query_index_visit_scalar(
-        pouch, namespace_name, terms[0].field, terms[0].value, visit, context,
-        index_seq, error);
-  }
   memset(&term_reader, 0, sizeof(term_reader));
   memset(&keys, 0, sizeof(keys));
   memset(&doc_context, 0, sizeof(doc_context));
@@ -4069,6 +4215,9 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     term_reader.allocator = &pouch->allocator;
     term_reader.exact_terms = exact_terms;
     term_reader.exact_term_count = exact_term_count;
+    term_reader.exact_numeric =
+        lc_pouch_query_index_term_keys_have_numeric(exact_terms,
+                                                    exact_term_count);
     term_reader.visit_doc_ids = 1;
     term_reader.visit = lc_pouch_query_index_docid_key_collect;
     term_reader.context = &doc_context;
@@ -4100,7 +4249,7 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
 
 int lc_pouch_query_index_visit_scalar_any_docids(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *const *values, size_t value_count,
+    const char *const *values, const char *value_types, size_t value_count,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_scalar_term *terms;
@@ -4109,17 +4258,13 @@ int lc_pouch_query_index_visit_scalar_any_docids(
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
       field == NULL || field[0] == '\0' || values == NULL ||
-      value_count == 0U || visit == NULL || index_seq == NULL) {
+      value_types == NULL || value_count == 0U || visit == NULL ||
+      index_seq == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index multi-scalar docID lookup requires "
                         "pouch, namespace, field, values, visitor, and "
                         "index_seq",
                         NULL, NULL, NULL);
-  }
-  if (value_count == 1U) {
-    return lc_pouch_query_index_visit_scalar(
-        pouch, namespace_name, field, values[0], visit, context, index_seq,
-        error);
   }
   terms = (lc_pouch_query_index_scalar_term *)lc_alloc_with_allocator(
       &pouch->allocator, value_count * sizeof(*terms));
@@ -4132,15 +4277,18 @@ int lc_pouch_query_index_visit_scalar_any_docids(
   memset(terms, 0, value_count * sizeof(*terms));
   rc = LC_OK;
   for (index = 0U; index < value_count; ++index) {
-    if (values[index] == NULL) {
+    if (values[index] == NULL ||
+        (value_types[index] != 's' && value_types[index] != 'n' &&
+         value_types[index] != 'b' && value_types[index] != 'z')) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index multi-scalar docID lookup requires "
-                        "non-null values",
+                        "non-null values and scalar value types",
                         NULL, NULL, NULL);
       break;
     }
     terms[index].field = field;
     terms[index].value = values[index];
+    terms[index].value_type = value_types[index];
   }
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_visit_scalar_terms_docids(
@@ -4167,9 +4315,8 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, prefix, 1, 0, ignore_case, NULL, NULL, visit,
-      context,
-      index_seq, error);
+      pouch, namespace_name, field, prefix, 's', 1, 0, ignore_case, NULL, NULL,
+      visit, context, index_seq, error);
 }
 
 int lc_pouch_query_index_visit_contains(
@@ -4184,9 +4331,8 @@ int lc_pouch_query_index_visit_contains(
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, needle, 0, 1, ignore_case, NULL, NULL, visit,
-      context,
-      index_seq, error);
+      pouch, namespace_name, field, needle, 's', 0, 1, ignore_case, NULL, NULL,
+      visit, context, index_seq, error);
 }
 
 int lc_pouch_query_index_visit_range(
@@ -4203,8 +4349,8 @@ int lc_pouch_query_index_visit_range(
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, NULL, 0, 0, 0, bounds, NULL, visit, context,
-      index_seq, error);
+      pouch, namespace_name, field, NULL, '\0', 0, 0, 0, bounds, NULL, visit,
+      context, index_seq, error);
 }
 
 int lc_pouch_query_index_visit_date(
@@ -4221,7 +4367,7 @@ int lc_pouch_query_index_visit_date(
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, NULL, 0, 0, 0, NULL, bounds, visit,
+      pouch, namespace_name, field, NULL, '\0', 0, 0, 0, NULL, bounds, visit,
       context, index_seq, error);
 }
 

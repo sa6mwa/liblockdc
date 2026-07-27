@@ -240,7 +240,14 @@ int lc_pouch_index_term_key_compare_items(
   if (cmp != 0) {
     return cmp;
   }
-  return strcmp(left->value_hex, right->value_hex);
+  cmp = strcmp(left->value_hex, right->value_hex);
+  if (cmp != 0) {
+    return cmp;
+  }
+  if (left->value_type != right->value_type) {
+    return left->value_type < right->value_type ? -1 : 1;
+  }
+  return 0;
 }
 
 int lc_pouch_index_term_key_compare(const void *left, const void *right) {
@@ -266,15 +273,16 @@ int lc_pouch_index_term_key_compare_pair(
 
 int lc_pouch_index_term_keys_find(const lc_pouch_index_term_key *terms,
                                   size_t count, const char *field_hex,
-                                  const char *value_hex,
+                                  const char *value_hex, char value_type,
                                   size_t *index_out) {
   size_t low;
   size_t high;
   size_t mid;
+  size_t scan;
   int cmp;
 
   if (terms == NULL || field_hex == NULL || value_hex == NULL ||
-      count == 0U) {
+      value_type == '\0' || count == 0U) {
     return 0;
   }
   low = 0U;
@@ -284,10 +292,24 @@ int lc_pouch_index_term_keys_find(const lc_pouch_index_term_key *terms,
     cmp = lc_pouch_index_term_key_compare_pair(field_hex, value_hex,
                                                &terms[mid]);
     if (cmp == 0) {
-      if (index_out != NULL) {
-        *index_out = mid;
+      scan = mid;
+      while (scan > 0U &&
+             lc_pouch_index_term_key_compare_pair(field_hex, value_hex,
+                                                  &terms[scan - 1U]) == 0) {
+        --scan;
       }
-      return 1;
+      for (; scan < count &&
+             lc_pouch_index_term_key_compare_pair(field_hex, value_hex,
+                                                  &terms[scan]) == 0;
+           ++scan) {
+        if (terms[scan].value_type == value_type) {
+          if (index_out != NULL) {
+            *index_out = scan;
+          }
+          return 1;
+        }
+      }
+      return 0;
     }
     if (cmp < 0) {
       high = mid;
@@ -328,10 +350,12 @@ int lc_pouch_index_term_keys_build_exact(
   rc = LC_OK;
   for (index = 0U; index < term_count; ++index) {
     if (terms[index].field == NULL || terms[index].field[0] == '\0' ||
-        terms[index].value == NULL) {
+        terms[index].value == NULL ||
+        (terms[index].value_type != 's' && terms[index].value_type != 'n' &&
+         terms[index].value_type != 'b' && terms[index].value_type != 'z')) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index exact term-key build requires non-empty "
-                        "fields and non-null values",
+                        "fields, non-null values, and scalar value types",
                         NULL, NULL, NULL);
       break;
     }
@@ -345,6 +369,7 @@ int lc_pouch_index_term_keys_build_exact(
                         NULL, NULL);
       break;
     }
+    keys[index].value_type = terms[index].value_type;
   }
   if (rc == LC_OK) {
     qsort(keys, term_count, sizeof(keys[0]),
@@ -374,9 +399,9 @@ int lc_pouch_index_term_keys_build_exact(
 }
 
 int lc_pouch_index_term_keys_build_exact_for_field(
-    const char *field, const char *const *values, size_t value_count,
-    lc_pouch_index_term_key **out_terms, size_t *out_count,
-    const lc_allocator *allocator, lc_error *error) {
+    const char *field, const char *const *values, const char *value_types,
+    size_t value_count, lc_pouch_index_term_key **out_terms,
+    size_t *out_count, const lc_allocator *allocator, lc_error *error) {
   lc_pouch_index_plain_term *terms;
   size_t index;
   int rc;
@@ -390,10 +415,11 @@ int lc_pouch_index_term_keys_build_exact_for_field(
   *out_terms = NULL;
   *out_count = 0U;
   if (field == NULL || field[0] == '\0' ||
-      (values == NULL && value_count > 0U)) {
+      (values == NULL && value_count > 0U) ||
+      (value_types == NULL && value_count > 0U)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index exact field term-key build requires a "
-                        "field and values",
+                        "field, values, and value types",
                         NULL, NULL, NULL);
   }
   if (value_count == 0U) {
@@ -409,6 +435,7 @@ int lc_pouch_index_term_keys_build_exact_for_field(
   for (index = 0U; index < value_count; ++index) {
     terms[index].field = field;
     terms[index].value = values[index];
+    terms[index].value_type = value_types[index];
   }
   rc = lc_pouch_index_term_keys_build_exact(
       terms, value_count, out_terms, out_count, allocator, error);
@@ -568,6 +595,12 @@ int lc_pouch_index_term_values_collect_ranges(
   }
   range_count = 0U;
   for (index = 0U; index < term_count; ++index) {
+    if (index > 0U &&
+        lc_pouch_index_term_key_compare_pair(terms[index].field_hex,
+                                             terms[index].value_hex,
+                                             &terms[index - 1U]) == 0) {
+      continue;
+    }
     if (lc_pouch_index_term_values_find(values, value_count,
                                         terms[index].field_hex,
                                         terms[index].value_hex, &first,

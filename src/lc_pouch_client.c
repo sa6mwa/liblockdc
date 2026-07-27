@@ -176,6 +176,7 @@ typedef struct lc_pouch_query_scan_context {
 typedef struct lc_pouch_query_index_plan {
   char *field;
   char **values;
+  char *value_types;
   size_t value_count;
   size_t value_capacity;
   lc_pouch_query_index_scalar_term *or_terms;
@@ -192,6 +193,23 @@ typedef struct lc_pouch_query_index_plan {
   lc_pouch_query_index_range_bounds range_bounds;
   lc_pouch_query_index_date_bounds date_bounds;
 } lc_pouch_query_index_plan;
+
+typedef struct lc_pouch_query_selector_scalar {
+  char *value;
+  char value_type;
+} lc_pouch_query_selector_scalar;
+
+typedef struct lc_pouch_query_selector_scalar_list {
+  lc_pouch_query_selector_scalar *items;
+  size_t count;
+  size_t capacity;
+  size_t cursor;
+  char *scratch;
+  size_t scratch_len;
+  size_t scratch_capacity;
+  int capturing;
+  char capture_type;
+} lc_pouch_query_selector_scalar_list;
 
 typedef struct lc_pouch_query_index_key_set {
   lc_pouch_query_index_key_view *keys;
@@ -1075,6 +1093,21 @@ static char *lc_pouch_query_index_metadata_string(size_t candidates,
   return lc_strdup_local(stack);
 }
 
+static void lc_pouch_query_selector_scalar_list_cleanup(
+    lc_pouch_query_selector_scalar_list *list) {
+  size_t index;
+
+  if (list == NULL) {
+    return;
+  }
+  for (index = 0U; index < list->count; ++index) {
+    free(list->items[index].value);
+  }
+  free(list->items);
+  free(list->scratch);
+  memset(list, 0, sizeof(*list));
+}
+
 static void lc_pouch_query_index_plan_cleanup(
     lc_pouch_query_index_plan *plan) {
   size_t index;
@@ -1095,6 +1128,7 @@ static void lc_pouch_query_index_plan_cleanup(
   free((char *)plan->date_bounds.lt);
   free((char *)plan->date_bounds.lte);
   free(plan->values);
+  free(plan->value_types);
   free(plan->or_terms);
   memset(plan, 0, sizeof(*plan));
 }
@@ -1123,6 +1157,30 @@ static char *lc_pouch_query_dup_lql_string(lql_string_view view,
   return out;
 }
 
+static char *lc_pouch_query_dup_bytes(const char *bytes, size_t length,
+                                      lc_error *error) {
+  char *out;
+
+  if (bytes == NULL && length > 0U) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch query selector has invalid scalar view", NULL, NULL,
+                 "pouch-redesign");
+    return NULL;
+  }
+  out = (char *)malloc(length + 1U);
+  if (out == NULL) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to allocate pouch query selector scalar", NULL, NULL,
+                 NULL);
+    return NULL;
+  }
+  if (length > 0U) {
+    memcpy(out, bytes, length);
+  }
+  out[length] = '\0';
+  return out;
+}
+
 static char *lc_pouch_query_dup_exists_candidate_path(lql_string_view path,
                                                      lc_error *error) {
   if (path.len >= 3U &&
@@ -1139,12 +1197,451 @@ static char *lc_pouch_query_dup_exists_candidate_path(lql_string_view path,
   return lc_pouch_query_dup_lql_string(path, error);
 }
 
+static int lc_pouch_query_path_segment_eq(
+    const lonejson_value_path *path, size_t index, const char *text) {
+  size_t len;
+
+  if (path == NULL || text == NULL || index >= path->segment_count) {
+    return 0;
+  }
+  len = strlen(text);
+  return path->segments[index].len == len &&
+         memcmp(path->segments[index].data, text, len) == 0;
+}
+
+static int lc_pouch_query_path_segment_is_index(
+    const lonejson_value_path *path, size_t index) {
+  size_t byte_index;
+
+  if (path == NULL || index >= path->segment_count ||
+      path->segments[index].len == 0U) {
+    return 0;
+  }
+  for (byte_index = 0U; byte_index < path->segments[index].len;
+       ++byte_index) {
+    char byte;
+
+    byte = path->segments[index].data[byte_index];
+    if (byte < '0' || byte > '9') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_query_selector_scalar_path(
+    const lonejson_value_path *path) {
+  size_t count;
+
+  if (path == NULL || path->segment_count < 2U) {
+    return 0;
+  }
+  count = path->segment_count;
+  if (lc_pouch_query_path_segment_eq(path, count - 1U, "value") &&
+      lc_pouch_query_path_segment_eq(path, count - 2U, "eq")) {
+    return 1;
+  }
+  if (count >= 3U && lc_pouch_query_path_segment_is_index(path, count - 1U) &&
+      lc_pouch_query_path_segment_eq(path, count - 2U, "any") &&
+      lc_pouch_query_path_segment_eq(path, count - 3U, "in")) {
+    return 1;
+  }
+  return 0;
+}
+
+static int lc_pouch_query_selector_scalar_list_reserve(
+    lc_pouch_query_selector_scalar_list *list, size_t needed,
+    lc_error *error) {
+  lc_pouch_query_selector_scalar *next_items;
+  size_t next_capacity;
+
+  if (needed <= list->capacity) {
+    return LC_OK;
+  }
+  next_capacity = list->capacity == 0U ? 4U : list->capacity;
+  while (next_capacity < needed) {
+    if (next_capacity > ((size_t)-1 / 2U)) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch query selector scalar list exceeds local "
+                          "limit",
+                          NULL, NULL, NULL);
+    }
+    next_capacity *= 2U;
+  }
+  next_items = (lc_pouch_query_selector_scalar *)realloc(
+      list->items, next_capacity * sizeof(*next_items));
+  if (next_items == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query selector scalars",
+                        NULL, NULL, NULL);
+  }
+  memset(next_items + list->capacity, 0,
+         (next_capacity - list->capacity) * sizeof(*next_items));
+  list->items = next_items;
+  list->capacity = next_capacity;
+  return LC_OK;
+}
+
+static int lc_pouch_query_selector_scalar_scratch_reserve(
+    lc_pouch_query_selector_scalar_list *list, size_t extra,
+    lc_error *error) {
+  char *next;
+  size_t needed;
+  size_t next_capacity;
+
+  if (extra > (size_t)-1 - list->scratch_len - 1U) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch query selector scalar exceeds local limit",
+                        NULL, NULL, NULL);
+  }
+  needed = list->scratch_len + extra + 1U;
+  if (needed <= list->scratch_capacity) {
+    return LC_OK;
+  }
+  next_capacity = list->scratch_capacity == 0U ? 32U
+                                               : list->scratch_capacity;
+  while (next_capacity < needed) {
+    if (next_capacity > ((size_t)-1 / 2U)) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch query selector scalar exceeds local limit",
+                          NULL, NULL, NULL);
+    }
+    next_capacity *= 2U;
+  }
+  next = (char *)realloc(list->scratch, next_capacity);
+  if (next == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query selector scalar",
+                        NULL, NULL, NULL);
+  }
+  list->scratch = next;
+  list->scratch_capacity = next_capacity;
+  list->scratch[list->scratch_len] = '\0';
+  return LC_OK;
+}
+
+static int lc_pouch_query_selector_scalar_add(
+    lc_pouch_query_selector_scalar_list *list, const char *value,
+    size_t value_len, char value_type, lc_error *error) {
+  char *copy;
+  int rc;
+
+  if (value_type != 's' && value_type != 'n' && value_type != 'b' &&
+      value_type != 'z') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query selector scalar has invalid JSON type",
+                        NULL, NULL, "pouch-redesign");
+  }
+  rc = lc_pouch_query_selector_scalar_list_reserve(list, list->count + 1U,
+                                                   error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  copy = lc_pouch_query_dup_bytes(value, value_len, error);
+  if (copy == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  list->items[list->count].value = copy;
+  list->items[list->count].value_type = value_type;
+  ++list->count;
+  return LC_OK;
+}
+
+static lonejson_status lc_pouch_query_selector_lonejson_error(
+    lonejson_error *lj_error, const lc_error *error) {
+  if (lj_error != NULL) {
+    lonejson_error_init(lj_error);
+    lj_error->code = error != NULL && error->code == LC_ERR_NOMEM
+                         ? LONEJSON_STATUS_ALLOCATION_FAILED
+                         : LONEJSON_STATUS_CALLBACK_FAILED;
+    snprintf(lj_error->message, sizeof(lj_error->message), "%s",
+             error != NULL && error->message != NULL
+                 ? error->message
+                 : "pouch query selector scalar callback failed");
+  }
+  return lj_error != NULL ? lj_error->code : LONEJSON_STATUS_CALLBACK_FAILED;
+}
+
+static lonejson_status lc_pouch_query_selector_scalar_begin(
+    void *user, const lonejson_value_path *path, char value_type,
+    lonejson_error *lj_error) {
+  lc_pouch_query_selector_scalar_list *list;
+  lc_error error;
+  int rc;
+
+  (void)lj_error;
+  list = (lc_pouch_query_selector_scalar_list *)user;
+  if (!lc_pouch_query_selector_scalar_path(path)) {
+    list->capturing = 0;
+    return LONEJSON_STATUS_OK;
+  }
+  list->scratch_len = 0U;
+  if (list->scratch != NULL) {
+    list->scratch[0] = '\0';
+  }
+  list->capturing = 1;
+  list->capture_type = value_type;
+  lc_error_init(&error);
+  rc = lc_pouch_query_selector_scalar_scratch_reserve(list, 0U, &error);
+  if (rc != LC_OK) {
+    return lc_pouch_query_selector_lonejson_error(lj_error, &error);
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_query_selector_string_begin(
+    void *user, const lonejson_value_path *path, lonejson_error *lj_error) {
+  return lc_pouch_query_selector_scalar_begin(user, path, 's', lj_error);
+}
+
+static lonejson_status lc_pouch_query_selector_number_begin(
+    void *user, const lonejson_value_path *path, lonejson_error *lj_error) {
+  return lc_pouch_query_selector_scalar_begin(user, path, 'n', lj_error);
+}
+
+static lonejson_status lc_pouch_query_selector_scalar_chunk(
+    void *user, const lonejson_value_path *path, const char *data, size_t len,
+    lonejson_error *lj_error) {
+  lc_pouch_query_selector_scalar_list *list;
+  lc_error error;
+  int rc;
+
+  (void)path;
+  list = (lc_pouch_query_selector_scalar_list *)user;
+  if (!list->capturing) {
+    return LONEJSON_STATUS_OK;
+  }
+  lc_error_init(&error);
+  rc = lc_pouch_query_selector_scalar_scratch_reserve(list, len, &error);
+  if (rc != LC_OK) {
+    return lc_pouch_query_selector_lonejson_error(lj_error, &error);
+  }
+  memcpy(list->scratch + list->scratch_len, data, len);
+  list->scratch_len += len;
+  list->scratch[list->scratch_len] = '\0';
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_query_selector_scalar_end(
+    void *user, const lonejson_value_path *path, lonejson_error *lj_error) {
+  lc_pouch_query_selector_scalar_list *list;
+  lc_error error;
+  int rc;
+
+  (void)path;
+  list = (lc_pouch_query_selector_scalar_list *)user;
+  if (!list->capturing) {
+    return LONEJSON_STATUS_OK;
+  }
+  lc_error_init(&error);
+  rc = lc_pouch_query_selector_scalar_add(
+      list, list->scratch, list->scratch_len, list->capture_type, &error);
+  list->capturing = 0;
+  if (rc != LC_OK) {
+    return lc_pouch_query_selector_lonejson_error(lj_error, &error);
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_query_selector_boolean_value(
+    void *user, const lonejson_value_path *path, int value,
+    lonejson_error *lj_error) {
+  lc_pouch_query_selector_scalar_list *list;
+  lc_error error;
+  const char *text;
+  int rc;
+
+  list = (lc_pouch_query_selector_scalar_list *)user;
+  if (!lc_pouch_query_selector_scalar_path(path)) {
+    return LONEJSON_STATUS_OK;
+  }
+  text = value ? "true" : "false";
+  lc_error_init(&error);
+  rc = lc_pouch_query_selector_scalar_add(list, text, strlen(text), 'b',
+                                          &error);
+  if (rc != LC_OK) {
+    return lc_pouch_query_selector_lonejson_error(lj_error, &error);
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static lonejson_status lc_pouch_query_selector_null_value(
+    void *user, const lonejson_value_path *path, lonejson_error *lj_error) {
+  lc_pouch_query_selector_scalar_list *list;
+  lc_error error;
+  int rc;
+
+  list = (lc_pouch_query_selector_scalar_list *)user;
+  if (!lc_pouch_query_selector_scalar_path(path)) {
+    return LONEJSON_STATUS_OK;
+  }
+  lc_error_init(&error);
+  rc = lc_pouch_query_selector_scalar_add(list, "null", 4U, 'z', &error);
+  if (rc != LC_OK) {
+    return lc_pouch_query_selector_lonejson_error(lj_error, &error);
+  }
+  return LONEJSON_STATUS_OK;
+}
+
+static int lc_pouch_query_selector_json_alloc(
+    lql *runtime, const lql_selector *selector, char **out,
+    lc_error *error) {
+  lql_error lql_error_value;
+  lql_status status;
+  FILE *fp;
+  long length;
+  char *json;
+  size_t got;
+
+  if (runtime == NULL || selector == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query selector serialization requires runtime, "
+                        "selector, and output",
+                        NULL, NULL, NULL);
+  }
+  *out = NULL;
+  fp = tmpfile();
+  if (fp == NULL) {
+    return lc_error_set(error, LC_ERR_PROTOCOL, (long)errno,
+                        "failed to create pouch query selector serialization "
+                        "file",
+                        strerror(errno), NULL, "liblql");
+  }
+  lql_error_init(&lql_error_value);
+  status = runtime->selector_write_json(runtime, selector, fp,
+                                        &lql_error_value);
+  if (status != LQL_STATUS_OK) {
+    fclose(fp);
+    return lc_pouch_query_lql_error(
+        error, status, &lql_error_value,
+        "failed to serialize pouch query selector for index planning");
+  }
+  if (fflush(fp) != 0 || fseek(fp, 0L, SEEK_END) != 0) {
+    int saved_errno;
+
+    saved_errno = errno;
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
+                        "failed to finalize pouch query selector "
+                        "serialization",
+                        strerror(saved_errno), NULL, "liblql");
+  }
+  length = ftell(fp);
+  if (length < 0L || fseek(fp, 0L, SEEK_SET) != 0) {
+    int saved_errno;
+
+    saved_errno = errno;
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
+                        "failed to rewind pouch query selector serialization",
+                        strerror(saved_errno), NULL, "liblql");
+  }
+  json = (char *)malloc((size_t)length + 1U);
+  if (json == NULL) {
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query selector JSON", NULL,
+                        NULL, NULL);
+  }
+  got = fread(json, 1U, (size_t)length, fp);
+  if (got != (size_t)length || ferror(fp)) {
+    int saved_errno;
+
+    saved_errno = errno;
+    free(json);
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
+                        "failed to read pouch query selector serialization",
+                        strerror(saved_errno), NULL, "liblql");
+  }
+  json[(size_t)length] = '\0';
+  fclose(fp);
+  *out = json;
+  return LC_OK;
+}
+
+static int lc_pouch_query_collect_selector_scalars(
+    lql *lql_runtime, const lql_selector *selector,
+    lc_pouch_query_selector_scalar_list *list, lc_error *error) {
+  lonejson_path_value_visitor visitor;
+  lonejson_error lj_error;
+  lonejson *json_runtime;
+  lonejson_status status;
+  char *json;
+  int rc;
+
+  if (lql_runtime == NULL || selector == NULL || list == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query selector scalar collection requires "
+                        "runtime, selector, and output",
+                        NULL, NULL, NULL);
+  }
+  memset(list, 0, sizeof(*list));
+  json = NULL;
+  rc = lc_pouch_query_selector_json_alloc(lql_runtime, selector, &json, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  json_runtime = lc_thread_lonejson_runtime();
+  if (json_runtime == NULL) {
+    free(json);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize pouch selector JSON runtime",
+                        NULL, NULL, NULL);
+  }
+  memset(&visitor, 0, sizeof(visitor));
+  visitor.string_begin = lc_pouch_query_selector_string_begin;
+  visitor.string_chunk = lc_pouch_query_selector_scalar_chunk;
+  visitor.string_end = lc_pouch_query_selector_scalar_end;
+  visitor.number_begin = lc_pouch_query_selector_number_begin;
+  visitor.number_chunk = lc_pouch_query_selector_scalar_chunk;
+  visitor.number_end = lc_pouch_query_selector_scalar_end;
+  visitor.boolean_value = lc_pouch_query_selector_boolean_value;
+  visitor.null_value = lc_pouch_query_selector_null_value;
+  lonejson_error_init(&lj_error);
+  status = lonejson_visit_path_value_cstr(json_runtime, json, &visitor, list,
+                                          &lj_error);
+  free(json);
+  if (status != LONEJSON_STATUS_OK) {
+    lc_pouch_query_selector_scalar_list_cleanup(list);
+    return lc_error_set(error,
+                        status == LONEJSON_STATUS_ALLOCATION_FAILED
+                            ? LC_ERR_NOMEM
+                            : LC_ERR_INVALID,
+                        0L, "failed to inspect pouch query selector scalars",
+                        lj_error.message, lonejson_status_string(status),
+                        "pouch-redesign");
+  }
+  return LC_OK;
+}
+
+static const lc_pouch_query_selector_scalar *
+lc_pouch_query_selector_scalar_next(
+    lc_pouch_query_selector_scalar_list *list, lc_error *error) {
+  if (list == NULL || list->cursor >= list->count) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch query selector scalar type metadata is incomplete",
+                 NULL, NULL, "pouch-redesign");
+    return NULL;
+  }
+  return &list->items[list->cursor++];
+}
+
 static int lc_pouch_query_index_plan_add_value(
-    lc_pouch_query_index_plan *plan, lql_string_view value, lc_error *error) {
+    lc_pouch_query_index_plan *plan, const char *value, size_t value_len,
+    char value_type, lc_error *error) {
   char **next_values;
+  char *next_value_types;
   size_t next_capacity;
   char *copy;
 
+  if (value_type != 's' && value_type != 'n' && value_type != 'b' &&
+      value_type != 'z') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query selector value requires a JSON scalar "
+                        "type",
+                        NULL, NULL, "pouch-redesign");
+  }
   if (plan->value_count >= plan->value_capacity) {
     next_capacity = plan->value_capacity == 0U ? 4U : plan->value_capacity;
     while (next_capacity <= plan->value_count) {
@@ -1156,34 +1653,60 @@ static int lc_pouch_query_index_plan_add_value(
       }
       next_capacity *= 2U;
     }
-    next_values = (char **)realloc(plan->values,
-                                   next_capacity * sizeof(*next_values));
+    next_values = (char **)malloc(next_capacity * sizeof(*next_values));
     if (next_values == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch query selector values",
                           NULL, NULL, NULL);
     }
+    next_value_types = (char *)malloc(next_capacity);
+    if (next_value_types == NULL) {
+      free(next_values);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch query selector value "
+                          "types",
+                          NULL, NULL, NULL);
+    }
+    if (plan->value_count > 0U) {
+      memcpy(next_values, plan->values,
+             plan->value_count * sizeof(*next_values));
+      memcpy(next_value_types, plan->value_types, plan->value_count);
+    }
     memset(next_values + plan->value_capacity, 0,
            (next_capacity - plan->value_capacity) * sizeof(*next_values));
+    memset(next_value_types + plan->value_capacity, 0,
+           next_capacity - plan->value_capacity);
+    free(plan->values);
+    free(plan->value_types);
     plan->values = next_values;
+    plan->value_types = next_value_types;
     plan->value_capacity = next_capacity;
   }
-  copy = lc_pouch_query_dup_lql_string(value, error);
+  copy = lc_pouch_query_dup_bytes(value, value_len, error);
   if (copy == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  plan->values[plan->value_count++] = copy;
+  plan->values[plan->value_count] = copy;
+  plan->value_types[plan->value_count] = value_type;
+  ++plan->value_count;
   return LC_OK;
 }
 
 static int lc_pouch_query_index_plan_add_or_term(
     lc_pouch_query_index_plan *plan, lql_string_view field,
-    lql_string_view value, lc_error *error) {
+    const char *value, size_t value_len, char value_type, lc_error *error) {
   lc_pouch_query_index_scalar_term *next_terms;
   size_t next_capacity;
   char *field_copy;
   char *value_copy;
 
+  if (value_type != 's' && value_type != 'n' && value_type != 'b' &&
+      value_type != 'z') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query selector root-or value requires a JSON "
+                        "scalar type",
+                        NULL, NULL, "pouch-redesign");
+  }
   if (plan->or_term_count >= plan->or_term_capacity) {
     next_capacity =
         plan->or_term_capacity == 0U ? 4U : plan->or_term_capacity;
@@ -1213,21 +1736,24 @@ static int lc_pouch_query_index_plan_add_or_term(
   if (field_copy == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  value_copy = lc_pouch_query_dup_lql_string(value, error);
+  value_copy = lc_pouch_query_dup_bytes(value, value_len, error);
   if (value_copy == NULL) {
     free(field_copy);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   plan->or_terms[plan->or_term_count].field = field_copy;
   plan->or_terms[plan->or_term_count].value = value_copy;
+  plan->or_terms[plan->or_term_count].value_type = value_type;
   ++plan->or_term_count;
   return LC_OK;
 }
 
 static int lc_pouch_query_index_plan_add_or_child(
     lql *runtime, lql_selector_node child, lc_pouch_query_index_plan *plan,
+    lc_pouch_query_selector_scalar_list *scalars,
     lql_error *lql_error_value, lc_error *error) {
   lql_selector_string_term string_term;
+  const lc_pouch_query_selector_scalar *scalar;
   lql_status status;
 
   if (child.kind != LQL_SELECTOR_NODE_EQ) {
@@ -1252,8 +1778,14 @@ static int lc_pouch_query_index_plan_add_or_child(
                         "scalar equality selectors only",
                         NULL, NULL, "pouch-redesign");
   }
+  scalar = lc_pouch_query_selector_scalar_next(scalars, error);
+  if (scalar == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_INVALID;
+  }
   return lc_pouch_query_index_plan_add_or_term(
-      plan, string_term.field, string_term.value, error);
+      plan, string_term.field, scalar->value, strlen(scalar->value),
+      scalar->value_type, error);
 }
 
 static int lc_pouch_query_index_plan_set_range_bound(
@@ -1311,6 +1843,8 @@ static int lc_pouch_query_index_plan_from_selector(
   lql_selector_range_term range_term;
   lql_selector_date_term date_term;
   lql_selector_in_term in_term;
+  lc_pouch_query_selector_scalar_list scalars;
+  const lc_pouch_query_selector_scalar *scalar;
   lql_error lql_error_value;
   lql_status status;
   size_t child_count;
@@ -1323,26 +1857,45 @@ static int lc_pouch_query_index_plan_from_selector(
                         NULL, NULL, NULL);
   }
   memset(plan, 0, sizeof(*plan));
+  memset(&scalars, 0, sizeof(scalars));
+  scalar = NULL;
   lql_error_init(&lql_error_value);
   status = runtime->selector_root(runtime, selector, &root, &lql_error_value);
   if (status != LQL_STATUS_OK) {
-    return lc_pouch_query_lql_error(error, status, &lql_error_value,
-                                    "failed to inspect pouch query selector");
+    int rc;
+
+    rc = lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                  "failed to inspect pouch query selector");
+    lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+    return rc;
   }
   if (root.kind == LQL_SELECTOR_NODE_OR) {
     child_count = 0U;
     status = runtime->selector_node_child_count(runtime, root, &child_count,
                                                 &lql_error_value);
     if (status != LQL_STATUS_OK) {
-      return lc_pouch_query_lql_error(
+      int rc;
+
+      rc = lc_pouch_query_lql_error(
           error, status, &lql_error_value,
           "failed to inspect pouch root or selector");
+      lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+      return rc;
     }
     if (child_count == 0U) {
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch query index engine supports non-empty root "
-                          "or selectors only",
-                          NULL, NULL, "pouch-redesign");
+      int rc;
+
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query index engine supports non-empty root "
+                        "or selectors only",
+                        NULL, NULL, "pouch-redesign");
+      lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+      return rc;
+    }
+    if (lc_pouch_query_collect_selector_scalars(runtime, selector, &scalars,
+                                               error) != LC_OK) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_INVALID;
     }
     for (index = 0U; index < child_count; ++index) {
       lql_selector_node child;
@@ -1351,17 +1904,27 @@ static int lc_pouch_query_index_plan_from_selector(
       status = runtime->selector_node_child(runtime, root, index, &child,
                                             &lql_error_value);
       if (status != LQL_STATUS_OK) {
-        return lc_pouch_query_lql_error(
+        int rc;
+
+        rc = lc_pouch_query_lql_error(
             error, status, &lql_error_value,
             "failed to inspect pouch root or selector child");
+        lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+        return rc;
       }
       if (lc_pouch_query_index_plan_add_or_child(
-              runtime, child, plan, &lql_error_value, error) != LC_OK) {
-        return error != NULL && error->code != LC_OK ? error->code
-                                                     : LC_ERR_INVALID;
+              runtime, child, plan, &scalars, &lql_error_value, error) !=
+          LC_OK) {
+        int rc;
+
+        rc = error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_INVALID;
+        lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+        return rc;
       }
     }
     plan->root_or = 1;
+    lc_pouch_query_selector_scalar_list_cleanup(&scalars);
     return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_EQ) {
@@ -1369,28 +1932,57 @@ static int lc_pouch_query_index_plan_from_selector(
     status = runtime->selector_node_string_term(runtime, root, &string_term,
                                                 &lql_error_value);
     if (status != LQL_STATUS_OK) {
-      return lc_pouch_query_lql_error(
+      int rc;
+
+      rc = lc_pouch_query_lql_error(
           error, status, &lql_error_value,
           "failed to inspect pouch equality selector");
+      lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+      return rc;
     }
     if (!string_term.value_present || string_term.any_count != 0U ||
         string_term.field.len == 0U) {
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch query index engine supports exact "
-                          "scalar equality selectors only",
-                          NULL, NULL, "pouch-redesign");
+      int rc;
+
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query index engine supports exact "
+                        "scalar equality selectors only",
+                        NULL, NULL, "pouch-redesign");
+      lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+      return rc;
     }
     plan->field = lc_pouch_query_dup_lql_string(string_term.field, error);
     if (plan->field == NULL) {
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
+      int rc;
+
+      rc = error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_NOMEM;
+      lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+      return rc;
     }
-    if (lc_pouch_query_index_plan_add_value(plan, string_term.value, error) !=
-        LC_OK) {
+    if (lc_pouch_query_collect_selector_scalars(runtime, selector, &scalars,
+                                               error) != LC_OK) {
       return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
+                                                   : LC_ERR_INVALID;
+    }
+    scalar = lc_pouch_query_selector_scalar_next(&scalars, error);
+    if (scalar == NULL) {
+      lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_INVALID;
+    }
+    if (lc_pouch_query_index_plan_add_value(
+            plan, scalar->value, strlen(scalar->value), scalar->value_type,
+            error) != LC_OK) {
+      int rc;
+
+      rc = error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_NOMEM;
+      lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+      return rc;
     }
     plan->candidates_exact = 1;
+    lc_pouch_query_selector_scalar_list_cleanup(&scalars);
     return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_PREFIX ||
@@ -1420,7 +2012,8 @@ static int lc_pouch_query_index_plan_from_selector(
                             ? 1
                             : 0;
     plan->candidates_exact = 1;
-    return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
+    return lc_pouch_query_index_plan_add_value(
+        plan, string_term.value.data, string_term.value.len, 's', error);
   }
   if (root.kind == LQL_SELECTOR_NODE_CONTAINS ||
       root.kind == LQL_SELECTOR_NODE_ICONTAINS) {
@@ -1450,7 +2043,8 @@ static int lc_pouch_query_index_plan_from_selector(
                             ? 1
                             : 0;
     plan->candidates_exact = 1;
-    return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
+    return lc_pouch_query_index_plan_add_value(
+        plan, string_term.value.data, string_term.value.len, 's', error);
   }
   if (root.kind == LQL_SELECTOR_NODE_RANGE) {
     int rc;
@@ -1598,22 +2192,45 @@ static int lc_pouch_query_index_plan_from_selector(
       return error != NULL && error->code != LC_OK ? error->code
                                                    : LC_ERR_NOMEM;
     }
+    if (lc_pouch_query_collect_selector_scalars(runtime, selector, &scalars,
+                                               error) != LC_OK) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_INVALID;
+    }
     for (index = 0U; index < in_term.any_count; ++index) {
       lql_string_view value;
 
       status = runtime->selector_node_in_term_any(runtime, root, index, &value,
                                                   &lql_error_value);
       if (status != LQL_STATUS_OK) {
-        return lc_pouch_query_lql_error(
+        int rc;
+
+        rc = lc_pouch_query_lql_error(
             error, status, &lql_error_value,
             "failed to inspect pouch in selector value");
+        lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+        return rc;
       }
-      if (lc_pouch_query_index_plan_add_value(plan, value, error) != LC_OK) {
+      scalar = lc_pouch_query_selector_scalar_next(&scalars, error);
+      if (scalar == NULL) {
+        lc_pouch_query_selector_scalar_list_cleanup(&scalars);
         return error != NULL && error->code != LC_OK ? error->code
-                                                     : LC_ERR_NOMEM;
+                                                     : LC_ERR_INVALID;
+      }
+      (void)value;
+      if (lc_pouch_query_index_plan_add_value(
+              plan, scalar->value, strlen(scalar->value), scalar->value_type,
+              error) != LC_OK) {
+        int rc;
+
+        rc = error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+        lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+        return rc;
       }
     }
     plan->candidates_exact = 1;
+    lc_pouch_query_selector_scalar_list_cleanup(&scalars);
     return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_EXISTS) {
@@ -1986,12 +2603,12 @@ static int lc_pouch_query_run_index_predicate(
     }
   }
   if (rc == LC_OK && !scan->emit_documents && plan.candidates_exact &&
-      plan.value_count > 1U && !plan.prefix && !plan.contains &&
+      plan.value_count > 0U && !plan.prefix && !plan.contains &&
       !plan.range && !plan.date) {
     value_seq = 0UL;
     rc = lc_pouch_query_index_visit_scalar_any_docids(
         scan->client->pouch, scan->namespace_name, plan.field,
-        (const char *const *)plan.values, plan.value_count,
+        (const char *const *)plan.values, plan.value_types, plan.value_count,
         lc_pouch_query_index_visit_exact_key, scan, &value_seq, error);
     if (rc == LC_OK && value_seq > scan->index_seq) {
       scan->index_seq = value_seq;
@@ -2001,7 +2618,7 @@ static int lc_pouch_query_run_index_predicate(
     value_seq = 0UL;
     rc = lc_pouch_query_index_visit_scalar_any(
         scan->client->pouch, scan->namespace_name, plan.field,
-        (const char *const *)plan.values, plan.value_count,
+        (const char *const *)plan.values, plan.value_types, plan.value_count,
         lc_pouch_query_index_key_collect, &keys, &value_seq, error);
     if (rc == LC_OK && value_seq > scan->index_seq) {
       scan->index_seq = value_seq;
@@ -2023,8 +2640,8 @@ static int lc_pouch_query_run_index_predicate(
       } else {
         rc = lc_pouch_query_index_visit_scalar(
             scan->client->pouch, scan->namespace_name, plan.field,
-            plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
-            &value_seq, error);
+            plan.values[value_index], plan.value_types[value_index],
+            lc_pouch_query_index_key_collect, &keys, &value_seq, error);
       }
       if (rc == LC_OK && value_seq > scan->index_seq) {
         scan->index_seq = value_seq;

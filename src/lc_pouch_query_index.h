@@ -65,14 +65,14 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
 int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
                                       const char *namespace_name,
                                       const char *field,
-                                      const char *value,
+                                      const char *value, char value_type,
                                       lc_pouch_query_index_key_visit_fn visit,
                                       void *context,
                                       unsigned long *index_seq,
                                       lc_error *error);
 int lc_pouch_query_index_visit_scalar_any(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *const *values, size_t value_count,
+    const char *const *values, const char *value_types, size_t value_count,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_scalar_terms(
@@ -92,12 +92,12 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_scalar_any_docids(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *const *values, size_t value_count,
+    const char *const *values, const char *value_types, size_t value_count,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_scalar_any_merged(
     lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *const *values, size_t value_count,
+    const char *const *values, const char *value_types, size_t value_count,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,

@@ -572,37 +572,51 @@ static void test_index_term_keys_sort_find_and_cleanup(void **state) {
   (void)state;
   lc_allocator_init(&allocator);
   terms = (lc_pouch_index_term_key *)lc_alloc_with_allocator(
-      &allocator, 3U * sizeof(*terms));
+      &allocator, 4U * sizeof(*terms));
   assert_non_null(terms);
-  memset(terms, 0, 3U * sizeof(*terms));
+  memset(terms, 0, 4U * sizeof(*terms));
   terms[0].field_hex = lc_strdup_with_allocator(&allocator, "74616773");
   terms[0].value_hex = lc_strdup_with_allocator(&allocator, "706c616e");
+  terms[0].value_type = 's';
   terms[1].field_hex = lc_strdup_with_allocator(&allocator, "616765");
   terms[1].value_hex = lc_strdup_with_allocator(&allocator, "3330");
+  terms[1].value_type = 'n';
   terms[2].field_hex = lc_strdup_with_allocator(&allocator, "6e616d65");
   terms[2].value_hex = lc_strdup_with_allocator(&allocator, "626f62");
+  terms[2].value_type = 's';
+  terms[3].field_hex = lc_strdup_with_allocator(&allocator, "6e616d65");
+  terms[3].value_hex = lc_strdup_with_allocator(&allocator, "626f62");
+  terms[3].value_type = 'b';
   assert_non_null(terms[0].field_hex);
   assert_non_null(terms[0].value_hex);
   assert_non_null(terms[1].field_hex);
   assert_non_null(terms[1].value_hex);
   assert_non_null(terms[2].field_hex);
   assert_non_null(terms[2].value_hex);
+  assert_non_null(terms[3].field_hex);
+  assert_non_null(terms[3].value_hex);
 
-  qsort(terms, 3U, sizeof(terms[0]), lc_pouch_index_term_key_compare);
+  qsort(terms, 4U, sizeof(terms[0]), lc_pouch_index_term_key_compare);
   assert_string_equal(terms[0].field_hex, "616765");
   assert_string_equal(terms[1].field_hex, "6e616d65");
-  assert_string_equal(terms[2].field_hex, "74616773");
+  assert_int_equal(terms[1].value_type, 'b');
+  assert_string_equal(terms[2].field_hex, "6e616d65");
+  assert_int_equal(terms[2].value_type, 's');
+  assert_string_equal(terms[3].field_hex, "74616773");
 
   found_index = 99U;
-  found = lc_pouch_index_term_keys_find(terms, 3U, "6e616d65", "626f62",
-                                        &found_index);
+  found = lc_pouch_index_term_keys_find(terms, 4U, "6e616d65", "626f62",
+                                        's', &found_index);
   assert_true(found);
-  assert_int_equal(found_index, 1);
-  found = lc_pouch_index_term_keys_find(terms, 3U, "6e616d65", "616c696365",
-                                        &found_index);
+  assert_int_equal(found_index, 2);
+  found = lc_pouch_index_term_keys_find(terms, 4U, "6e616d65", "616c696365",
+                                        's', &found_index);
+  assert_false(found);
+  found = lc_pouch_index_term_keys_find(terms, 4U, "6e616d65", "626f62",
+                                        'n', &found_index);
   assert_false(found);
 
-  lc_pouch_index_term_keys_cleanup(&allocator, terms, 3U);
+  lc_pouch_index_term_keys_cleanup(&allocator, terms, 4U);
 }
 
 static void test_index_term_keys_build_exact_sorts_and_deduplicates(
@@ -619,12 +633,16 @@ static void test_index_term_keys_build_exact_sorts_and_deduplicates(
   lc_error_init(&error);
   raw_terms[0].field = "/tags";
   raw_terms[0].value = "plan";
+  raw_terms[0].value_type = 's';
   raw_terms[1].field = "/age";
   raw_terms[1].value = "30";
+  raw_terms[1].value_type = 'n';
   raw_terms[2].field = "/tags";
   raw_terms[2].value = "plan";
+  raw_terms[2].value_type = 's';
   raw_terms[3].field = "/name";
   raw_terms[3].value = "bob";
+  raw_terms[3].value_type = 's';
   terms = NULL;
   term_count = 0U;
 
@@ -636,10 +654,13 @@ static void test_index_term_keys_build_exact_sorts_and_deduplicates(
   assert_int_equal(term_count, 3);
   assert_string_equal(terms[0].field_hex, "2f616765");
   assert_string_equal(terms[0].value_hex, "3330");
+  assert_int_equal(terms[0].value_type, 'n');
   assert_string_equal(terms[1].field_hex, "2f6e616d65");
   assert_string_equal(terms[1].value_hex, "626f62");
+  assert_int_equal(terms[1].value_type, 's');
   assert_string_equal(terms[2].field_hex, "2f74616773");
   assert_string_equal(terms[2].value_hex, "706c616e");
+  assert_int_equal(terms[2].value_type, 's');
 
   lc_pouch_index_term_keys_cleanup(&allocator, terms, 4U);
   lc_error_cleanup(&error);
@@ -659,8 +680,10 @@ static void test_index_term_keys_build_exact_rejects_invalid_terms(
   lc_error_init(&error);
   raw_terms[0].field = "/name";
   raw_terms[0].value = "bob";
+  raw_terms[0].value_type = 's';
   raw_terms[1].field = "";
   raw_terms[1].value = "bad";
+  raw_terms[1].value_type = 's';
   terms = (lc_pouch_index_term_key *)1;
   term_count = 99U;
 
@@ -675,6 +698,7 @@ static void test_index_term_keys_build_exact_rejects_invalid_terms(
   lc_error_init(&error);
   raw_terms[1].field = "/tags";
   raw_terms[1].value = NULL;
+  raw_terms[1].value_type = 's';
   terms = (lc_pouch_index_term_key *)1;
   term_count = 99U;
   rc = lc_pouch_index_term_keys_build_exact(
@@ -690,6 +714,7 @@ static void test_index_term_keys_build_exact_for_field_values(void **state) {
   lc_allocator allocator;
   lc_error error;
   const char *values[4];
+  char value_types[4];
   lc_pouch_index_term_key *terms;
   size_t term_count;
   int rc;
@@ -698,14 +723,19 @@ static void test_index_term_keys_build_exact_for_field_values(void **state) {
   lc_allocator_init(&allocator);
   lc_error_init(&error);
   values[0] = "plan";
+  value_types[0] = 's';
   values[1] = "finance";
+  value_types[1] = 's';
   values[2] = "plan";
+  value_types[2] = 's';
   values[3] = "";
+  value_types[3] = 's';
   terms = NULL;
   term_count = 0U;
 
   rc = lc_pouch_index_term_keys_build_exact_for_field(
-      "/tags", values, 4U, &terms, &term_count, &allocator, &error);
+      "/tags", values, value_types, 4U, &terms, &term_count, &allocator,
+      &error);
 
   assert_int_equal(rc, LC_OK);
   assert_non_null(terms);
@@ -726,6 +756,7 @@ static void test_index_term_keys_build_exact_for_field_rejects_invalid_values(
   lc_allocator allocator;
   lc_error error;
   const char *values[2];
+  char value_types[2];
   lc_pouch_index_term_key *terms;
   size_t term_count;
   int rc;
@@ -734,12 +765,15 @@ static void test_index_term_keys_build_exact_for_field_rejects_invalid_values(
   lc_allocator_init(&allocator);
   lc_error_init(&error);
   values[0] = "plan";
+  value_types[0] = 's';
   values[1] = NULL;
+  value_types[1] = 's';
   terms = (lc_pouch_index_term_key *)1;
   term_count = 99U;
 
   rc = lc_pouch_index_term_keys_build_exact_for_field(
-      "/tags", values, 2U, &terms, &term_count, &allocator, &error);
+      "/tags", values, value_types, 2U, &terms, &term_count, &allocator,
+      &error);
 
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(terms);
@@ -750,7 +784,7 @@ static void test_index_term_keys_build_exact_for_field_rejects_invalid_values(
   terms = (lc_pouch_index_term_key *)1;
   term_count = 99U;
   rc = lc_pouch_index_term_keys_build_exact_for_field(
-      "", values, 1U, &terms, &term_count, &allocator, &error);
+      "", values, value_types, 1U, &terms, &term_count, &allocator, &error);
 
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(terms);
@@ -762,7 +796,7 @@ static void test_index_term_values_collect_exact_ranges(void **state) {
   lc_allocator allocator;
   lc_error error;
   lc_pouch_index_term_value values[4];
-  lc_pouch_index_term_key terms[3];
+  lc_pouch_index_term_key terms[4];
   lc_pouch_index_term_range *ranges;
   size_t range_count;
   int rc;
@@ -789,22 +823,30 @@ static void test_index_term_values_collect_exact_ranges(void **state) {
   values[3].line_count = 5UL;
   terms[0].field_hex = "616765";
   terms[0].value_hex = "3330";
+  terms[0].value_type = 'n';
   terms[1].field_hex = "6e616d65";
   terms[1].value_hex = "626f62";
+  terms[1].value_type = 's';
   terms[2].field_hex = "74616773";
-  terms[2].value_hex = "6d697373696e67";
+  terms[2].value_hex = "706c616e";
+  terms[2].value_type = 'b';
+  terms[3].field_hex = "74616773";
+  terms[3].value_hex = "706c616e";
+  terms[3].value_type = 's';
   ranges = NULL;
   range_count = 99U;
 
   rc = lc_pouch_index_term_values_collect_ranges(
-      values, 4U, terms, 3U, &ranges, &range_count, &allocator, &error);
+      values, 4U, terms, 4U, &ranges, &range_count, &allocator, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(range_count, 2);
+  assert_int_equal(range_count, 3);
   assert_non_null(ranges);
   assert_int_equal(ranges[0].first_line, 0);
   assert_int_equal(ranges[0].line_count, 1);
   assert_int_equal(ranges[1].first_line, 3);
   assert_int_equal(ranges[1].line_count, 1);
+  assert_int_equal(ranges[2].first_line, 4);
+  assert_int_equal(ranges[2].line_count, 5);
 
   lc_pouch_index_term_ranges_cleanup(&allocator, ranges);
   lc_error_cleanup(&error);
@@ -7792,6 +7834,143 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_query_keys_index_preserves_json_scalar_types(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture scan_number_page;
+  pouch_query_key_capture number_page;
+  pouch_query_key_capture string_page;
+  pouch_query_key_capture bool_page;
+  pouch_query_key_capture mixed_in_page;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&scan_number_page, 0, sizeof(scan_number_page));
+  memset(&number_page, 0, sizeof(number_page));
+  memset(&string_page, 0, sizeof(string_page));
+  memset(&bool_page, 0, sizeof(bool_page));
+  memset(&mixed_in_page, 0, sizeof(mixed_in_page));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-scalar-types", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  pouch_write_json_state(pouch, "docs/query-index-scalar-types",
+                         "doc/number", "{\"v\":1,\"flag\":false}", NULL,
+                         &error);
+  pouch_write_json_state(pouch, "docs/query-index-scalar-types",
+                         "doc/number-float", "{\"v\":1.0}", NULL, &error);
+  pouch_write_json_state(pouch, "docs/query-index-scalar-types",
+                         "doc/string-number",
+                         "{\"v\":\"1\",\"flag\":\"false\"}", NULL, &error);
+  pouch_write_json_state(pouch, "docs/query-index-scalar-types", "doc/bool",
+                         "{\"v\":true,\"flag\":true}", NULL, &error);
+  pouch_write_json_state(pouch, "docs/query-index-scalar-types",
+                         "doc/string-bool",
+                         "{\"v\":\"true\",\"flag\":\"true\"}", NULL, &error);
+  pouch_write_json_state(pouch, "docs/query-index-scalar-types", "doc/null",
+                         "{\"v\":null}", NULL, &error);
+  pouch_write_json_state(pouch, "docs/query-index-scalar-types",
+                         "doc/string-null", "{\"v\":\"null\"}", NULL,
+                         &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/query-index-scalar-types";
+  query_req.selector_json = "{\"eq\":{\"field\":\"/v\",\"value\":1}}";
+  query_req.engine = "scan";
+  rc = client->query_keys(client, &query_req, &handler, &scan_number_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(pouch_query_capture_has(&scan_number_page, "doc/number"));
+  assert_false(pouch_query_capture_has(&scan_number_page,
+                                       "doc/string-number"));
+  lc_query_res_cleanup(&query_res);
+
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &number_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(number_page.count, scan_number_page.count);
+  assert_true(pouch_query_capture_has(&number_page, "doc/number"));
+  assert_false(pouch_query_capture_has(&number_page, "doc/string-number"));
+  assert_int_equal(pouch_query_capture_has(&number_page, "doc/number-float"),
+                   pouch_query_capture_has(&scan_number_page,
+                                           "doc/number-float"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":2"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&string_page, 0, sizeof(string_page));
+  query_req.refresh = NULL;
+  query_req.selector_json = "{\"eq\":{\"field\":\"/v\",\"value\":\"1\"}}";
+  rc = client->query_keys(client, &query_req, &handler, &string_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(string_page.count, 1);
+  assert_true(pouch_query_capture_has(&string_page, "doc/string-number"));
+  assert_false(pouch_query_capture_has(&string_page, "doc/number"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":1"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&bool_page, 0, sizeof(bool_page));
+  query_req.selector_lql = "eq{field=/flag,value=true}";
+  query_req.selector_json = NULL;
+  rc = client->query_keys(client, &query_req, &handler, &bool_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(bool_page.count, 1);
+  assert_true(pouch_query_capture_has(&bool_page, "doc/bool"));
+  assert_false(pouch_query_capture_has(&bool_page, "doc/string-bool"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":1"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&mixed_in_page, 0, sizeof(mixed_in_page));
+  query_req.selector_lql = NULL;
+  query_req.selector_json =
+      "{\"in\":{\"field\":\"/v\",\"any\":[1,\"1\",null,\"null\"]}}";
+  rc = client->query_keys(client, &query_req, &handler, &mixed_in_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(mixed_in_page.count, 5);
+  assert_true(pouch_query_capture_has(&mixed_in_page, "doc/number"));
+  assert_true(pouch_query_capture_has(&mixed_in_page, "doc/number-float"));
+  assert_true(pouch_query_capture_has(&mixed_in_page, "doc/string-number"));
+  assert_true(pouch_query_capture_has(&mixed_in_page, "doc/null"));
+  assert_true(pouch_query_capture_has(&mixed_in_page, "doc/string-null"));
+  assert_false(pouch_query_capture_has(&mixed_in_page, "doc/bool"));
+  assert_false(pouch_query_capture_has(&mixed_in_page, "doc/string-bool"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":5"));
+
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   static const char selector_lql[] =
       "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}";
@@ -10307,6 +10486,7 @@ int main(void) {
       cmocka_unit_test(test_query_keys_enforces_lockd_limit_contract),
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
+      cmocka_unit_test(test_query_keys_index_preserves_json_scalar_types),
       cmocka_unit_test(test_query_keys_index_root_or_uses_scalar_union),
       cmocka_unit_test(test_query_keys_index_text_stops_after_target_field),
       cmocka_unit_test(

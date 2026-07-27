@@ -815,12 +815,15 @@ Latest release targets confirmed on 2026-07-23:
           live in `lc_pouch_index_terms.c`, and exact range readers consume the
           index-owned key vector directly without adapter allocations.
         - [x] Move exact scalar term-key construction into
-          `lc_pouch_index_terms.c`: raw field/value term arrays are validated,
-          hex-encoded, sorted, and deduplicated by the index term module,
-          leaving query callers to pass the built key vector to sidecar readers.
-          Simple equality and single-field value arrays for non-wildcard `in`
-          now use the same term-owned construction path instead of query-local
-          value-hex setup.
+          `lc_pouch_index_terms.c`: raw field/value/type term arrays are
+          validated, hex-encoded, sorted, and deduplicated by the index term
+          module, leaving query callers to pass the built key vector to sidecar
+          readers. Simple equality and single-field value arrays for
+          non-wildcard `in` now use the same term-owned construction path
+          instead of query-local value-hex setup. Exact matching preserves
+          liblql JSON scalar typing, including string/number/boolean/null
+          separation and numeric equality across equivalent number spellings
+          such as `1` and `1.0`.
       - [x] Physically split private docID set algebra into
         `src/lc_pouch_index_doc.c`, including sorted unique append and
         merge-based union/intersection/subtraction helpers plus the first
