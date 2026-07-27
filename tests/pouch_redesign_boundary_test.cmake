@@ -9,6 +9,11 @@ foreach(required_source
     "src/lc_pouch_namespace.c"
     "src/lc_pouch_path.h"
     "src/lc_pouch_path.c"
+    "src/lc_pouch_index.h"
+    "src/lc_pouch_index.c"
+    "src/lc_pouch_query_index.h"
+    "src/lc_pouch_query_index.c"
+    "src/lc_pouch_state.c"
     "src/lc_pouch_client.c"
     "deprecated/pouch-legacy/src/lc_pouch.c"
 )
@@ -21,7 +26,6 @@ foreach(retired_source
     "src/lc_pouch_store.h"
     "src/lc_pouch_allocator.c"
     "src/lc_pouch_logstore.c"
-    "src/lc_pouch_index.c"
 )
     if(EXISTS "${LOCKDC_ROOT}/${retired_source}")
         message(FATAL_ERROR "retired pouch source must not remain live: ${retired_source}")
@@ -33,7 +37,6 @@ foreach(forbidden
     "src/lc_pouch_store.h"
     "src/lc_pouch_allocator.c"
     "src/lc_pouch_logstore.c"
-    "src/lc_pouch_index.c"
 )
     string(FIND "${root_cmake}" "${forbidden}" forbidden_index)
     if(NOT forbidden_index EQUAL -1)

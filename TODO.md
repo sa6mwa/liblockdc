@@ -1767,6 +1767,12 @@ Latest release targets confirmed on 2026-07-23:
       queue message. The same slice fixes the shared test temp helper so
       missing-path tracking cannot create orphan owner markers and stale
       cleanup removes orphan `*.liblockdc-test-tmp-owner` sidecars.
+    - [x] Add a bounded large-namespace segmented pouch e2e: it writes many
+      JSON documents through direct `lc_pouch` storage with a small segment
+      target, proves indexed public client queries see every document before
+      maintenance, forces compaction with multi-segment candidate diagnostics,
+      retries cleanup, reopens through `pouch://`, and proves indexed query
+      results survive the snapshot/reopen lifecycle.
   - [x] Add a separate Go/cgo benchmark module under `benchmark/` for opt-in
     e2e perf comparison and stress testing outside the liblockdc release gate.
   - [x] Launch a real latest pinned `pkt.systems/lockd` disk backend from the

@@ -3747,11 +3747,93 @@ static size_t pouch_e2e_query_key_count(lc_client *client,
   query_req.namespace_name = namespace_name;
   query_req.selector_json = selector_json;
   query_req.engine = "index";
-  query_req.limit = 32L;
+  query_req.limit = 512L;
   rc = lc_query_keys(client, &query_req, &handler, &count, &query_res, error);
   assert_lc_ok(rc, error);
   lc_query_res_cleanup(&query_res);
   return count.rows;
+}
+
+static void pouch_e2e_write_segmented_docs_direct(const char *root,
+                                                  const char *namespace_name,
+                                                  const char *kind,
+                                                  size_t doc_count,
+                                                  lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_options write_options;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  char body[1024];
+  char key[192];
+  char pad[640];
+  size_t index;
+  int written;
+  int rc;
+
+  pouch = NULL;
+  source = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_options, 0, sizeof(write_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(pad, 'x', sizeof(pad) - 1U);
+  pad[sizeof(pad) - 1U] = '\0';
+  open_options.segment_target_bytes = 4096UL;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.background_compaction_enabled = 0;
+  open_options.query_engine = "index";
+  write_options.content_type = "application/json";
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  for (index = 0U; index < doc_count; ++index) {
+    written = snprintf(key, sizeof(key), "pouch/large/%s/%04zu", kind, index);
+    assert_true(written > 0 && (size_t)written < sizeof(key));
+    written = snprintf(
+        body, sizeof(body),
+        "{\"kind\":\"%s\",\"ordinal\":%zu,\"group\":\"%s\","
+        "\"tags\":[\"pouch\",\"large\",\"%s\"],\"pad\":\"%s\"}",
+        kind, index, index % 2U == 0U ? "even" : "odd",
+        index % 3U == 0U ? "planning" : "finance", pad);
+    assert_true(written > 0 && (size_t)written < sizeof(body));
+    rc = lc_source_from_memory(body, strlen(body), &source, error);
+    assert_lc_ok(rc, error);
+    rc = lc_pouch_state_write(pouch, namespace_name, key, source,
+                              &write_options, &write_result, error);
+    lc_source_close(source);
+    source = NULL;
+    assert_lc_ok(rc, error);
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  }
+  lc_pouch_close(pouch);
+}
+
+static void pouch_e2e_force_maintenance_expect_segments(
+    const char *root, const char *namespace_name, lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.force = 1;
+  rc =
+      lc_pouch_maintenance_run(pouch, &maintenance_options, &maintenance_result,
+                               error);
+  assert_lc_ok(rc, error);
+  assert_true(maintenance_result.compacted);
+  assert_true(maintenance_result.candidate_segment_count > 1UL);
+  assert_true(maintenance_result.candidate_bytes > 4096UL);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
 }
 
 static void test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(
@@ -3920,6 +4002,65 @@ static void test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_direct_large_namespace_segmented_index_reopen(
+    void **state) {
+  lc_client *client;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_error error;
+  char root[256];
+  char endpoint[320];
+  char kind[96];
+  char selector_json[192];
+  size_t rows;
+  const size_t doc_count = 72U;
+  int rc;
+
+  (void)state;
+  make_pouch_root("large-namespace", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+
+  client = NULL;
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_index_flush_req_init(&flush_req);
+  lc_error_init(&error);
+
+  make_unique_name("pouch-large", kind, sizeof(kind));
+  snprintf(selector_json, sizeof(selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
+
+  pouch_e2e_write_segmented_docs_direct(root, "large", kind, doc_count,
+                                        &error);
+
+  open_pouch_client(endpoint, &client, &error);
+  flush_req.namespace_name = "large";
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  rows = pouch_e2e_query_key_count(client, "large", selector_json, &error);
+  assert_int_equal(rows, doc_count);
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_e2e_force_maintenance_expect_segments(root, "large", &error);
+  pouch_e2e_run_maintenance(root, "large", 0, 1, 0L, &error);
+
+  open_pouch_client(endpoint, &client, &error);
+  memset(&flush_res, 0, sizeof(flush_res));
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  rows = pouch_e2e_query_key_count(client, "large", selector_json, &error);
+  assert_int_equal(rows, doc_count);
+
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_direct_consumer_service_with_state(void **state) {
   lc_client *client;
   lc_consumer_service *service;
@@ -4054,6 +4195,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_direct_state_attachment_reopen_roundtrip),
       cmocka_unit_test(
           test_pouch_direct_lifecycle_maintenance_reopen_roundtrip),
+      cmocka_unit_test(
+          test_pouch_direct_large_namespace_segmented_index_reopen),
       cmocka_unit_test(test_pouch_direct_consumer_service_with_state)};
   return cmocka_run_group_tests(tests, setup_pouch_e2e_group,
                                 teardown_pouch_e2e_group);
