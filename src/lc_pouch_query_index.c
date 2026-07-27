@@ -3793,8 +3793,7 @@ int lc_pouch_query_index_visit_scalar_terms(
   lc_pouch_query_index_term_reader reader;
   lc_pouch_index_term_key *exact_terms;
   char *sidecar_path;
-  size_t index;
-  size_t write_index;
+  size_t exact_term_count;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -3816,62 +3815,15 @@ int lc_pouch_query_index_visit_scalar_terms(
   if (sidecar_path == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  exact_terms = (lc_pouch_index_term_key *)lc_alloc_with_allocator(
-      &pouch->allocator, term_count * sizeof(*exact_terms));
-  if (exact_terms == NULL) {
-    lc_free_with_allocator(&pouch->allocator, sidecar_path);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index scalar term "
-                        "lookup",
-                        NULL, NULL, NULL);
-  }
-  memset(exact_terms, 0, term_count * sizeof(*exact_terms));
-  rc = LC_OK;
-  for (index = 0U; index < term_count; ++index) {
-    if (terms[index].field == NULL || terms[index].field[0] == '\0' ||
-        terms[index].value == NULL) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index scalar term-set lookup requires "
-                        "non-empty fields and non-null values",
-                        NULL, NULL, NULL);
-      break;
-    }
-    exact_terms[index].field_hex =
-        lc_pouch_query_index_hex_encode(&pouch->allocator, terms[index].field);
-    exact_terms[index].value_hex =
-        lc_pouch_query_index_hex_encode(&pouch->allocator, terms[index].value);
-    if (exact_terms[index].field_hex == NULL ||
-        exact_terms[index].value_hex == NULL) {
-      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index scalar term",
-                        NULL, NULL, NULL);
-      break;
-    }
-  }
+  exact_terms = NULL;
+  exact_term_count = 0U;
+  rc = lc_pouch_index_term_keys_build_exact(
+      terms, term_count, &exact_terms, &exact_term_count, &pouch->allocator,
+      error);
   if (rc == LC_OK) {
-    qsort(exact_terms, term_count, sizeof(exact_terms[0]),
-          lc_pouch_index_term_key_compare);
-    write_index = 0U;
-    for (index = 0U; index < term_count; ++index) {
-      if (write_index > 0U &&
-          lc_pouch_index_term_key_compare_items(
-              &exact_terms[write_index - 1U], &exact_terms[index]) == 0) {
-        lc_free_with_allocator(&pouch->allocator,
-                               (char *)exact_terms[index].field_hex);
-        lc_free_with_allocator(&pouch->allocator,
-                               (char *)exact_terms[index].value_hex);
-        memset(&exact_terms[index], 0, sizeof(exact_terms[index]));
-        continue;
-      }
-      if (write_index != index) {
-        exact_terms[write_index] = exact_terms[index];
-        memset(&exact_terms[index], 0, sizeof(exact_terms[index]));
-      }
-      ++write_index;
-    }
     reader.allocator = &pouch->allocator;
     reader.exact_terms = exact_terms;
-    reader.exact_term_count = write_index;
+    reader.exact_term_count = exact_term_count;
     reader.visit = visit;
     reader.context = context;
     rc = lc_pouch_query_index_read_with_reader(sidecar_path, &sidecar, NULL,
@@ -4158,8 +4110,7 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
   lc_pouch_query_index_docid_key_context doc_context;
   lc_pouch_index_term_key *exact_terms;
   char *sidecar_path;
-  size_t index;
-  size_t write_index;
+  size_t exact_term_count;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -4183,65 +4134,17 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
   if (sidecar_path == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  exact_terms = (lc_pouch_index_term_key *)lc_alloc_with_allocator(
-      &pouch->allocator, term_count * sizeof(*exact_terms));
-  if (exact_terms == NULL) {
-    lc_free_with_allocator(&pouch->allocator, sidecar_path);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index scalar term "
-                        "docID lookup",
-                        NULL, NULL, NULL);
-  }
-  memset(exact_terms, 0, term_count * sizeof(*exact_terms));
-  rc = LC_OK;
-  for (index = 0U; index < term_count; ++index) {
-    if (terms[index].field == NULL || terms[index].field[0] == '\0' ||
-        terms[index].value == NULL) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index scalar term docID lookup requires "
-                        "non-empty fields and non-null values",
-                        NULL, NULL, NULL);
-      break;
-    }
-    exact_terms[index].field_hex =
-        lc_pouch_query_index_hex_encode(&pouch->allocator, terms[index].field);
-    exact_terms[index].value_hex =
-        lc_pouch_query_index_hex_encode(&pouch->allocator, terms[index].value);
-    if (exact_terms[index].field_hex == NULL ||
-        exact_terms[index].value_hex == NULL) {
-      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index scalar docID "
-                        "term",
-                        NULL, NULL, NULL);
-      break;
-    }
-  }
+  exact_terms = NULL;
+  exact_term_count = 0U;
+  rc = lc_pouch_index_term_keys_build_exact(
+      terms, term_count, &exact_terms, &exact_term_count, &pouch->allocator,
+      error);
   if (rc == LC_OK) {
-    qsort(exact_terms, term_count, sizeof(exact_terms[0]),
-          lc_pouch_index_term_key_compare);
-    write_index = 0U;
-    for (index = 0U; index < term_count; ++index) {
-      if (write_index > 0U &&
-          lc_pouch_index_term_key_compare_items(
-              &exact_terms[write_index - 1U], &exact_terms[index]) == 0) {
-        lc_free_with_allocator(&pouch->allocator,
-                               (char *)exact_terms[index].field_hex);
-        lc_free_with_allocator(&pouch->allocator,
-                               (char *)exact_terms[index].value_hex);
-        memset(&exact_terms[index], 0, sizeof(exact_terms[index]));
-        continue;
-      }
-      if (write_index != index) {
-        exact_terms[write_index] = exact_terms[index];
-        memset(&exact_terms[index], 0, sizeof(exact_terms[index]));
-      }
-      ++write_index;
-    }
     doc_context.allocator = &pouch->allocator;
     doc_context.keys = &keys;
     term_reader.allocator = &pouch->allocator;
     term_reader.exact_terms = exact_terms;
-    term_reader.exact_term_count = write_index;
+    term_reader.exact_term_count = exact_term_count;
     term_reader.visit_doc_ids = 1;
     term_reader.visit = lc_pouch_query_index_docid_key_collect;
     term_reader.context = &doc_context;

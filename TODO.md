@@ -814,6 +814,10 @@ Latest release targets confirmed on 2026-07-23:
           `lc_pouch_index_term_key`: sorted term-key compare/find/cleanup now
           live in `lc_pouch_index_terms.c`, and exact range readers consume the
           index-owned key vector directly without adapter allocations.
+        - [x] Move exact scalar term-key construction into
+          `lc_pouch_index_terms.c`: raw field/value term arrays are validated,
+          hex-encoded, sorted, and deduplicated by the index term module,
+          leaving query callers to pass the built key vector to sidecar readers.
       - [x] Physically split private docID set algebra into
         `src/lc_pouch_index_doc.c`, including sorted unique append and
         merge-based union/intersection/subtraction helpers plus the first

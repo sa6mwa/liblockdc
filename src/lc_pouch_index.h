@@ -100,6 +100,11 @@ typedef struct lc_pouch_index_term_key {
   const char *value_hex;
 } lc_pouch_index_term_key;
 
+typedef struct lc_pouch_index_plain_term {
+  const char *field;
+  const char *value;
+} lc_pouch_index_plain_term;
+
 typedef struct lc_pouch_index_term_range {
   unsigned long first_line;
   unsigned long line_count;
@@ -215,6 +220,10 @@ int lc_pouch_index_term_keys_find(const lc_pouch_index_term_key *terms,
                                   size_t count, const char *field_hex,
                                   const char *value_hex,
                                   size_t *index_out);
+int lc_pouch_index_term_keys_build_exact(
+    const lc_pouch_index_plain_term *terms, size_t term_count,
+    lc_pouch_index_term_key **out_terms, size_t *out_count,
+    const lc_allocator *allocator, lc_error *error);
 int lc_pouch_index_term_field_parse_line(
     char *line, lc_pouch_index_term_field *field,
     const lc_allocator *allocator, lc_error *error);

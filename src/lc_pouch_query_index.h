@@ -33,10 +33,7 @@ typedef struct lc_pouch_query_index_key_view {
   size_t value_index;
 } lc_pouch_query_index_key_view;
 
-typedef struct lc_pouch_query_index_scalar_term {
-  const char *field;
-  const char *value;
-} lc_pouch_query_index_scalar_term;
+typedef lc_pouch_index_plain_term lc_pouch_query_index_scalar_term;
 
 typedef struct lc_pouch_query_index_range_bounds {
   int has_gt;

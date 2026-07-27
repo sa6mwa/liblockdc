@@ -71,6 +71,45 @@ static int lc_pouch_index_term_parse_ulong_token(const char *token,
   return LC_OK;
 }
 
+static char *lc_pouch_index_term_hex_encode_bytes(
+    const lc_allocator *allocator, const char *value, size_t length) {
+  static const char hex[] = "0123456789abcdef";
+  const unsigned char *src;
+  char *encoded;
+  char *dst;
+
+  if (value == NULL || length == 0U) {
+    encoded = (char *)lc_alloc_with_allocator(allocator, 2U);
+    if (encoded != NULL) {
+      encoded[0] = '-';
+      encoded[1] = '\0';
+    }
+    return encoded;
+  }
+  if (length > ((size_t)-1 - 1U) / 2U) {
+    return NULL;
+  }
+  encoded = (char *)lc_alloc_with_allocator(allocator, (length * 2U) + 1U);
+  if (encoded == NULL) {
+    return NULL;
+  }
+  src = (const unsigned char *)value;
+  dst = encoded;
+  while (length-- > 0U) {
+    *dst++ = hex[*src >> 4];
+    *dst++ = hex[*src & 0x0fU];
+    ++src;
+  }
+  *dst = '\0';
+  return encoded;
+}
+
+static char *lc_pouch_index_term_hex_encode(const lc_allocator *allocator,
+                                            const char *value) {
+  return lc_pouch_index_term_hex_encode_bytes(
+      allocator, value, value != NULL ? strlen(value) : 0U);
+}
+
 void lc_pouch_index_term_fields_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_field *fields,
     size_t count) {
@@ -257,6 +296,81 @@ int lc_pouch_index_term_keys_find(const lc_pouch_index_term_key *terms,
     }
   }
   return 0;
+}
+
+int lc_pouch_index_term_keys_build_exact(
+    const lc_pouch_index_plain_term *terms, size_t term_count,
+    lc_pouch_index_term_key **out_terms, size_t *out_count,
+    const lc_allocator *allocator, lc_error *error) {
+  lc_pouch_index_term_key *keys;
+  size_t index;
+  size_t write_index;
+  int rc;
+
+  if (out_terms == NULL || out_count == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index exact term-key build requires outputs",
+                        NULL, NULL, NULL);
+  }
+  *out_terms = NULL;
+  *out_count = 0U;
+  if (terms == NULL || term_count == 0U) {
+    return LC_OK;
+  }
+  keys = (lc_pouch_index_term_key *)lc_alloc_with_allocator(
+      allocator, term_count * sizeof(*keys));
+  if (keys == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index exact term keys",
+                        NULL, NULL, NULL);
+  }
+  memset(keys, 0, term_count * sizeof(*keys));
+  rc = LC_OK;
+  for (index = 0U; index < term_count; ++index) {
+    if (terms[index].field == NULL || terms[index].field[0] == '\0' ||
+        terms[index].value == NULL) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index exact term-key build requires non-empty "
+                        "fields and non-null values",
+                        NULL, NULL, NULL);
+      break;
+    }
+    keys[index].field_hex =
+        lc_pouch_index_term_hex_encode(allocator, terms[index].field);
+    keys[index].value_hex =
+        lc_pouch_index_term_hex_encode(allocator, terms[index].value);
+    if (keys[index].field_hex == NULL || keys[index].value_hex == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index exact term key", NULL,
+                        NULL, NULL);
+      break;
+    }
+  }
+  if (rc == LC_OK) {
+    qsort(keys, term_count, sizeof(keys[0]),
+          lc_pouch_index_term_key_compare);
+    write_index = 0U;
+    for (index = 0U; index < term_count; ++index) {
+      if (write_index > 0U &&
+          lc_pouch_index_term_key_compare_items(
+              &keys[write_index - 1U], &keys[index]) == 0) {
+        lc_free_with_allocator(allocator, (char *)keys[index].field_hex);
+        lc_free_with_allocator(allocator, (char *)keys[index].value_hex);
+        memset(&keys[index], 0, sizeof(keys[index]));
+        continue;
+      }
+      if (write_index != index) {
+        keys[write_index] = keys[index];
+        memset(&keys[index], 0, sizeof(keys[index]));
+      }
+      ++write_index;
+    }
+    *out_terms = keys;
+    *out_count = write_index;
+    return LC_OK;
+  }
+  lc_pouch_index_term_keys_cleanup(allocator, keys, term_count);
+  return rc;
 }
 
 int lc_pouch_index_term_field_parse_line(

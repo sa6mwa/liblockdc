@@ -605,6 +605,87 @@ static void test_index_term_keys_sort_find_and_cleanup(void **state) {
   lc_pouch_index_term_keys_cleanup(&allocator, terms, 3U);
 }
 
+static void test_index_term_keys_build_exact_sorts_and_deduplicates(
+    void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_plain_term raw_terms[4];
+  lc_pouch_index_term_key *terms;
+  size_t term_count;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  raw_terms[0].field = "/tags";
+  raw_terms[0].value = "plan";
+  raw_terms[1].field = "/age";
+  raw_terms[1].value = "30";
+  raw_terms[2].field = "/tags";
+  raw_terms[2].value = "plan";
+  raw_terms[3].field = "/name";
+  raw_terms[3].value = "bob";
+  terms = NULL;
+  term_count = 0U;
+
+  rc = lc_pouch_index_term_keys_build_exact(
+      raw_terms, 4U, &terms, &term_count, &allocator, &error);
+
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(terms);
+  assert_int_equal(term_count, 3);
+  assert_string_equal(terms[0].field_hex, "2f616765");
+  assert_string_equal(terms[0].value_hex, "3330");
+  assert_string_equal(terms[1].field_hex, "2f6e616d65");
+  assert_string_equal(terms[1].value_hex, "626f62");
+  assert_string_equal(terms[2].field_hex, "2f74616773");
+  assert_string_equal(terms[2].value_hex, "706c616e");
+
+  lc_pouch_index_term_keys_cleanup(&allocator, terms, 4U);
+  lc_error_cleanup(&error);
+}
+
+static void test_index_term_keys_build_exact_rejects_invalid_terms(
+    void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_plain_term raw_terms[2];
+  lc_pouch_index_term_key *terms;
+  size_t term_count;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  raw_terms[0].field = "/name";
+  raw_terms[0].value = "bob";
+  raw_terms[1].field = "";
+  raw_terms[1].value = "bad";
+  terms = (lc_pouch_index_term_key *)1;
+  term_count = 99U;
+
+  rc = lc_pouch_index_term_keys_build_exact(
+      raw_terms, 2U, &terms, &term_count, &allocator, &error);
+
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(terms);
+  assert_int_equal(term_count, 0);
+  lc_error_cleanup(&error);
+
+  lc_error_init(&error);
+  raw_terms[1].field = "/tags";
+  raw_terms[1].value = NULL;
+  terms = (lc_pouch_index_term_key *)1;
+  term_count = 99U;
+  rc = lc_pouch_index_term_keys_build_exact(
+      raw_terms, 2U, &terms, &term_count, &allocator, &error);
+
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(terms);
+  assert_int_equal(term_count, 0);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_term_values_collect_exact_ranges(void **state) {
   lc_allocator allocator;
   lc_error error;
@@ -10065,6 +10146,8 @@ int main(void) {
       cmocka_unit_test(test_index_term_parses_sidecar_records),
       cmocka_unit_test(test_index_term_rejects_invalid_sidecar_records),
       cmocka_unit_test(test_index_term_keys_sort_find_and_cleanup),
+      cmocka_unit_test(test_index_term_keys_build_exact_sorts_and_deduplicates),
+      cmocka_unit_test(test_index_term_keys_build_exact_rejects_invalid_terms),
       cmocka_unit_test(test_index_term_values_collect_exact_ranges),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
