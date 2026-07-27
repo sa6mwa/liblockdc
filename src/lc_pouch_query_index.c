@@ -92,8 +92,11 @@ typedef struct lc_pouch_query_index_term_reader {
   int contains_match;
   int ignore_case;
   int range_match;
+  int date_match;
   int stop;
   lc_pouch_query_index_range_bounds range_bounds;
+  lc_pouch_query_index_date_bounds date_bounds;
+  lc_pouch_index_parsed_date_bounds parsed_date_bounds;
   lc_pouch_query_index_key_visit_fn visit;
   void *context;
 } lc_pouch_query_index_term_reader;
@@ -1339,6 +1342,7 @@ static int lc_pouch_query_index_term_reader_matches_value(
     int *matched, lc_error *error) {
   char *value_text;
   double number;
+  lc_pouch_index_instant instant;
 
   if (matched == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1392,6 +1396,20 @@ static int lc_pouch_query_index_term_reader_matches_value(
     if (lc_pouch_query_index_parse_number_value(value_text, &number)) {
       *matched = lc_pouch_query_index_range_contains_value(
           &reader->range_bounds, number);
+    }
+    lc_free_with_allocator(reader->allocator, value_text);
+    return LC_OK;
+  }
+  if (reader->date_match) {
+    value_text =
+        lc_pouch_query_index_hex_decode(reader->allocator, value_hex, error);
+    if (value_text == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    if (lc_pouch_index_parse_rfc3339(value_text, &instant)) {
+      *matched = lc_pouch_index_date_contains_value(
+          &reader->parsed_date_bounds, &instant);
     }
     lc_free_with_allocator(reader->allocator, value_text);
     return LC_OK;
@@ -1451,12 +1469,14 @@ static int lc_pouch_query_index_parse_and_visit_term(
   rc = LC_OK;
   matched = 0;
   field_cmp = strcmp(field_hex, reader->field_hex);
-  if (!reader->prefix_match && !reader->contains_match &&
-      !reader->range_match && !reader->ignore_case && field_cmp > 0) {
+  if ((!reader->prefix_match && !reader->contains_match &&
+       !reader->range_match && !reader->date_match && !reader->ignore_case &&
+       field_cmp > 0) ||
+      ((reader->range_match || reader->date_match) && field_cmp > 0)) {
     reader->stop = 1;
   } else if (field_cmp == 0) {
     if (!reader->prefix_match && !reader->contains_match &&
-        !reader->range_match && !reader->ignore_case) {
+        !reader->range_match && !reader->date_match && !reader->ignore_case) {
       value_cmp = strcmp(value_hex, reader->value_hex);
       if (value_cmp > 0) {
         reader->stop = 1;
@@ -1667,7 +1687,7 @@ static int lc_pouch_query_index_read_terms(
   actual_terms = 0UL;
   allow_sorted_stop =
       reader != NULL && reader->visit != NULL && !reader->prefix_match &&
-      !reader->contains_match && !reader->range_match && !reader->ignore_case;
+      !reader->contains_match && !reader->ignore_case;
   if (allow_sorted_stop) {
     reader->stop = 0;
   }
@@ -2506,6 +2526,7 @@ static int lc_pouch_query_index_visit_term_match(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *value, int prefix_match, int contains_match, int ignore_case,
     const lc_pouch_query_index_range_bounds *range_bounds,
+    const lc_pouch_query_index_date_bounds *date_bounds,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
@@ -2517,8 +2538,8 @@ static int lc_pouch_query_index_visit_term_match(
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
       field == NULL || field[0] == '\0' ||
-      (value == NULL && range_bounds == NULL) || visit == NULL ||
-      index_seq == NULL) {
+      (value == NULL && range_bounds == NULL && date_bounds == NULL) ||
+      visit == NULL || index_seq == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index term lookup requires pouch, "
                         "namespace, field, value, visitor, and index_seq",
@@ -2530,7 +2551,7 @@ static int lc_pouch_query_index_visit_term_match(
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   field_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, field);
-  value_hex = range_bounds == NULL
+  value_hex = range_bounds == NULL && date_bounds == NULL
                   ? lc_pouch_query_index_hex_encode(&pouch->allocator, value)
                   : lc_strdup_with_allocator(&pouch->allocator, "");
   if (field_hex == NULL || value_hex == NULL) {
@@ -2552,6 +2573,18 @@ static int lc_pouch_query_index_visit_term_match(
   if (range_bounds != NULL) {
     reader.range_match = 1;
     reader.range_bounds = *range_bounds;
+  }
+  if (date_bounds != NULL) {
+    reader.date_match = 1;
+    reader.date_bounds = *date_bounds;
+    rc = lc_pouch_index_parse_date_bounds(
+        date_bounds, &reader.parsed_date_bounds, error);
+    if (rc != LC_OK) {
+      lc_free_with_allocator(&pouch->allocator, field_hex);
+      lc_free_with_allocator(&pouch->allocator, value_hex);
+      lc_free_with_allocator(&pouch->allocator, sidecar_path);
+      return rc;
+    }
   }
   reader.visit = visit;
   reader.context = context;
@@ -2585,7 +2618,7 @@ int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
                                       unsigned long *index_seq,
                                       lc_error *error) {
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, value, 0, 0, 0, NULL, visit, context,
+      pouch, namespace_name, field, value, 0, 0, 0, NULL, NULL, visit, context,
       index_seq, error);
 }
 
@@ -2605,7 +2638,7 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, prefix, 1, 0, ignore_case, NULL, visit,
+      pouch, namespace_name, field, prefix, 1, 0, ignore_case, NULL, NULL, visit,
       context,
       index_seq, error);
 }
@@ -2622,7 +2655,7 @@ int lc_pouch_query_index_visit_contains(
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, needle, 0, 1, ignore_case, NULL, visit,
+      pouch, namespace_name, field, needle, 0, 1, ignore_case, NULL, NULL, visit,
       context,
       index_seq, error);
 }
@@ -2641,8 +2674,26 @@ int lc_pouch_query_index_visit_range(
                         NULL, NULL, NULL);
   }
   return lc_pouch_query_index_visit_term_match(
-      pouch, namespace_name, field, NULL, 0, 0, 0, bounds, visit, context,
+      pouch, namespace_name, field, NULL, 0, 0, 0, bounds, NULL, visit, context,
       index_seq, error);
+}
+
+int lc_pouch_query_index_visit_date(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const lc_pouch_query_index_date_bounds *bounds,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error) {
+  if (bounds == NULL ||
+      (!bounds->has_gt && !bounds->has_gte && !bounds->has_lt &&
+       !bounds->has_lte)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index date lookup requires temporal "
+                        "bounds",
+                        NULL, NULL, NULL);
+  }
+  return lc_pouch_query_index_visit_term_match(
+      pouch, namespace_name, field, NULL, 0, 0, 0, NULL, bounds, visit,
+      context, index_seq, error);
 }
 
 int lc_pouch_query_index_visit_exists(lc_pouch *pouch,

@@ -2,6 +2,7 @@
 #define LC_POUCH_QUERY_INDEX_H
 
 #include "lc_pouch.h"
+#include "lc_pouch_index.h"
 
 typedef struct lc_pouch_query_index_flush_result {
   unsigned long index_seq;
@@ -33,6 +34,8 @@ typedef struct lc_pouch_query_index_range_bounds {
   double lt;
   double lte;
 } lc_pouch_query_index_range_bounds;
+
+typedef lc_pouch_index_date_bounds lc_pouch_query_index_date_bounds;
 
 typedef int (*lc_pouch_query_index_key_visit_fn)(
     const lc_pouch_query_index_key_view *key, void *context, lc_error *error);
@@ -73,6 +76,11 @@ int lc_pouch_query_index_visit_contains(
 int lc_pouch_query_index_visit_range(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const lc_pouch_query_index_range_bounds *bounds,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error);
+int lc_pouch_query_index_visit_date(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const lc_pouch_query_index_date_bounds *bounds,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_exists(lc_pouch *pouch,

@@ -237,9 +237,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     - [x] Batch indexed candidate state reads through one namespace manifest
       open, marker refresh, and warmed projection-cache lookup per candidate
       set instead of reopening the manifest for every posting hit.
-    - [ ] Add a real typed temporal posting path for indexed `DateAfter`
-      instead of using `/created_at` field-presence candidates plus final
-      liblql filtering.
+    - [x] Add a typed temporal candidate path for indexed `DateAfter` over
+      durable scalar term postings: pouch now parses RFC3339 term values and
+      date selector bounds into UTC instants, excludes invalid/out-of-range
+      terms before state reads, and still preserves final `liblql` selector
+      acceptance.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
   new pouch API and restore the comparison scenarios only when they measure the
   redesigned implementation.
@@ -726,11 +728,11 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Split the pouch search/index subsystem out of `lc_pouch.c` into
       an internal C index layer with explicit reader, writer, planner, posting,
       visibility, and result-cache boundaries.
-      - [x] Introduce the first private reader/planner boundary in
-        `lc_pouch_index`: exact-term, field-presence, and range docID reader
-        callbacks let the index layer own primary equality, `in` union, exact
-        `exists`, and numeric range planning while the pouch backend adapts the
-        current sidecar postings.
+      - [x] Introduce the first real private index module boundary in
+        `lc_pouch_index`: indexed `DateAfter` temporal parsing and bound
+        evaluation now live outside the sidecar reader, so the pouch query path
+        starts moving toward an index-owned planner/reader layer without
+        legacy compatibility paths.
       - [x] Move the first result-cache/page orchestration boundary into
         `lc_pouch_index`: a generation-scoped cached docID page helper now owns
         normalized plan key lookup, cache miss collection, cache insert, and
@@ -1407,10 +1409,16 @@ Latest release targets confirmed on 2026-07-23:
         runs: `EqSparse` pouch improved to about 7.0 ms keys / 7.4 ms
         documents C-side versus Go lockd disk at about 32 ms / 38 ms;
         `ContainsMessage` pouch measured about 38 ms keys / 40 ms documents
-        versus Go lockd disk at about 31 ms / 44 ms; `DateAfter` remains a
+        versus Go lockd disk at about 31 ms / 44 ms; `DateAfter` remained a
         gap at about 166 ms keys / 174 ms documents versus Go lockd disk at
-        about 1.1 ms / 12 ms because pouch still uses broad presence
+        about 1.1 ms / 12 ms because pouch still used broad presence
         candidates instead of temporal postings.
+      - [x] Replace the broad `/created_at` presence-candidate path for
+        bounded indexed `DateAfter` with a typed temporal reader over scalar
+        term postings, with temporal semantics owned by `lc_pouch_index`.
+        Verified on 2026-07-27 with focused 4096-document indexed `DateAfter`:
+        pouch measured about 34 ms keys / 36 ms documents C-side versus Go
+        lockd disk at about 32 ms / 48 ms in the same run.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

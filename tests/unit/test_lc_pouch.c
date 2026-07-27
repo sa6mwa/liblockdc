@@ -5742,7 +5742,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_query_keys_index_date_lql_filters_presence_candidates(
+static void test_query_keys_index_date_lql_filters_temporal_candidates(
     void **state) {
   lc_client *client;
   lc_pouch *pouch;
@@ -5781,6 +5781,18 @@ static void test_query_keys_index_date_lql_filters_presence_candidates(
       &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/new",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory(
+      "{\"created_at\":\"2025-01-01T02:00:00+01:00\",\"n\":7}",
+      strlen("{\"created_at\":\"2025-01-01T02:00:00+01:00\",\"n\":7}"),
+      &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/offset",
                             source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
@@ -5865,8 +5877,9 @@ static void test_query_keys_index_date_lql_filters_presence_candidates(
   rc = client->query_keys(client, &query_req, &handler, &date_page,
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(date_page.count, 1);
+  assert_int_equal(date_page.count, 2);
   assert_true(pouch_query_capture_has(&date_page, "doc/new"));
+  assert_true(pouch_query_capture_has(&date_page, "doc/offset"));
   assert_false(pouch_query_capture_has(&date_page, "doc/old"));
   assert_false(pouch_query_capture_has(&date_page, "doc/invalid"));
   assert_false(pouch_query_capture_has(&date_page, "doc/missing"));
@@ -7872,7 +7885,7 @@ int main(void) {
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
       cmocka_unit_test(
-          test_query_keys_index_date_lql_filters_presence_candidates),
+          test_query_keys_index_date_lql_filters_temporal_candidates),
       cmocka_unit_test(
           test_query_keys_index_recursive_exists_uses_container_presence),
       cmocka_unit_test(test_query_documents_scan_streams_rows),

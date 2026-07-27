@@ -142,7 +142,9 @@ typedef struct lc_pouch_query_index_plan {
   int contains;
   int ignore_case;
   int range;
+  int date;
   lc_pouch_query_index_range_bounds range_bounds;
+  lc_pouch_query_index_date_bounds date_bounds;
 } lc_pouch_query_index_plan;
 
 typedef struct lc_pouch_query_index_key_set {
@@ -789,6 +791,10 @@ static void lc_pouch_query_index_plan_cleanup(
   for (index = 0U; index < plan->value_count; ++index) {
     free(plan->values[index]);
   }
+  free((char *)plan->date_bounds.gt);
+  free((char *)plan->date_bounds.gte);
+  free((char *)plan->date_bounds.lt);
+  free((char *)plan->date_bounds.lte);
   free(plan->values);
   memset(plan, 0, sizeof(*plan));
 }
@@ -891,6 +897,29 @@ static int lc_pouch_query_index_plan_set_range_bound(
   }
   *has_bound = 1;
   *value = bound->number;
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_plan_set_date_bound(
+    lql_string_view view, int *has_bound, const char **value,
+    lc_error *error) {
+  char *copy;
+
+  if (has_bound == NULL || value == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query date planning requires bound outputs",
+                        NULL, NULL, NULL);
+  }
+  if (view.len == 0U) {
+    return LC_OK;
+  }
+  copy = lc_pouch_query_dup_lql_string(view, error);
+  if (copy == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  free((char *)*value);
+  *value = copy;
+  *has_bound = 1;
   return LC_OK;
 }
 
@@ -1052,6 +1081,8 @@ static int lc_pouch_query_index_plan_from_selector(
     return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_DATE) {
+    int rc;
+
     memset(&date_term, 0, sizeof(date_term));
     status = runtime->selector_node_date_term(runtime, root, &date_term,
                                               &lql_error_value);
@@ -1070,7 +1101,56 @@ static int lc_pouch_query_index_plan_from_selector(
       return error != NULL && error->code != LC_OK ? error->code
                                                    : LC_ERR_NOMEM;
     }
-    plan->exists = 1;
+    rc = LC_OK;
+    if (date_term.value.len > 0U) {
+      rc = lc_pouch_query_index_plan_set_date_bound(
+          date_term.value, &plan->date_bounds.has_gte,
+          &plan->date_bounds.gte, error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_query_index_plan_set_date_bound(
+            date_term.value, &plan->date_bounds.has_lte,
+            &plan->date_bounds.lte, error);
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_date_bound(
+          date_term.after, &plan->date_bounds.has_gt, &plan->date_bounds.gt,
+          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_date_bound(
+          date_term.before, &plan->date_bounds.has_lt, &plan->date_bounds.lt,
+          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_date_bound(
+          date_term.gt, &plan->date_bounds.has_gt, &plan->date_bounds.gt,
+          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_date_bound(
+          date_term.gte, &plan->date_bounds.has_gte, &plan->date_bounds.gte,
+          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_date_bound(
+          date_term.lt, &plan->date_bounds.has_lt, &plan->date_bounds.lt,
+          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_plan_set_date_bound(
+          date_term.lte, &plan->date_bounds.has_lte, &plan->date_bounds.lte,
+          error);
+    }
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (plan->date_bounds.has_gt || plan->date_bounds.has_gte ||
+        plan->date_bounds.has_lt || plan->date_bounds.has_lte) {
+      plan->date = 1;
+    } else {
+      plan->exists = 1;
+    }
     return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_IN) {
@@ -1368,6 +1448,16 @@ static int lc_pouch_query_run_index_predicate(
     rc = lc_pouch_query_index_visit_exists(
         scan->client->pouch, scan->namespace_name, plan.field,
         lc_pouch_query_index_key_collect, &keys, &value_seq, error);
+    if (rc == LC_OK && value_seq > scan->index_seq) {
+      scan->index_seq = value_seq;
+    }
+  }
+  if (rc == LC_OK && plan.date) {
+    value_seq = 0UL;
+    rc = lc_pouch_query_index_visit_date(
+        scan->client->pouch, scan->namespace_name, plan.field,
+        &plan.date_bounds, lc_pouch_query_index_key_collect, &keys, &value_seq,
+        error);
     if (rc == LC_OK && value_seq > scan->index_seq) {
       scan->index_seq = value_seq;
     }
