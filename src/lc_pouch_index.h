@@ -35,6 +35,20 @@ typedef struct lc_pouch_index_docid_set {
   size_t capacity;
 } lc_pouch_index_docid_set;
 
+typedef struct lc_pouch_index_doc {
+  const char *key_hex;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
+} lc_pouch_index_doc;
+
+typedef struct lc_pouch_index_doc_table {
+  lc_pouch_index_doc *items;
+  size_t count;
+  size_t capacity;
+} lc_pouch_index_doc_table;
+
 typedef struct lc_pouch_index_posting {
   unsigned char *bytes;
   size_t length;
@@ -85,6 +99,20 @@ int lc_pouch_index_docid_set_subtract_sorted(
     const lc_pouch_index_docid_set *left,
     const lc_pouch_index_docid_set *right, lc_pouch_index_docid_set *out,
     const lc_allocator *allocator, lc_error *error);
+void lc_pouch_index_doc_table_cleanup(const lc_allocator *allocator,
+                                      lc_pouch_index_doc_table *table);
+int lc_pouch_index_doc_table_append_sorted_unique(
+    lc_pouch_index_doc_table *table, const char *key_hex,
+    unsigned long version, unsigned long bytes, int has_query_hidden,
+    int query_hidden, unsigned long *doc_id, const lc_allocator *allocator,
+    lc_error *error);
+int lc_pouch_index_doc_table_find_key_hex(
+    const lc_pouch_index_doc_table *table, const char *key_hex,
+    unsigned long *doc_id, int *found, lc_error *error);
+int lc_pouch_index_doc_table_get(const lc_pouch_index_doc_table *table,
+                                 unsigned long doc_id,
+                                 const lc_pouch_index_doc **doc,
+                                 lc_error *error);
 void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
                                     lc_pouch_index_posting *posting);
 int lc_pouch_index_posting_append_sorted_unique(

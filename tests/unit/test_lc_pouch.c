@@ -228,6 +228,77 @@ static void test_index_docid_set_merges_sorted_sets(void **state) {
   lc_pouch_index_docid_set_cleanup(&allocator, &right);
 }
 
+static void test_index_doc_table_maps_sorted_keys_to_docids(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_doc_table table;
+  const lc_pouch_index_doc *doc;
+  lc_error error;
+  unsigned long doc_id;
+  int found;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&table, 0, sizeof(table));
+  doc = NULL;
+  doc_id = 999UL;
+  found = 0;
+
+  rc = lc_pouch_index_doc_table_append_sorted_unique(
+      &table, "0a", 3UL, 11UL, 1, 0, &doc_id, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(doc_id, 0);
+  rc = lc_pouch_index_doc_table_append_sorted_unique(
+      &table, "0b", 4UL, 12UL, 1, 1, &doc_id, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(doc_id, 1);
+  rc = lc_pouch_index_doc_table_append_sorted_unique(
+      &table, "10", 5UL, 13UL, 0, 0, &doc_id, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(doc_id, 2);
+
+  rc = lc_pouch_index_doc_table_find_key_hex(&table, "0b", &doc_id, &found,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(found);
+  assert_int_equal(doc_id, 1);
+  rc = lc_pouch_index_doc_table_get(&table, doc_id, &doc, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(doc);
+  assert_string_equal(doc->key_hex, "0b");
+  assert_int_equal(doc->version, 4);
+  assert_int_equal(doc->bytes, 12);
+  assert_true(doc->has_query_hidden);
+  assert_true(doc->query_hidden);
+
+  rc = lc_pouch_index_doc_table_find_key_hex(&table, "0c", &doc_id, &found,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(found);
+
+  rc = lc_pouch_index_doc_table_append_sorted_unique(
+      &table, "10", 6UL, 14UL, 0, 0, &doc_id, &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "duplicate"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_index_doc_table_append_sorted_unique(
+      &table, "09", 6UL, 14UL, 0, 0, &doc_id, &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "sorted"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_index_doc_table_get(&table, 99UL, &doc, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "out of range"));
+
+  lc_error_cleanup(&error);
+  lc_pouch_index_doc_table_cleanup(&allocator, &table);
+}
+
 static void test_index_posting_roundtrips_sparse_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_posting posting;
@@ -9590,6 +9661,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_index_docid_set_keeps_sorted_unique_docids),
       cmocka_unit_test(test_index_docid_set_merges_sorted_sets),
+      cmocka_unit_test(test_index_doc_table_maps_sorted_keys_to_docids),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),

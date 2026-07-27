@@ -786,17 +786,18 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Physically split sparse posting encoding into
         `src/lc_pouch_index_posting.c`, keeping the private posting boundary
         separate from document-table, term-dictionary, and result-cache code.
-        Dense bitset primitives now live in the same module; adaptive
-        sparse/dense selection remains pending.
+        Dense bitset primitives and adaptive sparse/dense selection now live in
+        the same module.
       - [ ] Physically split term dictionaries, term-ID posting tables, and
         prepared-term cache lifecycle into `src/lc_pouch_index_terms.c`, so
         the private index layer has distinct document, posting, term, and
         result-cache modules.
       - [x] Physically split private docID set algebra into
         `src/lc_pouch_index_doc.c`, including sorted unique append and
-        merge-based union/intersection/subtraction helpers. `lc_pouch_index.c`
-        remains focused on temporal parsing while the dense document-table
-        split remains pending.
+        merge-based union/intersection/subtraction helpers plus the first
+        borrowed-key dense document-table primitive. `lc_pouch_index.c`
+        remains focused on temporal parsing while the persistent per-generation
+        table cutover remains pending.
       - [x] Document the current private index module map in
         `docs/pouch-storage.md`, including the pouch storage bridge responsibility that
         remains in `src/lc_pouch.c`.
@@ -865,6 +866,10 @@ Latest release targets confirmed on 2026-07-23:
         union, intersection, and subtraction now run with linear merge scans,
         reject unsorted or duplicate inputs, and require non-aliased empty
         output sets so future planner scratch buffers have a strict contract.
+      - [x] Wire query-index text generation through the private document table
+        for term docID assignment: sorted rows populate borrowed-key doc table
+        entries once, terms resolve docIDs through table lookup, and unit
+        coverage fixes the sorted unique/lookup/out-of-range contract.
       - [x] Add an internal docID scratch-buffer primitive and wire equality
         intersection/subtraction collectors through it, so multi-term query
         algebra reuses allocator-owned temporary buffers instead of allocating

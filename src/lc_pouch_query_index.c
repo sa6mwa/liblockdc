@@ -981,35 +981,6 @@ static int lc_pouch_query_index_row_compare(const void *left,
   return 0;
 }
 
-static int lc_pouch_query_index_row_find_doc_id(
-    const lc_pouch_query_index_summary *summary, const char *key_hex,
-    unsigned long *doc_id) {
-  size_t low;
-  size_t high;
-  size_t mid;
-  int cmp;
-
-  if (summary == NULL || key_hex == NULL || doc_id == NULL) {
-    return 0;
-  }
-  low = 0U;
-  high = summary->count;
-  while (low < high) {
-    mid = low + ((high - low) / 2U);
-    cmp = strcmp(key_hex, summary->rows[mid].key_hex);
-    if (cmp == 0) {
-      *doc_id = (unsigned long)mid;
-      return 1;
-    }
-    if (cmp < 0) {
-      high = mid;
-    } else {
-      low = mid + 1U;
-    }
-  }
-  return 0;
-}
-
 static int lc_pouch_query_index_term_compare(const void *left,
                                              const void *right) {
   const lc_pouch_query_index_term *a;
@@ -3356,6 +3327,7 @@ static int lc_pouch_query_index_build_text(
   lc_pouch_query_index_text term_values;
   lc_pouch_query_index_text terms;
   lc_pouch_query_index_text presences;
+  lc_pouch_index_doc_table doc_table;
   char line[256];
   unsigned long row_hash;
   unsigned long term_hash;
@@ -3368,10 +3340,12 @@ static int lc_pouch_query_index_build_text(
   unsigned long current_value_count;
   unsigned long presence_hash;
   unsigned long presence_line_count;
+  unsigned long doc_id;
   const char *current_field_hex;
   const char *current_value_field_hex;
   const char *current_value_hex;
   size_t index;
+  int found;
   int written;
   int rc;
 
@@ -3410,6 +3384,7 @@ static int lc_pouch_query_index_build_text(
   memset(&term_values, 0, sizeof(term_values));
   memset(&terms, 0, sizeof(terms));
   memset(&presences, 0, sizeof(presences));
+  memset(&doc_table, 0, sizeof(doc_table));
   header.allocator = summary->allocator;
   rows.allocator = summary->allocator;
   term_fields.allocator = summary->allocator;
@@ -3466,6 +3441,12 @@ static int lc_pouch_query_index_build_text(
                                                  &row_hash, error);
     }
     if (rc == LC_OK) {
+      rc = lc_pouch_index_doc_table_append_sorted_unique(
+          &doc_table, row->key_hex, row->version, row->bytes,
+          row->has_query_hidden, row->query_hidden, &doc_id,
+          summary->allocator, error);
+    }
+    if (rc == LC_OK) {
       rc = lc_pouch_query_index_text_append_cstr(&rows, "\n", &row_hash,
                                                  error);
     }
@@ -3478,11 +3459,16 @@ static int lc_pouch_query_index_build_text(
         lc_pouch_query_index_term_equal(&summary->terms[index - 1U], term)) {
       continue;
     }
-    if (!lc_pouch_query_index_row_find_doc_id(summary, term->key_hex,
-                                             &term->doc_id)) {
+    rc = lc_pouch_index_doc_table_find_key_hex(
+        &doc_table, term->key_hex, &term->doc_id, &found, error);
+    if (rc != LC_OK) {
+      break;
+    }
+    if (!found) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term references missing row", NULL,
-                        NULL, NULL);
+                        "pouch query-index term references missing doc table "
+                        "entry",
+                        NULL, NULL, NULL);
       break;
     }
     if (current_field_hex == NULL ||
@@ -3785,6 +3771,7 @@ static int lc_pouch_query_index_build_text(
   lc_free_with_allocator(summary->allocator, term_values.bytes);
   lc_free_with_allocator(summary->allocator, terms.bytes);
   lc_free_with_allocator(summary->allocator, presences.bytes);
+  lc_pouch_index_doc_table_cleanup(summary->allocator, &doc_table);
   return rc;
 }
 

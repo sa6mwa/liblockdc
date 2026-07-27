@@ -1408,11 +1408,11 @@ fuller compiled-index module map remains the target for the remaining work:
   evaluation. It should become the planner/collector orchestration layer over
   private index primitives.
 - `src/lc_pouch_index_doc.c` currently owns the private docID set algebra used
-  by indexed candidate collection. It should grow the dense document table:
-  namespace/key pairs to stable in-memory document IDs, reverse lookup, and
-  broader scratch-buffer lifecycle. It already provides sorted unique append
-  plus merge-based union, intersection, and subtraction helpers for sorted
-  unique docID sets.
+  by indexed candidate collection plus the first borrowed-key document table.
+  It already provides sorted unique docID append, merge-based union,
+  intersection, and subtraction helpers, and sorted key-to-docID / docID-to-key
+  table lookup. It should still grow the persistent per-generation document
+  table and broader scratch-buffer lifecycle.
 - `src/lc_pouch_index_posting.c` currently owns sparse delta-varint docID
   posting streams. The active exact/`in` query-index docID bridge exercises
   that posting primitive while collapsing sorted candidate docIDs before key
