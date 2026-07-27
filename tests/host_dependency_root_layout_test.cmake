@@ -64,6 +64,8 @@ assert_contains(host_test_script "have_native_musl_toolchain()" "host test resol
 assert_contains(root_cmake [=[list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LOCKDC_SLOW_TEST_RUNTIME=1")]=] "C test cross slow-runtime environment")
 assert_contains(root_cmake [=[list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}")]=] "C test Bootlin runtime environment")
 assert_contains(root_cmake "-print-file-name=libatomic.so.1" "C test libatomic runtime discovery")
+assert_contains(root_cmake [=[set_tests_properties(lockdc_bench_help PROPERTIES
+                ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")]=] "benchmark help test Bootlin runtime environment")
 
 file(REMOVE_RECURSE "${fake_compiler_dir}")
 file(MAKE_DIRECTORY "${fake_compiler_dir}")

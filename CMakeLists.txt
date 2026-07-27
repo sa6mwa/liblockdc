@@ -742,6 +742,10 @@ if(LOCKDC_BUILD_TESTS)
             PASS_REGULAR_EXPRESSION "usage: .*lockdc_bench"
             FAIL_REGULAR_EXPRESSION "benchmark[ ]+iterations|failed during"
         )
+        if(LOCKDC_C_TEST_ENVIRONMENT)
+            set_tests_properties(lockdc_bench_help PROPERTIES
+                ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+        endif()
 
         add_test(NAME lockdc_bench_short_help COMMAND lockdc_bench -h)
         set_tests_properties(lockdc_bench_short_help PROPERTIES
@@ -750,6 +754,10 @@ if(LOCKDC_BUILD_TESTS)
             PASS_REGULAR_EXPRESSION "usage: .*lockdc_bench"
             FAIL_REGULAR_EXPRESSION "benchmark[ ]+iterations|failed during"
         )
+        if(LOCKDC_C_TEST_ENVIRONMENT)
+            set_tests_properties(lockdc_bench_short_help PROPERTIES
+                ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+        endif()
     endif()
 
     if(TARGET lc_shared AND TARGET lc_static)
