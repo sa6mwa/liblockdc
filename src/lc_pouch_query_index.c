@@ -3525,9 +3525,12 @@ static int lc_pouch_query_index_visit_term_match(
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
   lc_pouch_query_index_term_reader reader;
+  lc_pouch_index_term_key *exact_terms;
   char *sidecar_path;
   char *field_hex;
   char *value_hex;
+  size_t exact_term_count;
+  int exact_scalar;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -3544,22 +3547,41 @@ static int lc_pouch_query_index_visit_term_match(
   if (sidecar_path == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  field_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, field);
-  value_hex = range_bounds == NULL && date_bounds == NULL
-                  ? lc_pouch_query_index_hex_encode(&pouch->allocator, value)
-                  : lc_strdup_with_allocator(&pouch->allocator, "");
-  if (field_hex == NULL || value_hex == NULL) {
+  exact_terms = NULL;
+  exact_term_count = 0U;
+  field_hex = NULL;
+  value_hex = NULL;
+  exact_scalar = !prefix_match && !contains_match && !ignore_case &&
+                 range_bounds == NULL && date_bounds == NULL;
+  if (exact_scalar) {
+    rc = lc_pouch_index_term_keys_build_exact_for_field(
+        field, &value, 1U, &exact_terms, &exact_term_count,
+        &pouch->allocator, error);
+  } else {
+    field_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, field);
+    value_hex = range_bounds == NULL && date_bounds == NULL
+                    ? lc_pouch_query_index_hex_encode(&pouch->allocator, value)
+                    : lc_strdup_with_allocator(&pouch->allocator, "");
+    rc = field_hex != NULL && value_hex != NULL ? LC_OK : LC_ERR_NOMEM;
+  }
+  if (rc != LC_OK) {
+    if (rc == LC_ERR_NOMEM) {
+      lc_error_set(error, LC_ERR_NOMEM, 0L,
+                   "failed to allocate pouch query-index scalar lookup", NULL,
+                   NULL, NULL);
+    }
+    lc_pouch_index_term_keys_cleanup(&pouch->allocator, exact_terms, 1U);
     lc_free_with_allocator(&pouch->allocator, field_hex);
     lc_free_with_allocator(&pouch->allocator, value_hex);
     lc_free_with_allocator(&pouch->allocator, sidecar_path);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index scalar lookup",
-                        NULL, NULL, NULL);
+    return rc;
   }
   memset(&reader, 0, sizeof(reader));
   reader.allocator = &pouch->allocator;
   reader.field_hex = field_hex;
   reader.value_hex = value_hex;
+  reader.exact_terms = exact_terms;
+  reader.exact_term_count = exact_term_count;
   reader.value_text = value;
   reader.prefix_match = prefix_match;
   reader.contains_match = contains_match;
@@ -3600,6 +3622,7 @@ static int lc_pouch_query_index_visit_term_match(
     *index_seq = sidecar.index_seq;
   }
   lc_free_with_allocator(&pouch->allocator, reader.value_scratch);
+  lc_pouch_index_term_keys_cleanup(&pouch->allocator, exact_terms, 1U);
   lc_free_with_allocator(&pouch->allocator, field_hex);
   lc_free_with_allocator(&pouch->allocator, value_hex);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
