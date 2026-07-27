@@ -1265,6 +1265,17 @@ Latest release targets confirmed on 2026-07-23:
         keys and 28.5 ms for documents; the target completed in 1m22s.
         `RangeHalf`, `InTags`, and `DateAfter` still require deeper
         compiled-index/posting work to beat Go disk consistently.
+      - [x] Add a durable `query.index` v6 term-field line table so indexed
+        term readers can skip unrelated sorted field posting lines before
+        parsing target candidates. Verified on 2026-07-27 with a focused
+        4096-doc key benchmark: pouch `RangeHalf` measured about 23.8 ms
+        C-side, `InTags` about 22.7 ms C-side, and `ContainsMessage` about
+        29.6 ms C-side. This improves late-field scans but remains an interim
+        sidecar acceleration before typed docID/posting generations. The
+        broader `make benchmark-pouch-go-acceptance` gate completed in 1m33s
+        on 2026-07-27 with pouch indexed key timings of about 22.4 ms
+        `RangeHalf`, 19.8 ms `InTags`, 25.1 ms `ContainsMessage`, 11.8 ms
+        `DateAfter`, and 33.9 ms `OrSparseOrFlag` C-side.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

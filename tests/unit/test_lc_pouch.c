@@ -6272,6 +6272,12 @@ static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
   assert_path_file_contains(namespace_path, "index/query.index",
                             "row_count=3");
   assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_field_count=");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_field 2f63617465676f7279 ");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_field 2f6e ");
+  assert_path_file_contains(namespace_path, "index/query.index",
                             "term_index_complete=1");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "presence_index_complete=1");
@@ -7818,13 +7824,19 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_non_null(namespace_path);
   assert_path_file_contains(namespace_path, "index/query.index",
                             "format=pouch-query-index");
-  assert_path_file_contains(namespace_path, "index/query.index", "version=5");
+  assert_path_file_contains(namespace_path, "index/query.index", "version=6");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "state_index_seq=4");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "row_count=2");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "term_count=");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_field_count=");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_field 2f6b696e64 ");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_field 2f6e ");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "term_index_complete=1");
   assert_path_file_contains(namespace_path, "index/query.index",

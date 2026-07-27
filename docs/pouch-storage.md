@@ -1028,14 +1028,19 @@ conjunction. Exists-only root `or` groups may union wildcard/recursive
 expansions with exact presence postings before final acceptance.
 The `query.index` sidecar starts with a format/version record so incompatible
 layouts rebuild from authoritative namespace segments/snapshots instead of
-being trusted. Version 2 stores the namespace state high-water, deterministic
-live-row count, a hash over the row payload, and one row per live state entry:
-version, byte length, query-hidden metadata flags, hex-encoded key,
-content-type, and etag. Tombstones advance the high-water but are not emitted as
-live rows. The planned typed-posting slices will extend this format and must
-preserve the same rebuild rule: a format-triggered rebuild restores both the
-ordered query summary projection and the field postings used by indexed
-predicate document and key scans.
+being trusted. Version 6 stores the namespace state high-water, deterministic
+live-row count, a hash over the row payload, scalar term counts and hashes,
+field-presence counts and hashes, and a term-field line table. The field table
+contains `term_field <field_hex> <first_line> <line_count>` entries sorted by
+strict JSON Pointer field. Term readers use that table to skip unrelated
+posting lines for indexed equality, `in`, range, date, prefix, contains, and
+root equality `or` candidate extraction while preserving final `liblql`
+acceptance. Live summary rows still contain version, byte length, query-hidden
+metadata flags, hex-encoded key, content-type, and etag. Tombstones advance the
+high-water but are not emitted as live rows. The planned typed-posting slices
+will extend this format and must preserve the same rebuild rule: a
+format-triggered rebuild restores both the ordered query summary projection and
+the field postings used by indexed predicate document and key scans.
 In explicit scan mode, calls route through the ordered scan path and emit no
 index sequence because no durable query index is consulted. `query_keys` streams
 keys, excludes `query_hidden=true` metadata, uses `cursor` as `start_after`, and
