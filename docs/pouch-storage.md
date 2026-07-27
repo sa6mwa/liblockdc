@@ -1414,14 +1414,13 @@ fuller compiled-index module map remains the target for the remaining work:
   table lookup. It should still grow the persistent per-generation document
   table and broader scratch-buffer lifecycle.
 - `src/lc_pouch_index_posting.c` currently owns sparse delta-varint docID
-  posting streams. The active exact/`in` query-index docID bridge exercises
-  that posting primitive while collapsing sorted candidate docIDs before key
-  emission. It also owns the first dense bitset posting primitive, with
-  sorted append and corruption-checked decode. The first adaptive wrapper
-  appends sorted docIDs once, opportunistically tracks dense bits while the
-  shape remains plausible, and selects dense only when density and encoded
-  size justify it. Persisted posting generation files still need to consume
-  that adaptive boundary broadly.
+  posting streams. The active exact/`in` query-index docID bridge now sorts and
+  compacts collected candidates directly before key emission, avoiding a local
+  posting round-trip. The posting module still owns sparse delta-varint
+  streams, the first dense bitset posting primitive with sorted append and
+  corruption-checked decode, and the adaptive wrapper that selects dense only
+  when density and encoded size justify it. Persisted posting generation files
+  still need to consume that adaptive boundary broadly.
 - `src/lc_pouch_index_terms.c` owns term dictionaries, term-ID posting tables,
   and prepared-term cache identity refresh/cleanup. Prepared bridge caches are
   keyed by an explicit private index identity containing the current index

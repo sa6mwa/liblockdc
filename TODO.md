@@ -858,10 +858,7 @@ Latest release targets confirmed on 2026-07-23:
         Current active source now exposes `lc_pouch_index_docid_set` from the
         private index module and routes query-index docID key emission through
         its sorted unique append contract, with unit coverage for duplicate
-        collapse and out-of-order rejection. The same private set now also
-        deduplicates multi-term query-index docID hits at collection time
-        before duplicate `key_hex` allocation, which is the current active
-        bridge for indexed exact `in` and equality-term unions.
+        collapse and out-of-order rejection.
       - [x] Add private merge-based docID algebra for sorted unique sets:
         union, intersection, and subtraction now run with linear merge scans,
         reject unsorted or duplicate inputs, and require non-aliased empty
@@ -870,6 +867,11 @@ Latest release targets confirmed on 2026-07-23:
         for term docID assignment: sorted rows populate borrowed-key doc table
         entries once, terms resolve docIDs through table lookup, and unit
         coverage fixes the sorted unique/lookup/out-of-range contract.
+      - [x] Cut multi-term query-index docID emission over to direct sorted
+        compaction: collectors append candidate rows once, the emitter sorts by
+        docID/key/value slot, drops adjacent duplicate docIDs without a local
+        posting round-trip, and preserves `value_index` on the docID reader
+        branch for value-specific merge callers.
       - [x] Add an internal docID scratch-buffer primitive and wire equality
         intersection/subtraction collectors through it, so multi-term query
         algebra reuses allocator-owned temporary buffers instead of allocating
