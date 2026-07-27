@@ -1617,13 +1617,15 @@ Latest release targets confirmed on 2026-07-23:
     POUCH_GO_FAST_BENCHTIME=1x POUCH_GO_FAST_TIMEOUT=45s`: the Go/cgo module
     now starts `.cache/go/bin/lockd` with a disk backend under an
     automatically cleaned `/tmp/liblockdc-lockd-disk-bench-*` root.
-  - [ ] Compare that real lockd disk server against an actual liblockdc
+  - [x] Compare that real lockd disk server against an actual liblockdc
     `pouch://` client instance with the same full-form LQL selector shape.
     - [x] Add the first fast comparison cases for sparse equality, `/tags[]`
-      array membership, and recursive exists. The lockd disk side uses the
-      Go client with full-form LQL; the pouch side uses the equivalent
-      `selector_json` through the current public C query request so C-side
-      timing still excludes cgo overhead.
+      array membership, and recursive exists against real lockd disk and
+      actual liblockdc `pouch://` clients.
+    - [x] Add `lc_query_req.selector_lql` for public C full-form LQL query
+      expressions and switch the pouch Go/cgo benchmark helper to use the same
+      full-form LQL strings as the lockd disk client side, while preserving
+      `selector_json` as an explicit AST-JSON input for existing callers.
   - [ ] Mirror more of the Go lockd disk benchmark suite shape in the Go/cgo
     module so pouch and Go disk backend results can be compared case by case.
     - [x] Add `BenchmarkMediumLockdDiskKeys` and

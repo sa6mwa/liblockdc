@@ -1639,7 +1639,12 @@ static int lcdc_client_query(lua_State *L) {
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
   req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
-  lcdc_require_string_field(L, 2, "selector_json", &req.selector_json);
+  req.selector_lql = lcdc_opt_string_field(L, 2, "selector_lql");
+  req.selector_json = lcdc_opt_string_field(L, 2, "selector_json");
+  if ((req.selector_lql == NULL || req.selector_lql[0] == '\0') &&
+      (req.selector_json == NULL || req.selector_json[0] == '\0')) {
+    return luaL_error(L, "query requires selector_lql or selector_json");
+  }
   lcdc_opt_integer_field(L, 2, "limit", &req.limit);
   req.cursor = lcdc_opt_string_field(L, 2, "cursor");
   req.fields_json = lcdc_opt_string_field(L, 2, "fields_json");

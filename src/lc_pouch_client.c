@@ -383,6 +383,60 @@ static int lc_pouch_query_lql_error(lc_error *error, lql_status status,
                       "pouch-lql");
 }
 
+static int lc_pouch_query_request_has_selector(const lc_query_req *req) {
+  return req != NULL &&
+         ((req->selector_json != NULL && req->selector_json[0] != '\0') ||
+          (req->selector_lql != NULL && req->selector_lql[0] != '\0'));
+}
+
+static int lc_pouch_query_request_validate_selector(const lc_query_req *req,
+                                                    lc_error *error) {
+  if (req != NULL && req->selector_json != NULL &&
+      req->selector_json[0] != '\0' && req->selector_lql != NULL &&
+      req->selector_lql[0] != '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "selector_json and selector_lql are mutually "
+                        "exclusive",
+                        NULL, NULL, "pouch-redesign");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_query_parse_selector(lql *runtime, const lc_query_req *req,
+                                         lql_selector **out,
+                                         lc_error *error) {
+  lql_error lql_error_value;
+  lql_status status;
+
+  if (runtime == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query selector parse requires runtime, request, "
+                        "and output",
+                        NULL, NULL, "pouch-redesign");
+  }
+  *out = NULL;
+  if (lc_pouch_query_request_validate_selector(req, error) != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  }
+  lql_error_init(&lql_error_value);
+  if (req->selector_lql != NULL && req->selector_lql[0] != '\0') {
+    status =
+        runtime->selector_parse(runtime, req->selector_lql, out,
+                                &lql_error_value);
+  } else if (req->selector_json != NULL && req->selector_json[0] != '\0') {
+    status = runtime->selector_parse_json(
+        runtime, req->selector_json, strlen(req->selector_json), out,
+        &lql_error_value);
+  } else {
+    return LC_OK;
+  }
+  if (status != LQL_STATUS_OK) {
+    return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                    "failed to parse pouch query selector");
+  }
+  return LC_OK;
+}
+
 static lql_status lc_pouch_query_lql_read(void *user,
                                           unsigned char *buffer,
                                           size_t capacity, size_t *out_len,
@@ -6134,9 +6188,14 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                         NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  if (req->selector_json == NULL || req->selector_json[0] == '\0') {
+  rc = lc_pouch_query_request_validate_selector(req, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!lc_pouch_query_request_has_selector(req)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query requires selector_json", NULL, NULL,
+                        "pouch query requires selector_json or selector_lql",
+                        NULL, NULL,
                         "pouch-redesign");
   }
   if (req->fields_json != NULL && req->fields_json[0] != '\0') {
@@ -6180,13 +6239,10 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
     return lc_pouch_query_lql_error(error, status, &lql_error_value,
                                     "failed to initialize pouch query runtime");
   }
-  status = runtime->selector_parse_json(runtime, req->selector_json,
-                                        strlen(req->selector_json), &selector,
-                                        &lql_error_value);
-  if (status != LQL_STATUS_OK) {
+  rc = lc_pouch_query_parse_selector(runtime, req, &selector, error);
+  if (rc != LC_OK) {
     runtime->destroy(runtime);
-    return lc_pouch_query_lql_error(error, status, &lql_error_value,
-                                    "failed to parse pouch query selector");
+    return rc;
   }
 
   memset(&scan, 0, sizeof(scan));
@@ -6267,7 +6323,11 @@ int lc_pouch_client_query_keys_method(lc_client *self,
                         "pouch query_keys does not accept fields_json", NULL,
                         NULL, "pouch-redesign");
   }
-  has_selector = req->selector_json != NULL && req->selector_json[0] != '\0';
+  rc = lc_pouch_query_request_validate_selector(req, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  has_selector = lc_pouch_query_request_has_selector(req);
   use_index_summary = 0;
   use_index_predicate = 0;
   if (req->engine != NULL && req->engine[0] != '\0' &&
@@ -6352,13 +6412,10 @@ int lc_pouch_client_query_keys_method(lc_client *self,
                                     "failed to initialize pouch query runtime");
   }
   if (has_selector) {
-    status = runtime->selector_parse_json(
-        runtime, req->selector_json, strlen(req->selector_json), &selector,
-        &lql_error_value);
-    if (status != LQL_STATUS_OK) {
+    rc = lc_pouch_query_parse_selector(runtime, req, &selector, error);
+    if (rc != LC_OK) {
       runtime->destroy(runtime);
-      return lc_pouch_query_lql_error(error, status, &lql_error_value,
-                                      "failed to parse pouch query selector");
+      return rc;
     }
   }
   scan.runtime = runtime;

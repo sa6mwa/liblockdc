@@ -5115,6 +5115,8 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   lc_query_key_handler handler;
   pouch_query_key_capture first_page;
   pouch_query_key_capture second_page;
+  pouch_query_key_capture lql_page;
+  pouch_query_key_capture conflict_page;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
   lc_error error;
@@ -5130,6 +5132,8 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   memset(&handler, 0, sizeof(handler));
   memset(&first_page, 0, sizeof(first_page));
   memset(&second_page, 0, sizeof(second_page));
+  memset(&lql_page, 0, sizeof(lql_page));
+  memset(&conflict_page, 0, sizeof(conflict_page));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
   lc_query_req_init(&query_req);
@@ -5238,9 +5242,34 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   assert_false(pouch_query_capture_has(&second_page, "doc/c"));
 
   lc_query_res_cleanup(&query_res);
+
+  lc_query_req_init(&query_req);
+  query_req.namespace_name = "docs/query";
+  query_req.engine = "scan";
+  query_req.selector_lql = "eq{field=/category,value=planning}";
+  query_req.limit = 10L;
+  rc = client->query_keys(client, &query_req, &handler, &lql_page, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lql_page.count, 2);
+  assert_true(pouch_query_capture_has(&lql_page, "doc/a"));
+  assert_true(pouch_query_capture_has(&lql_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&lql_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&lql_page, "doc/staged"));
+  lc_query_res_cleanup(&query_res);
+
+  lc_query_req_init(&query_req);
+  query_req.namespace_name = "docs/query";
+  query_req.engine = "scan";
+  query_req.selector_json = selector;
+  query_req.selector_lql = "eq{field=/category,value=planning}";
+  rc = client->query_keys(client, &query_req, &handler, &conflict_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_query_res_cleanup(&query_res);
+  lc_error_cleanup(&error);
   lc_client_close(client);
   cleanup_root(root);
-  lc_error_cleanup(&error);
 }
 
 static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {

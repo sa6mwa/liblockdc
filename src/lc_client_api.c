@@ -2,9 +2,132 @@
 #include "lc_internal.h"
 #include "lc_log.h"
 
+#include <lql/lql.h>
+
 #include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static void *lc_subscribe_handler_main(void *context);
+
+static int lc_client_query_request_selector_json(const lc_query_req *req,
+                                                 char **out,
+                                                 lc_error *error) {
+  lql *runtime;
+  lql_selector *selector;
+  lql_error lql_error_value;
+  lql_status status;
+  FILE *fp;
+  long length;
+  char *json;
+  size_t got;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "query selector output is required", NULL, NULL,
+                        NULL);
+  }
+  *out = NULL;
+  if (req == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "query request is required", NULL, NULL, NULL);
+  }
+  if (req->selector_json != NULL && req->selector_json[0] != '\0' &&
+      req->selector_lql != NULL && req->selector_lql[0] != '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "selector_json and selector_lql are mutually "
+                        "exclusive",
+                        NULL, NULL, NULL);
+  }
+  if (req->selector_lql == NULL || req->selector_lql[0] == '\0') {
+    return LC_OK;
+  }
+
+  runtime = NULL;
+  selector = NULL;
+  fp = NULL;
+  json = NULL;
+  lql_error_init(&lql_error_value);
+  status = lql_new(&runtime, &lql_error_value);
+  if (status != LQL_STATUS_OK) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to initialize query LQL runtime",
+                        lql_error_value.message, lql_status_string(status),
+                        "liblql");
+  }
+  status =
+      runtime->selector_parse(runtime, req->selector_lql, &selector,
+                              &lql_error_value);
+  if (status != LQL_STATUS_OK) {
+    runtime->destroy(runtime);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to parse query selector_lql",
+                        lql_error_value.message, lql_status_string(status),
+                        "liblql");
+  }
+  fp = tmpfile();
+  if (fp == NULL) {
+    runtime->selector_destroy(runtime, selector);
+    runtime->destroy(runtime);
+    return lc_error_set(error, LC_ERR_PROTOCOL, (long)errno,
+                        "failed to create query selector serialization file",
+                        strerror(errno), NULL, "liblql");
+  }
+  status = runtime->selector_write_json(runtime, selector, fp, &lql_error_value);
+  runtime->selector_destroy(runtime, selector);
+  if (status != LQL_STATUS_OK) {
+    fclose(fp);
+    runtime->destroy(runtime);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to serialize query selector_lql",
+                        lql_error_value.message, lql_status_string(status),
+                        "liblql");
+  }
+  runtime->destroy(runtime);
+  runtime = NULL;
+  if (fflush(fp) != 0 || fseek(fp, 0L, SEEK_END) != 0) {
+    int saved_errno;
+
+    saved_errno = errno;
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
+                        "failed to finalize query selector serialization",
+                        strerror(saved_errno), NULL, "liblql");
+  }
+  length = ftell(fp);
+  if (length < 0L || fseek(fp, 0L, SEEK_SET) != 0) {
+    int saved_errno;
+
+    saved_errno = errno;
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
+                        "failed to rewind query selector serialization",
+                        strerror(saved_errno), NULL, "liblql");
+  }
+  json = (char *)malloc((size_t)length + 1U);
+  if (json == NULL) {
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate query selector JSON", NULL, NULL,
+                        NULL);
+  }
+  got = fread(json, 1U, (size_t)length, fp);
+  if (got != (size_t)length || ferror(fp)) {
+    int saved_errno;
+
+    saved_errno = errno;
+    free(json);
+    fclose(fp);
+    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
+                        "failed to read query selector serialization",
+                        strerror(saved_errno), NULL, "liblql");
+  }
+  json[(size_t)length] = '\0';
+  fclose(fp);
+  *out = json;
+  return LC_OK;
+}
 
 static void lc_client_log_operation_error(lc_client_handle *client,
                                           pslog_level level,
@@ -1740,6 +1863,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
   lc_engine_query_stream_response engine_res;
   lc_engine_error engine_error;
   lc_write_bridge bridge;
+  char *selector_json;
   int rc;
 
   if (self == NULL || req == NULL || dst == NULL || out == NULL) {
@@ -1760,9 +1884,16 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
+  selector_json = NULL;
+  rc = lc_client_query_request_selector_json(req, &selector_json, error);
+  if (rc != LC_OK) {
+    lc_engine_error_cleanup(&engine_error);
+    return rc;
+  }
   bridge.sink = dst;
   engine_req.namespace_name = req->namespace_name;
-  engine_req.selector_json = req->selector_json;
+  engine_req.selector_json =
+      selector_json != NULL ? selector_json : req->selector_json;
   engine_req.limit = req->limit;
   engine_req.cursor = req->cursor;
   engine_req.fields_json = req->fields_json;
@@ -1792,6 +1923,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
     }
     lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
     lc_engine_error_cleanup(&engine_error);
+    free(selector_json);
     return rc;
   }
   out->cursor = lc_strdup_local(engine_res.cursor);
@@ -1811,6 +1943,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
   }
   lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
   lc_engine_error_cleanup(&engine_error);
+  free(selector_json);
   return LC_OK;
 }
 
@@ -1908,6 +2041,7 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
   lc_engine_query_stream_response engine_res;
   lc_engine_error engine_error;
   lc_query_key_public_bridge bridge;
+  char *selector_json;
   int rc;
 
   if (self == NULL || req == NULL || handler == NULL || out == NULL) {
@@ -1929,10 +2063,17 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
   memset(&engine_res, 0, sizeof(engine_res));
   memset(&bridge, 0, sizeof(bridge));
   lc_engine_error_init(&engine_error);
+  selector_json = NULL;
+  rc = lc_client_query_request_selector_json(req, &selector_json, error);
+  if (rc != LC_OK) {
+    lc_engine_error_cleanup(&engine_error);
+    return rc;
+  }
   bridge.handler = handler;
   bridge.context = context;
   engine_req.namespace_name = req->namespace_name;
-  engine_req.selector_json = req->selector_json;
+  engine_req.selector_json =
+      selector_json != NULL ? selector_json : req->selector_json;
   engine_req.limit = req->limit;
   engine_req.cursor = req->cursor;
   engine_req.fields_json = req->fields_json;
@@ -1961,6 +2102,7 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
     }
     lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
     lc_engine_error_cleanup(&engine_error);
+    free(selector_json);
     return rc;
   }
   out->cursor = lc_strdup_local(engine_res.cursor);
@@ -1980,6 +2122,7 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
   }
   lc_engine_query_stream_response_cleanup(client->engine, &engine_res);
   lc_engine_error_cleanup(&engine_error);
+  free(selector_json);
   return LC_OK;
 }
 

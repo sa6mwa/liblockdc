@@ -462,6 +462,11 @@ typedef struct lc_query_req {
   const char *namespace_name;
   /** JSON selector expression used by the query engine. */
   const char *selector_json;
+  /**
+   * Full-form LQL selector expression used by the query engine. Mutually
+   * exclusive with `selector_json`.
+   */
+  const char *selector_lql;
   /** Maximum number of rows to return in this page. */
   long limit;
   /** Cursor returned by a previous query page, or `NULL` for a fresh query. */

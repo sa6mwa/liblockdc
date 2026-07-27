@@ -87,39 +87,35 @@ static int lockdc_bench_open_client(const char *root, lc_client **out,
   return lc_client_open(&config, out, error);
 }
 
-static const char *lockdc_bench_selector(const char *scenario) {
+static const char *lockdc_bench_selector_lql(const char *scenario) {
   if (scenario == NULL || strcmp(scenario, "EqSparse") == 0) {
-    return "{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle\"}}";
+    return "eq{field=/bucket,value=needle}";
   }
   if (strcmp(scenario, "EqDense") == 0) {
-    return "{\"eq\":{\"field\":\"/group\",\"value\":\"even\"}}";
+    return "eq{field=/group,value=even}";
   }
   if (strcmp(scenario, "RangeHalf") == 0) {
-    return "{\"range\":{\"field\":\"/value\",\"gte\":0}}";
+    return "range{field=/value,gte=0}";
   }
   if (strcmp(scenario, "InRegionSingle") == 0) {
-    return "{\"in\":{\"field\":\"/region\",\"any\":[\"us\"]}}";
+    return "in{field=/region,any=us}";
   }
   if (strcmp(scenario, "InTags") == 0) {
-    return "{\"in\":{\"field\":\"/"
-           "tags[]\",\"any\":[\"planning\",\"finance\"]}}";
+    return "in{field=/tags[],any=planning|finance}";
   }
   if (strcmp(scenario, "ContainsMessage") == 0) {
-    return "{\"contains\":{\"field\":\"/details/"
-           "message\",\"value\":\"timeout\"}}";
+    return "contains{field=/details/message,value=timeout}";
   }
   if (strcmp(scenario, "DateAfter") == 0) {
-    return "{\"date\":{\"field\":\"/"
-           "created_at\",\"after\":\"2025-01-01T00:00:00Z\"}}";
+    return "date{field=/created_at,after=2025-01-01T00:00:00Z}";
   }
   if (strcmp(scenario, "RecursiveExists") == 0) {
-    return "{\"exists\":\"/details/**\"}";
+    return "exists{/details/**}";
   }
   if (strcmp(scenario, "OrSparseOrFlag") == 0) {
-    return "{\"or\":[{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle\"}},"
-           "{\"eq\":{\"field\":\"/flag\",\"value\":true}}]}";
+    return "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}";
   }
-  return "{\"eq\":{\"field\":\"/bucket\",\"value\":\"needle\"}}";
+  return "eq{field=/bucket,value=needle}";
 }
 
 static int lockdc_bench_key_begin(void *context, lc_error *error) {
@@ -225,7 +221,7 @@ static int lockdc_bench_query(lc_client *client, const char *scenario,
   lc_query_req_init(&req);
   memset(&res, 0, sizeof(res));
   req.namespace_name = "bench";
-  req.selector_json = lockdc_bench_selector(scenario);
+  req.selector_lql = lockdc_bench_selector_lql(scenario);
   req.engine = engine;
   req.limit = limit > 0L ? limit : 1L;
   if (documents) {

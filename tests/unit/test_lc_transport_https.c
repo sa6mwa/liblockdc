@@ -5343,6 +5343,9 @@ static void test_public_query_keys_streams_chunks_and_headers(void **state) {
       "Content-Type: application/json",
       "Accept: application/x-ndjson, application/json"};
   static const char *query_body[] = {"\"namespace\":\"transport-ns\"",
+                                     "\"selector\":{\"eq\"",
+                                     "\"field\":\"/owner\"",
+                                     "\"value\":\"owner-a\"",
                                      "\"return\":\"keys\""};
   static const char *response_headers[] = {
       "X-Correlation-Id: corr-query-keys",
@@ -5396,7 +5399,7 @@ static void test_public_query_keys_streams_chunks_and_headers(void **state) {
   handler.chunk = capture_query_key_chunk;
   handler.end = capture_query_key_end;
   req.namespace_name = "transport-ns";
-  req.selector_json = "{\"owner\":\"owner-a\"}";
+  req.selector_lql = "eq{field=/owner,value=owner-a}";
   req.limit = 2L;
   req.engine = "index&scan/fast+safe";
   req.refresh = "wait for/seq+1";

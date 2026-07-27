@@ -12,6 +12,6 @@ useful as a coarse runner signal.
 `BenchmarkFastLockdDisk` and `BenchmarkMediumLockdDisk*` launch a real pinned
 `pkt.systems/lockd` binary with a disk backend rooted in an automatically
 removed `/tmp/liblockdc-lockd-disk-bench-*` directory. The disk side uses the
-exported Go client and full-form LQL expressions. The pouch side still measures
-the C query path directly and currently feeds the equivalent selector JSON
-because the public C request surface exposes `selector_json`.
+exported Go client and full-form LQL expressions. The pouch side measures the
+C query path directly through `selector_lql` and reports C-side query time so
+the cgo bridge is excluded from pouch latency metrics.
