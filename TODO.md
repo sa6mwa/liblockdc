@@ -1276,6 +1276,29 @@ Latest release targets confirmed on 2026-07-23:
         on 2026-07-27 with pouch indexed key timings of about 22.4 ms
         `RangeHalf`, 19.8 ms `InTags`, 25.1 ms `ContainsMessage`, 11.8 ms
         `DateAfter`, and 33.9 ms `OrSparseOrFlag` C-side.
+      - [x] Add durable exact term-value posting ranges and dense row-ordinal
+        docIDs to `query.index`, then bump the private sidecar to v9 and store
+        posting records before row records so exact equality, non-wildcard
+        `in`, and root equality `or` readers can select field/value posting
+        ranges without scanning unrelated row records first. Focused pouch
+        unit coverage now asserts the v9 sidecar, term-value table, docID
+        term fields, root OR pagination, and the large default query header
+        limit contract. Verified on 2026-07-27 with the bounded 4096-doc
+        acceptance matrix in 1m47s: pouch still only beat Go disk on sparse
+        equality in that sample (`EqSparse` keys about 27.4 ms C-side vs Go
+        about 40.7 ms; documents about 19.4 ms C-side vs Go about 34.6 ms).
+        Remaining indexed key gaps were `RangeHalf` about 32.8 ms C-side vs
+        Go about 1.67 ms, `InTags` about 30.8 ms vs Go about 1.59 ms,
+        `ContainsMessage` about 36.9 ms vs Go about 1.73 ms, `DateAfter`
+        about 23.2 ms vs Go about 0.97 ms, and `OrSparseOrFlag` about
+        45.1 ms vs Go about 1.20 ms. Remaining indexed document gaps were
+        `RangeHalf` about 68.0 ms, `InTags` about 66.1 ms,
+        `ContainsMessage` about 39.5 ms, `DateAfter` about 37.1 ms, and
+        `OrSparseOrFlag` about 50.5 ms C-side, versus Go document timings of
+        about 15.5 ms, 15.8 ms, 8.83 ms, 19.1 ms, and 9.11 ms respectively.
+        This confirms the next performance work must move more of these paths
+        onto compiled generation readers/result-cache paging rather than
+        adding more text-sidecar skips.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

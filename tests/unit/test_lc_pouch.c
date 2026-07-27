@@ -366,7 +366,10 @@ static void assert_file_contains(const char *path, const char *needle) {
   assert_int_equal(nread, (size_t)length);
   assert_int_equal(fclose(fp), 0);
   bytes[nread] = '\0';
-  assert_non_null(strstr(bytes, needle));
+  if (strstr(bytes, needle) == NULL) {
+    free(bytes);
+    assert_non_null(NULL);
+  }
   free(bytes);
 }
 
@@ -388,7 +391,10 @@ static void assert_file_not_contains(const char *path, const char *needle) {
   assert_int_equal(nread, (size_t)length);
   assert_int_equal(fclose(fp), 0);
   bytes[nread] = '\0';
-  assert_null(strstr(bytes, needle));
+  if (strstr(bytes, needle) != NULL) {
+    free(bytes);
+    assert_null(needle);
+  }
   free(bytes);
 }
 
@@ -7827,7 +7833,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_non_null(namespace_path);
   assert_path_file_contains(namespace_path, "index/query.index",
                             "format=pouch-query-index");
-  assert_path_file_contains(namespace_path, "index/query.index", "version=6");
+  assert_path_file_contains(namespace_path, "index/query.index", "version=9");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "state_index_seq=4");
   assert_path_file_contains(namespace_path, "index/query.index",
@@ -7837,7 +7843,15 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_path_file_contains(namespace_path, "index/query.index",
                             "term_field_count=");
   assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_value_count=");
+  assert_path_file_contains(namespace_path, "index/query.index",
                             "term_field 2f6b696e64 ");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_value 2f6b696e64 666c757368 ");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            " 0 2f6b696e64 ");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            " 1 2f6b696e64 ");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "term_field 2f6e ");
   assert_path_file_contains(namespace_path, "index/query.index",

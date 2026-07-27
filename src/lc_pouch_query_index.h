@@ -11,6 +11,8 @@ typedef struct lc_pouch_query_index_flush_result {
 
 typedef struct lc_pouch_query_index_row_view {
   const char *key;
+  const char *key_hex;
+  unsigned long doc_id;
   unsigned long version;
   unsigned long bytes;
   int has_query_hidden;
@@ -22,6 +24,8 @@ typedef int (*lc_pouch_query_index_row_visit_fn)(
 
 typedef struct lc_pouch_query_index_key_view {
   const char *key;
+  const char *key_hex;
+  unsigned long doc_id;
   unsigned long version;
   unsigned long bytes;
   int has_query_hidden;
@@ -80,6 +84,11 @@ int lc_pouch_query_index_visit_scalar_terms(
     lc_pouch_query_index_key_visit_fn visit, void *context,
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_scalar_terms_merged(
+    lc_pouch *pouch, const char *namespace_name,
+    const lc_pouch_query_index_scalar_term *terms, size_t term_count,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error);
+int lc_pouch_query_index_visit_scalar_terms_docids(
     lc_pouch *pouch, const char *namespace_name,
     const lc_pouch_query_index_scalar_term *terms, size_t term_count,
     lc_pouch_query_index_key_visit_fn visit, void *context,
