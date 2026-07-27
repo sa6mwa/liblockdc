@@ -66,6 +66,7 @@ func benchmarkMediumLQL(b *testing.B, documents bool) {
 		"InTags",
 		"ContainsMessage",
 		"DateAfter",
+		"OrSparseOrFlag",
 		"RecursiveExists",
 	})
 	for _, rows := range rowsList {
@@ -90,7 +91,8 @@ func benchmarkMediumLQL(b *testing.B, documents bool) {
 
 func BenchmarkFastPouch(b *testing.B) {
 	rows := envInt64("LOCKDC_BENCH_SEED_ROWS", 64)
-	for _, scenario := range []string{"EqSparse", "InTags", "RecursiveExists"} {
+	for _, scenario := range []string{"EqSparse", "InTags", "OrSparseOrFlag",
+		"RecursiveExists"} {
 		scenario := scenario
 		b.Run("Keys/Docs"+strconv.FormatInt(rows, 10)+"/index/"+scenario, func(b *testing.B) {
 			runPouchC(b, rows, "index", scenario, false)

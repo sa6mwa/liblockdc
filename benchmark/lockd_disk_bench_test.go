@@ -266,6 +266,7 @@ func benchmarkLockdDisk(b *testing.B, documents bool) {
 		"InTags",
 		"ContainsMessage",
 		"DateAfter",
+		"OrSparseOrFlag",
 		"RecursiveExists",
 	})
 	for _, rows := range rowsList {
@@ -300,7 +301,8 @@ func BenchmarkFastLockdDisk(b *testing.B) {
 	rows := envInt64("LOCKDC_BENCH_SEED_ROWS", 64)
 	h := startLockdDiskHarness(b)
 	seedLockdDisk(b, h, rows)
-	for _, scenario := range []string{"EqSparse", "InTags", "RecursiveExists"} {
+	for _, scenario := range []string{"EqSparse", "InTags", "OrSparseOrFlag",
+		"RecursiveExists"} {
 		scenario := scenario
 		b.Run("Keys/Docs"+strconv.FormatInt(rows, 10)+"/index/"+scenario, func(b *testing.B) {
 			b.ResetTimer()

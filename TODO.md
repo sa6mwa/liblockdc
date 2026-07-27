@@ -1531,6 +1531,13 @@ Latest release targets confirmed on 2026-07-23:
         29 ms `RangeHalf`, 25 ms `InTags`, 41 ms `ContainsMessage`, and
         9.9 ms `DateAfter`; document-return remained body-read-bound at about
         8.0 ms, 67 ms, 61 ms, 45 ms, and 30 ms respectively.
+      - [x] Add indexed `OrSparseOrFlag` to the 4096-document pouch-vs-Go
+        acceptance matrix after indexed root `or` support landed. Verified on
+        2026-07-27: `make benchmark-pouch-go-acceptance` completed in 1m33s
+        under the 3-minute cap. Go lockd disk measured about 1.3 ms keys /
+        9.8 ms documents for indexed `OrSparseOrFlag`; pouch measured about
+        41 ms keys / 43 ms documents C-side, so multi-field OR union planning
+        is now an explicit pouch performance gap.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
@@ -1815,6 +1822,10 @@ Latest release targets confirmed on 2026-07-23:
       `/created_at` presence index as the candidate source and the liblql
       selector as the final filter; the bounded medium matrix includes
       `DateAfter` for both pouch and real lockd disk comparisons.
+    - [x] Add `OrSparseOrFlag` to the default fast, medium, and acceptance
+      Go/cgo comparison scenario sets so the real lockd disk backend and
+      liblockdc pouch are compared case by case for public full-form root OR
+      queries over the shared seeded document shape.
   - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
     Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`
