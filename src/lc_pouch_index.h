@@ -201,6 +201,20 @@ int lc_pouch_index_term_values_find(const lc_pouch_index_term_value *values,
                                     const char *value_hex,
                                     unsigned long *first_line,
                                     unsigned long *line_count);
+void lc_pouch_index_term_keys_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_term_key *terms,
+    size_t count);
+int lc_pouch_index_term_key_compare_items(
+    const lc_pouch_index_term_key *left,
+    const lc_pouch_index_term_key *right);
+int lc_pouch_index_term_key_compare(const void *left, const void *right);
+int lc_pouch_index_term_key_compare_pair(
+    const char *field_hex, const char *value_hex,
+    const lc_pouch_index_term_key *term);
+int lc_pouch_index_term_keys_find(const lc_pouch_index_term_key *terms,
+                                  size_t count, const char *field_hex,
+                                  const char *value_hex,
+                                  size_t *index_out);
 int lc_pouch_index_term_field_parse_line(
     char *line, lc_pouch_index_term_field *field,
     const lc_allocator *allocator, lc_error *error);

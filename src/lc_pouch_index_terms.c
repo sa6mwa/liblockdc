@@ -168,6 +168,97 @@ int lc_pouch_index_term_values_find(const lc_pouch_index_term_value *values,
   return 0;
 }
 
+void lc_pouch_index_term_keys_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_term_key *terms,
+    size_t count) {
+  size_t index;
+
+  if (terms == NULL) {
+    return;
+  }
+  for (index = 0U; index < count; ++index) {
+    lc_free_with_allocator(allocator, (char *)terms[index].field_hex);
+    lc_free_with_allocator(allocator, (char *)terms[index].value_hex);
+  }
+  lc_free_with_allocator(allocator, terms);
+}
+
+int lc_pouch_index_term_key_compare_items(
+    const lc_pouch_index_term_key *left,
+    const lc_pouch_index_term_key *right) {
+  int cmp;
+
+  if (left == NULL && right == NULL) {
+    return 0;
+  }
+  if (left == NULL) {
+    return -1;
+  }
+  if (right == NULL) {
+    return 1;
+  }
+  cmp = strcmp(left->field_hex, right->field_hex);
+  if (cmp != 0) {
+    return cmp;
+  }
+  return strcmp(left->value_hex, right->value_hex);
+}
+
+int lc_pouch_index_term_key_compare(const void *left, const void *right) {
+  return lc_pouch_index_term_key_compare_items(
+      (const lc_pouch_index_term_key *)left,
+      (const lc_pouch_index_term_key *)right);
+}
+
+int lc_pouch_index_term_key_compare_pair(
+    const char *field_hex, const char *value_hex,
+    const lc_pouch_index_term_key *term) {
+  int cmp;
+
+  if (field_hex == NULL || value_hex == NULL || term == NULL) {
+    return field_hex == NULL && value_hex == NULL && term == NULL ? 0 : -1;
+  }
+  cmp = strcmp(field_hex, term->field_hex);
+  if (cmp != 0) {
+    return cmp;
+  }
+  return strcmp(value_hex, term->value_hex);
+}
+
+int lc_pouch_index_term_keys_find(const lc_pouch_index_term_key *terms,
+                                  size_t count, const char *field_hex,
+                                  const char *value_hex,
+                                  size_t *index_out) {
+  size_t low;
+  size_t high;
+  size_t mid;
+  int cmp;
+
+  if (terms == NULL || field_hex == NULL || value_hex == NULL ||
+      count == 0U) {
+    return 0;
+  }
+  low = 0U;
+  high = count;
+  while (low < high) {
+    mid = low + ((high - low) / 2U);
+    cmp = lc_pouch_index_term_key_compare_pair(field_hex, value_hex,
+                                               &terms[mid]);
+    if (cmp == 0) {
+      if (index_out != NULL) {
+        *index_out = mid;
+      }
+      return 1;
+    }
+    if (cmp < 0) {
+      high = mid;
+    } else {
+      low = mid + 1U;
+    }
+  }
+  return 0;
+}
+
 int lc_pouch_index_term_field_parse_line(
     char *line, lc_pouch_index_term_field *field,
     const lc_allocator *allocator, lc_error *error) {

@@ -810,6 +810,10 @@ Latest release targets confirmed on 2026-07-23:
         - [x] Move sidecar `term_field`/`term_value` record parsing into
           `lc_pouch_index_terms.c`, with focused malformed-record coverage so
           the query bridge no longer owns term-table line format validation.
+        - [x] Replace the query-local exact-term type with
+          `lc_pouch_index_term_key`: sorted term-key compare/find/cleanup now
+          live in `lc_pouch_index_terms.c`, and exact range readers consume the
+          index-owned key vector directly without adapter allocations.
       - [x] Physically split private docID set algebra into
         `src/lc_pouch_index_doc.c`, including sorted unique append and
         merge-based union/intersection/subtraction helpers plus the first

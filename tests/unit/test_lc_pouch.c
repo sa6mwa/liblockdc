@@ -563,6 +563,48 @@ static void test_index_term_rejects_invalid_sidecar_records(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_index_term_keys_sort_find_and_cleanup(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_term_key *terms;
+  size_t found_index;
+  int found;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  terms = (lc_pouch_index_term_key *)lc_alloc_with_allocator(
+      &allocator, 3U * sizeof(*terms));
+  assert_non_null(terms);
+  memset(terms, 0, 3U * sizeof(*terms));
+  terms[0].field_hex = lc_strdup_with_allocator(&allocator, "74616773");
+  terms[0].value_hex = lc_strdup_with_allocator(&allocator, "706c616e");
+  terms[1].field_hex = lc_strdup_with_allocator(&allocator, "616765");
+  terms[1].value_hex = lc_strdup_with_allocator(&allocator, "3330");
+  terms[2].field_hex = lc_strdup_with_allocator(&allocator, "6e616d65");
+  terms[2].value_hex = lc_strdup_with_allocator(&allocator, "626f62");
+  assert_non_null(terms[0].field_hex);
+  assert_non_null(terms[0].value_hex);
+  assert_non_null(terms[1].field_hex);
+  assert_non_null(terms[1].value_hex);
+  assert_non_null(terms[2].field_hex);
+  assert_non_null(terms[2].value_hex);
+
+  qsort(terms, 3U, sizeof(terms[0]), lc_pouch_index_term_key_compare);
+  assert_string_equal(terms[0].field_hex, "616765");
+  assert_string_equal(terms[1].field_hex, "6e616d65");
+  assert_string_equal(terms[2].field_hex, "74616773");
+
+  found_index = 99U;
+  found = lc_pouch_index_term_keys_find(terms, 3U, "6e616d65", "626f62",
+                                        &found_index);
+  assert_true(found);
+  assert_int_equal(found_index, 1);
+  found = lc_pouch_index_term_keys_find(terms, 3U, "6e616d65", "616c696365",
+                                        &found_index);
+  assert_false(found);
+
+  lc_pouch_index_term_keys_cleanup(&allocator, terms, 3U);
+}
+
 static void test_index_term_values_collect_exact_ranges(void **state) {
   lc_allocator allocator;
   lc_error error;
@@ -10022,6 +10064,7 @@ int main(void) {
       cmocka_unit_test(test_index_term_values_find_sorted_ranges),
       cmocka_unit_test(test_index_term_parses_sidecar_records),
       cmocka_unit_test(test_index_term_rejects_invalid_sidecar_records),
+      cmocka_unit_test(test_index_term_keys_sort_find_and_cleanup),
       cmocka_unit_test(test_index_term_values_collect_exact_ranges),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
