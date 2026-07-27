@@ -406,9 +406,10 @@ Required invariants:
 - Any segment or snapshot that is the target of a live state-link is protected
   from obsolete cleanup, even if it otherwise looks compactable.
 - Compaction installs a new snapshot only after validating that the captured
-  manifest bytes and compacted candidate segment bytes still match the current
-  namespace lifecycle. Validation drift abandons the snapshot and leaves
-  indexes, manifest, and obsolete sets unchanged.
+  manifest bytes and ordered candidate segment content fingerprints still match
+  the current namespace lifecycle. Validation drift, including same-length
+  segment metadata changes, abandons the snapshot and leaves indexes, manifest,
+  and obsolete sets unchanged.
 - Manifest state accelerates lifecycle tracking but is not authoritative for
   payload correctness. Missing or legacy manifest information can be repaired
   by scanning segment and snapshot directories, but a valid manifest does not

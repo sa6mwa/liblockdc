@@ -178,6 +178,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       before manifest install, aborts with `validation-drift-aborted` if a peer
       write or manifest rewrite lands, removes the uninstalled snapshot, and
       keeps valid manifests from adopting stray unmanifested snapshot files.
+    - [x] Strengthen compaction drift validation from aggregate candidate byte
+      counts to ordered candidate segment content fingerprints, with regression
+      coverage for same-length segment metadata rewrites that must abort before
+      snapshot manifest install.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
   - [x] Add the first redesigned pouch `query_keys` scan path over the

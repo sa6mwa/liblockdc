@@ -306,6 +306,9 @@ static void replace_text_file_first(const char *path, const char *needle,
 
 typedef struct pouch_compaction_drift_hook_state {
   lc_pouch *peer;
+  const char *segment_path;
+  const char *needle;
+  const char *replacement;
   int called;
 } pouch_compaction_drift_hook_state;
 
@@ -316,9 +319,17 @@ static int pouch_compaction_drift_hook(void *context, lc_error *error) {
   int rc;
 
   state = (pouch_compaction_drift_hook_state *)context;
+  state->called = 1;
+  if (state->segment_path != NULL) {
+    assert_non_null(state->needle);
+    assert_non_null(state->replacement);
+    assert_int_equal(strlen(state->needle), strlen(state->replacement));
+    replace_text_file_first(state->segment_path, state->needle,
+                            state->replacement);
+    return LC_OK;
+  }
   body = NULL;
   memset(&write_result, 0, sizeof(write_result));
-  state->called = 1;
   rc = lc_source_from_memory("peer", strlen("peer"), &body, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_write(state->peer, "team/alpha", "state/peer-drift",
@@ -2391,6 +2402,98 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   free(namespace_path);
   lc_pouch_close(peer);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_maintenance_aborts_on_same_size_segment_drift(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  pouch_compaction_drift_hook_state hook_state;
+  lc_error error;
+  char root[512];
+  char key[128];
+  char needle_hex[256];
+  char replacement_hex[256];
+  char segment_path[1024];
+  char *namespace_path;
+  char *segment_leaf;
+  int written;
+  int rc;
+  unsigned int i;
+
+  (void)state;
+  pouch = NULL;
+  namespace_path = NULL;
+  segment_leaf = NULL;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&hook_state, 0, sizeof(hook_state));
+  make_root("maintenance-same-size-validation-drift", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 100000000UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  for (i = 0U; i < 16U; ++i) {
+    snprintf(key, sizeof(key), "state/item/%04u", i);
+    rc = lc_source_from_memory("seed", strlen("seed"), &body, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, "team/alpha", key, body, NULL,
+                              &write_result, &error);
+    assert_int_equal(rc, LC_OK);
+    body->close(body);
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+    memset(&write_result, 0, sizeof(write_result));
+  }
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
+  assert_non_null(namespace_path);
+  assert_non_null(segment_leaf);
+  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
+                     namespace_path, segment_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  hex_encode_string("state/item/0000", needle_hex, sizeof(needle_hex));
+  hex_encode_string("state/item/9999", replacement_hex,
+                    sizeof(replacement_hex));
+  assert_int_equal(strlen(needle_hex), strlen(replacement_hex));
+
+  hook_state.segment_path = segment_path;
+  hook_state.needle = needle_hex;
+  hook_state.replacement = replacement_hex;
+  lc_pouch_test_after_snapshot_write_context = &hook_state;
+  lc_pouch_test_after_snapshot_write_hook = pouch_compaction_drift_hook;
+
+  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  lc_pouch_test_after_snapshot_write_hook = NULL;
+  lc_pouch_test_after_snapshot_write_context = NULL;
+  assert_true(hook_state.called);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(maintenance_result.diagnostic,
+                      "validation-drift-aborted");
+  assert_true(maintenance_result.aborted);
+  assert_false(maintenance_result.compacted);
+  assert_false(maintenance_result.skipped);
+  assert_path_file_not_contains(
+      namespace_path, "manifest",
+      "snapshot=snapshot-00000000000000000001.log");
+
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  free(segment_leaf);
+  free(namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -9083,6 +9186,7 @@ int main(void) {
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
       cmocka_unit_test(test_manifest_open_ignores_unmanifested_snapshot),
       cmocka_unit_test(test_maintenance_aborts_on_validation_drift),
+      cmocka_unit_test(test_maintenance_aborts_on_same_size_segment_drift),
       cmocka_unit_test(test_maintenance_reports_snapshot_write_abort),
       cmocka_unit_test(test_maintenance_reports_interval_skip),
       cmocka_unit_test(test_compaction_retries_manifest_obsolete_cleanup),

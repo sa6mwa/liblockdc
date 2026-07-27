@@ -77,6 +77,8 @@ typedef struct lc_pouch_state_visit_snapshot {
 typedef struct lc_pouch_state_compaction_capture {
   char *manifest_text;
   unsigned long candidate_bytes;
+  unsigned long candidate_hash_a;
+  unsigned long candidate_hash_b;
 } lc_pouch_state_compaction_capture;
 
 struct lc_pouch_state_cache_namespace {
@@ -1352,6 +1354,114 @@ static int lc_pouch_state_write_snapshot(
   return rc;
 }
 
+static void lc_pouch_state_compaction_hash_byte(unsigned long *hash_a,
+                                                unsigned long *hash_b,
+                                                unsigned char byte) {
+  *hash_a ^= (unsigned long)byte;
+  *hash_a *= 16777619UL;
+  *hash_b = (*hash_b * 65599UL) + (unsigned long)byte + 1UL;
+}
+
+static void lc_pouch_state_compaction_hash_string(unsigned long *hash_a,
+                                                  unsigned long *hash_b,
+                                                  const char *value) {
+  const unsigned char *cursor;
+
+  cursor = (const unsigned char *)value;
+  while (*cursor != '\0') {
+    lc_pouch_state_compaction_hash_byte(hash_a, hash_b, *cursor);
+    ++cursor;
+  }
+  lc_pouch_state_compaction_hash_byte(hash_a, hash_b, 0U);
+}
+
+static int lc_pouch_state_compaction_hash_segment(
+    const char *segment_path, unsigned long *bytes, unsigned long *hash_a,
+    unsigned long *hash_b, lc_error *error) {
+  unsigned char buffer[4096];
+  FILE *fp;
+  int rc;
+
+  fp = fopen(segment_path, "rb");
+  if (fp == NULL) {
+    if (errno == ENOENT) {
+      lc_pouch_state_compaction_hash_byte(hash_a, hash_b, 0U);
+      return LC_OK;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open pouch state segment", strerror(errno),
+                        segment_path, NULL);
+  }
+  lc_pouch_state_compaction_hash_byte(hash_a, hash_b, 1U);
+  rc = LC_OK;
+  while (!feof(fp)) {
+    size_t got;
+    size_t index;
+
+    got = fread(buffer, 1U, sizeof(buffer), fp);
+    if (got != 0U) {
+      *bytes += (unsigned long)got;
+      for (index = 0U; index < got; ++index) {
+        lc_pouch_state_compaction_hash_byte(hash_a, hash_b, buffer[index]);
+      }
+    }
+    if (ferror(fp)) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to read pouch state segment", strerror(errno),
+                        segment_path, NULL);
+      break;
+    }
+  }
+  if (fclose(fp) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close pouch state segment", strerror(errno),
+                      segment_path, NULL);
+  }
+  return rc;
+}
+
+static int lc_pouch_state_compaction_candidate_fingerprint(
+    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
+    unsigned long *bytes, unsigned long *hash_a, unsigned long *hash_b,
+    lc_error *error) {
+  unsigned long segment_id;
+
+  *bytes = 0UL;
+  *hash_a = 2166136261UL;
+  *hash_b = 0UL;
+  for (segment_id = manifest->latest_snapshot_segment_id + 1UL;
+       segment_id <= manifest->max_segment_id; ++segment_id) {
+    char *segment_leaf;
+    char *segment_path;
+    int rc;
+
+    segment_leaf =
+        lc_pouch_namespace_segment_leaf(&pouch->allocator, segment_id);
+    segment_path =
+        segment_leaf != NULL
+            ? lc_pouch_state_child_path(&pouch->allocator,
+                                        manifest->namespace_path, "segments",
+                                        segment_leaf)
+            : NULL;
+    if (segment_leaf == NULL || segment_path == NULL) {
+      lc_free_with_allocator(&pouch->allocator, segment_leaf);
+      lc_free_with_allocator(&pouch->allocator, segment_path);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch state segment path", NULL,
+                          NULL, NULL);
+    }
+    lc_pouch_state_compaction_hash_string(hash_a, hash_b, segment_leaf);
+    lc_free_with_allocator(&pouch->allocator, segment_leaf);
+    rc = lc_pouch_state_compaction_hash_segment(segment_path, bytes, hash_a,
+                                                hash_b, error);
+    lc_free_with_allocator(&pouch->allocator, segment_path);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_state_compaction_candidate_bytes(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
     unsigned long *bytes, lc_error *error) {
@@ -1511,8 +1621,9 @@ static int lc_pouch_state_compaction_capture_now(
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_state_compaction_candidate_bytes(
-      pouch, manifest, &capture->candidate_bytes, error);
+  rc = lc_pouch_state_compaction_candidate_fingerprint(
+      pouch, manifest, &capture->candidate_bytes,
+      &capture->candidate_hash_a, &capture->candidate_hash_b, error);
   if (rc != LC_OK) {
     lc_pouch_state_compaction_capture_cleanup(pouch, capture);
   }
@@ -1532,6 +1643,8 @@ static int lc_pouch_state_compaction_validate_capture(
     return rc;
   }
   matched = before->candidate_bytes == after.candidate_bytes &&
+            before->candidate_hash_a == after.candidate_hash_a &&
+            before->candidate_hash_b == after.candidate_hash_b &&
             before->manifest_text != NULL && after.manifest_text != NULL &&
             strcmp(before->manifest_text, after.manifest_text) == 0;
   lc_pouch_state_compaction_capture_cleanup(pouch, &after);
