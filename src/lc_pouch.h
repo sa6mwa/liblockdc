@@ -36,6 +36,7 @@ typedef struct lc_pouch_maintenance_options {
   const char *namespace_name;
   int force;
   int cleanup_only;
+  long retention_updated_before_unix;
 } lc_pouch_maintenance_options;
 
 typedef struct lc_pouch_maintenance_result {
@@ -46,6 +47,10 @@ typedef struct lc_pouch_maintenance_result {
   unsigned long compacted_segment_id;
   unsigned long cleanup_deleted_count;
   unsigned long cleanup_pending_count;
+  unsigned long retention_scanned_count;
+  unsigned long retention_expired_count;
+  unsigned long retention_deleted_state_count;
+  unsigned long retention_failed_count;
   int compacted;
   int skipped;
   int aborted;
@@ -64,6 +69,7 @@ typedef struct lc_pouch_state_write_result {
   char *etag;
   unsigned long version;
   unsigned long bytes;
+  long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_state_write_result;
@@ -74,6 +80,7 @@ typedef struct lc_pouch_state_read_result {
   char *etag;
   unsigned long version;
   unsigned long bytes;
+  long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   lc_source *body;
@@ -85,6 +92,7 @@ typedef struct lc_pouch_state_visit_entry {
   const char *etag;
   unsigned long version;
   unsigned long bytes;
+  long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_state_visit_entry;

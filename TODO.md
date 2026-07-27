@@ -17,7 +17,7 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 - [x] Add first executable redesign coverage for root manifest creation,
   per-namespace `segments`/`snapshots`/`markers`/`index` directories, escaped
   namespace paths, `pouch://` client open, and benchmark temp cleanup.
-- [ ] Rebuild the pouch storage write/read path on the new architecture:
+- [x] Rebuild the pouch storage write/read path on the new architecture:
   metadata, state payloads, objects, staged state, queues, transactions, and
   retention.
   - [x] Add committed-state tombstones, public state remove, and pouch
@@ -120,6 +120,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       - [x] Cover mixed object/queue transaction composition: one transaction
         can commit staged attachment upload plus staged queue ack, and another
         can roll both side-effect types back together.
+  - [x] Add the first metadata-driven retention sweep through pouch
+    maintenance: state records carry `updated_at_unix`, the sweep deletes
+    expired live state with version preconditions, reports scanned/expired/
+    deleted/failed counts, and reruns idempotently without removing logstore
+    files directly.
 - [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.

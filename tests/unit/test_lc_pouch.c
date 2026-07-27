@@ -1921,6 +1921,102 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_maintenance_retention_sweep_deletes_expired_state(
+    void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("maintenance-retention", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/retention", "state/a", body, NULL,
+                            &write_result, &error);
+  body->close(body);
+  body = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_true(write_result.updated_at_unix > 0L);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/retention", "state/b", body, NULL,
+                            &write_result, &error);
+  body->close(body);
+  body = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_true(write_result.updated_at_unix > 0L);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  maintenance_options.namespace_name = "team/retention";
+  maintenance_options.retention_updated_before_unix = 1L;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "retention-complete");
+  assert_int_equal(maintenance_result.retention_scanned_count, 2UL);
+  assert_int_equal(maintenance_result.retention_expired_count, 0UL);
+  assert_int_equal(maintenance_result.retention_deleted_state_count, 0UL);
+  assert_int_equal(maintenance_result.retention_failed_count, 0UL);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+
+  maintenance_options.retention_updated_before_unix = 2147483647L;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "retention-complete");
+  assert_int_equal(maintenance_result.retention_scanned_count, 2UL);
+  assert_int_equal(maintenance_result.retention_expired_count, 2UL);
+  assert_int_equal(maintenance_result.retention_deleted_state_count, 2UL);
+  assert_int_equal(maintenance_result.retention_failed_count, 0UL);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+
+  rc = lc_pouch_state_read(pouch, "team/retention", "state/a", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, "team/retention", "state/b", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(maintenance_result.diagnostic, "retention-complete");
+  assert_int_equal(maintenance_result.retention_scanned_count, 0UL);
+  assert_int_equal(maintenance_result.retention_expired_count, 0UL);
+  assert_int_equal(maintenance_result.retention_deleted_state_count, 0UL);
+  assert_int_equal(maintenance_result.retention_failed_count, 0UL);
+
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_maintenance_creates_namespace_without_prior_writes(
     void **state) {
   lc_pouch *pouch;
@@ -8766,6 +8862,7 @@ int main(void) {
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),
+      cmocka_unit_test(test_maintenance_retention_sweep_deletes_expired_state),
       cmocka_unit_test(
           test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),

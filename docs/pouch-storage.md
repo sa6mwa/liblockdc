@@ -618,9 +618,9 @@ The interface should also expose optional capability functions or flags:
 - index flush/default tuning for the storage indexer and later LQL integration
 - query backend mode/defaults: indexed is preferred, full log-backed ordered
   scan is supported when explicitly configured, and fallback policy is explicit
-- retention/janitor sweep for expired metadata and state; the current private
-  disk hook accepts an `updated_before_unix` cutoff and reports scanned,
-  expired, deleted metadata, deleted state, and failed-key counts
+- retention/janitor sweep for expired metadata and state; pouch maintenance
+  accepts a `retention_updated_before_unix` cutoff and reports scanned,
+  expired, deleted state, and failed-key counts
 
 The disk implementation should report that it is not a general concurrent
 writer backend, even though it safely serializes same-root mutations with
@@ -2439,11 +2439,12 @@ failure must leave the destination unchanged.
 
 ## Retention and Cleanup
 
-The pouch backend should support an optional retention sweep. The sweep scans
-metadata, decodes records, and removes metadata plus state when `UpdatedAtUnix`
-is older than the configured retention. Sweep failures for individual keys
-should not abort the whole pass. The logstore directories themselves remain; the
-deletion is represented by append-log records and later reclaimed by compaction.
+The pouch backend supports an optional retention sweep through
+`lc_pouch_maintenance_run()`. The sweep scans current namespace state metadata
+and removes state when `updated_at_unix` is older than
+`retention_updated_before_unix`. Sweep failures for individual keys do not abort
+the whole pass. The logstore directories themselves remain; deletion is
+represented by append-log tombstone records and later reclaimed by compaction.
 
 Cleanup tasks must be restartable and idempotent:
 
@@ -2452,12 +2453,13 @@ Cleanup tasks must be restartable and idempotent:
 - transaction record cleanup may be repeated after replay;
 - backend-id creation may race and recover through CAS reread.
 
-Retention sweep is metadata-driven. It must decode current metadata records,
-check `updated_at_unix`, append metadata/state delete records for expired keys,
-and continue when individual keys fail to decode or delete. It must not remove
-log files directly. The current private disk hook implements the append-record
-path and idempotent reruns; future public scheduling/configuration can sit above
-that hook without changing the log semantics.
+Retention sweep is metadata-driven. State segment and snapshot records carry
+`updated_at_unix`; the sweep checks the current live projection, appends state
+delete tombstones for expired keys with version preconditions, and continues
+when individual keys fail to delete. It does not remove log files directly.
+Reruns are idempotent because already-deleted keys disappear from the live
+projection, and future public scheduling/configuration can sit above the
+maintenance hook without changing the log semantics.
 
 ## Crypto and Descriptors
 
