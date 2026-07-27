@@ -1226,6 +1226,54 @@ static int lc_pouch_query_index_key_collect(
       error);
 }
 
+static int lc_pouch_query_index_process_key_read(
+    const char *key, const lc_pouch_state_read_result *read_result,
+    void *read_context, lc_error *error) {
+  lc_pouch_query_scan_context *context;
+  int matched;
+  int rc;
+
+  context = (lc_pouch_query_scan_context *)read_context;
+  if (context == NULL || key == NULL || read_result == NULL) {
+    return LC_OK;
+  }
+  if (!read_result->found ||
+      (read_result->has_query_hidden && read_result->query_hidden)) {
+    return LC_OK;
+  }
+  if (read_result->version > context->index_seq) {
+    context->index_seq = read_result->version;
+  }
+  if (context->seen++ < context->offset) {
+    return LC_OK;
+  }
+  matched = 0;
+  rc = read_result->body != NULL
+           ? lc_pouch_query_match_body(context, read_result->body, &matched,
+                                       error)
+           : LC_OK;
+  if (rc == LC_OK && matched) {
+    ++context->matched;
+    if (context->request->limit > 0L &&
+        context->emitted >= (size_t)context->request->limit) {
+      if (context->next_offset == 0U) {
+        context->next_offset = context->seen - 1U;
+      }
+    } else {
+      if (context->emit_documents) {
+        rc = lc_pouch_query_emit_document(context, read_result->body, error);
+      } else {
+        rc = lc_pouch_query_emit_key(context->handler,
+                                     context->handler_context, key, error);
+      }
+      if (rc == LC_OK && context->next_offset == 0U) {
+        ++context->emitted;
+      }
+    }
+  }
+  return rc;
+}
+
 static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
                                               const char *namespace_name,
                                               unsigned long *index_seq,
@@ -1257,7 +1305,7 @@ static int lc_pouch_query_index_process_keys(
     lc_pouch_query_scan_context *context, lc_pouch_query_index_key_set *keys,
     lc_error *error) {
   size_t index;
-  int rc;
+  size_t write_index;
 
   if (context == NULL || keys == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1268,61 +1316,25 @@ static int lc_pouch_query_index_process_keys(
     qsort(keys->keys, keys->count, sizeof(keys->keys[0]),
           lc_pouch_query_index_key_compare);
   }
-  rc = LC_OK;
-  for (index = 0U; rc == LC_OK && index < keys->count; ++index) {
-    lc_pouch_state_read_result read_result;
-    int matched;
-
+  write_index = 0U;
+  for (index = 0U; index < keys->count; ++index) {
     if (strncmp(keys->keys[index], ".staging/", sizeof(".staging/") - 1U) ==
             0 ||
         strstr(keys->keys[index], "/.staging/") != NULL) {
+      free(keys->keys[index]);
+      keys->keys[index] = NULL;
       continue;
     }
-    memset(&read_result, 0, sizeof(read_result));
-    rc = lc_pouch_state_read(context->client->pouch, context->namespace_name,
-                             keys->keys[index], &read_result, error);
-    if (rc != LC_OK) {
-      break;
-    }
-    if (!read_result.found ||
-        (read_result.has_query_hidden && read_result.query_hidden)) {
-      lc_pouch_state_read_result_cleanup(&context->client->allocator,
-                                         &read_result);
-      continue;
-    }
-    if (read_result.version > context->index_seq) {
-      context->index_seq = read_result.version;
-    }
-    if (context->seen++ < context->offset) {
-      lc_pouch_state_read_result_cleanup(&context->client->allocator,
-                                         &read_result);
-      continue;
-    }
-    rc = lc_pouch_query_match_body(context, read_result.body, &matched, error);
-    if (rc == LC_OK && matched) {
-      ++context->matched;
-      if (context->request->limit > 0L &&
-          context->emitted >= (size_t)context->request->limit) {
-        if (context->next_offset == 0U) {
-          context->next_offset = context->seen - 1U;
-        }
-      } else {
-        if (context->emit_documents) {
-          rc = lc_pouch_query_emit_document(context, read_result.body, error);
-        } else {
-          rc = lc_pouch_query_emit_key(context->handler,
-                                       context->handler_context,
-                                       keys->keys[index], error);
-        }
-        if (rc == LC_OK && context->next_offset == 0U) {
-          ++context->emitted;
-        }
-      }
-    }
-    lc_pouch_state_read_result_cleanup(&context->client->allocator,
-                                       &read_result);
+    keys->keys[write_index++] = keys->keys[index];
   }
-  return rc;
+  keys->count = write_index;
+  if (keys->count == 0U) {
+    return LC_OK;
+  }
+  return lc_pouch_state_read_many(
+      context->client->pouch, context->namespace_name,
+      (const char *const *)keys->keys, keys->count,
+      lc_pouch_query_index_process_key_read, context, error);
 }
 
 static int lc_pouch_query_run_index_predicate(

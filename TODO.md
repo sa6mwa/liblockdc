@@ -234,6 +234,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       selected-section sidecar validation, and sorted exact-term early stop,
       while explicit `flush_index` still performs full sidecar validation and
       repair.
+    - [x] Batch indexed candidate state reads through one namespace manifest
+      open, marker refresh, and warmed projection-cache lookup per candidate
+      set instead of reopening the manifest for every posting hit.
+    - [ ] Add a real typed temporal posting path for indexed `DateAfter`
+      instead of using `/created_at` field-presence candidates plus final
+      liblql filtering.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
   new pouch API and restore the comparison scenarios only when they measure the
   redesigned implementation.
@@ -1395,6 +1401,16 @@ Latest release targets confirmed on 2026-07-23:
         pouch measured about 61 ms keys / 62 ms documents C-side. Pouch remains
         slower, but the sparse equality gap is now candidate/state-read work
         rather than unconditional index generation rebuild.
+      - [x] Batch candidate state reads after posting collection so indexed
+        queries refresh namespace state once per candidate set instead of once
+        per key. Verified on 2026-07-27 with focused 4096-document indexed
+        runs: `EqSparse` pouch improved to about 7.0 ms keys / 7.4 ms
+        documents C-side versus Go lockd disk at about 32 ms / 38 ms;
+        `ContainsMessage` pouch measured about 38 ms keys / 40 ms documents
+        versus Go lockd disk at about 31 ms / 44 ms; `DateAfter` remains a
+        gap at about 166 ms keys / 174 ms documents versus Go lockd disk at
+        about 1.1 ms / 12 ms because pouch still uses broad presence
+        candidates instead of temporal postings.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

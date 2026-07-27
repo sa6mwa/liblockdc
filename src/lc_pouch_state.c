@@ -1147,6 +1147,47 @@ static int lc_pouch_state_cache_lookup(
   return lc_pouch_state_entry_from_cache_record(pouch, record, out, error);
 }
 
+static int lc_pouch_state_read_result_from_entry(
+    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
+    lc_pouch_state_entry *current, lc_pouch_state_read_result *out,
+    lc_error *error) {
+  char *payload_path;
+  int rc;
+
+  if (pouch == NULL || manifest == NULL || current == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state read result requires pouch, manifest, "
+                        "entry, and out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  if (!current->found) {
+    return LC_OK;
+  }
+  payload_path =
+      lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
+                                "payloads", current->payload_leaf);
+  if (payload_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch state payload path", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_source_from_file(payload_path, &out->body, error);
+  lc_free_with_allocator(&pouch->allocator, payload_path);
+  if (rc == LC_OK) {
+    out->content_type = current->content_type;
+    out->etag = current->etag;
+    out->version = current->version;
+    out->bytes = current->bytes;
+    out->has_query_hidden = current->has_query_hidden;
+    out->query_hidden = current->query_hidden;
+    out->found = 1;
+    current->content_type = NULL;
+    current->etag = NULL;
+  }
+  return rc;
+}
+
 static int lc_pouch_state_snapshot_write_record(
     lc_pouch *pouch, int fd, const lc_pouch_state_cache_record *record,
     lc_error *error) {
@@ -2846,7 +2887,6 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                         lc_error *error) {
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
-  char *payload_path;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -2876,30 +2916,77 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return rc;
   }
-  payload_path =
-      lc_pouch_state_child_path(&pouch->allocator, manifest.namespace_path,
-                                "payloads", current.payload_leaf);
-  if (payload_path == NULL) {
-    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch state payload path", NULL,
-                        NULL, NULL);
-  }
-  rc = lc_source_from_file(payload_path, &out->body, error);
-  lc_free_with_allocator(&pouch->allocator, payload_path);
-  if (rc == LC_OK) {
-    out->content_type = current.content_type;
-    out->etag = current.etag;
-    out->version = current.version;
-    out->bytes = current.bytes;
-    out->has_query_hidden = current.has_query_hidden;
-    out->query_hidden = current.query_hidden;
-    out->found = 1;
-    current.content_type = NULL;
-    current.etag = NULL;
-  }
+  rc = lc_pouch_state_read_result_from_entry(pouch, &manifest, &current, out,
+                                             error);
   lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
+int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
+                             const char *const *keys, size_t key_count,
+                             lc_pouch_state_read_many_fn visitor,
+                             void *context, lc_error *error) {
+  lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_cache_namespace *cache;
+  size_t index;
+  int force_refresh;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      (keys == NULL && key_count != 0U) || visitor == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_state_read_many requires pouch, namespace, "
+                        "keys, and visitor",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  if (cache == NULL) {
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  force_refresh = 0;
+  if (!pouch->single_writer) {
+    rc = lc_pouch_namespace_marker_refresh_should_scan(
+        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
+        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+        &force_refresh, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
+                                      error);
+  }
+  for (index = 0U; rc == LC_OK && index < key_count; ++index) {
+    lc_pouch_state_read_result read_result;
+    lc_pouch_state_entry current;
+    lc_pouch_state_cache_record *record;
+
+    memset(&read_result, 0, sizeof(read_result));
+    memset(&current, 0, sizeof(current));
+    record = lc_pouch_state_cache_record_find(cache, keys[index]);
+    rc = lc_pouch_state_entry_from_cache_record(pouch, record, &current,
+                                                error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_read_result_from_entry(pouch, &manifest, &current,
+                                                 &read_result, error);
+    }
+    if (rc == LC_OK) {
+      rc = visitor(keys[index], &read_result, context, error);
+    }
+    lc_pouch_state_read_result_cleanup(&pouch->allocator, &read_result);
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+  }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;
 }

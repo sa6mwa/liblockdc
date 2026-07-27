@@ -91,6 +91,9 @@ typedef struct lc_pouch_state_visit_entry {
 
 typedef int (*lc_pouch_state_visit_fn)(
     const lc_pouch_state_visit_entry *entry, void *context, lc_error *error);
+typedef int (*lc_pouch_state_read_many_fn)(
+    const char *key, const lc_pouch_state_read_result *result, void *context,
+    lc_error *error);
 
 int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   const lc_pouch_open_options *options, lc_pouch **out,
@@ -145,6 +148,10 @@ void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
 int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                         const char *key, lc_pouch_state_read_result *out,
                         lc_error *error);
+int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
+                             const char *const *keys, size_t key_count,
+                             lc_pouch_state_read_many_fn visitor,
+                             void *context, lc_error *error);
 int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
                          lc_pouch_state_visit_fn visitor, void *context,
                          lc_error *error);
