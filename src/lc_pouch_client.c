@@ -1419,6 +1419,7 @@ static int lc_pouch_query_index_plan_from_selector(
                                 root.kind == LQL_SELECTOR_NODE_IPREFIX
                             ? 1
                             : 0;
+    plan->candidates_exact = 1;
     return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
   }
   if (root.kind == LQL_SELECTOR_NODE_CONTAINS ||
@@ -1448,6 +1449,7 @@ static int lc_pouch_query_index_plan_from_selector(
                                 root.kind == LQL_SELECTOR_NODE_ICONTAINS
                             ? 1
                             : 0;
+    plan->candidates_exact = 1;
     return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
   }
   if (root.kind == LQL_SELECTOR_NODE_RANGE) {

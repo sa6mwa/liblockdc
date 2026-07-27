@@ -6450,6 +6450,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   pouch_query_key_capture contains_page;
   pouch_query_key_capture iprefix_page;
   pouch_query_key_capture icontains_page;
+  pouch_query_key_capture numeric_prefix_page;
+  pouch_query_key_capture odd_nibble_contains_page;
   pouch_query_key_capture range_page;
   pouch_query_key_capture unsupported_page;
   lc_pouch_state_write_options hidden_options;
@@ -6475,6 +6477,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   memset(&contains_page, 0, sizeof(contains_page));
   memset(&iprefix_page, 0, sizeof(iprefix_page));
   memset(&icontains_page, 0, sizeof(icontains_page));
+  memset(&numeric_prefix_page, 0, sizeof(numeric_prefix_page));
+  memset(&odd_nibble_contains_page, 0, sizeof(odd_nibble_contains_page));
   memset(&range_page, 0, sizeof(range_page));
   memset(&unsupported_page, 0, sizeof(unsupported_page));
   memset(&hidden_options, 0, sizeof(hidden_options));
@@ -6526,6 +6530,18 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/decimal",
                             source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"needle\":\"\\u0006\\u0016 \"}",
+                             strlen("{\"needle\":\"\\u0006\\u0016 \"}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in",
+                            "doc/odd-nibble", source, NULL, &write_result,
+                            &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -6635,6 +6651,21 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
   query_req.selector_json =
+      "{\"contains\":{\"field\":\"/needle\",\"value\":\"ab\"}}";
+  query_req.limit = 0L;
+  rc = client->query_keys(client, &query_req, &handler,
+                          &odd_nibble_contains_page, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(odd_nibble_contains_page.count, 0);
+  assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
       "{\"prefix\":{\"field\":\"/tags[]\",\"value\":\"fin\"}}";
   query_req.limit = 0L;
   rc = client->query_keys(client, &query_req, &handler, &prefix_page,
@@ -6695,7 +6726,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
   query_req.selector_json =
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}";
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}";
   query_req.limit = 0L;
   rc = client->query_keys(client, &query_req, &handler, &icontains_page,
                           &query_res, &error);
@@ -6707,6 +6738,21 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_false(pouch_query_capture_has(&icontains_page, "doc/b"));
   assert_false(pouch_query_capture_has(&icontains_page, "doc/hidden"));
   assert_false(pouch_query_capture_has(&icontains_page, "doc/deleted"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
+      "{\"prefix\":{\"field\":\"/n\",\"value\":\"2\"}}";
+  query_req.limit = 0L;
+  rc = client->query_keys(client, &query_req, &handler, &numeric_prefix_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(numeric_prefix_page.count, 0);
+  assert_null(query_res.cursor);
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
@@ -7768,7 +7814,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
   query_req.selector_json =
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}";
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}";
   query_req.limit = 0L;
   rc = lc_sink_to_memory(&icontains_sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -7936,7 +7982,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_non_null(namespace_path);
   assert_path_file_contains(namespace_path, "index/query.index",
                             "format=pouch-query-index");
-  assert_path_file_contains(namespace_path, "index/query.index", "version=9");
+  assert_path_file_contains(namespace_path, "index/query.index", "version=10");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "state_index_seq=4");
   assert_path_file_contains(namespace_path, "index/query.index",
@@ -7951,6 +7997,8 @@ static void test_flush_index_reports_projection_high_water(void **state) {
                             "term_field 2f6b696e64 ");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "term_value 2f6b696e64 666c757368 ");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "666c757368 646f632f6c697665 s");
   assert_path_file_contains(namespace_path, "index/query.index",
                             " 0 2f6b696e64 ");
   assert_path_file_contains(namespace_path, "index/query.index",

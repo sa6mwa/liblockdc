@@ -238,6 +238,14 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     pagination, and fail-closed unsupported selector shapes.
   - [ ] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
+    - [x] Add typed scalar term postings to `query.index` by bumping the
+      sidecar format to version 10 and appending a value-type tag to every
+      term row (`s`, `n`, `b`, `z`). Indexed `prefix` / `iprefix` and
+      `contains` / `icontains` readers now accept only string postings before
+      treating their candidates as exact, preserving liblql string semantics
+      while avoiding candidate document re-filtering for indexed key queries.
+      Non-case-insensitive `contains` over hex sidecar postings now advances on
+      byte boundaries only, preventing odd-nibble substring false positives.
     - [x] Add pouch query-engine configuration to `lc_pouch_open` options and
       `pouch://` endpoint query parameters: `query_engine=index` is the
       default, `query_engine=scan` forces implicit scan routing, explicit
@@ -1926,6 +1934,19 @@ Latest release targets confirmed on 2026-07-23:
       fallback. Current evidence still shows pouch trailing Go lockd disk on
       1024-row indexed `IprefixTags` / `IcontainsTags` and materially trailing
       the Go scan adapter on scan-path text predicates.
+      Follow-up on 2026-07-27 after typed string postings and exact
+      prefix/contains candidates: focused
+      `Medium(LQL|LockdDisk)(Documents|Keys)/Docs1024/index/(IprefixTags|IcontainsTags)`
+      completed successfully. Pouch key timings improved materially
+      (`IprefixTags` about 9.0 ms C-side, `IcontainsTags` about 7.6 ms
+      C-side). Pouch `IprefixTags` documents was roughly tied with Go in that
+      sample, while `IcontainsTags` documents still trailed Go lockd disk.
+      The full `make benchmark-pouch-go-medium` matrix still completed in 19s
+      under the 3-minute cap; in that run 1024-row pouch indexed keys measured
+      about 8.1 ms C-side for `IprefixTags` and 7.5 ms C-side for
+      `IcontainsTags`, while Go lockd disk reported about 0.66 ms and
+      0.63 ms respectively, so text postings still need a more compact
+      reader/storage path.
   - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
     Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`
