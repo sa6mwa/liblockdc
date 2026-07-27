@@ -229,6 +229,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       request `engine` overrides configuration, and
       `query_fallback_engine=index` handles implicit `refresh=wait_for`
       requests from scan-preferred endpoints.
+    - [x] Avoid rebuilding current query-index generations on ordinary indexed
+      query reads: query paths now do a header-only current-generation check,
+      selected-section sidecar validation, and sorted exact-term early stop,
+      while explicit `flush_index` still performs full sidecar validation and
+      repair.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
   new pouch API and restore the comparison scenarios only when they measure the
   redesigned implementation.
@@ -1382,6 +1387,14 @@ Latest release targets confirmed on 2026-07-23:
         pouch gaps: sparse equality and first-page contains/date-after are still
         materially slower than Go lockd disk and remain the next performance
         targets after the redesign boundaries are in place.
+      - [x] Remove avoidable query-time sidecar rebuild/full-validation work
+        from indexed reads and fix the Go lockd disk document benchmark drain
+        so it does not cancel the query context before consuming streamed
+        rows. Verified on 2026-07-27 with focused 4096-document indexed
+        `EqSparse`: Go lockd disk measured about 28 ms keys / 35 ms documents;
+        pouch measured about 61 ms keys / 62 ms documents C-side. Pouch remains
+        slower, but the sparse equality gap is now candidate/state-read work
+        rather than unconditional index generation rebuild.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

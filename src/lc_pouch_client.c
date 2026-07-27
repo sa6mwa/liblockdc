@@ -1245,8 +1245,8 @@ static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
     return rc;
   }
   memset(&flush_result, 0, sizeof(flush_result));
-  rc = lc_pouch_query_index_flush(client->pouch, namespace_name, *index_seq,
-                                  &flush_result, error);
+  rc = lc_pouch_query_index_ensure_current(
+      client->pouch, namespace_name, *index_seq, &flush_result, error);
   if (rc == LC_OK) {
     *index_seq = flush_result.index_seq;
   }

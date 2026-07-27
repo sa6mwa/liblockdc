@@ -41,6 +41,9 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                unsigned long state_index_seq,
                                lc_pouch_query_index_flush_result *out,
                                lc_error *error);
+int lc_pouch_query_index_ensure_current(
+    lc_pouch *pouch, const char *namespace_name, unsigned long state_index_seq,
+    lc_pouch_query_index_flush_result *out, lc_error *error);
 int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_query_index_row_visit_fn visit,
                                void *context, unsigned long *index_seq,

@@ -237,10 +237,11 @@ func runLockdDiskQuery(tb testing.TB, h *lockdDiskHarness, rows int64, engine, s
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	resp, err := h.client.Query(ctx, opts...)
-	cancel()
 	if err != nil {
+		cancel()
 		tb.Fatalf("lockd disk query scenario=%s engine=%s documents=%t: %v\n%s", scenario, engine, documents, err, h.logs.String())
 	}
+	defer cancel()
 	defer resp.Close()
 	if !documents {
 		return len(resp.Keys())
