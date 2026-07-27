@@ -1438,13 +1438,21 @@ Latest release targets confirmed on 2026-07-23:
         pouch `RangeHalf` improved to about 56 ms keys / 60 ms documents
         C-side versus Go lockd disk at about 31 ms / 57 ms; pouch `InTags`
         measured about 73 ms keys / 91 ms documents versus Go lockd disk at
-        about 1.5 ms / 13 ms, so metadata-only key paging and compiled array
-        membership remain open performance work.
-        The same 2026-07-27 bounded acceptance target completed in 1m10s with
-        pouch indexed key-return at about 7.9 ms `EqSparse`, 54 ms
-        `RangeHalf`, 66 ms `InTags`, 38 ms `ContainsMessage`, and 21 ms
-        `DateAfter`; indexed document-return measured about 7.5 ms, 65 ms,
-        75 ms, 57 ms, and 29 ms respectively.
+        about 1.5 ms / 13 ms.
+      - [x] Add metadata-only batched state reads for exact key-only indexed
+        pages, so equality, `in`, numeric range, and bounded date key queries
+        can verify live/hidden metadata without opening payload bodies.
+        Verified on 2026-07-27 with focused 4096-document indexed
+        `RangeHalf`/`InTags`: pouch `RangeHalf` measured about 47 ms keys /
+        62 ms documents C-side versus Go lockd disk at about 35 ms / 44 ms;
+        pouch `InTags` measured about 66 ms keys / 72 ms documents versus Go
+        lockd disk at about 2.0 ms / 14 ms, so compiled array membership
+        remains the dominant open gap.
+        The same 2026-07-27 bounded acceptance target completed in 1m08s with
+        pouch indexed key-return at about 6.6 ms `EqSparse`, 49 ms
+        `RangeHalf`, 60 ms `InTags`, 38 ms `ContainsMessage`, and 19 ms
+        `DateAfter`; indexed document-return measured about 6.6 ms, 60 ms,
+        71 ms, 42 ms, and 34 ms respectively.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

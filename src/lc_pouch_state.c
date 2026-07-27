@@ -2923,10 +2923,10 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
-int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
-                             const char *const *keys, size_t key_count,
-                             lc_pouch_state_read_many_fn visitor,
-                             void *context, lc_error *error) {
+static int lc_pouch_state_read_many_internal(
+    lc_pouch *pouch, const char *namespace_name, const char *const *keys,
+    size_t key_count, lc_pouch_state_read_many_fn visitor, void *context,
+    int include_body, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
   size_t index;
@@ -2977,9 +2977,15 @@ int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
     record = lc_pouch_state_cache_record_find(cache, keys[index]);
     rc = lc_pouch_state_entry_from_cache_record(pouch, record, &current,
                                                 error);
-    if (rc == LC_OK) {
+    if (rc == LC_OK && include_body) {
       rc = lc_pouch_state_read_result_from_entry(pouch, &manifest, &current,
                                                  &read_result, error);
+    } else if (rc == LC_OK && current.found) {
+      read_result.found = 1;
+      read_result.version = current.version;
+      read_result.bytes = current.bytes;
+      read_result.has_query_hidden = current.has_query_hidden;
+      read_result.query_hidden = current.query_hidden;
     }
     if (rc == LC_OK) {
       rc = visitor(keys[index], &read_result, context, error);
@@ -2993,6 +2999,24 @@ int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
   }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;
+}
+
+int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
+                             const char *const *keys, size_t key_count,
+                             lc_pouch_state_read_many_fn visitor,
+                             void *context, lc_error *error) {
+  return lc_pouch_state_read_many_internal(
+      pouch, namespace_name, keys, key_count, visitor, context, 1, error);
+}
+
+int lc_pouch_state_read_many_metadata(lc_pouch *pouch,
+                                      const char *namespace_name,
+                                      const char *const *keys,
+                                      size_t key_count,
+                                      lc_pouch_state_read_many_fn visitor,
+                                      void *context, lc_error *error) {
+  return lc_pouch_state_read_many_internal(
+      pouch, namespace_name, keys, key_count, visitor, context, 0, error);
 }
 
 int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,

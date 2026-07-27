@@ -153,6 +153,12 @@ int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
                              const char *const *keys, size_t key_count,
                              lc_pouch_state_read_many_fn visitor,
                              void *context, lc_error *error);
+int lc_pouch_state_read_many_metadata(lc_pouch *pouch,
+                                      const char *namespace_name,
+                                      const char *const *keys,
+                                      size_t key_count,
+                                      lc_pouch_state_read_many_fn visitor,
+                                      void *context, lc_error *error);
 int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
                          lc_pouch_state_visit_fn visitor, void *context,
                          lc_error *error);

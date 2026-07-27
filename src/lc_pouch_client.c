@@ -1429,6 +1429,12 @@ static int lc_pouch_query_index_process_keys(
   if (keys->count == 0U) {
     return LC_OK;
   }
+  if (!context->emit_documents && context->indexed_candidates_exact) {
+    return lc_pouch_state_read_many_metadata(
+        context->client->pouch, context->namespace_name,
+        (const char *const *)keys->keys, keys->count,
+        lc_pouch_query_index_process_key_read, context, error);
+  }
   return lc_pouch_state_read_many(
       context->client->pouch, context->namespace_name,
       (const char *const *)keys->keys, keys->count,
