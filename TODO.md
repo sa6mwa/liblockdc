@@ -1429,6 +1429,22 @@ Latest release targets confirmed on 2026-07-23:
         concrete index performance targets; `EqSparse` is about 7.5 ms /
         8.1 ms, `ContainsMessage` about 40 ms / 41 ms, and `DateAfter` about
         31 ms / 31 ms.
+      - [x] Align pouch query page limits with the lockd public API contract
+        and stop indexed batched state reads once the cursor-producing extra
+        match has been found; simple equality, `in`, numeric range, and
+        bounded date candidates also skip redundant final `liblql` evaluation
+        after the planner has proven exact candidate acceptance. Verified on
+        2026-07-27 with focused 4096-document indexed `RangeHalf`/`InTags`:
+        pouch `RangeHalf` improved to about 56 ms keys / 60 ms documents
+        C-side versus Go lockd disk at about 31 ms / 57 ms; pouch `InTags`
+        measured about 73 ms keys / 91 ms documents versus Go lockd disk at
+        about 1.5 ms / 13 ms, so metadata-only key paging and compiled array
+        membership remain open performance work.
+        The same 2026-07-27 bounded acceptance target completed in 1m10s with
+        pouch indexed key-return at about 7.9 ms `EqSparse`, 54 ms
+        `RangeHalf`, 66 ms `InTags`, 38 ms `ContainsMessage`, and 21 ms
+        `DateAfter`; indexed document-return measured about 7.5 ms, 65 ms,
+        75 ms, 57 ms, and 29 ms respectively.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

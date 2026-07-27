@@ -91,6 +91,7 @@ typedef struct lc_pouch_state_visit_entry {
 
 typedef int (*lc_pouch_state_visit_fn)(
     const lc_pouch_state_visit_entry *entry, void *context, lc_error *error);
+#define LC_POUCH_STATE_READ_MANY_STOP (-1000)
 typedef int (*lc_pouch_state_read_many_fn)(
     const char *key, const lc_pouch_state_read_result *result, void *context,
     lc_error *error);

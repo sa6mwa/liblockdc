@@ -47,6 +47,10 @@ typedef struct pouch_query_key_capture {
   size_t count;
 } pouch_query_key_capture;
 
+typedef struct pouch_query_key_counter {
+  size_t count;
+} pouch_query_key_counter;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
@@ -127,6 +131,30 @@ static int pouch_query_capture_has(const pouch_query_key_capture *capture,
     }
   }
   return 0;
+}
+
+static int pouch_query_count_begin(void *context, lc_error *error) {
+  (void)context;
+  (void)error;
+  return 1;
+}
+
+static int pouch_query_count_chunk(void *context, const char *bytes,
+                                   size_t len, lc_error *error) {
+  (void)context;
+  (void)bytes;
+  (void)len;
+  (void)error;
+  return 1;
+}
+
+static int pouch_query_count_end(void *context, lc_error *error) {
+  pouch_query_key_counter *counter;
+
+  (void)error;
+  counter = (pouch_query_key_counter *)context;
+  ++counter->count;
+  return 1;
 }
 
 static int bytes_contain_text(const void *bytes, size_t length,
@@ -5272,6 +5300,69 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   cleanup_root(root);
 }
 
+static void test_query_keys_enforces_lockd_limit_contract(void **state) {
+  lc_client *client;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_counter default_counter;
+  pouch_query_key_counter capped_counter;
+  lc_update_res update_res;
+  lc_error error;
+  char root[512];
+  char key[64];
+  char body[64];
+  unsigned long index;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&default_counter, 0, sizeof(default_counter));
+  memset(&capped_counter, 0, sizeof(capped_counter));
+  memset(&update_res, 0, sizeof(update_res));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-limit-contract", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+
+  for (index = 0UL; index < 1005UL; ++index) {
+    snprintf(key, sizeof(key), "doc/%04lu", index);
+    snprintf(body, sizeof(body), "{\"n\":%lu}", index);
+    write_client_state(client, key, body, NULL, 0L, 0, &update_res, &error);
+    lc_update_res_cleanup(&update_res);
+  }
+
+  handler.begin = pouch_query_count_begin;
+  handler.chunk = pouch_query_count_chunk;
+  handler.end = pouch_query_count_end;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &default_counter,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(default_counter.count, 100);
+  assert_non_null(query_res.cursor);
+  lc_query_res_cleanup(&query_res);
+
+  lc_query_req_init(&query_req);
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  query_req.limit = 2000L;
+  rc = client->query_keys(client, &query_req, &handler, &capped_counter,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capped_counter.count, 1000);
+  assert_non_null(query_res.cursor);
+
+  lc_query_res_cleanup(&query_res);
+  lc_error_cleanup(&error);
+  lc_client_close(client);
+  cleanup_root(root);
+}
+
 static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
@@ -7919,6 +8010,7 @@ int main(void) {
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
+      cmocka_unit_test(test_query_keys_enforces_lockd_limit_contract),
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
       cmocka_unit_test(

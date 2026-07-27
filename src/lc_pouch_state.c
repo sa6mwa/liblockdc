@@ -2986,6 +2986,10 @@ int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
     }
     lc_pouch_state_read_result_cleanup(&pouch->allocator, &read_result);
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    if (rc == LC_POUCH_STATE_READ_MANY_STOP) {
+      rc = LC_OK;
+      break;
+    }
   }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;

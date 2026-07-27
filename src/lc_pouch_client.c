@@ -18,6 +18,9 @@
 #include <string.h>
 #include <time.h>
 
+#define LC_POUCH_QUERY_DEFAULT_LIMIT 100L
+#define LC_POUCH_QUERY_MAX_LIMIT 1000L
+
 #define LC_POUCH_ATTACHMENT_DELETE_CONTENT_TYPE                               \
   "application/x-lockdc-pouch-attachment-delete"
 
@@ -128,8 +131,10 @@ typedef struct lc_pouch_query_scan_context {
   size_t emitted;
   size_t matched;
   size_t next_offset;
+  size_t limit;
   unsigned long index_seq;
   int emit_documents;
+  int indexed_candidates_exact;
 } lc_pouch_query_scan_context;
 
 typedef struct lc_pouch_query_index_plan {
@@ -143,6 +148,7 @@ typedef struct lc_pouch_query_index_plan {
   int ignore_case;
   int range;
   int date;
+  int candidates_exact;
   lc_pouch_query_index_range_bounds range_bounds;
   lc_pouch_query_index_date_bounds date_bounds;
 } lc_pouch_query_index_plan;
@@ -593,6 +599,16 @@ static int lc_pouch_query_emit_document(lc_pouch_query_scan_context *context,
   return LC_OK;
 }
 
+static size_t lc_pouch_query_effective_limit(long requested) {
+  if (requested <= 0L) {
+    return (size_t)LC_POUCH_QUERY_DEFAULT_LIMIT;
+  }
+  if (requested > LC_POUCH_QUERY_MAX_LIMIT) {
+    return (size_t)LC_POUCH_QUERY_MAX_LIMIT;
+  }
+  return (size_t)requested;
+}
+
 static int lc_pouch_query_scan_visit(const lc_pouch_state_visit_entry *entry,
                                      void *scan_context, lc_error *error) {
   lc_pouch_query_scan_context *context;
@@ -627,8 +643,7 @@ static int lc_pouch_query_scan_visit(const lc_pouch_state_visit_entry *entry,
   }
   if (rc == LC_OK && matched) {
     ++context->matched;
-    if (context->request->limit > 0L &&
-        context->emitted >= (size_t)context->request->limit) {
+    if (context->emitted >= context->limit) {
       if (context->next_offset == 0U) {
         context->next_offset = context->seen - 1U;
       }
@@ -669,8 +684,7 @@ static int lc_pouch_query_index_summary_visit(
     return LC_OK;
   }
   ++context->matched;
-  if (context->request->limit > 0L &&
-      context->emitted >= (size_t)context->request->limit) {
+  if (context->emitted >= context->limit) {
     if (context->next_offset == 0U) {
       context->next_offset = context->seen - 1U;
     }
@@ -969,7 +983,13 @@ static int lc_pouch_query_index_plan_from_selector(
       return error != NULL && error->code != LC_OK ? error->code
                                                    : LC_ERR_NOMEM;
     }
-    return lc_pouch_query_index_plan_add_value(plan, string_term.value, error);
+    if (lc_pouch_query_index_plan_add_value(plan, string_term.value, error) !=
+        LC_OK) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    plan->candidates_exact = 1;
+    return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_PREFIX ||
       root.kind == LQL_SELECTOR_NODE_IPREFIX) {
@@ -1078,6 +1098,7 @@ static int lc_pouch_query_index_plan_from_selector(
                                                    : LC_ERR_NOMEM;
     }
     plan->range = 1;
+    plan->candidates_exact = 1;
     return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_DATE) {
@@ -1148,6 +1169,7 @@ static int lc_pouch_query_index_plan_from_selector(
     if (plan->date_bounds.has_gt || plan->date_bounds.has_gte ||
         plan->date_bounds.has_lt || plan->date_bounds.has_lte) {
       plan->date = 1;
+      plan->candidates_exact = 1;
     } else {
       plan->exists = 1;
     }
@@ -1187,6 +1209,7 @@ static int lc_pouch_query_index_plan_from_selector(
                                                      : LC_ERR_NOMEM;
       }
     }
+    plan->candidates_exact = 1;
     return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_EXISTS) {
@@ -1244,28 +1267,12 @@ static int lc_pouch_query_index_key_compare(const void *left,
   return strcmp(*a, *b);
 }
 
-static int lc_pouch_query_index_key_set_contains(
-    const lc_pouch_query_index_key_set *set, const char *key) {
-  size_t index;
-
-  if (set == NULL || key == NULL) {
-    return 0;
-  }
-  for (index = 0U; index < set->count; ++index) {
-    if (strcmp(set->keys[index], key) == 0) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
 static int lc_pouch_query_index_key_set_add(
     lc_pouch_query_index_key_set *set, const char *key, lc_error *error) {
   char **next_keys;
   size_t next_capacity;
 
-  if (key == NULL || key[0] == '\0' ||
-      lc_pouch_query_index_key_set_contains(set, key)) {
+  if (key == NULL || key[0] == '\0') {
     return LC_OK;
   }
   if (set->count >= set->capacity) {
@@ -1328,17 +1335,22 @@ static int lc_pouch_query_index_process_key_read(
     return LC_OK;
   }
   matched = 0;
-  rc = read_result->body != NULL
-           ? lc_pouch_query_match_body(context, read_result->body, &matched,
-                                       error)
-           : LC_OK;
+  if (context->indexed_candidates_exact) {
+    matched = 1;
+    rc = LC_OK;
+  } else {
+    rc = read_result->body != NULL
+             ? lc_pouch_query_match_body(context, read_result->body, &matched,
+                                         error)
+             : LC_OK;
+  }
   if (rc == LC_OK && matched) {
     ++context->matched;
-    if (context->request->limit > 0L &&
-        context->emitted >= (size_t)context->request->limit) {
+    if (context->emitted >= context->limit) {
       if (context->next_offset == 0U) {
         context->next_offset = context->seen - 1U;
       }
+      return LC_POUCH_STATE_READ_MANY_STOP;
     } else {
       if (context->emit_documents) {
         rc = lc_pouch_query_emit_document(context, read_result->body, error);
@@ -1401,6 +1413,12 @@ static int lc_pouch_query_index_process_keys(
     if (strncmp(keys->keys[index], ".staging/", sizeof(".staging/") - 1U) ==
             0 ||
         strstr(keys->keys[index], "/.staging/") != NULL) {
+      free(keys->keys[index]);
+      keys->keys[index] = NULL;
+      continue;
+    }
+    if (write_index > 0U &&
+        strcmp(keys->keys[write_index - 1U], keys->keys[index]) == 0) {
       free(keys->keys[index]);
       keys->keys[index] = NULL;
       continue;
@@ -1499,6 +1517,7 @@ static int lc_pouch_query_run_index_predicate(
     scan->index_seq = flushed_seq;
   }
   if (rc == LC_OK) {
+    scan->indexed_candidates_exact = plan.candidates_exact;
     rc = lc_pouch_query_index_process_keys(scan, &keys, error);
   }
   if (rc == LC_OK) {
@@ -6374,6 +6393,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   scan.client = client;
   scan.namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
   scan.request = req;
+  scan.limit = lc_pouch_query_effective_limit(req->limit);
   scan.sink = dst;
   scan.runtime = runtime;
   scan.selector = selector;
@@ -6486,6 +6506,7 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   scan.client = client;
   scan.namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
   scan.request = req;
+  scan.limit = lc_pouch_query_effective_limit(req->limit);
   scan.handler = handler;
   scan.handler_context = context;
   rc = lc_pouch_query_parse_cursor(req->cursor, &scan.offset, error);
