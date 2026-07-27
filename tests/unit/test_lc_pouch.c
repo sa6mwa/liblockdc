@@ -6639,6 +6639,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
 static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   static const char selector_lql[] =
       "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}";
+  static const char reversed_selector_lql[] =
+      "or.eq{field=/flag,value=true},or.eq{field=/bucket,value=needle}";
   lc_client *client;
   lc_pouch *pouch;
   lc_query_req query_req;
@@ -6646,6 +6648,7 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   lc_query_key_handler handler;
   pouch_query_key_capture first_page;
   pouch_query_key_capture second_page;
+  pouch_query_key_capture reversed_page;
   lc_sink *documents_sink;
   lc_pouch_state_write_options hidden_options;
   lc_pouch_state_write_result delete_result;
@@ -6666,6 +6669,7 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   memset(&handler, 0, sizeof(handler));
   memset(&first_page, 0, sizeof(first_page));
   memset(&second_page, 0, sizeof(second_page));
+  memset(&reversed_page, 0, sizeof(reversed_page));
   memset(&hidden_options, 0, sizeof(hidden_options));
   memset(&delete_result, 0, sizeof(delete_result));
   lc_query_req_init(&query_req);
@@ -6750,6 +6754,24 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
 
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
+  query_req.limit = 0L;
+  query_req.selector_lql = reversed_selector_lql;
+  rc = client->query_keys(client, &query_req, &handler, &reversed_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reversed_page.count, 3);
+  assert_true(pouch_query_capture_has(&reversed_page, "doc/a"));
+  assert_true(pouch_query_capture_has(&reversed_page, "doc/b"));
+  assert_true(pouch_query_capture_has(&reversed_page, "doc/overlap"));
+  assert_false(pouch_query_capture_has(&reversed_page, "doc/string-flag"));
+  assert_false(pouch_query_capture_has(&reversed_page, "doc/no-match"));
+  assert_false(pouch_query_capture_has(&reversed_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&reversed_page, "doc/deleted"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_lql = selector_lql;
   query_req.limit = 0L;
   query_req.return_mode = "documents";
   query_req.fields_json = "{\"n\":true}";

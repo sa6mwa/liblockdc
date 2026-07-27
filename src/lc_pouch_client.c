@@ -178,7 +178,7 @@ typedef struct lc_pouch_query_index_plan {
   char **values;
   size_t value_count;
   size_t value_capacity;
-  struct lc_pouch_query_index_or_term *or_terms;
+  lc_pouch_query_index_scalar_term *or_terms;
   size_t or_term_count;
   size_t or_term_capacity;
   int exists;
@@ -192,11 +192,6 @@ typedef struct lc_pouch_query_index_plan {
   lc_pouch_query_index_range_bounds range_bounds;
   lc_pouch_query_index_date_bounds date_bounds;
 } lc_pouch_query_index_plan;
-
-typedef struct lc_pouch_query_index_or_term {
-  char *field;
-  char *value;
-} lc_pouch_query_index_or_term;
 
 typedef struct lc_pouch_query_index_key_set {
   lc_pouch_query_index_key_view *keys;
@@ -1092,8 +1087,8 @@ static void lc_pouch_query_index_plan_cleanup(
     free(plan->values[index]);
   }
   for (index = 0U; index < plan->or_term_count; ++index) {
-    free(plan->or_terms[index].field);
-    free(plan->or_terms[index].value);
+    free((char *)plan->or_terms[index].field);
+    free((char *)plan->or_terms[index].value);
   }
   free((char *)plan->date_bounds.gt);
   free((char *)plan->date_bounds.gte);
@@ -1184,7 +1179,7 @@ static int lc_pouch_query_index_plan_add_value(
 static int lc_pouch_query_index_plan_add_or_term(
     lc_pouch_query_index_plan *plan, lql_string_view field,
     lql_string_view value, lc_error *error) {
-  lc_pouch_query_index_or_term *next_terms;
+  lc_pouch_query_index_scalar_term *next_terms;
   size_t next_capacity;
   char *field_copy;
   char *value_copy;
@@ -1201,7 +1196,7 @@ static int lc_pouch_query_index_plan_add_or_term(
       }
       next_capacity *= 2U;
     }
-    next_terms = (lc_pouch_query_index_or_term *)realloc(
+    next_terms = (lc_pouch_query_index_scalar_term *)realloc(
         plan->or_terms, next_capacity * sizeof(*next_terms));
     if (next_terms == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -1944,16 +1939,13 @@ static int lc_pouch_query_run_index_predicate(
                                             &flushed_seq, error);
   }
   if (rc == LC_OK && plan.root_or) {
-    for (value_index = 0U; rc == LC_OK && value_index < plan.or_term_count;
-         ++value_index) {
-      value_seq = 0UL;
-      rc = lc_pouch_query_index_visit_scalar(
-          scan->client->pouch, scan->namespace_name,
-          plan.or_terms[value_index].field, plan.or_terms[value_index].value,
-          lc_pouch_query_index_key_collect, &keys, &value_seq, error);
-      if (rc == LC_OK && value_seq > scan->index_seq) {
-        scan->index_seq = value_seq;
-      }
+    value_seq = 0UL;
+    rc = lc_pouch_query_index_visit_scalar_terms(
+        scan->client->pouch, scan->namespace_name, plan.or_terms,
+        plan.or_term_count, lc_pouch_query_index_key_collect, &keys,
+        &value_seq, error);
+    if (rc == LC_OK && value_seq > scan->index_seq) {
+      scan->index_seq = value_seq;
     }
   } else if (rc == LC_OK && plan.exists) {
     value_seq = 0UL;

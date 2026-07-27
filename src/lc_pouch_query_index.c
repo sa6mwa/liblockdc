@@ -93,6 +93,8 @@ typedef struct lc_pouch_query_index_term_reader {
   const char *value_hex;
   const char *const *value_hexes;
   size_t value_hex_count;
+  const struct lc_pouch_query_index_exact_term *exact_terms;
+  size_t exact_term_count;
   const char *value_text;
   int prefix_match;
   int contains_match;
@@ -127,6 +129,11 @@ typedef struct lc_pouch_query_index_any_merge_context {
   lc_pouch_query_index_key_list *lists;
   size_t list_count;
 } lc_pouch_query_index_any_merge_context;
+
+typedef struct lc_pouch_query_index_exact_term {
+  char *field_hex;
+  char *value_hex;
+} lc_pouch_query_index_exact_term;
 
 typedef struct lc_pouch_query_index_source_reader {
   lc_source *source;
@@ -929,6 +936,21 @@ static int lc_pouch_query_index_term_compare(const void *left,
   return strcmp(a->key_hex, b->key_hex);
 }
 
+static int lc_pouch_query_index_exact_term_compare(const void *left,
+                                                   const void *right) {
+  const lc_pouch_query_index_exact_term *a;
+  const lc_pouch_query_index_exact_term *b;
+  int cmp;
+
+  a = (const lc_pouch_query_index_exact_term *)left;
+  b = (const lc_pouch_query_index_exact_term *)right;
+  cmp = strcmp(a->field_hex, b->field_hex);
+  if (cmp != 0) {
+    return cmp;
+  }
+  return strcmp(a->value_hex, b->value_hex);
+}
+
 static int lc_pouch_query_index_cstr_ptr_compare(const void *left,
                                                  const void *right) {
   const char *const *a;
@@ -1612,6 +1634,51 @@ static int lc_pouch_query_index_term_reader_matches_any_value(
   return 0;
 }
 
+static int lc_pouch_query_index_term_reader_exact_pair_compare(
+    const char *field_hex, const char *value_hex,
+    const lc_pouch_query_index_exact_term *term) {
+  int cmp;
+
+  cmp = strcmp(field_hex, term->field_hex);
+  if (cmp != 0) {
+    return cmp;
+  }
+  return strcmp(value_hex, term->value_hex);
+}
+
+static int lc_pouch_query_index_term_reader_matches_exact_term(
+    lc_pouch_query_index_term_reader *reader, const char *field_hex,
+    const char *value_hex, size_t *value_index_out) {
+  size_t low;
+  size_t high;
+  size_t mid;
+  int cmp;
+
+  if (reader == NULL || field_hex == NULL || value_hex == NULL ||
+      reader->exact_term_count == 0U) {
+    return 0;
+  }
+  low = 0U;
+  high = reader->exact_term_count;
+  while (low < high) {
+    mid = low + ((high - low) / 2U);
+    cmp = lc_pouch_query_index_term_reader_exact_pair_compare(
+        field_hex, value_hex, &reader->exact_terms[mid]);
+    if (cmp == 0) {
+      if (value_index_out != NULL) {
+        *value_index_out = mid;
+      }
+      return 1;
+    }
+    if (cmp < 0) {
+      high = mid;
+    } else {
+      low = mid + 1U;
+    }
+  }
+  return 0;
+}
+
 static int lc_pouch_query_index_parse_and_visit_term(
     char *line, lc_pouch_query_index_term_reader *reader,
     lc_error *error) {
@@ -1668,8 +1735,19 @@ static int lc_pouch_query_index_parse_and_visit_term(
     }
   }
   matched = 0;
-  field_cmp = rc == LC_OK ? strcmp(field_hex, reader->field_hex) : 0;
-  if (rc == LC_OK && field_cmp > 0) {
+  field_cmp = 0;
+  if (rc == LC_OK && reader->exact_term_count > 0U) {
+    field_cmp = lc_pouch_query_index_term_reader_exact_pair_compare(
+        field_hex, value_hex,
+        &reader->exact_terms[reader->exact_term_count - 1U]);
+    if (field_cmp > 0) {
+      reader->stop = 1;
+    } else {
+      matched = lc_pouch_query_index_term_reader_matches_exact_term(
+          reader, field_hex, value_hex, &value_index);
+    }
+  } else if (rc == LC_OK &&
+             (field_cmp = strcmp(field_hex, reader->field_hex)) > 0) {
     reader->stop = 1;
   } else if (rc == LC_OK && field_cmp == 0) {
     if (!reader->prefix_match && !reader->contains_match &&
@@ -2866,6 +2944,7 @@ int lc_pouch_query_index_visit_scalar_any(
         pouch, namespace_name, field, values[0], visit, context, index_seq,
         error);
   }
+  memset(&reader, 0, sizeof(reader));
   *index_seq = 0UL;
   sidecar_path = lc_pouch_query_index_path(pouch, namespace_name, error);
   if (sidecar_path == NULL) {
@@ -2920,7 +2999,6 @@ int lc_pouch_query_index_visit_scalar_any(
       }
       ++write_index;
     }
-    memset(&reader, 0, sizeof(reader));
     reader.allocator = &pouch->allocator;
     reader.field_hex = field_hex;
     reader.value_hexes = (const char *const *)value_hexes;
@@ -2949,6 +3027,120 @@ int lc_pouch_query_index_visit_scalar_any(
   }
   lc_free_with_allocator(&pouch->allocator, value_hexes);
   lc_free_with_allocator(&pouch->allocator, field_hex);
+  lc_free_with_allocator(&pouch->allocator, sidecar_path);
+  return rc;
+}
+
+int lc_pouch_query_index_visit_scalar_terms(
+    lc_pouch *pouch, const char *namespace_name,
+    const lc_pouch_query_index_scalar_term *terms, size_t term_count,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error) {
+  lc_pouch_query_index_read_result sidecar;
+  lc_pouch_query_index_term_reader reader;
+  lc_pouch_query_index_exact_term *exact_terms;
+  char *sidecar_path;
+  size_t index;
+  size_t write_index;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      terms == NULL || term_count == 0U || visit == NULL ||
+      index_seq == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index scalar term-set lookup requires "
+                        "pouch, namespace, terms, visitor, and index_seq",
+                        NULL, NULL, NULL);
+  }
+  if (term_count == 1U) {
+    return lc_pouch_query_index_visit_scalar(
+        pouch, namespace_name, terms[0].field, terms[0].value, visit, context,
+        index_seq, error);
+  }
+  memset(&reader, 0, sizeof(reader));
+  *index_seq = 0UL;
+  sidecar_path = lc_pouch_query_index_path(pouch, namespace_name, error);
+  if (sidecar_path == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  exact_terms = (lc_pouch_query_index_exact_term *)lc_alloc_with_allocator(
+      &pouch->allocator, term_count * sizeof(*exact_terms));
+  if (exact_terms == NULL) {
+    lc_free_with_allocator(&pouch->allocator, sidecar_path);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query-index scalar term "
+                        "lookup",
+                        NULL, NULL, NULL);
+  }
+  memset(exact_terms, 0, term_count * sizeof(*exact_terms));
+  rc = LC_OK;
+  for (index = 0U; index < term_count; ++index) {
+    if (terms[index].field == NULL || terms[index].field[0] == '\0' ||
+        terms[index].value == NULL) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index scalar term-set lookup requires "
+                        "non-empty fields and non-null values",
+                        NULL, NULL, NULL);
+      break;
+    }
+    exact_terms[index].field_hex =
+        lc_pouch_query_index_hex_encode(&pouch->allocator, terms[index].field);
+    exact_terms[index].value_hex =
+        lc_pouch_query_index_hex_encode(&pouch->allocator, terms[index].value);
+    if (exact_terms[index].field_hex == NULL ||
+        exact_terms[index].value_hex == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query-index scalar term",
+                        NULL, NULL, NULL);
+      break;
+    }
+  }
+  if (rc == LC_OK) {
+    qsort(exact_terms, term_count, sizeof(exact_terms[0]),
+          lc_pouch_query_index_exact_term_compare);
+    write_index = 0U;
+    for (index = 0U; index < term_count; ++index) {
+      if (write_index > 0U &&
+          lc_pouch_query_index_exact_term_compare(
+              &exact_terms[write_index - 1U], &exact_terms[index]) == 0) {
+        lc_free_with_allocator(&pouch->allocator, exact_terms[index].field_hex);
+        lc_free_with_allocator(&pouch->allocator, exact_terms[index].value_hex);
+        memset(&exact_terms[index], 0, sizeof(exact_terms[index]));
+        continue;
+      }
+      if (write_index != index) {
+        exact_terms[write_index] = exact_terms[index];
+        memset(&exact_terms[index], 0, sizeof(exact_terms[index]));
+      }
+      ++write_index;
+    }
+    reader.allocator = &pouch->allocator;
+    reader.exact_terms = exact_terms;
+    reader.exact_term_count = write_index;
+    reader.visit = visit;
+    reader.context = context;
+    rc = lc_pouch_query_index_read_with_reader(sidecar_path, &sidecar, NULL,
+                                               &reader, NULL, error);
+    if (rc == LC_OK && (!sidecar.present || !sidecar.valid)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index sidecar is not readable", NULL,
+                        NULL, "pouch-redesign");
+    }
+    if (rc == LC_OK && !sidecar.term_index_complete) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index scalar postings are incomplete",
+                        NULL, NULL, "pouch-redesign");
+    }
+    if (rc == LC_OK) {
+      *index_seq = sidecar.index_seq;
+    }
+  }
+  lc_free_with_allocator(&pouch->allocator, reader.value_scratch);
+  for (index = 0U; index < term_count; ++index) {
+    lc_free_with_allocator(&pouch->allocator, exact_terms[index].field_hex);
+    lc_free_with_allocator(&pouch->allocator, exact_terms[index].value_hex);
+  }
+  lc_free_with_allocator(&pouch->allocator, exact_terms);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
   return rc;
 }

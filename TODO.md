@@ -1538,6 +1538,18 @@ Latest release targets confirmed on 2026-07-23:
         9.8 ms documents for indexed `OrSparseOrFlag`; pouch measured about
         41 ms keys / 43 ms documents C-side, so multi-field OR union planning
         is now an explicit pouch performance gap.
+      - [x] Reduce one part of the indexed root `or` gap by scanning the
+        query-index scalar sidecar once for a sorted exact field/value term
+        set instead of reopening it once per OR child. Verified on 2026-07-27
+        with focused 4096-doc `OrSparseOrFlag` key comparison:
+        `make __benchmark-pouch-go-fast POUCH_GO_FAST_BENCH='Fast.*/.*/.*/.*/OrSparseOrFlag' POUCH_GO_FAST_SEED_ROWS=4096 POUCH_GO_FAST_BENCHTIME=1x POUCH_GO_FAST_TIMEOUT=90s`
+        measured pouch at about 36.9 ms C-side for 640 rows and Go lockd disk
+        at about 32.0 ms wall time for the same row count. Pouch still needs a
+        typed docID/posting OR path to close this gap decisively.
+        Broader acceptance stayed within the gate on 2026-07-27:
+        `make benchmark-pouch-go-acceptance` completed in 1m35s, with pouch
+        indexed `OrSparseOrFlag` at about 37.8 ms keys / 37.3 ms documents
+        C-side and Go disk at about 1.7 ms keys / 13.3 ms documents.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
