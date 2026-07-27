@@ -599,10 +599,10 @@ static int lc_pouch_client_can_use_query_fallback(lc_client_handle *client,
          strcmp(client->pouch->query_fallback_engine, fallback) == 0;
 }
 
-static int lc_pouch_client_public_read_unsupported(lc_error *error) {
+static int lc_pouch_client_public_attachment_read_unsupported(lc_error *error) {
   return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch public state reads are not implemented yet", NULL,
-                      NULL, "pouch-redesign");
+                      "pouch public attachment reads are not implemented yet",
+                      NULL, NULL, "pouch-redesign");
 }
 
 static int lc_pouch_client_validate_public_key(const char *key,
@@ -4593,9 +4593,7 @@ static int lc_pouch_client_get_namespace(lc_client_handle *client,
   lc_pouch_state_read_result read_result;
   int rc;
 
-  if (opts != NULL && opts->public_read) {
-    return lc_pouch_client_public_read_unsupported(error);
-  }
+  (void)opts;
   memset(out, 0, sizeof(*out));
   memset(&read_result, 0, sizeof(read_result));
   rc = lc_pouch_state_read(client->pouch,
@@ -4633,9 +4631,7 @@ static int lc_pouch_client_load_namespace(lc_client_handle *client,
   lonejson_status status;
   int rc;
 
-  if (opts != NULL && opts->public_read) {
-    return lc_pouch_client_public_read_unsupported(error);
-  }
+  (void)opts;
   memset(out, 0, sizeof(*out));
   memset(&read_result, 0, sizeof(read_result));
   memory_sink = NULL;
@@ -5560,7 +5556,7 @@ int lc_pouch_client_list_attachments_method(
                         NULL, NULL, NULL);
   }
   if (req->public_read) {
-    return lc_pouch_client_public_read_unsupported(error);
+    return lc_pouch_client_public_attachment_read_unsupported(error);
   }
   client = (lc_client_handle *)self;
   rc = lc_pouch_client_validate_public_key(req->lease.key, error);
@@ -5608,7 +5604,7 @@ int lc_pouch_client_get_attachment_method(
                         NULL, NULL, NULL);
   }
   if (req->public_read) {
-    return lc_pouch_client_public_read_unsupported(error);
+    return lc_pouch_client_public_attachment_read_unsupported(error);
   }
   client = (lc_client_handle *)self;
   rc = lc_pouch_client_validate_public_key(req->lease.key, error);

@@ -3172,17 +3172,31 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
 
 static void test_client_get_missing_and_public_state_behavior(void **state) {
   lc_client *client;
+  lc_source *source;
   lc_sink *sink;
   lc_get_opts get_opts;
   lc_get_res get_res;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  pouch_value_doc loaded;
   lc_error error;
+  const void *bytes;
+  size_t length;
   char root[512];
   int rc;
 
   (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
   lc_error_init(&error);
   memset(&get_res, 0, sizeof(get_res));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&loaded, 0, sizeof(loaded));
   lc_get_opts_init(&get_opts);
+  lc_update_req_init(&update_req);
   make_root("client-missing", root, sizeof(root));
   cleanup_root(root);
 
@@ -3194,19 +3208,60 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   assert_true(get_res.no_content);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
+  sink = NULL;
 
-  lc_error_cleanup(&error);
-  lc_error_init(&error);
   memset(&get_res, 0, sizeof(get_res));
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   get_opts.public_read = 1;
   rc = client->get(client, "missing", &get_opts, sink, &get_res, &error);
-  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
   sink->close(sink);
-
+  sink = NULL;
   lc_get_res_cleanup(&get_res);
-  lc_client_close(client);
+
+  update_req.lease.key = "public/state";
+  rc = lc_source_from_memory("{\"value\":42}", strlen("{\"value\":42}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  assert_int_equal(rc, LC_OK);
+  source->close(source);
+  source = NULL;
+  lc_update_res_cleanup(&update_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "public/state", &get_opts, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/json");
+  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_int_equal(get_res.version, 1L);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length, "\"value\":42"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  rc = client->load(client, "public/state", &pouch_value_map, &loaded,
+                    &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_int_equal(loaded.value, 42);
+  lc_get_res_cleanup(&get_res);
+  if (source != NULL) {
+    source->close(source);
+  }
+  if (sink != NULL) {
+    sink->close(sink);
+  }
+  lc_update_res_cleanup(&update_res);
+  if (client != NULL) {
+    lc_client_close(client);
+  }
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
