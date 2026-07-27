@@ -29,8 +29,8 @@ typedef struct lc_pouch_index_parsed_date_bounds {
   lc_pouch_index_instant lte;
 } lc_pouch_index_parsed_date_bounds;
 
-int lc_pouch_index_parse_rfc3339(const char *text,
-                                 lc_pouch_index_instant *out);
+int lc_pouch_index_parse_lql_datetime(const char *text,
+                                      lc_pouch_index_instant *out);
 int lc_pouch_index_parse_date_bounds(
     const lc_pouch_index_date_bounds *bounds,
     lc_pouch_index_parsed_date_bounds *out, lc_error *error);

@@ -1407,7 +1407,7 @@ static int lc_pouch_query_index_term_reader_matches_value(
       return error != NULL && error->code != LC_OK ? error->code
                                                    : LC_ERR_NOMEM;
     }
-    if (lc_pouch_index_parse_rfc3339(value_text, &instant)) {
+    if (lc_pouch_index_parse_lql_datetime(value_text, &instant)) {
       *matched = lc_pouch_index_date_contains_value(
           &reader->parsed_date_bounds, &instant);
     }

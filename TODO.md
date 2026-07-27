@@ -238,10 +238,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       open, marker refresh, and warmed projection-cache lookup per candidate
       set instead of reopening the manifest for every posting hit.
     - [x] Add a typed temporal candidate path for indexed `DateAfter` over
-      durable scalar term postings: pouch now parses RFC3339 term values and
-      date selector bounds into UTC instants, excludes invalid/out-of-range
-      terms before state reads, and still preserves final `liblql` selector
-      acceptance.
+      durable scalar term postings: pouch now parses LQL date-only,
+      naive-UTC, fractional, and offset timestamp term values plus selector
+      bounds into UTC instants, excludes invalid/out-of-range terms before
+      state reads, and still preserves final `liblql` selector acceptance.
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
   new pouch API and restore the comparison scenarios only when they measure the
   redesigned implementation.
@@ -1417,8 +1417,8 @@ Latest release targets confirmed on 2026-07-23:
         bounded indexed `DateAfter` with a typed temporal reader over scalar
         term postings, with temporal semantics owned by `lc_pouch_index`.
         Verified on 2026-07-27 with focused 4096-document indexed `DateAfter`:
-        pouch measured about 34 ms keys / 36 ms documents C-side versus Go
-        lockd disk at about 32 ms / 48 ms in the same run.
+        pouch measured about 31 ms keys / 31 ms documents C-side versus Go
+        lockd disk at about 46 ms / 44 ms in the same run.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

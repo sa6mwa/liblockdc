@@ -5799,6 +5799,41 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
+  rc = lc_source_from_memory("{\"created_at\":\"2025-01-02\",\"n\":8}",
+                             strlen("{\"created_at\":\"2025-01-02\",\"n\":8}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/date-only",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory(
+      "{\"created_at\":\"2025-01-01T00:00:01\",\"n\":9}",
+      strlen("{\"created_at\":\"2025-01-01T00:00:01\",\"n\":9}"), &source,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/naive",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory(
+      "{\"created_at\":\"2025-01-01T00:00:00.500Z\",\"n\":10}",
+      strlen("{\"created_at\":\"2025-01-01T00:00:00.500Z\",\"n\":10}"),
+      &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/fractional",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
   rc = lc_source_from_memory(
       "{\"created_at\":\"2024-01-01T00:00:00Z\",\"n\":2}",
       strlen("{\"created_at\":\"2024-01-01T00:00:00Z\",\"n\":2}"),
@@ -5870,16 +5905,18 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
   query_req.namespace_name = "docs/query-index-date";
-  query_req.selector_lql =
-      "date{field=/created_at,after=2025-01-01T00:00:00Z}";
+  query_req.selector_lql = "date{field=/created_at,after=2025-01-01}";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
   rc = client->query_keys(client, &query_req, &handler, &date_page,
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(date_page.count, 2);
+  assert_int_equal(date_page.count, 5);
   assert_true(pouch_query_capture_has(&date_page, "doc/new"));
   assert_true(pouch_query_capture_has(&date_page, "doc/offset"));
+  assert_true(pouch_query_capture_has(&date_page, "doc/date-only"));
+  assert_true(pouch_query_capture_has(&date_page, "doc/naive"));
+  assert_true(pouch_query_capture_has(&date_page, "doc/fractional"));
   assert_false(pouch_query_capture_has(&date_page, "doc/old"));
   assert_false(pouch_query_capture_has(&date_page, "doc/invalid"));
   assert_false(pouch_query_capture_has(&date_page, "doc/missing"));

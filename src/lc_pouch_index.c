@@ -65,8 +65,8 @@ static double lc_pouch_index_days_from_civil(int year, int month, int day) {
   return (double)(era * 146097L + doe - 719468L);
 }
 
-int lc_pouch_index_parse_rfc3339(const char *text,
-                                 lc_pouch_index_instant *out) {
+int lc_pouch_index_parse_lql_datetime(const char *text,
+                                      lc_pouch_index_instant *out) {
   int year;
   int month;
   int day;
@@ -77,32 +77,57 @@ int lc_pouch_index_parse_rfc3339(const char *text,
   int offset_hour;
   int offset_minute;
   double fraction;
+  size_t length;
   size_t index;
   double days;
   double seconds;
   double offset_seconds;
 
-  if (text == NULL || out == NULL || strlen(text) < 20U) {
+  if (text == NULL || out == NULL) {
+    return 0;
+  }
+  length = strlen(text);
+  if (length < 10U) {
     return 0;
   }
   if (!lc_pouch_index_parse_4digits(text, &year) || text[4] != '-' ||
       !lc_pouch_index_parse_2digits(text + 5, &month) || text[7] != '-' ||
-      !lc_pouch_index_parse_2digits(text + 8, &day) ||
-      (text[10] != 'T' && text[10] != 't') ||
-      !lc_pouch_index_parse_2digits(text + 11, &hour) ||
-      text[13] != ':' ||
-      !lc_pouch_index_parse_2digits(text + 14, &minute) ||
-      text[16] != ':' ||
-      !lc_pouch_index_parse_2digits(text + 17, &second)) {
+      !lc_pouch_index_parse_2digits(text + 8, &day)) {
     return 0;
   }
+  hour = 0;
+  minute = 0;
+  second = 0;
   if (month < 1 || month > 12 || day < 1 ||
-      day > lc_pouch_index_date_month_days(year, month) || hour < 0 ||
-      hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
+      day > lc_pouch_index_date_month_days(year, month)) {
     return 0;
   }
-  index = 19U;
+  index = 10U;
   fraction = 0.0;
+  if (text[index] == '\0') {
+    days = lc_pouch_index_days_from_civil(year, month, day);
+    out->seconds = days * 86400.0;
+    return 1;
+  }
+  if (text[index] != 'T' && text[index] != 't') {
+    return 0;
+  }
+  if (length < 19U) {
+    return 0;
+  }
+  ++index;
+  if (!lc_pouch_index_parse_2digits(text + index, &hour) ||
+      text[index + 2U] != ':' ||
+      !lc_pouch_index_parse_2digits(text + index + 3U, &minute) ||
+      text[index + 5U] != ':' ||
+      !lc_pouch_index_parse_2digits(text + index + 6U, &second)) {
+    return 0;
+  }
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 ||
+      second > 60) {
+    return 0;
+  }
+  index += 8U;
   if (text[index] == '.') {
     double scale;
     size_t digits;
@@ -139,7 +164,7 @@ int lc_pouch_index_parse_rfc3339(const char *text,
       return 0;
     }
     index += 5U;
-  } else {
+  } else if (text[index] != '\0') {
     return 0;
   }
   if (text[index] != '\0') {
@@ -205,7 +230,7 @@ int lc_pouch_index_parse_date_bounds(
   }
   memset(out, 0, sizeof(*out));
   if (bounds->has_gt) {
-    if (!lc_pouch_index_parse_rfc3339(bounds->gt, &out->gt)) {
+    if (!lc_pouch_index_parse_lql_datetime(bounds->gt, &out->gt)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index date gt bound is invalid", NULL, NULL,
                           "pouch-redesign");
@@ -213,7 +238,7 @@ int lc_pouch_index_parse_date_bounds(
     out->has_gt = 1;
   }
   if (bounds->has_gte) {
-    if (!lc_pouch_index_parse_rfc3339(bounds->gte, &out->gte)) {
+    if (!lc_pouch_index_parse_lql_datetime(bounds->gte, &out->gte)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index date gte bound is invalid", NULL, NULL,
                           "pouch-redesign");
@@ -221,7 +246,7 @@ int lc_pouch_index_parse_date_bounds(
     out->has_gte = 1;
   }
   if (bounds->has_lt) {
-    if (!lc_pouch_index_parse_rfc3339(bounds->lt, &out->lt)) {
+    if (!lc_pouch_index_parse_lql_datetime(bounds->lt, &out->lt)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index date lt bound is invalid", NULL, NULL,
                           "pouch-redesign");
@@ -229,7 +254,7 @@ int lc_pouch_index_parse_date_bounds(
     out->has_lt = 1;
   }
   if (bounds->has_lte) {
-    if (!lc_pouch_index_parse_rfc3339(bounds->lte, &out->lte)) {
+    if (!lc_pouch_index_parse_lql_datetime(bounds->lte, &out->lte)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index date lte bound is invalid", NULL, NULL,
                           "pouch-redesign");
