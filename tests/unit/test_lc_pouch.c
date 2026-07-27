@@ -3358,6 +3358,14 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_string_equal(list.items[1].id, beta_id);
   lc_attachment_list_cleanup(&list);
 
+  list_req.public_read = 1;
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 2U);
+  assert_string_equal(list.items[0].name, "alpha.txt");
+  assert_string_equal(list.items[1].name, "beta.bin");
+  lc_attachment_list_cleanup(&list);
+
   get_op.lease.key = key;
   get_op.selector.name = "alpha.txt";
   rc = lc_sink_to_memory(&sink, &error);
@@ -3372,6 +3380,23 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   sink->close(sink);
   sink = NULL;
   lc_attachment_get_res_cleanup(&get_res);
+
+  get_op.public_read = 1;
+  get_op.selector.name = "alpha.txt";
+  get_op.selector.id = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(get_res.attachment.name, "alpha.txt");
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("alpha"));
+  assert_memory_equal(bytes, "alpha", strlen("alpha"));
+  sink->close(sink);
+  sink = NULL;
+  lc_attachment_get_res_cleanup(&get_res);
+  get_op.public_read = 0;
 
   get_op.selector.name = NULL;
   get_op.selector.id = beta_id;
@@ -3393,6 +3418,27 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   rc = client->delete_attachment(client, &delete_op, &deleted, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(deleted, 1);
+  list_req.public_read = 1;
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_string_equal(list.items[0].name, "beta.bin");
+  lc_attachment_list_cleanup(&list);
+  get_op.public_read = 1;
+  get_op.selector.name = "alpha.txt";
+  get_op.selector.id = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "not found"));
+  sink->close(sink);
+  sink = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_attachment_get_res_cleanup(&get_res);
+  get_op.public_read = 0;
+  list_req.public_read = 0;
   deleted = 0;
   rc = client->delete_attachment(client, &delete_op, &deleted, &error);
   assert_int_equal(rc, LC_OK);
@@ -3407,6 +3453,13 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 0U);
 
+  if (sink != NULL) {
+    sink->close(sink);
+  }
+  if (source != NULL) {
+    source->close(source);
+  }
+  lc_attachment_get_res_cleanup(&get_res);
   lc_attachment_list_cleanup(&list);
   lc_client_close(client);
   cleanup_root(root);

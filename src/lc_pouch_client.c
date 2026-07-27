@@ -599,12 +599,6 @@ static int lc_pouch_client_can_use_query_fallback(lc_client_handle *client,
          strcmp(client->pouch->query_fallback_engine, fallback) == 0;
 }
 
-static int lc_pouch_client_public_attachment_read_unsupported(lc_error *error) {
-  return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch public attachment reads are not implemented yet",
-                      NULL, NULL, "pouch-redesign");
-}
-
 static int lc_pouch_client_validate_public_key(const char *key,
                                                lc_error *error) {
   if (key == NULL || key[0] == '\0') {
@@ -5555,9 +5549,6 @@ int lc_pouch_client_list_attachments_method(
                         "pouch list_attachments requires self, req, and out",
                         NULL, NULL, NULL);
   }
-  if (req->public_read) {
-    return lc_pouch_client_public_attachment_read_unsupported(error);
-  }
   client = (lc_client_handle *)self;
   rc = lc_pouch_client_validate_public_key(req->lease.key, error);
   if (rc != LC_OK) {
@@ -5602,9 +5593,6 @@ int lc_pouch_client_get_attachment_method(
                         "pouch get_attachment requires self, req, dst, and "
                         "out",
                         NULL, NULL, NULL);
-  }
-  if (req->public_read) {
-    return lc_pouch_client_public_attachment_read_unsupported(error);
   }
   client = (lc_client_handle *)self;
   rc = lc_pouch_client_validate_public_key(req->lease.key, error);
