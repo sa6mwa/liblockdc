@@ -232,6 +232,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 - [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
   new pouch API and restore the comparison scenarios only when they measure the
   redesigned implementation.
+  - [x] Restore the live `benchmark/` Go/cgo module expected by the
+    `benchmark-pouch-go*` Makefile targets, with C-side pouch timing metrics
+    and fast/medium benchmark names that compile against the redesigned
+    `lc_pouch` API.
 
 ## Foundation
 
@@ -1607,13 +1611,13 @@ Latest release targets confirmed on 2026-07-23:
     recovery, search/index rebuild, and large namespace stress scenarios.
   - [x] Add a separate Go/cgo benchmark module under `benchmark/` for opt-in
     e2e perf comparison and stress testing outside the liblockdc release gate.
-  - [x] Launch a real latest pinned `pkt.systems/lockd` disk backend from the
+  - [ ] Launch a real latest pinned `pkt.systems/lockd` disk backend from the
     Go comparison module instead of using in-process lockd internals.
-  - [x] Compare that real lockd disk server against an actual liblockdc
+  - [ ] Compare that real lockd disk server against an actual liblockdc
     `pouch://` client instance with the same full-form LQL selector shape.
   - [ ] Mirror more of the Go lockd disk benchmark suite shape in the Go/cgo
     module so pouch and Go disk backend results can be compared case by case.
-    - [x] Add Go/cgo pouch-vs-lockd disk comparison coverage for the same
+    - [ ] Add Go/cgo pouch-vs-lockd disk comparison coverage for the same
       `DateAfter` residual-filter scenario as the native C benchmark: seeded
       documents include valid, invalid, and out-of-range `/created_at` values,
       while both backends run `date{field=/created_at,after=...}` through the
