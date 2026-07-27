@@ -523,9 +523,17 @@ BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_scan_documents,
                      "date{field=/created_at,after=2025-01-01T00:00:00Z}",
                      "scan", 1)
 BENCH_POUCH_LQL_FUNC(
+    bench_pouch_query_or_sparse_or_flag_index_keys,
+    "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "index",
+    0)
+BENCH_POUCH_LQL_FUNC(
     bench_pouch_query_or_sparse_or_flag_scan_keys,
     "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "scan",
     0)
+BENCH_POUCH_LQL_FUNC(
+    bench_pouch_query_or_sparse_or_flag_index_documents,
+    "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "index",
+    1)
 BENCH_POUCH_LQL_FUNC(
     bench_pouch_query_or_sparse_or_flag_scan_documents,
     "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "scan",
@@ -592,8 +600,12 @@ static const bench_case *bench_cases(void) {
        bench_pouch_query_date_after_index_documents},
       {"pouch-query-date-after-scan-documents", 1024L,
        bench_pouch_query_date_after_scan_documents},
+      {"pouch-query-or-sparse-or-flag-index-keys", 1024L,
+       bench_pouch_query_or_sparse_or_flag_index_keys},
       {"pouch-query-or-sparse-or-flag-scan-keys", 1024L,
        bench_pouch_query_or_sparse_or_flag_scan_keys},
+      {"pouch-query-or-sparse-or-flag-index-documents", 1024L,
+       bench_pouch_query_or_sparse_or_flag_index_documents},
       {"pouch-query-or-sparse-or-flag-scan-documents", 1024L,
        bench_pouch_query_or_sparse_or_flag_scan_documents},
       {"pouch-query-iprefix-index-keys", 1024L,

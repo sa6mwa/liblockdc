@@ -1759,11 +1759,12 @@ Latest release targets confirmed on 2026-07-23:
           numeric range, scalar `in`, array `/tags[]` `in`, contains, date
           after, plus scan-mode root `or`, across key and document result
           modes.
-        - [ ] Add indexed root `or` benchmark coverage after the pouch index
+        - [x] Add indexed root `or` benchmark coverage after the pouch index
           planner grows a real union plan for multi-field public LQL
-          disjunctions such as `bucket == needle OR flag == true`; scan mode
-          is currently benchmarked, but indexed registration is intentionally
-          withheld because the current single-primary index plan rejects it.
+          disjunctions such as `bucket == needle OR flag == true`; indexed
+          execution now unions child equality posting candidates and preserves
+          final `liblql` acceptance before registering key/document benchmark
+          cases.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
   - [ ] Refine pouch e2e coverage around segmented manifest/snapshot
     lifecycle, manifest repair, background compaction scheduling, marker

@@ -82,6 +82,25 @@ static void cleanup_all_roots(void) {
                             POUCH_UNIT_TMP_PREFIX);
 }
 
+static void pouch_write_json_state(lc_pouch *pouch, const char *namespace_name,
+                                   const char *key, const char *json,
+                                   const lc_pouch_state_write_options *options,
+                                   lc_error *error) {
+  lc_source *source;
+  lc_pouch_state_write_result write_result;
+  int rc;
+
+  source = NULL;
+  memset(&write_result, 0, sizeof(write_result));
+  rc = lc_source_from_memory(json, strlen(json), &source, error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, namespace_name, key, source, options,
+                            &write_result, error);
+  lc_source_close(source);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+}
+
 static int pouch_query_key_begin(void *context, lc_error *error) {
   pouch_query_key_capture *capture;
 
@@ -6617,6 +6636,150 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
+  static const char selector_lql[] =
+      "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}";
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture first_page;
+  pouch_query_key_capture second_page;
+  lc_sink *documents_sink;
+  lc_pouch_state_write_options hidden_options;
+  lc_pouch_state_write_result delete_result;
+  lc_error error;
+  const void *document_bytes;
+  size_t document_length;
+  char root[512];
+  char cursor[64];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  documents_sink = NULL;
+  document_bytes = NULL;
+  document_length = 0U;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&first_page, 0, sizeof(first_page));
+  memset(&second_page, 0, sizeof(second_page));
+  memset(&hidden_options, 0, sizeof(hidden_options));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-root-or", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  pouch_write_json_state(pouch, "docs/query-index-or", "doc/a",
+                         "{\"bucket\":\"needle\",\"flag\":false,\"n\":1}",
+                         NULL, &error);
+  pouch_write_json_state(pouch, "docs/query-index-or", "doc/b",
+                         "{\"bucket\":\"hay\",\"flag\":true,\"n\":2}", NULL,
+                         &error);
+  pouch_write_json_state(pouch, "docs/query-index-or", "doc/overlap",
+                         "{\"bucket\":\"needle\",\"flag\":true,\"n\":3}",
+                         NULL, &error);
+  pouch_write_json_state(pouch, "docs/query-index-or", "doc/string-flag",
+                         "{\"bucket\":\"hay\",\"flag\":\"true\",\"n\":4}",
+                         NULL, &error);
+  pouch_write_json_state(pouch, "docs/query-index-or", "doc/no-match",
+                         "{\"bucket\":\"hay\",\"flag\":false,\"n\":5}", NULL,
+                         &error);
+  hidden_options.has_query_hidden = 1;
+  hidden_options.query_hidden = 1;
+  pouch_write_json_state(pouch, "docs/query-index-or", "doc/hidden",
+                         "{\"bucket\":\"needle\",\"flag\":false,\"n\":6}",
+                         &hidden_options, &error);
+  pouch_write_json_state(pouch, "docs/query-index-or", "doc/deleted",
+                         "{\"bucket\":\"hay\",\"flag\":true,\"n\":7}", NULL,
+                         &error);
+  rc = lc_pouch_state_delete(pouch, "docs/query-index-or", "doc/deleted",
+                             NULL, &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/query-index-or";
+  query_req.selector_lql = selector_lql;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  query_req.limit = 2L;
+  rc = client->query_keys(client, &query_req, &handler, &first_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(first_page.count, 2);
+  assert_non_null(query_res.cursor);
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+
+  snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
+  query_req.cursor = cursor;
+  lc_query_res_cleanup(&query_res);
+  rc = client->query_keys(client, &query_req, &handler, &second_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(second_page.count, 1);
+  assert_null(query_res.cursor);
+  assert_true(pouch_query_capture_has(&first_page, "doc/a") ||
+              pouch_query_capture_has(&second_page, "doc/a"));
+  assert_true(pouch_query_capture_has(&first_page, "doc/b") ||
+              pouch_query_capture_has(&second_page, "doc/b"));
+  assert_true(pouch_query_capture_has(&first_page, "doc/overlap") ||
+              pouch_query_capture_has(&second_page, "doc/overlap"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/string-flag"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/string-flag"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/no-match"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/no-match"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&first_page, "doc/deleted"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/deleted"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.limit = 0L;
+  query_req.return_mode = "documents";
+  query_req.fields_json = "{\"n\":true}";
+  rc = lc_sink_to_memory(&documents_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, documents_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(documents_sink, &document_bytes, &document_length,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(document_length > 0U);
+  assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(document_bytes, document_length, "\"n\":1"));
+  assert_true(bytes_contain_text(document_bytes, document_length, "\"n\":2"));
+  assert_true(bytes_contain_text(document_bytes, document_length, "\"n\":3"));
+  assert_false(bytes_contain_text(document_bytes, document_length, "\"n\":4"));
+  assert_false(bytes_contain_text(document_bytes, document_length, "\"n\":5"));
+  assert_false(bytes_contain_text(document_bytes, document_length, "\"n\":6"));
+  assert_false(bytes_contain_text(document_bytes, document_length, "\"n\":7"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+
+  lc_sink_close(documents_sink);
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_keys_index_text_stops_after_target_field(void **state) {
   lc_client *client;
   lc_pouch *pouch;
@@ -8926,6 +9089,7 @@ int main(void) {
       cmocka_unit_test(test_query_keys_enforces_lockd_limit_contract),
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
+      cmocka_unit_test(test_query_keys_index_root_or_uses_scalar_union),
       cmocka_unit_test(test_query_keys_index_text_stops_after_target_field),
       cmocka_unit_test(
           test_query_keys_index_date_lql_filters_temporal_candidates),

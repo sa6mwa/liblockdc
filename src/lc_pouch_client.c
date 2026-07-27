@@ -178,16 +178,25 @@ typedef struct lc_pouch_query_index_plan {
   char **values;
   size_t value_count;
   size_t value_capacity;
+  struct lc_pouch_query_index_or_term *or_terms;
+  size_t or_term_count;
+  size_t or_term_capacity;
   int exists;
   int prefix;
   int contains;
   int ignore_case;
   int range;
   int date;
+  int root_or;
   int candidates_exact;
   lc_pouch_query_index_range_bounds range_bounds;
   lc_pouch_query_index_date_bounds date_bounds;
 } lc_pouch_query_index_plan;
+
+typedef struct lc_pouch_query_index_or_term {
+  char *field;
+  char *value;
+} lc_pouch_query_index_or_term;
 
 typedef struct lc_pouch_query_index_key_set {
   lc_pouch_query_index_key_view *keys;
@@ -1082,11 +1091,16 @@ static void lc_pouch_query_index_plan_cleanup(
   for (index = 0U; index < plan->value_count; ++index) {
     free(plan->values[index]);
   }
+  for (index = 0U; index < plan->or_term_count; ++index) {
+    free(plan->or_terms[index].field);
+    free(plan->or_terms[index].value);
+  }
   free((char *)plan->date_bounds.gt);
   free((char *)plan->date_bounds.gte);
   free((char *)plan->date_bounds.lt);
   free((char *)plan->date_bounds.lte);
   free(plan->values);
+  free(plan->or_terms);
   memset(plan, 0, sizeof(*plan));
 }
 
@@ -1167,6 +1181,86 @@ static int lc_pouch_query_index_plan_add_value(
   return LC_OK;
 }
 
+static int lc_pouch_query_index_plan_add_or_term(
+    lc_pouch_query_index_plan *plan, lql_string_view field,
+    lql_string_view value, lc_error *error) {
+  lc_pouch_query_index_or_term *next_terms;
+  size_t next_capacity;
+  char *field_copy;
+  char *value_copy;
+
+  if (plan->or_term_count >= plan->or_term_capacity) {
+    next_capacity =
+        plan->or_term_capacity == 0U ? 4U : plan->or_term_capacity;
+    while (next_capacity <= plan->or_term_count) {
+      if (next_capacity > ((size_t)-1 / 2U)) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "pouch query selector root or term list exceeds "
+                            "local limit",
+                            NULL, NULL, NULL);
+      }
+      next_capacity *= 2U;
+    }
+    next_terms = (lc_pouch_query_index_or_term *)realloc(
+        plan->or_terms, next_capacity * sizeof(*next_terms));
+    if (next_terms == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch query selector root or "
+                          "terms",
+                          NULL, NULL, NULL);
+    }
+    memset(next_terms + plan->or_term_capacity, 0,
+           (next_capacity - plan->or_term_capacity) * sizeof(*next_terms));
+    plan->or_terms = next_terms;
+    plan->or_term_capacity = next_capacity;
+  }
+  field_copy = lc_pouch_query_dup_lql_string(field, error);
+  if (field_copy == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  value_copy = lc_pouch_query_dup_lql_string(value, error);
+  if (value_copy == NULL) {
+    free(field_copy);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  plan->or_terms[plan->or_term_count].field = field_copy;
+  plan->or_terms[plan->or_term_count].value = value_copy;
+  ++plan->or_term_count;
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_plan_add_or_child(
+    lql *runtime, lql_selector_node child, lc_pouch_query_index_plan *plan,
+    lql_error *lql_error_value, lc_error *error) {
+  lql_selector_string_term string_term;
+  lql_status status;
+
+  if (child.kind != LQL_SELECTOR_NODE_EQ) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query index engine supports root or groups "
+                        "whose children are exact scalar equality selectors "
+                        "only",
+                        NULL, NULL, "pouch-redesign");
+  }
+  memset(&string_term, 0, sizeof(string_term));
+  status = runtime->selector_node_string_term(runtime, child, &string_term,
+                                              lql_error_value);
+  if (status != LQL_STATUS_OK) {
+    return lc_pouch_query_lql_error(
+        error, status, lql_error_value,
+        "failed to inspect pouch root or equality selector");
+  }
+  if (!string_term.value_present || string_term.any_count != 0U ||
+      string_term.field.len == 0U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query index engine supports root or exact "
+                        "scalar equality selectors only",
+                        NULL, NULL, "pouch-redesign");
+  }
+  return lc_pouch_query_index_plan_add_or_term(
+      plan, string_term.field, string_term.value, error);
+}
+
 static int lc_pouch_query_index_plan_set_range_bound(
     lc_pouch_query_index_range_bounds *bounds,
     const lql_selector_range_bound *bound, int *has_bound, double *value,
@@ -1224,6 +1318,7 @@ static int lc_pouch_query_index_plan_from_selector(
   lql_selector_in_term in_term;
   lql_error lql_error_value;
   lql_status status;
+  size_t child_count;
   size_t index;
 
   if (runtime == NULL || selector == NULL || plan == NULL) {
@@ -1238,6 +1333,41 @@ static int lc_pouch_query_index_plan_from_selector(
   if (status != LQL_STATUS_OK) {
     return lc_pouch_query_lql_error(error, status, &lql_error_value,
                                     "failed to inspect pouch query selector");
+  }
+  if (root.kind == LQL_SELECTOR_NODE_OR) {
+    child_count = 0U;
+    status = runtime->selector_node_child_count(runtime, root, &child_count,
+                                                &lql_error_value);
+    if (status != LQL_STATUS_OK) {
+      return lc_pouch_query_lql_error(
+          error, status, &lql_error_value,
+          "failed to inspect pouch root or selector");
+    }
+    if (child_count == 0U) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query index engine supports non-empty root "
+                          "or selectors only",
+                          NULL, NULL, "pouch-redesign");
+    }
+    for (index = 0U; index < child_count; ++index) {
+      lql_selector_node child;
+
+      memset(&child, 0, sizeof(child));
+      status = runtime->selector_node_child(runtime, root, index, &child,
+                                            &lql_error_value);
+      if (status != LQL_STATUS_OK) {
+        return lc_pouch_query_lql_error(
+            error, status, &lql_error_value,
+            "failed to inspect pouch root or selector child");
+      }
+      if (lc_pouch_query_index_plan_add_or_child(
+              runtime, child, plan, &lql_error_value, error) != LC_OK) {
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_INVALID;
+      }
+    }
+    plan->root_or = 1;
+    return LC_OK;
   }
   if (root.kind == LQL_SELECTOR_NODE_EQ) {
     memset(&string_term, 0, sizeof(string_term));
@@ -1813,7 +1943,19 @@ static int lc_pouch_query_run_index_predicate(
     rc = lc_pouch_query_flush_summary_index(scan->client, scan->namespace_name,
                                             &flushed_seq, error);
   }
-  if (rc == LC_OK && plan.exists) {
+  if (rc == LC_OK && plan.root_or) {
+    for (value_index = 0U; rc == LC_OK && value_index < plan.or_term_count;
+         ++value_index) {
+      value_seq = 0UL;
+      rc = lc_pouch_query_index_visit_scalar(
+          scan->client->pouch, scan->namespace_name,
+          plan.or_terms[value_index].field, plan.or_terms[value_index].value,
+          lc_pouch_query_index_key_collect, &keys, &value_seq, error);
+      if (rc == LC_OK && value_seq > scan->index_seq) {
+        scan->index_seq = value_seq;
+      }
+    }
+  } else if (rc == LC_OK && plan.exists) {
     value_seq = 0UL;
     rc = lc_pouch_query_index_visit_exists(
         scan->client->pouch, scan->namespace_name, plan.field,
