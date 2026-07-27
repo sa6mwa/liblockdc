@@ -1343,6 +1343,102 @@ static void append_text_file(const char *path, const char *text) {
   assert_int_equal(fclose(fp), 0);
 }
 
+static void test_index_doc_table_generation_loads_identity_matched_file(
+    void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_doc_table table;
+  lc_pouch_index_doc_table loaded;
+  const lc_pouch_index_doc *doc;
+  char *bytes;
+  size_t length;
+  char root[512];
+  char path[1024];
+  unsigned long doc_id;
+  int found;
+  int present;
+  int valid;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&table, 0, sizeof(table));
+  memset(&loaded, 0, sizeof(loaded));
+  bytes = NULL;
+  length = 0U;
+  make_root("doc-table-generation-load", root, sizeof(root));
+
+  rc = lc_pouch_index_doc_table_append_sorted_unique(
+      &table, "0a", 3UL, 11UL, 1, 0, &doc_id, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_doc_table_append_sorted_unique(
+      &table, "0b", 4UL, 12UL, 1, 1, &doc_id, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_doc_table_generation_encode(
+      &table, 77UL, 12345UL, &allocator, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(bytes);
+  assert_true(length > 0U);
+
+  snprintf(path, sizeof(path), "%s/docs.lcpdtg", root);
+  write_text_file(path, bytes);
+  lc_free_with_allocator(&allocator, bytes);
+  bytes = NULL;
+
+  present = 0;
+  valid = 0;
+  rc = lc_pouch_index_doc_table_generation_load_file(
+      &allocator, path, 77UL, 2UL, 12345UL, &loaded, &present, &valid, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(present);
+  assert_true(valid);
+  assert_int_equal(loaded.count, 2);
+  rc = lc_pouch_index_doc_table_find_key_hex(&loaded, "0b", &doc_id, &found,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(found);
+  assert_int_equal(doc_id, 1);
+  rc = lc_pouch_index_doc_table_get(&loaded, doc_id, &doc, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(doc);
+  assert_string_equal(doc->key_hex, "0b");
+  assert_int_equal(doc->version, 4);
+  assert_int_equal(doc->bytes, 12);
+  assert_true(doc->has_query_hidden);
+  assert_true(doc->query_hidden);
+  lc_pouch_index_doc_table_cleanup(&allocator, &loaded);
+
+  present = 0;
+  valid = 1;
+  rc = lc_pouch_index_doc_table_generation_load_file(
+      &allocator, path, 77UL, 2UL, 999UL, &loaded, &present, &valid, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(present);
+  assert_false(valid);
+  assert_int_equal(loaded.count, 0);
+
+  write_text_file(path,
+                  "format=pouch-doc-table-generation\nversion=1\n"
+                  "index_seq=77\nrow_count=2\nrow_hash=12345\n"
+                  "doc 0b 4 12 1 1\n"
+                  "doc 0a 3 11 1 0\n");
+  present = 0;
+  valid = 1;
+  rc = lc_pouch_index_doc_table_generation_load_file(
+      &allocator, path, 77UL, 2UL, 12345UL, &loaded, &present, &valid,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(present);
+  assert_false(valid);
+  assert_int_equal(loaded.count, 0);
+
+  lc_pouch_index_doc_table_cleanup(&allocator, &loaded);
+  lc_pouch_index_doc_table_cleanup(&allocator, &table);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void replace_text_file_first(const char *path, const char *needle,
                                     const char *replacement) {
   FILE *fp;
@@ -7893,6 +7989,8 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   lc_error error;
   const void *document_bytes;
   size_t document_length;
+  char *namespace_path;
+  char doc_table_path[1024];
   char root[512];
   int rc;
 
@@ -7912,6 +8010,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   document_sink = NULL;
   document_bytes = NULL;
   document_length = 0U;
+  namespace_path = NULL;
   lc_query_req_init(&query_req);
   lc_error_init(&error);
   make_root("query-keys-index-scalar-types", root, sizeof(root));
@@ -8065,6 +8164,13 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
                                  "\"query_candidates\":5"));
   lc_query_res_cleanup(&query_res);
 
+  namespace_path =
+      lc_pouch_namespace_path(NULL, root, "docs/query-index-scalar-types");
+  assert_non_null(namespace_path);
+  snprintf(doc_table_path, sizeof(doc_table_path),
+           "%s/index/query.index.lcpdtg", namespace_path);
+  write_text_file(doc_table_path, "broken\n");
+
   query_req.selector_lql = "eq{field=/flag,value=false}";
   query_req.selector_json = NULL;
   query_req.return_mode = "documents";
@@ -8084,7 +8190,12 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"query_candidates\":1"));
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "format=pouch-doc-table-generation");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "row_count=7");
 
+  free(namespace_path);
   lc_sink_close(document_sink);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
@@ -10587,6 +10698,8 @@ int main(void) {
       cmocka_unit_test(test_index_docid_set_keeps_sorted_unique_docids),
       cmocka_unit_test(test_index_docid_set_merges_sorted_sets),
       cmocka_unit_test(test_index_doc_table_maps_sorted_keys_to_docids),
+      cmocka_unit_test(
+          test_index_doc_table_generation_loads_identity_matched_file),
       cmocka_unit_test(test_index_result_key_list_sorts_and_compacts_docids),
       cmocka_unit_test(test_index_result_row_list_copies_keys_and_metadata),
       cmocka_unit_test(test_index_term_fields_find_sorted_ranges),

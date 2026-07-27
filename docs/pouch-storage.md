@@ -1526,13 +1526,16 @@ per-namespace document-table generation file under
 flush/rebuild. Flush validates the generation's format, version, index
 sequence, row count, row hash, and sorted document rows; a missing, stale, or
 corrupt generation is repaired even when `index/query.index` is already
-current. The current query path still rebuilds the live in-memory global
-document table from summary refresh state; exact-term, field-presence, numeric
-range, text/trigram, and temporal generations remain the cutover target for
-namespace-local persisted docIDs and remap through document-table generations
-when loading prepared postings. Result-page selection still needs the same
-namespace-local doc table cutover before compiled reader files can stop
-depending on the global docID table.
+current. Exact scalar docID emission now loads that identity-matched
+generation, repairs it through flush when needed, and resolves docIDs through
+the persisted namespace document table before key or document-page emission.
+The current query path still rebuilds the live in-memory global document table
+from summary refresh state for broader plans; exact-term, field-presence,
+numeric range, text/trigram, and temporal compiled generations remain the
+cutover target for namespace-local persisted docIDs and remap through
+document-table generations when loading prepared postings. Non-exact
+result-page selection still needs the same namespace-local doc table cutover
+before compiled reader files can stop depending on the global docID table.
 Even before that cutover, the query path no longer depends on direct
 summary-array-position casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:

@@ -45,6 +45,7 @@ typedef struct lc_pouch_index_doc {
 
 typedef struct lc_pouch_index_doc_table {
   lc_pouch_index_doc *items;
+  char *owned_generation_bytes;
   size_t count;
   size_t capacity;
 } lc_pouch_index_doc_table;
@@ -191,6 +192,12 @@ int lc_pouch_index_doc_table_generation_validate_file(
     unsigned long expected_index_seq,
     unsigned long expected_row_count, unsigned long expected_row_hash,
     int *present, int *valid, lc_error *error);
+int lc_pouch_index_doc_table_generation_load_file(
+    const lc_allocator *allocator, const char *path,
+    unsigned long expected_index_seq,
+    unsigned long expected_row_count, unsigned long expected_row_hash,
+    lc_pouch_index_doc_table *table, int *present, int *valid,
+    lc_error *error);
 void lc_pouch_index_result_key_list_cleanup(
     const lc_allocator *allocator, lc_pouch_index_result_key_list *list);
 int lc_pouch_index_result_key_list_add(

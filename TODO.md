@@ -850,6 +850,12 @@ Latest release targets confirmed on 2026-07-23:
         validates format/version/index sequence/row count/row hash/sorted
         document rows, and repairs missing or corrupt generation files even
         when the main `index/query.index` sidecar is current.
+      - [x] Load identity-matched document-table generation files for exact
+        scalar docID emission: equality, non-wildcard `in`, and root equality
+        `or` docID visitors now collect docIDs, load/repair the matching
+        `index/query.index.lcpdtg`, and resolve page keys/metadata through the
+        persisted namespace document table before emitting keys or opening
+        document bodies.
       - [x] Cut exact-term generation files over to namespace-local docIDs:
         exact generation build stores postings by the matching per-namespace
         document-table generation, prepared exact readers require an
@@ -1277,9 +1283,11 @@ Latest release targets confirmed on 2026-07-23:
         `liblql` body evaluation remains skipped only for planner-proven exact
         predicates, preserving typed JSON scalar equality. Focused regression
         coverage asserts indexed `/tags[]` exact-`in` document pagination
-        metadata across a resumed cursor. Verified on 2026-07-27 with focused
-        1024-doc indexed `EqDense` document comparison: Go lockd disk measured
-        about 16.2 ms wall time and pouch measured about 10.2 ms C-side.
+        metadata across a resumed cursor, and exact document-return now repairs
+        a corrupt `index/query.index.lcpdtg` before resolving the page through
+        the persisted doc table. Verified on 2026-07-27 with focused 1024-doc
+        indexed `EqDense` document comparison: Go lockd disk measured about
+        16.2 ms wall time and pouch measured about 10.2 ms C-side.
       - [x] Route simple positive `exists` document/key scans through the same
         index-owned docID result paging bridge, sharing invalid-docID detection
         and avoiding full cached-match summary translation before cursor/limit
