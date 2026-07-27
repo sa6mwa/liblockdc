@@ -390,7 +390,7 @@ static int bench_pouch_query_iprefix_scan_documents(long iterations) {
 
 static int bench_pouch_query_icontains_index_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", NULL,
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL,
       "index", 0};
 
   return bench_pouch_query_text(iterations, &query_case);
@@ -398,7 +398,7 @@ static int bench_pouch_query_icontains_index_keys(long iterations) {
 
 static int bench_pouch_query_icontains_scan_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", NULL,
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL,
       "scan", 0};
 
   return bench_pouch_query_text(iterations, &query_case);
@@ -406,7 +406,7 @@ static int bench_pouch_query_icontains_scan_keys(long iterations) {
 
 static int bench_pouch_query_icontains_index_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", NULL,
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL,
       "index", 1};
 
   return bench_pouch_query_text(iterations, &query_case);
@@ -414,7 +414,7 @@ static int bench_pouch_query_icontains_index_documents(long iterations) {
 
 static int bench_pouch_query_icontains_scan_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", NULL,
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL,
       "scan", 1};
 
   return bench_pouch_query_text(iterations, &query_case);

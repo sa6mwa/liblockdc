@@ -112,6 +112,12 @@ static const char *lockdc_bench_selector_lql(const char *scenario) {
   if (strcmp(scenario, "ContainsMessage") == 0) {
     return "contains{field=/details/message,value=timeout}";
   }
+  if (strcmp(scenario, "IprefixTags") == 0) {
+    return "iprefix{field=/tags[],value=FIN}";
+  }
+  if (strcmp(scenario, "IcontainsTags") == 0) {
+    return "icontains{field=/tags[],value=INA}";
+  }
   if (strcmp(scenario, "DateAfter") == 0) {
     return "date{field=/created_at,after=2025-01-01T00:00:00Z}";
   }

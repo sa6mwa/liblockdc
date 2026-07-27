@@ -65,6 +65,8 @@ func benchmarkMediumLQL(b *testing.B, documents bool) {
 		"InRegionSingle",
 		"InTags",
 		"ContainsMessage",
+		"IprefixTags",
+		"IcontainsTags",
 		"DateAfter",
 		"OrSparseOrFlag",
 		"RecursiveExists",

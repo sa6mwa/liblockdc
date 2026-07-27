@@ -1912,6 +1912,20 @@ Latest release targets confirmed on 2026-07-23:
       Go/cgo comparison scenario sets so the real lockd disk backend and
       liblockdc pouch are compared case by case for public full-form root OR
       queries over the shared seeded document shape.
+    - [x] Add Go/cgo pouch-vs-lockd disk comparison coverage for the same
+      case-insensitive `/tags[]` text selectors as the native C benchmark:
+      `IprefixTags` runs `iprefix{field=/tags[],value=FIN}` and
+      `IcontainsTags` runs `icontains{field=/tags[],value=INA}` through both
+      the liblockdc pouch C helper and the real Go lockd disk client. The
+      bounded medium matrix now includes these scenarios while the 4096-doc
+      acceptance matrix remains unchanged to preserve the explicit 3-minute
+      cap until the expanded text acceptance run is re-measured.
+      Verified on 2026-07-27 with `make benchmark-pouch-go-medium`; the
+      expanded 64/1024-row medium matrix completed in 19s under the 3-minute
+      cap after the lockd disk harness explicitly enabled namespace scan
+      fallback. Current evidence still shows pouch trailing Go lockd disk on
+      1024-row indexed `IprefixTags` / `IcontainsTags` and materially trailing
+      the Go scan adapter on scan-path text predicates.
   - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
     Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`

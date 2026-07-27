@@ -41,6 +41,10 @@ func lockdBenchLQL(scenario string) string {
 		return "in{field=/tags[],any=planning|finance}"
 	case "ContainsMessage":
 		return "contains{field=/details/message,value=timeout}"
+	case "IprefixTags":
+		return "iprefix{field=/tags[],value=FIN}"
+	case "IcontainsTags":
+		return "icontains{field=/tags[],value=INA}"
 	case "DateAfter":
 		return "date{field=/created_at,after=2025-01-01T00:00:00Z}"
 	case "RecursiveExists":
@@ -175,6 +179,19 @@ func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
 		_, lastErr = cli.FlushIndex(readyCtx, lockdDiskBenchNamespace, lockdclient.WithFlushModeWait())
 		readyCancel()
 		if lastErr == nil {
+			configCtx, configCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err := cli.UpdateNamespaceConfig(configCtx, api.NamespaceConfigRequest{
+				Namespace: lockdDiskBenchNamespace,
+				Query: &api.NamespaceQueryConfig{
+					PreferredEngine: "index",
+					FallbackEngine:  "scan",
+				},
+			}, lockdclient.NamespaceConfigOptions{})
+			configCancel()
+			if err != nil {
+				cancel()
+				tb.Fatalf("configure lockd disk benchmark namespace query engines: %v\n%s", err, logs.String())
+			}
 			return &lockdDiskHarness{client: cli, logs: logs}
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -265,6 +282,8 @@ func benchmarkLockdDisk(b *testing.B, documents bool) {
 		"InRegionSingle",
 		"InTags",
 		"ContainsMessage",
+		"IprefixTags",
+		"IcontainsTags",
 		"DateAfter",
 		"OrSparseOrFlag",
 		"RecursiveExists",
