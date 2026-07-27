@@ -851,6 +851,10 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add private C docID set primitives and wire exact primary `in`
         candidate collection through docID accumulation while preserving
         secondary-filter and `liblql` predicate authority.
+        Current active source now exposes `lc_pouch_index_docid_set` from the
+        private index module and routes query-index docID key emission through
+        its sorted unique append contract, with unit coverage for duplicate
+        collapse and out-of-order rejection.
       - [x] Add an internal docID scratch-buffer primitive and wire equality
         intersection/subtraction collectors through it, so multi-term query
         algebra reuses allocator-owned temporary buffers instead of allocating

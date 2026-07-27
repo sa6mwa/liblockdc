@@ -1,11 +1,11 @@
 # Pouch Storage Technical Specification
 
-> Current status: this document contains the pre-redesign pouch specification
-> and is retained as background. The active implementation has cut over to a
-> new `lc_pouch` architecture; the old implementation now lives under
-> `deprecated/pouch-legacy/` and is not compiled. The replacement spec must be
-> rewritten around the new root/namespace/layout modules as storage, manifest,
-> compaction, marker, index, search, queue, and benchmark subsystems are rebuilt.
+> Current status: this document is the working pouch redesign specification.
+> The old implementation lives under `deprecated/pouch-legacy/` and is not
+> compiled. The active implementation uses the `lc_pouch` root/namespace/path,
+> state, client, query-index, and private index modules under `src/`; sections
+> that describe future compiled index generations remain design targets until
+> the current source and tests prove them.
 
 `pouch` is the embedded storage runtime for `liblockdc`. It gives the C client a
 local `lockd`-compatible backend selected by `pouch://` endpoints, without
@@ -101,13 +101,14 @@ deterministic local lockd-compatible behavior from a filesystem root.
 At runtime a `pouch://` endpoint is selected inside the normal `lc_client`
 engine and routed to `lc_pouch_client` instead of the HTTP transport. The
 adapter translates public client operations into private storage calls against
-`lc_pouch_store`. The current concrete backend is `lc_pouch`, which owns
-the filesystem root, namespace logstores, replay projections, key locks,
-marker refresh state, queue state, compaction lifecycle, and query indexes.
-The public local opener is `lc_pouch_open`/`lc_pouch_open_with_options`, and
-the implementation lives in `src/lc_pouch.c` plus private
-`src/lc_pouch_logstore.c` and `src/lc_pouch_index*.c` modules. The Go lockd
-disk backend is the reference
+the concrete `lc_pouch` backend, which owns the filesystem root, namespace
+layout, replay projections, key locks, marker refresh state, queue state,
+compaction lifecycle, query indexes, and private index helpers. The public
+local opener is `lc_pouch_open`/`lc_pouch_open_with_options`, and the active
+implementation lives in `src/lc_pouch.c`, `src/lc_pouch_namespace.c`,
+`src/lc_pouch_path.c`, `src/lc_pouch_state.c`, `src/lc_pouch_client.c`,
+`src/lc_pouch_query_index.c`, and `src/lc_pouch_index.c`. The Go lockd disk
+backend is the reference
 implementation for proven storage and indexing ideas, but pouch is not named or
 structured as a C copy of that backend.
 

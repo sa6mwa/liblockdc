@@ -11,6 +11,7 @@
 
 #include "lc/lc.h"
 #include "lc_pouch.h"
+#include "lc_pouch_index.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
@@ -80,6 +81,44 @@ static void cleanup_root(const char *root) {
 static void cleanup_all_roots(void) {
   lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-pouch-redesign-",
                             POUCH_UNIT_TMP_PREFIX);
+}
+
+static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_docid_set set;
+  lc_error error;
+  int added;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&set, 0, sizeof(set));
+
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&set, 2UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&set, 2UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 0);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&set, 7UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+
+  assert_int_equal(set.count, 2);
+  assert_int_equal(set.items[0], 2UL);
+  assert_int_equal(set.items[1], 7UL);
+
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&set, 3UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "requires sorted input"));
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &set);
+  lc_error_cleanup(&error);
 }
 
 static void pouch_write_json_state(lc_pouch *pouch, const char *namespace_name,
@@ -9213,6 +9252,7 @@ static void test_acquire_for_update_rollback_removes_new_state(void **state) {
 
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_index_docid_set_keeps_sorted_unique_docids),
       cmocka_unit_test(test_open_creates_segmented_root_layout),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(

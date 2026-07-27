@@ -4463,10 +4463,12 @@ static int lc_pouch_query_index_docid_key_collect(
 static int lc_pouch_query_index_docid_key_emit(
     const lc_allocator *allocator, lc_pouch_query_index_docid_key_list *keys,
     lc_pouch_query_index_key_visit_fn visit, void *context, lc_error *error) {
+  lc_pouch_index_docid_set seen;
   lc_pouch_query_index_key_view key_view;
   char *key;
   size_t index;
   size_t write_index;
+  int added;
   int rc;
 
   if (keys == NULL || visit == NULL) {
@@ -4482,10 +4484,16 @@ static int lc_pouch_query_index_docid_key_emit(
     qsort(keys->items, keys->count, sizeof(keys->items[0]),
           lc_pouch_query_index_docid_key_item_compare);
   }
+  memset(&seen, 0, sizeof(seen));
   write_index = 0U;
+  rc = LC_OK;
   for (index = 0U; index < keys->count; ++index) {
-    if (write_index > 0U &&
-        keys->items[write_index - 1U].doc_id == keys->items[index].doc_id) {
+    rc = lc_pouch_index_docid_set_append_sorted_unique(
+        &seen, keys->items[index].doc_id, &added, allocator, error);
+    if (rc != LC_OK) {
+      break;
+    }
+    if (!added) {
       lc_free_with_allocator(allocator, keys->items[index].key_hex);
       memset(&keys->items[index], 0, sizeof(keys->items[index]));
       continue;
@@ -4496,8 +4504,11 @@ static int lc_pouch_query_index_docid_key_emit(
     }
     ++write_index;
   }
+  lc_pouch_index_docid_set_cleanup(allocator, &seen);
+  if (rc != LC_OK) {
+    return rc;
+  }
   keys->count = write_index;
-  rc = LC_OK;
   for (index = 0U; rc == LC_OK && index < keys->count; ++index) {
     memset(&key_view, 0, sizeof(key_view));
     key = lc_pouch_query_index_hex_decode(allocator, keys->items[index].key_hex,
