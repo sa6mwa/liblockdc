@@ -129,6 +129,22 @@ typedef struct lc_pouch_query_index_key_list {
   size_t capacity;
 } lc_pouch_query_index_key_list;
 
+typedef struct lc_pouch_query_index_docid_key_item {
+  char *key_hex;
+  unsigned long doc_id;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
+  size_t value_index;
+} lc_pouch_query_index_docid_key_item;
+
+typedef struct lc_pouch_query_index_docid_key_list {
+  lc_pouch_query_index_docid_key_item *items;
+  size_t count;
+  size_t capacity;
+} lc_pouch_query_index_docid_key_list;
+
 typedef struct lc_pouch_query_index_term_field {
   char *field_hex;
   unsigned long first_line;
@@ -155,7 +171,7 @@ typedef struct lc_pouch_query_index_any_merge_context {
 
 typedef struct lc_pouch_query_index_docid_key_context {
   const lc_allocator *allocator;
-  lc_pouch_query_index_key_list *keys;
+  lc_pouch_query_index_docid_key_list *keys;
 } lc_pouch_query_index_docid_key_context;
 
 typedef struct lc_pouch_query_index_exact_term {
@@ -4257,24 +4273,94 @@ static int lc_pouch_query_index_key_list_add(
   return LC_OK;
 }
 
-static int lc_pouch_query_index_key_doc_id_compare(const void *left,
-                                                   const void *right) {
-  const lc_pouch_query_index_key_view *a;
-  const lc_pouch_query_index_key_view *b;
+static void lc_pouch_query_index_docid_key_list_cleanup(
+    const lc_allocator *allocator, lc_pouch_query_index_docid_key_list *list) {
+  size_t index;
+
+  if (list == NULL) {
+    return;
+  }
+  for (index = 0U; index < list->count; ++index) {
+    lc_free_with_allocator(allocator, list->items[index].key_hex);
+  }
+  lc_free_with_allocator(allocator, list->items);
+  memset(list, 0, sizeof(*list));
+}
+
+static int lc_pouch_query_index_docid_key_list_add(
+    const lc_allocator *allocator, lc_pouch_query_index_docid_key_list *list,
+    const lc_pouch_query_index_key_view *key, lc_error *error) {
+  lc_pouch_query_index_docid_key_item *next_items;
+  lc_pouch_query_index_docid_key_item *item;
+  size_t next_capacity;
+
+  if (list == NULL || key == NULL || key->key_hex == NULL ||
+      key->key_hex[0] == '\0') {
+    return LC_OK;
+  }
+  if (list->count >= list->capacity) {
+    next_capacity = list->capacity == 0U ? 16U : list->capacity;
+    while (next_capacity <= list->count) {
+      if (next_capacity > ((size_t)-1 / 2U)) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "pouch query-index docID list exceeds local "
+                            "limit",
+                            NULL, NULL, NULL);
+      }
+      next_capacity *= 2U;
+    }
+    next_items = (lc_pouch_query_index_docid_key_item *)lc_alloc_with_allocator(
+        allocator, next_capacity * sizeof(*next_items));
+    if (next_items == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch query-index docID list",
+                          NULL, NULL, NULL);
+    }
+    if (list->items != NULL) {
+      memcpy(next_items, list->items, list->count * sizeof(*next_items));
+      lc_free_with_allocator(allocator, list->items);
+    }
+    memset(next_items + list->count, 0,
+           (next_capacity - list->count) * sizeof(*next_items));
+    list->items = next_items;
+    list->capacity = next_capacity;
+  }
+  item = &list->items[list->count];
+  memset(item, 0, sizeof(*item));
+  item->key_hex = lc_strdup_with_allocator(allocator, key->key_hex);
+  if (item->key_hex == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query-index docID key",
+                        NULL, NULL, NULL);
+  }
+  item->doc_id = key->doc_id;
+  item->version = key->version;
+  item->bytes = key->bytes;
+  item->has_query_hidden = key->has_query_hidden;
+  item->query_hidden = key->query_hidden;
+  item->value_index = key->value_index;
+  ++list->count;
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_docid_key_item_compare(const void *left,
+                                                       const void *right) {
+  const lc_pouch_query_index_docid_key_item *a;
+  const lc_pouch_query_index_docid_key_item *b;
   int cmp;
 
-  a = (const lc_pouch_query_index_key_view *)left;
-  b = (const lc_pouch_query_index_key_view *)right;
+  a = (const lc_pouch_query_index_docid_key_item *)left;
+  b = (const lc_pouch_query_index_docid_key_item *)right;
   if (a->doc_id < b->doc_id) {
     return -1;
   }
   if (a->doc_id > b->doc_id) {
     return 1;
   }
-  if (a->key == NULL || b->key == NULL) {
-    return a->key == b->key ? 0 : (a->key == NULL ? -1 : 1);
+  if (a->key_hex == NULL || b->key_hex == NULL) {
+    return a->key_hex == b->key_hex ? 0 : (a->key_hex == NULL ? -1 : 1);
   }
-  cmp = strcmp(a->key, b->key);
+  cmp = strcmp(a->key_hex, b->key_hex);
   if (cmp != 0) {
     return cmp;
   }
@@ -4290,13 +4376,15 @@ static int lc_pouch_query_index_docid_key_collect(
   if (doc_context == NULL || doc_context->keys == NULL) {
     return LC_OK;
   }
-  return lc_pouch_query_index_key_list_add(
+  return lc_pouch_query_index_docid_key_list_add(
       doc_context->allocator, doc_context->keys, key, error);
 }
 
 static int lc_pouch_query_index_docid_key_emit(
-    const lc_allocator *allocator, lc_pouch_query_index_key_list *keys,
+    const lc_allocator *allocator, lc_pouch_query_index_docid_key_list *keys,
     lc_pouch_query_index_key_visit_fn visit, void *context, lc_error *error) {
+  lc_pouch_query_index_key_view key_view;
+  char *key;
   size_t index;
   size_t write_index;
   int rc;
@@ -4312,13 +4400,13 @@ static int lc_pouch_query_index_docid_key_emit(
   }
   if (keys->count > 1U) {
     qsort(keys->items, keys->count, sizeof(keys->items[0]),
-          lc_pouch_query_index_key_doc_id_compare);
+          lc_pouch_query_index_docid_key_item_compare);
   }
   write_index = 0U;
   for (index = 0U; index < keys->count; ++index) {
     if (write_index > 0U &&
         keys->items[write_index - 1U].doc_id == keys->items[index].doc_id) {
-      lc_free_with_allocator(allocator, (char *)keys->items[index].key);
+      lc_free_with_allocator(allocator, keys->items[index].key_hex);
       memset(&keys->items[index], 0, sizeof(keys->items[index]));
       continue;
     }
@@ -4331,7 +4419,23 @@ static int lc_pouch_query_index_docid_key_emit(
   keys->count = write_index;
   rc = LC_OK;
   for (index = 0U; rc == LC_OK && index < keys->count; ++index) {
-    rc = visit(&keys->items[index], context, error);
+    memset(&key_view, 0, sizeof(key_view));
+    key = lc_pouch_query_index_hex_decode(allocator, keys->items[index].key_hex,
+                                          error);
+    if (key == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      break;
+    }
+    key_view.key = key;
+    key_view.key_hex = keys->items[index].key_hex;
+    key_view.doc_id = keys->items[index].doc_id;
+    key_view.version = keys->items[index].version;
+    key_view.bytes = keys->items[index].bytes;
+    key_view.has_query_hidden = keys->items[index].has_query_hidden;
+    key_view.query_hidden = keys->items[index].query_hidden;
+    key_view.value_index = keys->items[index].value_index;
+    rc = visit(&key_view, context, error);
+    lc_free_with_allocator(allocator, key);
   }
   if (rc == LC_POUCH_STATE_READ_MANY_STOP) {
     rc = LC_OK;
@@ -4516,7 +4620,7 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
   lc_pouch_query_index_term_reader term_reader;
-  lc_pouch_query_index_key_list keys;
+  lc_pouch_query_index_docid_key_list keys;
   lc_pouch_query_index_docid_key_context doc_context;
   lc_pouch_query_index_exact_term *exact_terms;
   char *sidecar_path;
@@ -4602,6 +4706,7 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     term_reader.allocator = &pouch->allocator;
     term_reader.exact_terms = exact_terms;
     term_reader.exact_term_count = write_index;
+    term_reader.visit_doc_ids = 1;
     term_reader.visit = lc_pouch_query_index_docid_key_collect;
     term_reader.context = &doc_context;
     rc = lc_pouch_query_index_read_with_reader(sidecar_path, &sidecar, NULL,
@@ -4628,8 +4733,61 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     lc_free_with_allocator(&pouch->allocator, exact_terms[index].value_hex);
   }
   lc_free_with_allocator(&pouch->allocator, exact_terms);
-  lc_pouch_query_index_key_list_cleanup(&pouch->allocator, &keys);
+  lc_pouch_query_index_docid_key_list_cleanup(&pouch->allocator, &keys);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
+  return rc;
+}
+
+int lc_pouch_query_index_visit_scalar_any_docids(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *const *values, size_t value_count,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error) {
+  lc_pouch_query_index_scalar_term *terms;
+  size_t index;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      field == NULL || field[0] == '\0' || values == NULL ||
+      value_count == 0U || visit == NULL || index_seq == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index multi-scalar docID lookup requires "
+                        "pouch, namespace, field, values, visitor, and "
+                        "index_seq",
+                        NULL, NULL, NULL);
+  }
+  if (value_count == 1U) {
+    return lc_pouch_query_index_visit_scalar(
+        pouch, namespace_name, field, values[0], visit, context, index_seq,
+        error);
+  }
+  terms = (lc_pouch_query_index_scalar_term *)lc_alloc_with_allocator(
+      &pouch->allocator, value_count * sizeof(*terms));
+  if (terms == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query-index multi-scalar "
+                        "docID lookup",
+                        NULL, NULL, NULL);
+  }
+  memset(terms, 0, value_count * sizeof(*terms));
+  rc = LC_OK;
+  for (index = 0U; index < value_count; ++index) {
+    if (values[index] == NULL) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index multi-scalar docID lookup requires "
+                        "non-null values",
+                        NULL, NULL, NULL);
+      break;
+    }
+    terms[index].field = field;
+    terms[index].value = values[index];
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_visit_scalar_terms_docids(
+        pouch, namespace_name, terms, value_count, visit, context, index_seq,
+        error);
+  }
+  lc_free_with_allocator(&pouch->allocator, terms);
   return rc;
 }
 

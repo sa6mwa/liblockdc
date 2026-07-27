@@ -1987,7 +1987,7 @@ static int lc_pouch_query_run_index_predicate(
       plan.value_count > 1U && !plan.prefix && !plan.contains &&
       !plan.range && !plan.date) {
     value_seq = 0UL;
-    rc = lc_pouch_query_index_visit_scalar_any_merged(
+    rc = lc_pouch_query_index_visit_scalar_any_docids(
         scan->client->pouch, scan->namespace_name, plan.field,
         (const char *const *)plan.values, plan.value_count,
         lc_pouch_query_index_visit_exact_key, scan, &value_seq, error);

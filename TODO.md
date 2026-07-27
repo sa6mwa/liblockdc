@@ -1299,6 +1299,23 @@ Latest release targets confirmed on 2026-07-23:
         This confirms the next performance work must move more of these paths
         onto compiled generation readers/result-cache paging rather than
         adding more text-sidecar skips.
+      - [x] Fix the query-index docID collector so docID-oriented exact term
+        readers stop decoding every matching key before dedupe, then decode
+        only the surviving emitted keys. The same-field exact `in` key path
+        now uses this docID route as well. Verified on 2026-07-27 with focused
+        4096-document key comparisons: pouch `OrSparseOrFlag` measured about
+        40.0 ms C-side for 640 rows versus Go lockd disk at about 35.5 ms in
+        that sample, and pouch `InTags` measured about 30.0 ms C-side for
+        1000 rows versus Go at about 34.3 ms in that focused sample. The
+        bounded 4096-document acceptance matrix completed in 1m33s; indexed
+        pouch key timings were about 14.5 ms `EqSparse`, 38.3 ms `RangeHalf`,
+        29.3 ms `InTags`, 39.8 ms `ContainsMessage`, 19.4 ms `DateAfter`, and
+        41.2 ms `OrSparseOrFlag` C-side. Indexed document timings were about
+        16.8 ms, 68.3 ms, 66.0 ms, 36.9 ms, 43.0 ms, and 61.5 ms C-side for
+        the same scenarios. The broad acceptance matrix still shows Go lockd
+        disk ahead on every case except sparse equality, so the next real
+        performance cut remains binary/adaptive postings and cached docID page
+        results rather than further text-sidecar routing.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.
