@@ -235,6 +235,45 @@ static void append_text_file(const char *path, const char *text) {
   assert_int_equal(fclose(fp), 0);
 }
 
+static void replace_text_file_first(const char *path, const char *needle,
+                                    const char *replacement) {
+  FILE *fp;
+  char *bytes;
+  char *match;
+  long length;
+  size_t needle_len;
+  size_t replacement_len;
+
+  fp = fopen(path, "rb");
+  assert_non_null(fp);
+  assert_int_equal(fseek(fp, 0L, SEEK_END), 0);
+  length = ftell(fp);
+  assert_true(length >= 0L);
+  assert_int_equal(fseek(fp, 0L, SEEK_SET), 0);
+  bytes = (char *)malloc((size_t)length + 1U);
+  assert_non_null(bytes);
+  assert_int_equal(fread(bytes, 1U, (size_t)length, fp), (size_t)length);
+  assert_int_equal(fclose(fp), 0);
+  bytes[length] = '\0';
+
+  match = strstr(bytes, needle);
+  assert_non_null(match);
+  needle_len = strlen(needle);
+  replacement_len = strlen(replacement);
+  fp = fopen(path, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fwrite(bytes, 1U, (size_t)(match - bytes), fp),
+                   (size_t)(match - bytes));
+  assert_int_equal(fwrite(replacement, 1U, replacement_len, fp),
+                   replacement_len);
+  assert_int_equal(
+      fwrite(match + needle_len, 1U,
+             (size_t)length - (size_t)(match - bytes) - needle_len, fp),
+      (size_t)length - (size_t)(match - bytes) - needle_len);
+  assert_int_equal(fclose(fp), 0);
+  free(bytes);
+}
+
 typedef struct pouch_compaction_drift_hook_state {
   lc_pouch *peer;
   int called;
@@ -6032,6 +6071,113 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_query_keys_index_text_stops_after_target_field(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture contains_page;
+  pouch_query_key_capture prefix_page;
+  lc_pouch_state_write_result write_result;
+  lc_error error;
+  char *namespace_path;
+  char sidecar_path[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  namespace_path = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&contains_page, 0, sizeof(contains_page));
+  memset(&prefix_page, 0, sizeof(prefix_page));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-text-stop", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"a\":\"alphabet timeout\",\"z\":\"later\"}",
+                             strlen("{\"a\":\"alphabet timeout\",\"z\":\"later\"}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-text-stop", "doc/a",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory("{\"a\":\"ordinary\",\"z\":\"later\"}",
+                             strlen("{\"a\":\"ordinary\",\"z\":\"later\"}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-text-stop", "doc/b",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/query-index-text-stop";
+  query_req.selector_json =
+      "{\"contains\":{\"field\":\"/a\",\"value\":\"timeout\"}}";
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &contains_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(contains_page.count, 1);
+  assert_true(pouch_query_capture_has(&contains_page, "doc/a"));
+  lc_query_res_cleanup(&query_res);
+
+  namespace_path =
+      lc_pouch_namespace_path(NULL, root, "docs/query-index-text-stop");
+  assert_non_null(namespace_path);
+  snprintf(sidecar_path, sizeof(sidecar_path), "%s/index/query.index",
+           namespace_path);
+  assert_file_contains(sidecar_path, "2f61");
+  assert_file_contains(sidecar_path, "2f7a");
+  replace_text_file_first(sidecar_path, "6c61746572", "6c6174657278");
+
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&contains_page, 0, sizeof(contains_page));
+  query_req.refresh = NULL;
+  rc = client->query_keys(client, &query_req, &handler, &contains_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(contains_page.count, 1);
+  assert_true(pouch_query_capture_has(&contains_page, "doc/a"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.selector_json =
+      "{\"prefix\":{\"field\":\"/a\",\"value\":\"alph\"}}";
+  rc = client->query_keys(client, &query_req, &handler, &prefix_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(prefix_page.count, 1);
+  assert_true(pouch_query_capture_has(&prefix_page, "doc/a"));
+
+  free(namespace_path);
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_keys_index_date_lql_filters_temporal_candidates(
     void **state) {
   lc_client *client;
@@ -8214,6 +8360,7 @@ int main(void) {
       cmocka_unit_test(test_query_keys_enforces_lockd_limit_contract),
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
+      cmocka_unit_test(test_query_keys_index_text_stops_after_target_field),
       cmocka_unit_test(
           test_query_keys_index_date_lql_filters_temporal_candidates),
       cmocka_unit_test(

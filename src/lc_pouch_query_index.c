@@ -1554,11 +1554,7 @@ static int lc_pouch_query_index_parse_and_visit_term(
   }
   matched = 0;
   field_cmp = rc == LC_OK ? strcmp(field_hex, reader->field_hex) : 0;
-  if (rc == LC_OK &&
-      (((!reader->prefix_match && !reader->contains_match &&
-         !reader->range_match && !reader->date_match && !reader->ignore_case &&
-         field_cmp > 0) ||
-        ((reader->range_match || reader->date_match) && field_cmp > 0)))) {
+  if (rc == LC_OK && field_cmp > 0) {
     reader->stop = 1;
   } else if (rc == LC_OK && field_cmp == 0) {
     if (!reader->prefix_match && !reader->contains_match &&
@@ -1779,9 +1775,7 @@ static int lc_pouch_query_index_read_terms(
   line.allocator = reader != NULL ? reader->allocator : NULL;
   computed_hash = lc_pouch_query_index_hash_init();
   actual_terms = 0UL;
-  allow_sorted_stop =
-      reader != NULL && reader->visit != NULL && !reader->prefix_match &&
-      !reader->contains_match && !reader->ignore_case;
+  allow_sorted_stop = reader != NULL && reader->visit != NULL;
   if (allow_sorted_stop) {
     reader->stop = 0;
   }

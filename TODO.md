@@ -1238,6 +1238,17 @@ Latest release targets confirmed on 2026-07-23:
         Verified on 2026-07-26 with the focused 4096-doc
         `ContainsMessage` indexed key benchmark: pouch measured about 2.75 ms;
         the matching Go disk run measured about 47.4 ms.
+      - [x] Stop selected-field text term scans after the sorted sidecar has
+        passed the target JSON Pointer field: prefix/contains/icontains
+        readers now share the same field-bounded validation fast path as exact,
+        range, and date readers while preserving final `liblql` acceptance.
+        Focused unit coverage corrupts a later-field term after flush and
+        proves `/a` prefix/contains queries still use the selected valid field
+        slice. Verified on 2026-07-27 with the bounded 4096-doc acceptance
+        matrix: pouch `ContainsMessage` measured about 27.9 ms C-side for
+        keys and about 31.8 ms C-side for documents; the target completed in
+        1m22s under the 3-minute cap. Range, `InTags`, and `DateAfter` remain
+        slower than Go disk in that run.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.
