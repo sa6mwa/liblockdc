@@ -1822,3 +1822,13 @@ Latest release targets confirmed on 2026-07-23:
       prefixed with `lql:` now route through `selector_lql`, and seed corpus
       entries cover strict equality, `/tags[]` array membership, date residual
       filtering, recursive `exists`, and compound range/text selectors.
+    - [x] Add a dedicated `lc_fuzz_pouch_lifecycle` target for cross-surface
+      pouch lifecycle smoke fuzzing: the harness seeds state, attachment,
+      queue, and retention namespaces through the public client API, forces
+      pouch maintenance/compaction and optional cleanup, reopens the store,
+      verifies survivor query/object/queue behavior, verifies namespace-wide
+      retention deletion in a separate namespace, and uses the shared
+      `/tmp/liblockdc-*` tracking helper for automatic cleanup.
+    - [x] Wire the pouch LQL-planning and lifecycle fuzz targets into
+      `scripts/fuzz.sh` so `make fuzz-smoke` / release fuzzing exercises the
+      redesigned pouch fuzz corpora instead of only registering CTest smokes.
