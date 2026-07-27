@@ -854,7 +854,10 @@ Latest release targets confirmed on 2026-07-23:
         Current active source now exposes `lc_pouch_index_docid_set` from the
         private index module and routes query-index docID key emission through
         its sorted unique append contract, with unit coverage for duplicate
-        collapse and out-of-order rejection.
+        collapse and out-of-order rejection. The same private set now also
+        deduplicates multi-term query-index docID hits at collection time
+        before duplicate `key_hex` allocation, which is the current active
+        bridge for indexed exact `in` and equality-term unions.
       - [x] Add an internal docID scratch-buffer primitive and wire equality
         intersection/subtraction collectors through it, so multi-term query
         algebra reuses allocator-owned temporary buffers instead of allocating

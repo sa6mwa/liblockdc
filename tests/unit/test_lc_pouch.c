@@ -117,6 +117,26 @@ static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_non_null(strstr(error.message, "requires sorted input"));
 
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_pouch_index_docid_set_cleanup(&allocator, &set);
+
+  rc = lc_pouch_index_docid_set_append_unique(&set, 7UL, &added, &allocator,
+                                              &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_docid_set_append_unique(&set, 2UL, &added, &allocator,
+                                              &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_docid_set_append_unique(&set, 7UL, &added, &allocator,
+                                              &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 0);
+  assert_int_equal(set.count, 2);
+  assert_int_equal(set.items[0], 7UL);
+  assert_int_equal(set.items[1], 2UL);
+
   lc_pouch_index_docid_set_cleanup(&allocator, &set);
   lc_error_cleanup(&error);
 }

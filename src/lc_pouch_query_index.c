@@ -174,6 +174,7 @@ typedef struct lc_pouch_query_index_any_merge_context {
 typedef struct lc_pouch_query_index_docid_key_context {
   const lc_allocator *allocator;
   lc_pouch_query_index_docid_key_list *keys;
+  lc_pouch_index_docid_set seen;
 } lc_pouch_query_index_docid_key_context;
 
 typedef struct lc_pouch_query_index_exact_term {
@@ -4451,10 +4452,17 @@ static int lc_pouch_query_index_docid_key_collect(
     const lc_pouch_query_index_key_view *key, void *context,
     lc_error *error) {
   lc_pouch_query_index_docid_key_context *doc_context;
+  int added;
+  int rc;
 
   doc_context = (lc_pouch_query_index_docid_key_context *)context;
   if (doc_context == NULL || doc_context->keys == NULL) {
     return LC_OK;
+  }
+  rc = lc_pouch_index_docid_set_append_unique(
+      &doc_context->seen, key->doc_id, &added, doc_context->allocator, error);
+  if (rc != LC_OK || !added) {
+    return rc;
   }
   return lc_pouch_query_index_docid_key_list_add(
       doc_context->allocator, doc_context->keys, key, error);
@@ -4825,6 +4833,7 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
   }
   lc_free_with_allocator(&pouch->allocator, exact_terms);
   lc_pouch_query_index_docid_key_list_cleanup(&pouch->allocator, &keys);
+  lc_pouch_index_docid_set_cleanup(&pouch->allocator, &doc_context.seen);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
   return rc;
 }

@@ -40,6 +40,9 @@ void lc_pouch_index_docid_set_cleanup(const lc_allocator *allocator,
 int lc_pouch_index_docid_set_append_sorted_unique(
     lc_pouch_index_docid_set *set, unsigned long doc_id, int *added,
     const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_docid_set_append_unique(
+    lc_pouch_index_docid_set *set, unsigned long doc_id, int *added,
+    const lc_allocator *allocator, lc_error *error);
 int lc_pouch_index_parse_lql_datetime(const char *text,
                                       lc_pouch_index_instant *out);
 int lc_pouch_index_parse_date_bounds(
