@@ -8,10 +8,10 @@
 
 #include <cmocka.h>
 
+#include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_intcompat.h"
 #include "lc_mutate_stream.h"
-#include "../support/lc_test_tmp.h"
 
 #define MUTATE_BASE64FILE_TMP_PREFIX "/tmp/liblockdc-base64file-"
 

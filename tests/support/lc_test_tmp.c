@@ -81,11 +81,11 @@ static int lc_test_tmp_marker_path(const char *path, char *marker,
     return 0;
   }
   if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
-    written = snprintf(marker, marker_size, "%s/%s", path,
-                       LC_TEST_TMP_OWNER_FILE);
+    written =
+        snprintf(marker, marker_size, "%s/%s", path, LC_TEST_TMP_OWNER_FILE);
   } else {
-    written = snprintf(marker, marker_size, "%s%s", path,
-                       LC_TEST_TMP_OWNER_SUFFIX);
+    written =
+        snprintf(marker, marker_size, "%s%s", path, LC_TEST_TMP_OWNER_SUFFIX);
   }
   return written >= 0 && (size_t)written < marker_size;
 }
@@ -276,8 +276,7 @@ static int lc_test_tmp_template_parts(const char *template_path, char *parent,
   size_t name_len;
   int written;
 
-  if (template_path == NULL || parent_size == 0U ||
-      name_prefix_size == 0U) {
+  if (template_path == NULL || parent_size == 0U || name_prefix_size == 0U) {
     return 0;
   }
   slash = strrchr(template_path, '/');
@@ -375,8 +374,7 @@ static int lc_test_tmp_mark_swept(const char *parent_dir,
   if (lc_test_tmp_swept_count >= LC_TEST_TMP_MAX_SWEEP_PREFIXES) {
     return 0;
   }
-  memcpy(lc_test_tmp_swept[lc_test_tmp_swept_count], key,
-         (size_t)written + 1U);
+  memcpy(lc_test_tmp_swept[lc_test_tmp_swept_count], key, (size_t)written + 1U);
   ++lc_test_tmp_swept_count;
   return 1;
 }
@@ -390,8 +388,7 @@ static void lc_test_tmp_cleanup_stale_for_template(const char *template_path,
     lc_test_tmp_global_stale_swept = 1;
     lc_test_tmp_cleanup_stale_older_than(
         LC_TEST_TMP_GLOBAL_PARENT, LC_TEST_TMP_GLOBAL_NAME_PREFIX,
-        LC_TEST_TMP_GLOBAL_ALLOWED_PREFIX,
-        lc_test_tmp_auto_stale_seconds());
+        LC_TEST_TMP_GLOBAL_ALLOWED_PREFIX, lc_test_tmp_auto_stale_seconds());
   }
   if (!lc_test_tmp_prefix_parts(allowed_prefix, parent_dir, sizeof(parent_dir),
                                 name_prefix, sizeof(name_prefix)) &&
@@ -402,9 +399,8 @@ static void lc_test_tmp_cleanup_stale_for_template(const char *template_path,
   if (!lc_test_tmp_mark_swept(parent_dir, name_prefix, allowed_prefix)) {
     return;
   }
-  lc_test_tmp_cleanup_stale_older_than(
-      parent_dir, name_prefix, allowed_prefix,
-      lc_test_tmp_auto_stale_seconds());
+  lc_test_tmp_cleanup_stale_older_than(parent_dir, name_prefix, allowed_prefix,
+                                       lc_test_tmp_auto_stale_seconds());
 }
 
 int lc_test_tmp_track_path(const char *path, const char *allowed_prefix) {
@@ -538,8 +534,7 @@ static void lc_test_tmp_cleanup_global_stale_once(void) {
       LC_TEST_TMP_GLOBAL_ALLOWED_PREFIX, lc_test_tmp_auto_stale_seconds());
 }
 
-void lc_test_tmp_cleanup_stale(const char *parent_dir,
-                               const char *name_prefix,
+void lc_test_tmp_cleanup_stale(const char *parent_dir, const char *name_prefix,
                                const char *allowed_prefix) {
   lc_test_tmp_cleanup_stale_older_than(parent_dir, name_prefix, allowed_prefix,
                                        0L);
@@ -554,7 +549,7 @@ void lc_test_tmp_cleanup_stale_older_than(const char *parent_dir,
   size_t owner_suffix_len;
 
   if (!lc_test_tmp_is_global_stale_sweep(parent_dir, name_prefix,
-                                        allowed_prefix)) {
+                                         allowed_prefix)) {
     lc_test_tmp_cleanup_global_stale_once();
   }
   dir = opendir(parent_dir);

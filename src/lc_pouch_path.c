@@ -138,18 +138,15 @@ int lc_pouch_path_write_text_file(const char *path, const char *text,
   }
   rc = LC_OK;
   if (!lc_pouch_path_write_all(fd, text, strlen(text))) {
-    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to write pouch file", strerror(errno), NULL,
-                      NULL);
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, "failed to write pouch file",
+                      strerror(errno), NULL, NULL);
   } else if (fsync(fd) != 0) {
-    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to fsync pouch file", strerror(errno), NULL,
-                      NULL);
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, "failed to fsync pouch file",
+                      strerror(errno), NULL, NULL);
   }
   if (close(fd) != 0 && rc == LC_OK) {
-    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch file", strerror(errno), NULL,
-                      NULL);
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, "failed to close pouch file",
+                      strerror(errno), NULL, NULL);
   }
   return rc;
 }

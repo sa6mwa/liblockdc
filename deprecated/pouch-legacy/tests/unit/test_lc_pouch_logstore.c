@@ -34,8 +34,7 @@ static int capture_fsync(void *context, int fd) {
   return 0;
 }
 
-static void test_root_path(char *buffer, size_t buffer_size,
-                           const char *name) {
+static void test_root_path(char *buffer, size_t buffer_size, const char *name) {
   (void)snprintf(buffer, buffer_size, "/tmp/liblockdc-pouch-logstore-%ld-%s",
                  (long)getpid(), name);
 }
@@ -60,8 +59,7 @@ static void cleanup_logstore_tree(const char *path) {
     struct stat st;
     int written;
 
-    if (strcmp(entry->d_name, ".") == 0 ||
-        strcmp(entry->d_name, "..") == 0) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
     written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
@@ -150,22 +148,22 @@ static void test_logstore_parses_segment_and_snapshot_names(void **state) {
 
   (void)state;
   number = 0UL;
-  assert_true(lc_pouch_logstore_segment_name_parse(
-      "seg-0000000000000042.log", &number));
+  assert_true(lc_pouch_logstore_segment_name_parse("seg-0000000000000042.log",
+                                                   &number));
   assert_int_equal(number, 42UL);
-  assert_false(lc_pouch_logstore_segment_name_parse(
-      "seg-0000000000000000.log", NULL));
-  assert_false(lc_pouch_logstore_segment_name_parse(
-      "snap-0000000000000042.log", NULL));
+  assert_false(
+      lc_pouch_logstore_segment_name_parse("seg-0000000000000000.log", NULL));
+  assert_false(
+      lc_pouch_logstore_segment_name_parse("snap-0000000000000042.log", NULL));
 
   number = 0UL;
-  assert_true(lc_pouch_logstore_snapshot_name_parse(
-      "snap-0000000000000007.log", &number));
+  assert_true(lc_pouch_logstore_snapshot_name_parse("snap-0000000000000007.log",
+                                                    &number));
   assert_int_equal(number, 7UL);
-  assert_false(lc_pouch_logstore_snapshot_name_parse(
-      "snap-0000000000000000.log", NULL));
-  assert_false(lc_pouch_logstore_snapshot_name_parse(
-      "seg-0000000000000007.log", NULL));
+  assert_false(
+      lc_pouch_logstore_snapshot_name_parse("snap-0000000000000000.log", NULL));
+  assert_false(
+      lc_pouch_logstore_snapshot_name_parse("seg-0000000000000007.log", NULL));
 }
 
 static void test_logstore_creates_namespace_manifest_and_segment(void **state) {
@@ -192,8 +190,7 @@ static void test_logstore_creates_namespace_manifest_and_segment(void **state) {
                  "%s/default/logstore/manifest/manifest.log", root);
   assert_true(path_exists(path));
   (void)snprintf(path, sizeof(path),
-                 "%s/default/logstore/segments/seg-0000000000000001.log",
-                 root);
+                 "%s/default/logstore/segments/seg-0000000000000001.log", root);
   assert_true(path_exists(path));
   lc_error_cleanup(&error);
   cleanup_default_logstore(root);
@@ -220,8 +217,7 @@ static void test_logstore_rolls_sealed_active_segment(void **state) {
   rc = lc_pouch_logstore_ensure_namespace(&logstore, "default", &error);
   assert_int_equal(rc, LC_OK);
   (void)snprintf(first_path, sizeof(first_path),
-                 "%s/default/logstore/segments/seg-0000000000000001.log",
-                 root);
+                 "%s/default/logstore/segments/seg-0000000000000001.log", root);
   fill_segment_to_seal(first_path);
 
   active_path = NULL;
@@ -255,8 +251,7 @@ static void test_logstore_collect_repairs_manifestless_segment(void **state) {
   cleanup_default_logstore(root);
   make_default_logstore_dirs(root);
   (void)snprintf(segment_path, sizeof(segment_path),
-                 "%s/default/logstore/segments/seg-0000000000000001.log",
-                 root);
+                 "%s/default/logstore/segments/seg-0000000000000001.log", root);
   write_text_file(segment_path, "segment-body");
   memset(&paths, 0, sizeof(paths));
   memset(&fsyncs, 0, sizeof(fsyncs));
@@ -301,8 +296,7 @@ static void test_logstore_collects_snapshot_and_generation(void **state) {
   assert_int_equal(rc, LC_OK);
 
   (void)snprintf(segment_path, sizeof(segment_path),
-                 "%s/default/logstore/segments/seg-0000000000000001.log",
-                 root);
+                 "%s/default/logstore/segments/seg-0000000000000001.log", root);
   (void)snprintf(snapshot_path, sizeof(snapshot_path),
                  "%s/default/logstore/snapshots/snap-0000000000000001.log",
                  root);
@@ -335,8 +329,8 @@ static void test_logstore_collects_snapshot_and_generation(void **state) {
   cleanup_default_logstore(root);
 }
 
-static void test_logstore_compact_helpers_prepare_restore_and_snapshot(
-    void **state) {
+static void
+test_logstore_compact_helpers_prepare_restore_and_snapshot(void **state) {
   char root[256];
   char existing_snapshot[512];
   char compact_snapshot_backup[512];
@@ -363,12 +357,12 @@ static void test_logstore_compact_helpers_prepare_restore_and_snapshot(
   rc = lc_pouch_logstore_ensure_namespace(&logstore, "default", &error);
   assert_int_equal(rc, LC_OK);
 
-  segment_path = lc_pouch_logstore_make_namespace_segment_path(
-      &logstore, "default", 1UL);
+  segment_path =
+      lc_pouch_logstore_make_namespace_segment_path(&logstore, "default", 1UL);
   assert_non_null(segment_path);
   write_text_file(segment_path, "active");
-  assert_true(lc_pouch_logstore_paths_add_take(&logstore, &active_paths,
-                                               segment_path));
+  assert_true(
+      lc_pouch_logstore_paths_add_take(&logstore, &active_paths, segment_path));
   rc = lc_pouch_logstore_prepare_compact_backups(&logstore, &active_paths,
                                                  &backups, &error);
   assert_int_equal(rc, LC_OK);

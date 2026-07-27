@@ -5,8 +5,20 @@ endif()
 set(lockdc_storage_owned_sources
   "${LOCKDC_ROOT}/src/lc_pouch.h"
   "${LOCKDC_ROOT}/src/lc_pouch.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_index.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_index.h"
+  "${LOCKDC_ROOT}/src/lc_pouch_index_doc.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_index_posting.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_index_result.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_index_terms.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_internal.h"
   "${LOCKDC_ROOT}/src/lc_pouch_namespace.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_namespace.h"
   "${LOCKDC_ROOT}/src/lc_pouch_path.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_path.h"
+  "${LOCKDC_ROOT}/src/lc_pouch_query_index.c"
+  "${LOCKDC_ROOT}/src/lc_pouch_query_index.h"
+  "${LOCKDC_ROOT}/src/lc_pouch_state.c"
 )
 
 foreach(lockdc_storage_source IN LISTS lockdc_storage_owned_sources)

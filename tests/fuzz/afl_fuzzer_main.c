@@ -87,8 +87,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: %s [input-file]\n", argv[0]);
     return 2;
   }
-  result = argc == 2 ? read_file(argv[1], &data, &size)
-                     : read_stdin(&data, &size);
+  result =
+      argc == 2 ? read_file(argv[1], &data, &size) : read_stdin(&data, &size);
   if (result != 0) {
     fprintf(stderr, "failed to read fuzz input\n");
     return 1;

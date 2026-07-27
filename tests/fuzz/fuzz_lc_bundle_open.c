@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "lc/lc.h"
 #include "../support/lc_test_tmp.h"
+#include "lc/lc.h"
 
 #include <stddef.h>
 #include <stdint.h>

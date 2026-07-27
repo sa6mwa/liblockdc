@@ -81,7 +81,8 @@ static int lockdc_bench_open_client(const char *root, lc_client **out,
   char endpoint[768];
   int written;
 
-  written = snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_single_writer=true", root);
   if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
     return LC_ERR_INVALID;
   }
@@ -275,8 +276,7 @@ static void lockdc_bench_result_set_error(lockdc_pouch_bench_result *out,
   }
 }
 
-int lockdc_pouch_bench_fixture_open(long rows,
-                                    lockdc_pouch_bench_fixture **out,
+int lockdc_pouch_bench_fixture_open(long rows, lockdc_pouch_bench_fixture **out,
                                     lockdc_pouch_bench_result *result) {
   char root_template[] = LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX";
   lockdc_pouch_bench_fixture *fixture;

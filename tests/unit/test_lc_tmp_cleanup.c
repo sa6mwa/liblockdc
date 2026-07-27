@@ -47,7 +47,7 @@ static int run_auto_stale_cleanup_probe(void) {
     return 13;
   }
   if (!lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
-                          TMP_AUTO_CLEANUP_PREFIX)) {
+                           TMP_AUTO_CLEANUP_PREFIX)) {
     lc_test_tmp_cleanup_path(stale_root, TMP_AUTO_CLEANUP_PREFIX);
     lc_test_tmp_cleanup_path(global_stale_root, TMP_GLOBAL_STALE_PREFIX);
     return 14;
@@ -64,7 +64,7 @@ static int run_auto_stale_cleanup_probe(void) {
     return 16;
   }
   if (!lc_test_tmp_mkdtemp(live_template, live_root, sizeof(live_root),
-                          TMP_AUTO_CLEANUP_PREFIX)) {
+                           TMP_AUTO_CLEANUP_PREFIX)) {
     lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
     return 17;
   }
@@ -192,7 +192,7 @@ int main(void) {
     return 2;
   }
   if (!lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
-                          TMP_CLEANUP_PREFIX)) {
+                           TMP_CLEANUP_PREFIX)) {
     return 3;
   }
   fp = fopen(path_file, "w");

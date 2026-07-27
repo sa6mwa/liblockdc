@@ -19,9 +19,10 @@ void lc_pouch_index_result_key_list_cleanup(
   memset(list, 0, sizeof(*list));
 }
 
-static int lc_pouch_index_result_key_list_reserve(
-    const lc_allocator *allocator, lc_pouch_index_result_key_list *list,
-    size_t needed, lc_error *error) {
+static int
+lc_pouch_index_result_key_list_reserve(const lc_allocator *allocator,
+                                       lc_pouch_index_result_key_list *list,
+                                       size_t needed, lc_error *error) {
   lc_pouch_index_result_key *next_items;
   size_t next_capacity;
 
@@ -71,8 +72,8 @@ int lc_pouch_index_result_key_list_add(
   if (list == NULL || key_hex == NULL || key_hex[0] == '\0') {
     return LC_OK;
   }
-  rc = lc_pouch_index_result_key_list_reserve(allocator, list,
-                                              list->count + 1U, error);
+  rc = lc_pouch_index_result_key_list_reserve(allocator, list, list->count + 1U,
+                                              error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -81,8 +82,8 @@ int lc_pouch_index_result_key_list_add(
   item->key_hex = lc_strdup_with_allocator(allocator, key_hex);
   if (item->key_hex == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch index result key", NULL,
-                        NULL, NULL);
+                        "failed to allocate pouch index result key", NULL, NULL,
+                        NULL);
   }
   item->doc_id = doc_id;
   item->version = version;
@@ -168,9 +169,10 @@ void lc_pouch_index_result_docid_list_cleanup(
   memset(list, 0, sizeof(*list));
 }
 
-static int lc_pouch_index_result_docid_list_reserve(
-    const lc_allocator *allocator, lc_pouch_index_result_docid_list *list,
-    size_t needed, lc_error *error) {
+static int
+lc_pouch_index_result_docid_list_reserve(const lc_allocator *allocator,
+                                         lc_pouch_index_result_docid_list *list,
+                                         size_t needed, lc_error *error) {
   lc_pouch_index_result_docid *next_items;
   size_t next_capacity;
 
@@ -209,9 +211,10 @@ static int lc_pouch_index_result_docid_list_reserve(
   return LC_OK;
 }
 
-int lc_pouch_index_result_docid_list_add(
-    const lc_allocator *allocator, lc_pouch_index_result_docid_list *list,
-    unsigned long doc_id, size_t value_index, lc_error *error) {
+int lc_pouch_index_result_docid_list_add(const lc_allocator *allocator,
+                                         lc_pouch_index_result_docid_list *list,
+                                         unsigned long doc_id,
+                                         size_t value_index, lc_error *error) {
   lc_pouch_index_result_docid *item;
   int rc;
 
@@ -285,6 +288,61 @@ int lc_pouch_index_result_docid_list_sort_compact(
   return LC_OK;
 }
 
+void lc_pouch_index_result_page_init(lc_pouch_index_result_page *page,
+                                     size_t offset, size_t limit) {
+  if (page == NULL) {
+    return;
+  }
+  memset(page, 0, sizeof(*page));
+  page->offset = offset;
+  page->limit = limit;
+}
+
+int lc_pouch_index_result_page_enter_candidate(lc_pouch_index_result_page *page,
+                                               int *active, lc_error *error) {
+  if (page == NULL || active == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index result page candidate requires page and "
+                        "active output",
+                        NULL, NULL, NULL);
+  }
+  *active = 0;
+  if (page->seen++ < page->offset) {
+    return LC_OK;
+  }
+  *active = 1;
+  return LC_OK;
+}
+
+int lc_pouch_index_result_page_accept_match(lc_pouch_index_result_page *page,
+                                            int *emit, int *stop,
+                                            lc_error *error) {
+  if (page == NULL || emit == NULL || stop == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index result page match requires page and "
+                        "outputs",
+                        NULL, NULL, NULL);
+  }
+  *emit = 0;
+  *stop = 0;
+  ++page->matched;
+  if (page->emitted >= page->limit) {
+    if (page->next_offset == 0U) {
+      page->next_offset = page->seen - 1U;
+    }
+    *stop = 1;
+    return LC_OK;
+  }
+  *emit = 1;
+  return LC_OK;
+}
+
+void lc_pouch_index_result_page_mark_emitted(lc_pouch_index_result_page *page) {
+  if (page != NULL && page->next_offset == 0U) {
+    ++page->emitted;
+  }
+}
+
 void lc_pouch_index_result_row_list_cleanup(
     const lc_allocator *allocator, lc_pouch_index_result_row_list *list) {
   size_t index;
@@ -300,9 +358,10 @@ void lc_pouch_index_result_row_list_cleanup(
   memset(list, 0, sizeof(*list));
 }
 
-static int lc_pouch_index_result_row_list_reserve(
-    const lc_allocator *allocator, lc_pouch_index_result_row_list *list,
-    size_t needed, lc_error *error) {
+static int
+lc_pouch_index_result_row_list_reserve(const lc_allocator *allocator,
+                                       lc_pouch_index_result_row_list *list,
+                                       size_t needed, lc_error *error) {
   lc_pouch_index_result_row *next_items;
   size_t next_capacity;
 
@@ -352,8 +411,8 @@ int lc_pouch_index_result_row_list_add(
   if (list == NULL || key == NULL || key[0] == '\0') {
     return LC_OK;
   }
-  rc = lc_pouch_index_result_row_list_reserve(allocator, list,
-                                              list->count + 1U, error);
+  rc = lc_pouch_index_result_row_list_reserve(allocator, list, list->count + 1U,
+                                              error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -382,5 +441,58 @@ int lc_pouch_index_result_row_list_add(
   item->query_hidden = query_hidden ? 1 : 0;
   item->value_index = value_index;
   ++list->count;
+  return LC_OK;
+}
+
+void lc_pouch_index_result_page_cache_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_result_page_cache *cache) {
+  if (cache == NULL) {
+    return;
+  }
+  lc_free_with_allocator(allocator, cache->key);
+  lc_pouch_index_result_row_list_cleanup(allocator, &cache->rows);
+  memset(cache, 0, sizeof(*cache));
+}
+
+int lc_pouch_index_result_page_cache_lookup(
+    const lc_pouch_index_result_page_cache *cache, const char *key,
+    const lc_pouch_index_result_row_list **rows, int *hit, lc_error *error) {
+  if (rows == NULL || hit == NULL || key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index result cache lookup requires key and "
+                        "outputs",
+                        NULL, NULL, NULL);
+  }
+  *rows = NULL;
+  *hit = 0;
+  if (cache == NULL || cache->key == NULL || strcmp(cache->key, key) != 0) {
+    return LC_OK;
+  }
+  *rows = &cache->rows;
+  *hit = 1;
+  return LC_OK;
+}
+
+int lc_pouch_index_result_page_cache_store(
+    const lc_allocator *allocator, lc_pouch_index_result_page_cache *cache,
+    const char *key, lc_pouch_index_result_row_list *rows, lc_error *error) {
+  char *key_copy;
+
+  if (cache == NULL || key == NULL || rows == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index result cache store requires cache, key, "
+                        "and rows",
+                        NULL, NULL, NULL);
+  }
+  key_copy = lc_strdup_with_allocator(allocator, key);
+  if (key_copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index result cache key", NULL,
+                        NULL, NULL);
+  }
+  lc_pouch_index_result_page_cache_cleanup(allocator, cache);
+  cache->key = key_copy;
+  cache->rows = *rows;
+  memset(rows, 0, sizeof(*rows));
   return LC_OK;
 }

@@ -6,12 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 
-static int lc_pouch_number_is_digit(char ch) {
-  return ch >= '0' && ch <= '9';
-}
+static int lc_pouch_number_is_digit(char ch) { return ch >= '0' && ch <= '9'; }
 
-static int lc_pouch_number_parse_exp(const char *data, size_t len,
-                                     size_t *pos, long *out) {
+static int lc_pouch_number_parse_exp(const char *data, size_t len, size_t *pos,
+                                     long *out) {
   int negative;
   long value;
 
@@ -168,9 +166,9 @@ int lc_pouch_number_eq_key(const char *data, size_t len, char **out) {
     lc_free_with_allocator(NULL, digits);
     return 0;
   }
-  written = snprintf(key, canonical_len + 64U, "n:%c:%.*s:%ld",
-                     negative ? '-' : '+', (int)canonical_len, digits + first,
-                     scale);
+  written =
+      snprintf(key, canonical_len + 64U, "n:%c:%.*s:%ld", negative ? '-' : '+',
+               (int)canonical_len, digits + first, scale);
   lc_free_with_allocator(NULL, digits);
   if (written < 0 || (size_t)written >= canonical_len + 64U) {
     lc_free_with_allocator(NULL, key);
@@ -227,8 +225,7 @@ static int lc_pouch_number_parse_key(const char *key, int *negative,
 static int lc_pouch_number_compare_digit_count(long left_scale,
                                                size_t left_digits,
                                                long right_scale,
-                                               size_t right_digits,
-                                               int *out) {
+                                               size_t right_digits, int *out) {
   long left;
   long right;
 
@@ -272,8 +269,8 @@ static int lc_pouch_number_compare_positive(const char *left_digits,
     *out = 1;
     return 1;
   }
-  compare_len =
-      left_digit_count > right_digit_count ? left_digit_count : right_digit_count;
+  compare_len = left_digit_count > right_digit_count ? left_digit_count
+                                                     : right_digit_count;
   for (index = 0U; index < compare_len; ++index) {
     char left;
     char right;
@@ -331,9 +328,9 @@ int lc_pouch_number_eq_key_compare(const char *left, const char *right,
     *out = left_negative ? -1 : 1;
     return 1;
   }
-  if (!lc_pouch_number_compare_positive(
-          left_digits, left_digit_count, left_scale, right_digits,
-          right_digit_count, right_scale, &cmp)) {
+  if (!lc_pouch_number_compare_positive(left_digits, left_digit_count,
+                                        left_scale, right_digits,
+                                        right_digit_count, right_scale, &cmp)) {
     return 0;
   }
   *out = left_negative ? -cmp : cmp;

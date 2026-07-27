@@ -710,16 +710,13 @@ void lc_pouch_queue_message_info_cleanup(const lc_pouch_allocator *allocator,
 void lc_pouch_queue_stats_cleanup(const lc_pouch_allocator *allocator,
                                   lc_pouch_queue_stats *stats);
 
-int lc_pouch_open(const char *root_path,
-                       const lc_pouch_allocator *allocator,
-                       lc_pouch_store **out, lc_error *error);
+int lc_pouch_open(const char *root_path, const lc_pouch_allocator *allocator,
+                  lc_pouch_store **out, lc_error *error);
 int lc_pouch_open_with_options(const char *root_path,
-                                    const lc_pouch_allocator *allocator,
-                                    const lc_pouch_open_opts *opts,
-                                    lc_pouch_store **out, lc_error *error);
-int lc_pouch_durability_batch_begin(lc_pouch_store *self,
-                                         lc_error *error);
-int lc_pouch_durability_batch_end(lc_pouch_store *self,
-                                       lc_error *error);
+                               const lc_pouch_allocator *allocator,
+                               const lc_pouch_open_opts *opts,
+                               lc_pouch_store **out, lc_error *error);
+int lc_pouch_durability_batch_begin(lc_pouch_store *self, lc_error *error);
+int lc_pouch_durability_batch_end(lc_pouch_store *self, lc_error *error);
 
 #endif

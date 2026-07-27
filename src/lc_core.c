@@ -957,8 +957,9 @@ typedef struct lc_pouch_endpoint_options {
   int single_writer;
 } lc_pouch_endpoint_options;
 
-static void lc_pouch_endpoint_options_cleanup(
-    const lc_allocator *allocator, lc_pouch_endpoint_options *options) {
+static void
+lc_pouch_endpoint_options_cleanup(const lc_allocator *allocator,
+                                  lc_pouch_endpoint_options *options) {
   if (options == NULL) {
     return;
   }
@@ -990,8 +991,7 @@ static int lc_uri_hex_value(char ch) {
 }
 
 static char *lc_pouch_endpoint_decode_component(const lc_allocator *allocator,
-                                                const char *src,
-                                                size_t src_len,
+                                                const char *src, size_t src_len,
                                                 const char *component,
                                                 lc_error *error) {
   char *decoded;
@@ -1033,8 +1033,8 @@ static char *lc_pouch_endpoint_decode_component(const lc_allocator *allocator,
       if (value == '\0') {
         lc_free_with_allocator(allocator, decoded);
         lc_error_set(error, LC_ERR_INVALID, 0L,
-                     "pouch endpoint component must not contain NUL",
-                     component, NULL, NULL);
+                     "pouch endpoint component must not contain NUL", component,
+                     NULL, NULL);
         return NULL;
       }
       decoded[dst_index++] = (char)value;
@@ -1047,10 +1047,11 @@ static char *lc_pouch_endpoint_decode_component(const lc_allocator *allocator,
   return decoded;
 }
 
-static int lc_pouch_endpoint_parse_option(
-    const lc_allocator *allocator, const char *key, size_t key_len,
-    const char *value, size_t value_len, lc_pouch_endpoint_options *options,
-    lc_error *error) {
+static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
+                                          const char *key, size_t key_len,
+                                          const char *value, size_t value_len,
+                                          lc_pouch_endpoint_options *options,
+                                          lc_error *error) {
   char *decoded_key;
   char *copy;
 
@@ -1069,8 +1070,7 @@ static int lc_pouch_endpoint_parse_option(
                                               "single_writer", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     }
     if (strcmp(copy, "true") == 0 || strcmp(copy, "1") == 0) {
       options->single_writer = 1;
@@ -1079,10 +1079,9 @@ static int lc_pouch_endpoint_parse_option(
     } else {
       lc_free_with_allocator(allocator, copy);
       lc_free_with_allocator(allocator, decoded_key);
-      return lc_error_set(
-          error, LC_ERR_INVALID, 0L,
-          "pouch endpoint single_writer must be true or false", NULL, NULL,
-          NULL);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch endpoint single_writer must be true or false",
+                          NULL, NULL, NULL);
     }
     lc_free_with_allocator(allocator, copy);
     lc_free_with_allocator(allocator, decoded_key);
@@ -1103,17 +1102,17 @@ static int lc_pouch_endpoint_parse_option(
         fallback ? "query_fallback_engine" : "query_engine", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     }
     if (strcmp(copy, "index") != 0 && strcmp(copy, "scan") != 0) {
       lc_free_with_allocator(allocator, copy);
       lc_free_with_allocator(allocator, decoded_key);
       return lc_error_set(
           error, LC_ERR_INVALID, 0L,
-          fallback ? "pouch endpoint query_fallback_engine must be index or scan"
-                   : "pouch endpoint query_engine must be index or scan",
-          NULL, NULL, "pouch-redesign");
+          fallback
+              ? "pouch endpoint query_fallback_engine must be index or scan"
+              : "pouch endpoint query_engine must be index or scan",
+          NULL, NULL, "pouch");
     }
     if (fallback) {
       lc_free_with_allocator(allocator, options->query_fallback_engine);
@@ -1131,9 +1130,10 @@ static int lc_pouch_endpoint_parse_option(
                       NULL);
 }
 
-static int lc_pouch_endpoint_options_parse(
-    const lc_allocator *allocator, const char *endpoint,
-    lc_pouch_endpoint_options *options, lc_error *error) {
+static int lc_pouch_endpoint_options_parse(const lc_allocator *allocator,
+                                           const char *endpoint,
+                                           lc_pouch_endpoint_options *options,
+                                           lc_error *error) {
   const char *path;
   const char *query;
   const char *cursor;
@@ -1178,9 +1178,9 @@ static int lc_pouch_endpoint_options_parse(
     }
     key_len = (size_t)(equals - part);
     value_len = equals < next ? (size_t)(next - equals - 1) : 0U;
-    rc = lc_pouch_endpoint_parse_option(
-        allocator, part, key_len, equals < next ? equals + 1 : next, value_len,
-        options, error);
+    rc = lc_pouch_endpoint_parse_option(allocator, part, key_len,
+                                        equals < next ? equals + 1 : next,
+                                        value_len, options, error);
     if (rc != LC_OK) {
       lc_pouch_endpoint_options_cleanup(allocator, options);
       return rc;
@@ -1349,8 +1349,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   }
   if (pouch_endpoint_count != 0U && config->endpoint_count != 1U) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch endpoints must be configured alone", NULL,
-                        NULL, NULL);
+                        "pouch endpoints must be configured alone", NULL, NULL,
+                        NULL);
   }
   is_pouch = pouch_endpoint_count == 1U;
   if (!config->disable_mtls && config->client_bundle_source != NULL) {
@@ -1493,8 +1493,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->disable_logger_sys_field = config->disable_logger_sys_field;
   client->base_logger =
       config->logger != NULL ? config->logger : lc_log_noop_logger();
-  client->logger = client->engine != NULL ? lc_engine_client_logger(client->engine)
-                                          : client->base_logger;
+  client->logger = client->engine != NULL
+                       ? lc_engine_client_logger(client->engine)
+                       : client->base_logger;
   client->http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
   client->pub.acquire = lc_client_acquire_method;

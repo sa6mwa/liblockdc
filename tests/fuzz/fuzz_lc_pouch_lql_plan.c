@@ -6,9 +6,9 @@
 
 #include <unistd.h>
 
+#include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_pouch.h"
-#include "../support/lc_test_tmp.h"
 
 #define FUZZ_POUCH_LQL_TMP_PREFIX "/tmp/liblockdc-pouch-lql-fuzz-"
 
@@ -218,18 +218,16 @@ static void fuzz_damage_namespace_manifest(const char *root,
   } else if (mode == 2U) {
     fuzz_write_text_file(path, "not-a-manifest\nactive_segment=broken\n");
   } else {
-    fuzz_write_text_file(path,
-                         "active_segment=seg-00000000000000000000.log\n"
-                         "snapshot=snapshot-00000000000000000000.log\n");
+    fuzz_write_text_file(path, "active_segment=seg-00000000000000000000.log\n"
+                               "snapshot=snapshot-00000000000000000000.log\n");
   }
 }
 
 static void fuzz_damage_marker(const char *root, unsigned int mode) {
   char path[768];
 
-  if (mode == 0U ||
-      !fuzz_namespace_path(path, sizeof(path), root,
-                           "markers/writer-fuzz-peer.marker")) {
+  if (mode == 0U || !fuzz_namespace_path(path, sizeof(path), root,
+                                         "markers/writer-fuzz-peer.marker")) {
     return;
   }
   if (mode == 1U) {
@@ -263,18 +261,17 @@ static void fuzz_damage_query_index(const char *root, unsigned int mode) {
     (void)fwrite("not-a-pouch-query-index\nterm broken\n", 1U,
                  strlen("not-a-pouch-query-index\nterm broken\n"), fp);
   } else {
-    static const char future_index[] =
-        "format=pouch-query-index\n"
-        "version=999999\n"
-        "state_index_seq=999999\n"
-        "row_count=1\n"
-        "row_hash=1\n"
-        "term_index_complete=1\n"
-        "term_count=1\n"
-        "term_hash=1\n"
-        "presence_index_complete=1\n"
-        "presence_count=1\n"
-        "presence_hash=1\n";
+    static const char future_index[] = "format=pouch-query-index\n"
+                                       "version=999999\n"
+                                       "state_index_seq=999999\n"
+                                       "row_count=1\n"
+                                       "row_hash=1\n"
+                                       "term_index_complete=1\n"
+                                       "term_count=1\n"
+                                       "term_hash=1\n"
+                                       "presence_index_complete=1\n"
+                                       "presence_count=1\n"
+                                       "presence_hash=1\n";
     (void)fwrite(future_index, 1U, sizeof(future_index) - 1U, fp);
   }
   (void)fclose(fp);
@@ -359,9 +356,8 @@ static char *fuzz_selector_from_input(const uint8_t *data, size_t size,
     selector_data += sizeof(lql_prefix) - 1U;
     selector_size -= sizeof(lql_prefix) - 1U;
   }
-  while (selector_size > 0U &&
-         (selector_data[selector_size - 1U] == '\n' ||
-          selector_data[selector_size - 1U] == '\r')) {
+  while (selector_size > 0U && (selector_data[selector_size - 1U] == '\n' ||
+                                selector_data[selector_size - 1U] == '\r')) {
     --selector_size;
   }
   if (selector_size == 0U && !*selector_is_lql) {

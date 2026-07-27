@@ -3002,8 +3002,7 @@ test_maintenance_cleanup_honors_obsolete_delete_grace(void **state) {
   assert_int_equal(close(fd), 0);
 
   open_opts.background_compaction_delete_grace_seconds = 3600UL;
-  rc = lc_pouch_open_with_options(root, &allocator, &open_opts, &store,
-                                       &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &open_opts, &store, &error);
   assert_int_equal(rc, LC_OK);
   rc = store->maintenance(store, "cleanup", &maintenance, &error);
   assert_int_equal(rc, LC_OK);
@@ -4218,8 +4217,8 @@ test_query_index_prepared_temporal_cache_reuses_generation_after_file_corrupt(
   test_cleanup_root(root);
 }
 
-static void test_query_index_temporal_generation_is_lazy_after_writes(
-    void **state) {
+static void
+test_query_index_temporal_generation_is_lazy_after_writes(void **state) {
   char root[256];
   char generation_path[512];
   lc_pouch_allocator allocator;
@@ -4294,8 +4293,8 @@ static void test_query_index_temporal_generation_is_lazy_after_writes(
   test_cleanup_root(root);
 }
 
-static void test_query_field_lazy_sort_preserves_update_and_dedupes(
-    void **state) {
+static void
+test_query_field_lazy_sort_preserves_update_and_dedupes(void **state) {
   char root[256];
   lc_pouch_allocator allocator;
   tracked_allocator tracked;
@@ -13687,7 +13686,7 @@ test_scheduled_maintenance_honors_not_before_deadline(void **state) {
 
   generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
   rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
-                                       &error);
+                                  &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "application/octet-stream";
@@ -13802,7 +13801,7 @@ test_scheduled_maintenance_honors_min_candidate_files(void **state) {
 
   generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
   rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
-                                       &error);
+                                  &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "application/octet-stream";
@@ -13848,7 +13847,7 @@ test_scheduled_maintenance_honors_min_candidate_files(void **state) {
   store = NULL;
 
   rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
-                                       &error);
+                                  &error);
   assert_int_equal(rc, LC_OK);
   for (index = 0U; index < 20U; ++index) {
     source = source_from_text(payload);
@@ -13922,7 +13921,7 @@ test_scheduled_maintenance_honors_min_reclaimable_bytes(void **state) {
 
   generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
   rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
-                                       &error);
+                                  &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "application/octet-stream";
@@ -14028,7 +14027,7 @@ static void test_scheduled_maintenance_honors_io_throttle(void **state) {
 
   generate_opts.background_compaction_min_log_bytes = (unsigned long)-1;
   rc = lc_pouch_open_with_options(root, &allocator, &generate_opts, &store,
-                                       &error);
+                                  &error);
   assert_int_equal(rc, LC_OK);
 
   state_opts.content_type = "application/octet-stream";
@@ -19836,8 +19835,7 @@ test_single_writer_mode_skips_peer_refresh_after_sync(void **state) {
   memset(&put_res, 0, sizeof(put_res));
 
   opts.single_writer = 1;
-  rc =
-      lc_pouch_open_with_options(root, &allocator, &opts, &reader, &error);
+  rc = lc_pouch_open_with_options(root, &allocator, &opts, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = reader->read_state(reader, "default", "single-writer-key", &body,
@@ -19985,8 +19983,7 @@ int main(void) {
           test_query_index_prepared_temporal_cache_reuses_generation_after_file_corrupt),
       cmocka_unit_test(
           test_query_index_temporal_generation_is_lazy_after_writes),
-      cmocka_unit_test(
-          test_query_field_lazy_sort_preserves_update_and_dedupes),
+      cmocka_unit_test(test_query_field_lazy_sort_preserves_update_and_dedupes),
       cmocka_unit_test(test_cas_and_remove_semantics),
       cmocka_unit_test(test_state_lookup_index_orders_updates_and_replays),
       cmocka_unit_test(

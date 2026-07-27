@@ -1,6 +1,6 @@
 # Pouch Storage Technical Specification
 
-> Current status: this document is the working pouch redesign specification.
+> Current status: this document is the working pouch cutover specification.
 > The old implementation lives under `deprecated/pouch-legacy/` and is not
 > compiled. The active implementation uses the `lc_pouch` root/namespace/path,
 > state, client, query-index, and private index modules under `src/`; sections
@@ -13,15 +13,14 @@ requiring a local server process. The storage layer must be usable by the client
 adapter first and remain suitable for a future C server stack.
 
 This document is the living technical specification for pouch. It covers the
-basic operating model, design constraints, on-disk layout, replay and
+basic operating model, design constraints, persistent layout, replay and
 compaction rules, query/index machinery, failure modes, benchmark expectations,
-and implementation order. It is based on the proven shape of the existing
-server-side disk store: a storage backend interface, a disk-log backend,
-per-namespace append logs, in-memory indexes rebuilt from durable records,
-advisory locks for cross-process writers, and compaction snapshots. The C
-implementation must be idiomatic C89 and must not copy runtime assumptions from
-the original implementation language, such as managed allocation, channels, or
-built-in maps.
+and implementation order. Go lockd disk is a reference implementation for
+storage semantics and performance expectations, but pouch is a separate
+embedded C storage engine with its own module names, persistent layout, and
+operational boundaries. The C implementation must be idiomatic C89 and must
+not copy runtime assumptions from the original implementation language, such as
+managed allocation, channels, or built-in maps.
 
 ## Basics
 
@@ -55,12 +54,12 @@ the Go lockd disk backend.
 
 ## Conceptual Lineage
 
-Pouch is primarily derived from the Go lockd disk backend. The important
-inheritance is the storage contract and durability model, not the Go
-implementation mechanics. Pouch keeps the same broad architecture: append-first
-namespace storage, reconstructed indexes, advisory write exclusion, marker-based
-reader refresh, staged state promotion, durable queue decisions, and
-snapshot-based compaction.
+Pouch is informed by the Go lockd disk backend as a reference for the lockd
+storage contract, durability semantics, and performance bar, while remaining a
+distinct embedded C storage engine. Pouch keeps the same broad durability
+shape: append-first namespace storage, reconstructed indexes, advisory write
+exclusion, marker-based reader refresh, staged state promotion, durable queue
+decisions, and snapshot-based compaction.
 
 Several older storage and search systems also inform the design:
 
@@ -124,7 +123,7 @@ A pouch operation normally follows this path:
 4. Mutations append typed records to the active namespace segment, join a commit
    group, wait for the configured durability policy, then apply the committed
    refs into the in-memory projections.
-   The current redesigned C backend has this projection path for state records
+   The current pouch backend has this projection path for state records
    in both `single_writer` and shared modes. Shared handles refresh their
    projections from peer-marker snapshots, while local writes update an already
    initialized projection directly.
@@ -166,7 +165,7 @@ owner, key, query-hidden, version, timestamps, and state ETag are typed storage
 columns. The public query language remains client-facing, while the backend can
 use cheaper typed summary checks for storage-owned metadata semantics.
 
-## Source Design Reading
+## Go Lockd Disk Reference Reading
 
 The server-side disk backend was designed as a storage contract first and a
 filesystem implementation second. The important shape to preserve is not the
@@ -177,7 +176,7 @@ implementation language or goroutine structure; it is the separation between:
 - optional capabilities such as metadata-summary scans, queue change feeds,
   single-writer controls, concurrent-write reporting, exclusive-writer probing,
   query backend mode, and indexer flush defaults;
-- a disk-log namespace runtime that owns segment replay, marker refresh,
+- a namespace log runtime that owns segment replay, marker refresh,
   pending commit visibility, open-file caches, and compaction;
 - higher lockd semantics implemented above the backend by composing metadata,
   state, object, staging, transaction, queue, and query primitives.
@@ -213,7 +212,7 @@ Additional parity details from the storage contract:
 - Namespace listing, when supported, returns sorted namespace roots and filters
   non-directories. Reserved internal namespaces remain usable by storage
   recovery but unavailable to public lock operations.
-- The disk-log backend must report that it does not support unrestricted
+- The pouch log backend must report that it does not support unrestricted
   concurrent writers. Per-key locks make same-root mutation safe, but the store
   is still append-serialized storage, not a consensus or multi-primary
   database.
@@ -223,7 +222,7 @@ Additional parity details from the storage contract:
   fallback contract matters: scans are lexical, support `start_after` and
   `limit`, and may skip rows that disappear or become transient while scanning.
 
-## Disk Backend Deep-Dive Addendum
+## Go Lockd Disk Reference Addendum
 
 The server disk implementation has several subtle correctness boundaries that
 must be treated as pouch design requirements rather than implementation
@@ -345,7 +344,7 @@ linear replay, pending-before-visible, forced refresh on uncertainty, streaming
 payload copy, conservative compaction, and queue/query visibility through
 committed storage records.
 
-## Design Invariants From The Existing Disk Store
+## Design Invariants From The Go Lockd Disk Store
 
 The existing disk store is best understood as a durable projection system:
 segments and snapshots are the source of truth; in-memory indexes are rebuilt
@@ -431,7 +430,7 @@ Required invariants:
   crash-detectable writer presence.
 
 These invariants should be documented beside C tests as they land. They are the
-reason pouch needs a real disk-log implementation instead of a simple directory
+reason pouch needs a real pouch log implementation instead of a simple directory
 of rewritten JSON files.
 
 ## Goals
@@ -447,11 +446,11 @@ of rewritten JSON files.
   supplies the public query language, parser, and final evaluator, while pouch
   maintains storage-owned summaries and postings for the candidate-generation
   paths it can prove without false negatives.
-- Current redesigned-pouch implementation status: `query_keys` and document
+- Current pouch implementation status: `query_keys` and document
   `query` have initial scan-mode paths over the segmented state projection.
   Both stream each candidate JSON body through `liblql` for final selector
   acceptance, skip `query_hidden` and staged records, and return paginated scan
-  metadata. `flush_index` synchronously refreshes the local redesigned state
+  metadata. `flush_index` synchronously refreshes the local pouch state
   projection, validates or repairs a durable per-namespace `index/query.index`
   sidecar, and returns its storage high-water token, including tombstones and
   peer-writer marker invalidation. The sidecar now carries deterministic live
@@ -609,11 +608,11 @@ The interface should also expose optional capability functions or flags:
 - exclusive writer probing
 - single-writer optimization mode
 - whether the backend is safe for concurrent writers to the same root
-- fsync statistics; the current private disk hook reports attempted and failed
+- fsync statistics; the current private pouch hook reports attempted and failed
   fsync calls plus successful log, query-index, root-directory,
   writer-marker, and queue-wake marker fsync counts
 - compaction statistics and explicit compaction trigger; the current private
-  disk hook supports `force` and threshold-gated `if_needed`, returning
+  pouch hook supports `force` and threshold-gated `if_needed`, returning
   before/after log and query-index byte counts, before/after record counts,
   live-record count, and a skip reason such as `below-min-log-size` or
   `below-obsolete-threshold`
@@ -624,7 +623,7 @@ The interface should also expose optional capability functions or flags:
   accepts a `retention_updated_before_unix` cutoff and reports scanned,
   expired, deleted state, and failed-key counts
 
-The disk implementation should report that it is not a general concurrent
+The pouch implementation should report that it is not a general concurrent
 writer backend, even though it safely serializes same-root mutations with
 per-key advisory locks. That distinction matters for HA and embedded pouch:
 multiple client instances can coordinate through the same store, but the log is
@@ -632,10 +631,10 @@ still append-serialized by key-level critical sections and commit ordering, not
 by a multi-writer database protocol.
 
 Current pouch backend milestone: the private backend capability hook reports a
-`disk-log` backend, advisory file-lock write coordination, same-root writer
+pouch log backend, advisory file-lock write coordination, same-root writer
 serialization support, crash-abort marker support, backend identity support,
 and explicitly reports that it is not a general concurrent-writer database.
-The private storage vtable also exposes namespace listing over the disk
+The private storage vtable also exposes namespace listing over the pouch
 backend's live projections; it reports unique sorted namespaces with active
 state, metadata, object, or queue entries after an authoritative replay refresh.
 Writer-presence diagnostics report advisory file-lock marker mode, this
@@ -646,7 +645,7 @@ without that field fall back to mtime.
 Lock diagnostics report the current `key-striped-fcntl` mode, lock path,
 whether the implementation still uses the root-level append writer lock, whether
 per-key lock caching/striping is active, and counters for lock acquisitions,
-releases, replay refreshes, and log reopens. The private disk vtable also
+releases, replay refreshes, and log reopens. The private pouch vtable also
 exposes the lock-key path normalizer and a nonblocking per-key advisory lock
 primitive: lock paths live under `locks/<namespace>/<key>`, with key bytes
 percent-escaped so slash-separated user keys do not become filesystem path
@@ -700,7 +699,7 @@ moved out of the foreground path whenever correctness allows it:
 - all hot allocations use pouch-owned buffers, pools, or slabs so allocation
   behavior is measurable and controllable.
 
-Current implementation milestone: the redesigned pouch backend writes
+Current implementation milestone: the pouch backend writes
 authoritative records to per-namespace segmented state logs and installs
 compacted live heads as manifested namespace snapshots. Compaction runs through
 the pouch writer path, captures the live namespace projection, writes a fresh
@@ -718,7 +717,7 @@ Idle read descriptors are cached separately from active read sources. The cache
 is a performance artifact only: entries are bounded, allocator-backed, reusable
 across state/object/queue payload reads, and discarded when their descriptor no
 longer names the recorded body file.
-Opening a store also removes stale `store.compact.tmp`, internal-logstore
+Opening a store also removes stale `store.compact.tmp`, internal namespace
 `query.index.compact.tmp`, and earlier root-level query-index temp files while
 holding the writer lock, so crash leftovers from older or interrupted
 compaction attempts do not accumulate or confuse later runs.
@@ -755,15 +754,11 @@ Current pouch field postings support strict JSON Pointer equality, `in`,
 collection. Range-primary document and key-only scans walk ordered numeric field
 postings, apply upper-bound termination, filter stale/deleted rows through the
 live state etag/version check, and then restore stable key/cursor ordering for
-the public result stream. Cached docID result pages for simple key-only
-equality, exists, range, non-wildcard `in`, prefix, and contains scans snapshot
-keys directly from the immutable document table, avoiding a summary-index
-translation layer when metadata rows are not needed. Prepared adaptive postings
-decode directly into caller-owned docID sets, so equality, `in`, exists, range,
-prefix, and contains readers avoid temporary decoded vectors on cache hits.
-Prepared term postings are shared only for request-independent plans; owner- or
-key-filtered requests still use the request-keyed result cache but do not
-populate or consume the shared prepared term cache.
+the public result stream. Exact key-only equality, non-wildcard `in`, exists,
+range, prefix, contains, and date scans resolve through immutable
+predicate/document-table generations; substring scans use persisted trigram
+candidates for needles of at least three bytes before final string-term
+validation.
 As an interim step toward append-oriented segmented indexes, live field posting
 mutations append into an unordered in-memory buffer and mark it dirty. Readers
 that require ordered postings pass through a single lazy sort/deduplicate
@@ -780,9 +775,9 @@ primary equality, non-wildcard `in`, `range`, `exists`, and `prefix`
 compilation also has a narrower docID append path for no-residual-filter
 queries; it still verifies live state, summary freshness, hidden state, owner
 filtering, and doc-table membership before accepting a candidate.
-Contains compilation checks raw text postings for the substring directly;
-trigrams remain a zero-candidate fast reject until the compiled field dictionary
-can drive a docID-first text search path. The client planner also recognizes
+Contains compilation intersects prepared trigram-generation docIDs for
+three-byte-and-longer needles, then checks prepared text-generation terms for
+the exact substring. The client planner also recognizes
 full-form `or` selectors whose branches are exact equality predicates over the
 same strict field and lowers them to the existing storage-owned `in` candidate
 path; mixed field equality OR branches use a storage-owned branch-union posting
@@ -906,9 +901,9 @@ mode accepts the same metadata selector set, but resolves equality by walking
 ordered full-summary or metadata scan routes instead of consulting postings.
 The current pouch backend keeps the sorted metadata projection as the
 authoritative in-memory index for match-all and exact-key scans, while
-the internal `.lockd` namespace logstore `query.index` remains a durable
-sidecar accelerator that can be validated against current metadata and rebuilt
-from authoritative namespace segments/snapshots. Indexed scans must never trust
+the internal `.lockd` namespace `query.index` remains a durable sidecar
+accelerator that can be validated against current metadata and rebuilt from
+authoritative namespace segments/snapshots. Indexed scans must never trust
 sidecar rows that do not match current metadata, and key-only scans must agree
 with document scans even after a sidecar tail fault. LQL predicates extend this
 boundary with storage-owned index postings and candidate iteration, rather than
@@ -940,14 +935,12 @@ plus numeric range candidate checks, string `in` candidates, text `prefix` /
 over those field postings.
 Numeric equality and range bounds use canonical numeric keys so equivalent JSON
 number spellings compare consistently instead of relying on raw token text. Text
-predicate postings store the liblql string-predicate view for JSON strings,
-booleans, and number source text; JSON null still has no text-predicate posting.
-The same text values also emit lowercase ASCII-normalized `g:` trigram postings
-used as a candidate superset for `contains` / `icontains` terms of at least
-three bytes, including supported OR branch collection. Exact substring and case
-semantics still run through the `t:` posting checks and final `liblql`
-acceptance, so trigram rows may create false positives but must not create false
-negatives. Object and array field
+predicate postings store the liblql string-predicate view for JSON strings;
+JSON null still has no text-predicate posting. Raw and lowercase
+ASCII-normalized trigram postings are persisted for selective `contains` /
+`icontains` candidate narrowing. Exact substring and case semantics still run
+through text checks and final `liblql` acceptance, so trigram rows may create
+false positives but must not create false negatives. Object and array field
 containers also emit presence postings so `exists` can narrow candidates for
 structured values without requiring a scalar leaf.
 Indexed mode also recognizes full-form `and` conjunctions made only of
@@ -1066,7 +1059,7 @@ filter that same ordered scan before limits and cursors are applied. Both
 `query` report local metadata such as `query_candidates`. `query` streams NDJSON
 document rows in the same ordered page, embeds JSON state payloads as
 `document`, emits `null` for non-JSON or empty state payloads, and returns
-`documents`. The current redesigned pouch `flush_index` is synchronous for the
+`documents`. The current pouch `flush_index` is synchronous for the
 local state projection: it refreshes from markers/segments/snapshots, validates
 or repairs the namespace's durable `index/query.index` live-row sidecar, and
 returns accepted/flushed/not-pending plus the latest storage high-water
@@ -1092,9 +1085,9 @@ spellings such as `1` and `1.0` match the same numeric selector. Key-only
 single-term exact scalar lookups for non-numeric scalar classes stream their
 term slice directly and avoid materializing the complete term-value table
 because one typed term cannot produce duplicate docIDs and the slice is already
-key/docID ordered. Numeric exact equality and multi-term unions still use the
-sorted/compacted docID path because one numeric selector can match several JSON
-number spellings, and OR/in unions can overlap. Go lockd disk benchmark results
+key/docID ordered. Numeric exact equality and multi-term unions use the
+sorted/compacted docID path because numeric selector keys are canonicalized
+before generation lookup, and OR/in unions can overlap. Go lockd disk benchmark results
 are treated as implementation-performance references only; pouch indexed query
 semantics follow liblql's real JSON scalar model, not Go LQL's looser scalar
 coercion.
@@ -1139,7 +1132,7 @@ keeps allocation ownership clear and allows storage tests to fail on accidental
 platform allocation.
 
 This is enforced by a local CTest source contract over the storage interface and
-disk-log backend. The allocator implementation itself is the only intentional
+pouch log backend. The allocator implementation itself is the only intentional
 place that may wrap platform allocation functions for the default allocator.
 
 Required allocator-backed structures:
@@ -1155,7 +1148,7 @@ Required allocator-backed structures:
 - compaction capture records
 - benchmark instrumentation allocations
 
-The disk-log backend should also provide fixed-size pools or slab allocators for
+The pouch log backend should also provide fixed-size pools or slab allocators for
 hot objects:
 
 - record references
@@ -1169,7 +1162,7 @@ Large payload bytes should stream through caller-provided `lc_source` and
 `lc_sink` abstractions or bounded copy buffers. Full payload materialization is
 allowed only for explicitly bounded inline records.
 
-## Disk Layout
+## Pouch Layout
 
 The store root is the decoded path from `pouch:///path/to/root`.
 
@@ -1177,26 +1170,21 @@ Suggested layout:
 
 ```text
 root/
-  .pouch/
-    format
-    backend-id
-    exclusive-writers/
-  .lockd/
-    backend-id
-  <namespace>/
-    logstore/
-      manifest/
-        manifest.log
+  manifest
+  namespaces/
+    <escaped-namespace>/
+      manifest
       markers/
         writer-<id>.marker
       segments/
-        seg-<writer-id>-00000001.log
-        seg-<writer-id>-00000002.log
+        seg-00000000000000000001.log
+        seg-00000000000000000002.log
       snapshots/
-        snap-<writer-id>-<id>.log
+        snapshot-00000000000000000002.log
       queue-notify/
         <queue>.notify
-    locks/
+      index/
+  locks/
       <escaped-key>.lock
 ```
 
@@ -1273,7 +1261,7 @@ targets must not accept absolute paths or path traversal.
 The C encoder must reject malformed descriptor/content-type lengths before
 writing. The decoder must reject truncated metadata for every record type.
 
-Header lengths are 32-bit fields in the disk-log format. Pouch v1 should treat
+Header lengths are 32-bit fields in the pouch log format. Pouch v1 should treat
 records whose key, metadata, or payload would overflow those fields as an
 explicit unsupported-size error before writing any bytes. If larger payloads are
 required later, they should be chunked into multiple records or moved to a new
@@ -1413,105 +1401,79 @@ selector plan. Pouch must converge on the same design shape in C:
   with a presence bitset, then reused for pagination;
 - document-result queries stream or batch only the visible page's documents,
   while key-only queries stop after key emission;
-- prepared readers and sorted matched-key vectors are cached behind immutable
-  index generation/manifest identities and invalidated by index sequence
-  changes.
+- non-exact prepared readers and sorted matched-key vectors must be keyed by
+  immutable index generation/manifest identities and invalidated by index
+  sequence changes.
 
 The current pouch posting arrays are acceptable functional scaffolding but not
 the long-term performance architecture. Incremental hot-loop optimizations are
 allowed only when they move toward this subsystem boundary or protect behavior
 while the subsystem is introduced.
 
-The current C source layout has started this subsystem boundary by splitting
-small private index primitives out of the monolithic storage bridge, while the
-fuller compiled-index module map remains the target for the remaining work:
+The current C source layout keeps the active pouch engine in pouch-native
+modules and keeps the pre-cutover implementation under `deprecated/` as
+reference-only material. The live module map is:
 
-- `src/lc_pouch_index.c` currently owns date-bound parsing and temporal bound
-  evaluation. It should become the planner/collector orchestration layer over
-  private index primitives.
+- `src/lc_pouch.c` owns the pouch handle, root setup, open options, writer
+  marker identity, status reporting, and namespace initialization entry point.
+- `src/lc_pouch_state.c` owns the current segmented state record path,
+  metadata/tombstone/staging records, state projection cache, maintenance,
+  retention, snapshot compaction, and marker refresh integration.
+- `src/lc_pouch_namespace.c` owns namespace path layout, namespace manifest
+  open/repair/write, segment and snapshot naming, obsolete cleanup, and marker
+  snapshot helpers.
+- `src/lc_pouch_path.c` owns path joining, percent escaping, and filesystem
+  helper routines shared by the pouch modules.
+- `src/lc_pouch_client.c` owns the internal `pouch://` client adapter,
+  public-operation mapping, public LQL parsing/final acceptance through
+  `liblql`, attachments, queues, transactions, TC state, query routing, and
+  watch/subscribe polling behavior.
+- `src/lc_pouch_query_index.c` owns the durable `query.index` sidecar, live row
+  summaries, scalar/presence/range/text/date posting readers, document-table
+  generation files, exact-term generation publication/repair/consumption, and
+  key/document candidate emission.
+- `src/lc_pouch_index.c` owns date-bound parsing and temporal bound evaluation
+  used by indexed planning.
 - `src/lc_pouch_index_doc.c` currently owns the private docID set algebra used
   by indexed candidate collection plus the first borrowed-key document table.
   It already provides sorted unique docID append, merge-based union,
   intersection, and subtraction helpers, and sorted key-to-docID / docID-to-key
-  table lookup. It should still grow the persistent per-generation document
-  table and broader scratch-buffer lifecycle.
+  table lookup.
 - `src/lc_pouch_index_posting.c` currently owns sparse delta-varint docID
   posting streams. The active exact/`in` query-index docID bridge now sorts and
   compacts collected candidates directly before key emission, avoiding a local
   posting round-trip. The posting module still owns sparse delta-varint
   streams, the first dense bitset posting primitive with sorted append and
   corruption-checked decode, and the adaptive wrapper that selects dense only
-  when density and encoded size justify it. Persisted posting generation files
-  still need to consume that adaptive boundary broadly.
+  when density and encoded size justify it. Persisted exact, presence, range,
+  text, trigram, and temporal generation files consume that adaptive boundary
+  through term-ID posting tables.
 - `src/lc_pouch_index_terms.c` currently owns the first term dictionary
   boundary: sidecar term field/value table records, cleanup, and sorted binary
   lookup, sidecar `term_field`/`term_value` line parsing, sorted exact term-key
   compare/find/cleanup, simple equality exact scalar construction with JSON
-  scalar type bytes, single-field `in` value-set construction, plus exact value
-  range collection and merged field span selection for sidecar term readers.
-  Numeric exact readers scan the relevant field span so parsed-number equality
-  stays aligned with liblql when equivalent numeric spellings have different
-  stored term bytes. It should grow into the owner for term
-  dictionaries, term-ID posting tables, and prepared-term cache identity
-  refresh/cleanup. Prepared bridge caches are keyed by an explicit private
-  index identity containing the current index sequence and segmented manifest
-  generation.
+  scalar type bytes, single-field `in` value-set construction, and merged
+  field span selection for sidecar term readers. Numeric exact term keys are
+  canonicalized before lookup so equivalent JSON number spellings share one
+  typed generation posting. It also owns the active immutable term-generation
+  codec and file validation/load helpers used by exact, presence, range, text,
+  trigram, and temporal generation files.
 - `src/lc_pouch_index_result.c` owns the first result-list primitive split out
   of the query bridge: sorted key/docID vectors, deterministic
   docID/key/value-slot ordering, key allocation ownership, and adjacent docID
   compaction before key emission. It also owns decoded result-row buckets used
   by merged `any`/term query emission, with the query bridge adapting those rows
-  to visitor views. It should grow into the cacheable plan-key, identity-scoped
-  result-cache, remapped generation-local result caching, and document-table
-  page-selection owner.
-- `src/lc_pouch_index_temporal.c` owns the typed temporal reader primitive for
-  normalized date values. It stores per-field normalized temporal docID vectors,
-  keeps residual postings for plausible temporal strings that must remain under
-  final `liblql` authority, exposes DateAfter collection for the immutable
-  generation reader cutover, and provides a private deterministic byte codec
-  plus a file-level generation container carrying identity and namespace for
-  persisted generation files.
-- `src/lc_pouch_index_text.c` owns the compiled text reader primitive for
-  prefix and contains planning. It stores per-field raw text docID vectors,
-  derives lowercase ASCII `g:` trigram postings into term-ID adaptive postings
-  during build/decode, preserves the existing ASCII-only case-insensitive
-  matching semantics, and provides a private deterministic byte codec plus a
-  file-level generation container carrying identity and namespace for persisted
-  generation files. The pouch storage bridge publishes and consumes those files for
-  simple primary prefix/contains plans; compound text plans still compile from
-  sidecar postings so secondary filtering remains explicit.
-- `src/lc_pouch_index.c` is the target planner/collector orchestration layer
-  over those primitives. It should invoke storage-supplied reader callbacks and
-  normalize the resulting candidate docID sets.
-- `src/lc_pouch_temporal.c` owns private liblql-compatible temporal parsing and
-  ordering comparison for date-only, RFC3339/RFC3339Nano offset, fractional,
-  and naive UTC datetime strings used by indexed date planning and fast final
-  filtering.
-- `src/lc_pouch_logstore.c` owns per-namespace segmented logstore mechanics:
-  namespace path escaping, logstore directory creation, manifest append,
-  active segment selection, segment rollover, and segment/snapshot name
-  parsing. It also owns manifest-derived active replay input discovery,
-  manifestless segment repair, obsolete segment/snapshot cleanup, logstore
-  generation fingerprinting, compaction-candidate counting, compaction backup
-  path/restore cleanup, backup-backed compact body opens, and next snapshot path
-  selection. It uses a small pouch-native context made from allocator, root
-  path, fsync callback inputs, and retention policy so these storage mechanics
-  do not depend on the concrete backend object.
-- `src/lc_pouch.c` still owns the higher-level pouch backend adapter: sidecar
-  scan adapters, live/hidden/owner/generation visibility checks, final summary
-  translation, concrete fsync policy, and final `liblql` acceptance. New
-  storage/index behavior should move toward private modules instead of adding
-  more logic to this adapter.
+  to visitor views.
+
+The retired `lc_pouch_logstore`, `lc_pouch_temporal`,
+`lc_pouch_index_temporal`, and `lc_pouch_index_text` files under
+`deprecated/pouch-legacy/` are reference material only. They are not part of
+the live pouch module map and must not be referenced by live CMake targets.
 
 The first C cutover stage uses private exact-term, field-presence, and range
 docID reader callbacks: `lc_pouch_index` owns primary equality, `in`, exact
-`exists`, and numeric range planning, while `lc_pouch.c` adapts the
-current sidecar postings into docID candidates. This is a migration bridge
-toward immutable compiled readers, not the final reader-cache architecture.
-Prepared bridge readers refresh against the same private identity shape the
-final compiled readers should use: an index sequence plus segmented manifest
-generation. That prevents the bridge contract from depending on a naked write
-counter while persisted immutable reader files are still pending.
+`exists`, and numeric range planning, while `lc_pouch_query_index.c` adapts the
+current sidecar postings into docID candidates.
 The index layer now has the first private document table primitive and
 generation codec: namespace/key pairs are sorted into dense docIDs with
 forward and reverse lookup, and per-namespace document-table generations can
@@ -1537,11 +1499,12 @@ compares JSON number values, and Go lockd's looser LQL scalar coercion is only
 a benchmark-reference caveat.
 The current query path still rebuilds the live in-memory global document table
 from summary refresh state for broader plans; exact-term, field-presence,
-numeric range, text/trigram, and temporal compiled generations remain the
-cutover target for namespace-local persisted docIDs and remap through
-document-table generations when loading prepared postings. Non-exact
-result-page selection still needs the same namespace-local doc table cutover
-before compiled reader files can stop depending on the global docID table.
+numeric range, text, trigram, and temporal compiled generations now use
+namespace-local persisted docIDs and remap through document-table generations
+when loading prepared postings.
+Non-exact result-page selection still needs the same namespace-local doc table
+cutover before every compiled reader can stop depending on the global docID
+table.
 Even before that cutover, the query path no longer depends on direct
 summary-array-position casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
@@ -1550,102 +1513,105 @@ so compiled readers can stop carrying raw string scans through the planner.
 Exact-term postings can also be stored by term ID as adaptive sparse/dense
 docID postings, giving the compiled reader a direct lookup target for equality
 and `in` plans before the pouch storage bridge is fully cut over.
-The index layer now defines the first immutable exact-term generation codec:
-a namespace-scoped dictionary plus term-ID posting table is wrapped with the
-same index sequence and segmented manifest identity used by prepared/result
-caches and temporal generations. Terms carry the liblql JSON scalar type, so
-the generation keeps `1`, `"1"`, `true`, `"true"`, and `null` as distinct exact
-terms instead of following Go LQL's looser scalar coercion. Decode validates
-magic/version headers, lengths, term/posting references, posting payload shape,
-decoded count, sorted docID order, max docID, and generation identity before a
-reader can trust the artifact. The remaining pouch storage-bridge cutover is to
-publish these generation files during query-index rebuild/compaction, load
-identity-matched namespace files into the generation-scoped exact cache, repair
-absent/stale/corrupt files on the exact query path, and remap namespace-local
-docIDs through the matching document-table generation before result paging.
-Field-presence terms use the same immutable generation container under
-`<root>/%2elockd/logstore/query.index.exists/<escaped-namespace>.lcpttg`.
-The term field is the namespace-qualified JSON Pointer and the term value is
-empty, so positive `exists` readers can merge identity-matched per-namespace
-files into the prepared exists cache before compiling from sidecar postings.
-Absent, stale, or corrupt exists generation files trigger the same namespace
-refresh and republish path. Exists generation postings are also stored with
-namespace-local docIDs and remapped through the identity-matched document-table
-generation before entering the prepared exists cache. Sidecar compilation
-remains the fallback when a current generation does not contain the requested
-field-presence term.
-Numeric ranges now have the corresponding index-layer generation foundation:
-`lc_pouch_index` can encode a namespace-scoped field dictionary whose entries
-are sorted canonical `n:` values plus residual docID postings under the same
-index sequence and segmented manifest identity. Range lookup uses canonical
-open/closed lower and upper bounds over the ordered value table, while residual
-docIDs preserve a conservative superset for values that still require higher
-level validation. Disk publishes these files under
-`<root>/%2elockd/logstore/query.index.number/<escaped-namespace>.lcpngn`
-during full query-index rebuilds and after successful compaction replay.
-Prepared simple primary `range` readers load identity-matched numeric
-generations, materialize the requested open/closed bounds into namespace-local
-docIDs, remap those IDs through the identity-matched document-table generation
-into query-bound adaptive postings over the current global doc table, and
-repair absent, stale, or corrupt files on the simple range query path. Compound
-range paths still use the sidecar compiler so secondary predicate filtering
-stays explicit.
-Text prefix/contains now have the corresponding private index-layer generation
-foundation: `lc_pouch_index` can encode a namespace-scoped field dictionary of
-raw text values, rebuild deterministic lowercase ASCII trigram postings on
-decode, and answer prefix or contains requests as docID sets. Disk publishes
-these files under
-`<root>/%2elockd/logstore/query.index.text/<escaped-namespace>.lcptxg`
-during full query-index rebuilds and after successful compaction replay.
-Prepared simple primary `prefix` and `contains` readers load identity-matched
-text generations, materialize the requested text predicate into query-bound
-adaptive postings, remap the namespace-local docIDs through the
-identity-matched document-table generation into the current global doc table,
-and repair absent, stale, or corrupt text or document-table generation files on
-the simple text query path. Compound text paths still use the sidecar compiler
-so secondary predicate filtering stays explicit.
-For primary equality plans with negative equality filters, the disk adapter can
+The index layer now defines and the pouch storage bridge publishes the first
+immutable exact-term generation file at
+`<root>/<escaped-namespace>/index/query.index.lcpttg`: a namespace-scoped
+dictionary plus term-ID posting table is wrapped with the same index sequence
+and segmented manifest identity used by the document-table generation. Terms
+carry the liblql JSON scalar type, so the generation keeps
+`1`, `"1"`, `true`, `"true"`, and `null` as distinct exact terms instead of
+following Go LQL's looser scalar coercion. Decode validates magic/version
+headers, lengths, term/posting references, posting payload shape, decoded
+count, sorted docID order, max docID, and generation identity before a reader
+can trust the artifact. Flush repairs absent, stale, or corrupt exact
+generation files. The active equality/`in` document and key readers load the
+identity-matched exact generation, collect typed postings, and remap
+namespace-local docIDs through the matching document-table generation before
+result paging. Numeric exact equality uses the same generation reader with
+canonical numeric term keys, preserving `liblql` JSON number equality across
+equivalent spellings such as `1` and `1.0` without conflating strings,
+booleans, or null. The active handle keeps a prepared exact reader cache keyed
+by namespace plus immutable `query.index` identity, so repeated exact equality
+and `in` scans reuse loaded exact-term and document-table generation readers
+until the namespace index identity changes. That prepared reader also keeps a
+bounded one-entry exact-result cache for the last normalized exact term set's
+docID vector.
+Field-presence terms are published as immutable
+`index/query.index.lcppg` generation files over namespace-local docIDs. The
+generation uses the same index sequence, row count, and row hash as
+`query.index` and `query.index.lcpdtg`, with a field-presence sentinel term for
+each indexed JSON Pointer. Positive `exists` readers load a prepared presence
+reader keyed by namespace plus immutable `query.index` identity, collect the
+field's docID posting, and remap through the matching document table before
+key/document result emission. The prepared presence reader keeps a bounded
+one-entry docID cache for the last field-presence lookup under that immutable
+identity.
+Numeric ranges are published as immutable `index/query.index.lcprg`
+generation files over namespace-local docIDs. The range generation stores
+canonical numeric term values only, under the same index sequence, row count,
+and row hash as the sidecar and document-table generation. Range readers load a
+prepared range reader, scan numeric terms for the selected field, apply finite
+open/closed bounds, and remap matching docIDs through the document table before
+result emission. The prepared range reader keeps a bounded one-entry docID
+cache keyed by field plus normalized range bounds under that immutable identity.
+String text predicates are published as immutable `index/query.index.lcptxg`
+generation files over namespace-local docIDs. Prefix and contains readers load
+a prepared text reader, scan string terms for the selected field, apply
+case-sensitive or case-insensitive text matching, and remap matching docIDs
+through the document table. The prepared text reader keeps a bounded one-entry
+docID cache keyed by field, needle, match mode, and case mode under that
+immutable identity. Trigram predicates are published as immutable
+`index/query.index.lcpt3g` generation files over namespace-local docIDs. The
+prepared text reader also loads the matching trigram generation and intersects
+gram-candidate docIDs before final substring validation for `contains` /
+`icontains` needles of at least three bytes. Temporal predicates are published
+as immutable
+`index/query.index.lcptdg` generation files over namespace-local docIDs. Date
+readers load a prepared temporal reader, scan normalized instant terms for the
+selected field, apply normalized instant bounds, and remap matching docIDs
+through the document table. The prepared temporal reader keeps a bounded
+one-entry docID cache keyed by field plus normalized instant bounds under that
+immutable identity.
+For primary equality plans with negative equality filters, the pouch query
+adapter can
 now ask exact-term readers for unfiltered primary and negative term docIDs,
 then lets `lc_pouch_index` subtract sorted negative docID sets from the primary
 candidate set before paging.
 Positive `exists` plans use the same bridge for field-presence postings:
-filtered sidecar candidates are compiled into adaptive docID postings per
-request when the immutable exists generation cannot satisfy the term, then
-decoded through the index layer.
-Positive numeric `range` plans also compile filtered sidecar candidates into
-adaptive docID postings per request before decoding through the index layer
-when the immutable numeric generation cannot satisfy the simple primary range
-or when compound range filtering requires sidecar validation.
-The range term dictionary key records bound presence separately from bound
-values so open, closed, and absent bounds stay distinct inside the compiled
+filtered sidecar candidates are collected per request and then validated by
+the ordinary query pipeline.
+Positive numeric `range` plans also collect filtered sidecar candidates per
+request before final validation.
+Future range term dictionary keys should record bound presence separately from
+bound values so open, closed, and absent bounds stay distinct inside a compiled
 reader bridge.
-When a primary numeric range plan has positive equality filters, the disk
-adapter now supplies separate range and exact-term docID readers and
+When a primary numeric range plan has positive equality filters, the pouch
+query adapter now supplies separate range and exact-term docID readers and
 `lc_pouch_index` intersects the resulting sorted docID sets. The pouch storage bridge
 still owns live-state, hidden, owner, generation, and residual predicate
 guards, but the repeated candidate-set algebra is no longer embedded in the
 range posting scan loop.
-When a primary non-wildcard `in` plan has positive equality filters, the disk
-adapter supplies exact-term docID readers for both the `in` value set and the
+When a primary non-wildcard `in` plan has positive equality filters, the pouch
+query adapter supplies exact-term docID readers for both the `in` value set and the
 equality filters. `lc_pouch_index` unions the `in` values, intersects the
 positive equality docID sets, and then pages the filtered result.
 When a primary non-wildcard `in` plan has negative equality filters, the same
 index-owned algebra subtracts the negative exact-term docID sets after the
 `in` value union and any positive equality intersections.
 Primary positive `prefix` plans now use the same reader/planner bridge: the
-disk adapter filters text sidecar postings with visibility and secondary
+pouch query adapter filters text sidecar postings with visibility and secondary
 predicate checks, compiles the matching summary docIDs into adaptive postings,
 then asks the index layer to page the decoded docIDs over the document table
-before converting only the selected page back to disk summaries.
-Primary positive `contains` plans also use a docID reader bridge. The disk
-adapter still chooses a selective trigram candidate when possible and performs
-final substring validation against text postings, but the accepted summary
-docIDs are compiled into adaptive postings before index-owned page selection.
+before converting only the selected page back to pouch summaries.
+Primary positive `contains` plans also use a docID reader bridge. The prepared
+text reader narrows three-byte-and-longer needles through trigram candidates,
+performs final substring validation against text terms, and the accepted docIDs
+flow through index-owned page selection.
 For primary `prefix` and `contains` plans with positive equality filters, the
 same index-owned intersection path used by compound range plans now combines
 the primary text candidate docIDs with exact-term docIDs before result paging.
-For primary positive `exists` plans with positive equality filters, the disk
-adapter reuses field-presence docID readers and exact-term docID readers while
+For primary positive `exists` plans with positive equality filters, the pouch
+query adapter reuses field-presence docID readers and exact-term docID readers while
 `lc_pouch_index` performs the sorted docID intersection before paging.
 Negative equality filters on primary positive `exists` plans use the same
 bridge: field-presence docIDs are intersected with optional positive equality
@@ -1654,159 +1620,37 @@ Primary numeric `range`, `prefix`, and `contains` plans with negative equality
 filters now follow that same pattern: the primary candidate docIDs are
 intersected with optional positive equality docIDs, then the negative
 exact-term docID sets are subtracted before result paging.
-The index layer also owns the first result-cache primitive: a private index
-identity plus normalized-plan key maps to a sorted docID vector. The simple
-result-cache plan key constructors now live in `lc_pouch_index`, and pouch
-supplies only the known simple-plan kind, current index identity, and storage
-sidecar readers. Pouch lookups include both the index sequence and segmented
-manifest generation, so the normalized-result cache follows the same
-immutable-view key shape as prepared bridge readers.
-The first pouch use is deliberately narrow: simple primary equality, positive
-`exists`, positive numeric `range`, non-wildcard positive `in`, prefix,
-contains, and `DateAfter` scans cache docIDs by the current index identity and
-a length-prefixed plan key, then ask the index layer to collect, cache, and
-page the candidate docIDs. Pouch supplies the identity-matched document-table
-generation and a global-to-local docID remap callback, but the index result
-layer owns local result-cache insertion and cursor page selection before pouch
-converts the selected page back to summary entries or key snapshots. Updates
-advance the index sequence, so stale cached results miss the cache. DateAfter,
-simple equality, simple `exists`, simple numeric `range`, simple non-wildcard
-`in`, simple `prefix`, and simple `contains` now store namespace-local docIDs
-in the normalized result cache, page over the identity-matched document-table
-generation, and convert only the selected local page back to summaries or key
-snapshots.
-Simple positive `exists` scans use the same identity-keyed cache with a
-length-prefixed field-presence plan key.
-Residual selectors such as date predicates use the same identity-keyed result
-cache for accepted candidate docIDs. DateAfter now first tries the prepared
-temporal reader cache for the current index identity. On a miss, it loads an
-identity-matched per-namespace temporal generation file into that cache:
-supported temporal strings are read as typed docID vectors newer than the bound
-and plausible unsupported temporal strings remain residual docIDs. The disk
-bridge remaps the generation's namespace-local docIDs into the current global
-doc table once when filling the prepared temporal cache, so distinct DateAfter
-plan keys can reuse the compiled temporal table without decoding the
-generation file again. Indexed DateAfter treats that generation as
-authoritative after repair and then applies live-state, owner, hidden, key, and
-secondary-predicate guards before paging. It does not fall back to reparsing
-field postings on the query hot path. DateAfter converts the accepted global
-candidate docIDs into the identity-matched document-table generation, stores
-and pages those namespace-local docIDs, and then translates only the selected
-local page. The client-level `liblql` filter remains authoritative for final
-acceptance and owns public cursor selection for residual pages.
-Temporal generation postings are stored with namespace-local docIDs and remap
-through the identity-matched document-table generation before DateAfter applies
-live-state and selector guards against the current global in-memory doc table.
-DateAfter result-cache plan keys include the namespace, temporal field,
-exclusive bound, and any sorted/deduplicated positive or negative equality
-suffixes. The cacheability boundary allows the parser's implied positive
-`exists` guard only when it names the same temporal field. Other secondary
-families are not cacheable under the DateAfter plan, so a filtered temporal
-query cannot alias the broader unfiltered temporal candidate vector.
-The temporal reader codec is intentionally private to pouch index generations:
-it writes a fixed magic/version header, sorted fields, normalized temporal
-docID entries, and residual docIDs. Decode rejects wrong versions, truncated
-payloads, and malformed encoded values before rebuilding in-memory search aids.
-The outer temporal generation container adds its own magic/version, the index
-identity, and namespace name around that payload so on-disk immutable readers
-can be tied to the same sequence plus segmented-manifest generation used by the
-prepared/result caches. During controlled query-index rebuild and successful
-compaction replay, the pouch backend compiles live per-namespace temporal
-postings and atomically publishes
-`<root>/%2elockd/logstore/query.index.temporal/<escaped-namespace>.lcptgn`
-files. Ordinary state writes/removes and metadata changes advance the live
-index identity without eagerly rebuilding temporal generation files, so ingest
-does not pay a whole-namespace DateAfter rebuild per mutation. The reader trusts
-only files whose encoded identity equals the current index identity. When the
-file is absent, stale, or corrupt and the prepared temporal cache does not
-already contain the namespace/field for the current identity, DateAfter checks
-query-index replay freshness, republishes the namespace generation, rereads the
-artifact, and uses the repaired file when it matches the refreshed identity. The
-freshness check does not force a full sidecar replay when the current handle has
-already replayed the query-index file size and identity. If repair still cannot
-produce an identity-matched generation, indexed DateAfter produces no
-candidates rather than scanning sidecar postings on the hot path.
+The active query path has direct query-index visitors, immutable
+exact/presence/range/text/trigram/temporal/document-table generations,
+handle-owned prepared exact, presence, range, text/trigram, and temporal
+readers, and bounded one-entry docID result caches for each prepared reader's
+last normalized predicate lookup. It also has one-entry index-layer sorted
+result-page cache slots on those prepared readers. The page caches live in
+`lc_pouch_index_result`, are keyed by immutable reader identity plus normalized
+predicate key, and reuse sorted key/docID rows before cursor-page emission.
+Offset, match, limit, emitted-count, and next-cursor accounting run through a
+private `lc_pouch_index_result` page primitive used by scan, summary, exact,
+and residual indexed query paths.
+Prepared generation readers record file signatures for their term-generation
+and document-table generation files. Cache hits validate unchanged signatures
+with `stat` before reusing resident decoded generations; changed signatures fall
+back to full generation validation and repair/eviction. Current sidecar
+freshness checks read only the fixed `query.index` header instead of
+materializing term-field and term-value tables on every query.
+Exact scalar equality, non-wildcard `in`, and exact root `or` paths use the
+identity-matched prepared exact reader, collect typed term postings as docIDs,
+remap those docIDs through the matching document-table generation, and then
+emit keys or read only the selected document bodies. Numeric exact selectors
+use canonical numeric term keys in that same generation path, so `1` and `1.0`
+share the numeric posting without matching string `"1"`.
+Date selectors use the persisted temporal generation for normalized instant
+candidates before final acceptance. These indexed scans still run the
+client-level `liblql` filter as the final authority for residual predicates,
+owner/key filters, hidden-state suppression, and public cursor selection.
 Key-return residual queries still use the row-scan path internally so the
 filter can evaluate the candidate body already surfaced by the index scan; they
 emit only keys after acceptance. This avoids reopening state by key for every
 candidate while preserving the public key-only result shape.
-Simple non-wildcard positive `in` scans also use the result cache; their plan
-key sorts and deduplicates typed values before key construction, so duplicate
-or reordered value lists reuse the same cached docID vector.
-Simple positive numeric `range` scans use a bound-aware identity-keyed cache
-with explicit `gt`/`gte`/`lt`/`lte` presence bits and length-prefixed typed
-bound values. This keeps open, closed, and absent bounds distinct while still
-reusing the full matching docID vector across repeated range pages.
-Simple positive `prefix` and `contains` scans use the same result cache. Their
-plan keys include namespace, field, case-sensitivity, and length-prefixed text
-values, so repeated text pages can reuse the matching docID vector until the
-index identity advances.
-Compound `prefix`/equality and `contains`/equality scans now route through the
-text primary collectors before the generic equality path. Their normalized
-plan keys append the same sorted/deduplicated equality suffix used by compound
-range plans, so document scans and key scans share the filtered docID cache
-until a write advances the index generation.
-Compound `exists`/equality scans route through the exists collector before the
-generic equality path for the same reason. Their normalized plan keys append
-the sorted/deduplicated equality suffix to the length-prefixed field-presence
-key, so document scans and key scans share the filtered result cache until the
-index sequence advances.
-Compound non-wildcard `in`/equality scans also route through the `in` collector
-before the generic equality path. Their normalized plan keys sort and
-deduplicate typed `in` values first, then append the same sorted/deduplicated
-equality suffix, so document scans and key scans share the filtered result
-cache until the index sequence advances.
-Primary equality/not-equality scans use a normalized equality key with a
-sorted/deduplicated `not_eq` suffix. The cached docID vector is the primary
-equality candidate set after index-owned subtraction, so document scans and key
-scans reuse the same filtered result until the index sequence advances.
-Primary non-wildcard `in`/not-equality scans append that same normalized
-`not_eq` suffix after the sorted/deduplicated `in` value list and any positive
-equality suffix. The cached docID vector is the unioned `in` value set after
-index-owned intersection/subtraction.
-Primary positive `exists`/not-equality scans append the normalized `not_eq`
-suffix after the length-prefixed field-presence key and any positive equality
-suffix. The cached docID vector is the field-presence candidate set after
-index-owned intersection/subtraction.
-Primary numeric `range`, `prefix`, and `contains` not-equality scans append the
-same normalized `not_eq` suffix after their primary selector key and any
-positive equality suffix. Their cached docID vectors are the primary candidate
-sets after index-owned intersection/subtraction.
-That layer owns cacheability and normalization for equality, exists, `in`,
-range, prefix, and contains result reuse. Equality, simple positive `exists`,
-simple positive numeric `range`, simple non-wildcard positive `in`, simple
-positive `prefix`, and simple positive `contains` now use the index-owned
-result page primitive, so page-N scans translate only the requested page of
-docIDs through disk summaries. Wildcard `in` and broader OR/path-pattern
-predicate scans still reuse or build the full matching vector before disk-side
-cursor/limit handling.
-
-The pouch storage bridge keeps prepared-reader caches keyed by the current index
-sequence plus segmented manifest generation. Exact terms are stored under a
-namespace-qualified field/value term and back simple equality and non-wildcard
-`in` plans. Simple positive `exists` scans use the same prepared-reader pattern
-with namespace-qualified field-presence terms. Simple positive numeric `range`
-scans also use prepared postings keyed by namespace-qualified field plus
-normalized range bounds. Simple positive `prefix` scans use prepared postings
-keyed by namespace-qualified field plus the case-sensitivity flag and text
-prefix. Simple positive `contains` scans use prepared postings keyed by the
-same namespace-qualified field and substring key after trigram narrowing and
-final substring validation. DateAfter uses a prepared temporal table keyed by
-namespace-qualified field, with typed temporal values and residual postings
-loaded from immutable temporal generation files. These caches are intentionally
-narrower than the final design: compound, negative, owner-filtered,
-key-filtered, and secondary-filtered range/prefix/contains selectors still use
-request-local compiled postings until their candidate sets can be cached
-without baking request-specific filters into the prepared view.
-The shared prepared-term cache container and generation refresh/cleanup
-lifecycle now live in `lc_pouch_index` as
-`lc_pouch_index_prepared_term_cache`. The pouch storage bridge still supplies
-namespace-qualified term keys and compiles sidecar-derived candidate docIDs,
-but it no longer owns separate per-predicate cache lifecycle types.
-The temporal prepared-cache lifecycle similarly lives in `lc_pouch_index` as
-`lc_pouch_index_prepared_temporal_cache`; the pouch storage bridge supplies
-namespace-qualified temporal fields and only owns generation-file IO plus
-docID remapping into the active in-memory table.
 
 LQL integration consumes storage query APIs, not raw log scans. Pouch exposes
 an internal predicate/query boundary over indexed summaries, owner postings,
@@ -1838,7 +1682,7 @@ Refresh should:
 4. Replay unread committed records in deterministic order.
 5. Track writer marker snapshots to skip unnecessary scans.
 
-The current segmented implementation compares an identity-based logstore
+The current segmented implementation compares an identity-based namespace
 generation derived from active snapshot and segment files. Size alone is not a
 sufficient generation signal because compaction can replace one history with
 different files of the same total byte length.
@@ -1858,7 +1702,7 @@ directory scans, stats cached peer markers when directory metadata is unchanged,
 and periodically falls back to full marker scans plus segment validation so
 marker hints cannot hide external rewrites indefinitely.
 
-The redesigned pouch backend currently writes per-namespace
+The pouch backend currently writes per-namespace
 `markers/writer-<pid>-<handle-id>.marker` files after segmented state
 mutations. Marker payloads include the process id, per-handle marker identity,
 a monotonic writer sequence, and alternating payload size across adjacent
@@ -1883,6 +1727,14 @@ Refresh needs two modes:
   synced once, because the mode promises that no peer writer is mutating the
   store;
 - forced refresh always scans manifest, snapshots, and segments.
+
+The state projection cache owns optional cached state payload bytes for repeated
+batched document reads. `lc_pouch_state_read_many` materializes a payload into
+the namespace projection record on first document read, returns later reads as
+memory sources, and invalidates the cached bytes whenever the record is
+reapplied from state. Large batched reads build a temporary sorted cache-record
+index so key-to-record lookup is logarithmic instead of a linked-list scan for
+each selected document.
 
 Forced refresh is required before concluding that a CAS target does not exist
 after a miss, after a pending wait completes, and after a metadata/payload decode
@@ -1988,7 +1840,7 @@ mtime and fall back to mtime for legacy markers. Abrupt abort must stop
 background work without removing the marker so peers can observe the stale
 writer until its TTL expires.
 
-The storage backend must still report that disk-log pouch is not a general
+The storage backend must still report that pouch log storage is not a general
 multi-writer database. It can safely serialize same-root mutations with locks,
 but higher HA logic must know it is append-serialized and not a consensus
 backend.
@@ -2004,7 +1856,7 @@ still relying on advisory byte-range locks and refresh scans for correctness.
 Durability must be explicit. The default should be safe: a successful mutation
 has reached the log and passed the configured commit policy.
 
-The disk-log backend should support:
+The pouch log backend should support:
 
 - immediate fsync
 - batched fsync with a small delay and maximum operation count
@@ -2139,7 +1991,7 @@ Compaction creates a snapshot segment containing the current live records from
 candidate sealed segments and the installed prior snapshot. It never mutates
 existing segment contents.
 
-The current redesigned C backend has the first state-only form of that
+The current pouch backend has the first state-only form of that
 lifecycle. When scheduled compaction is enabled and its segment-count and byte
 thresholds are met after a state mutation, pouch rebuilds the namespace state
 projection, writes `snapshots/snapshot-<segment>.log`, installs it in the
@@ -2256,7 +2108,7 @@ Promotion is intentionally link-based. It must not read the staged payload into
 memory, copy the payload into a new state record, or re-encrypt the bytes. The
 committed state head should point at the staged payload span, then compaction may
 later materialize it into a normal state-put record if doing so is safe.
-The redesigned pouch backend currently has committed-state segment records,
+The pouch backend currently has committed-state segment records,
 state tombstones, staged `acquire_for_update` writes, link-style promotion,
 staged discard over the segmented state log, durable transaction decision
 records, foreground participant commit/rollback, open-time committed/rolled-back
@@ -2378,7 +2230,7 @@ notification touch after a committed queue mutation must not roll back the
 mutation, and a missing notification file must not prevent pollers from
 discovering committed queue objects during their next refresh.
 
-The current redesigned C backend implements the first ordinary queue surface
+The current pouch backend implements the first ordinary queue surface
 with internal `.lockd/queue` segmented records. Enqueue stores payload and
 delivery metadata durably; stats, ordinary dequeue, dequeue batch, ack, nack,
 extend, and pouch message methods operate over those records with visibility
@@ -2472,7 +2324,7 @@ lockd metadata document, including staged attachment updates when transactions
 are used. Attachment payloads are immutable object records addressed by stable
 object keys. Deletes are log records.
 
-The current redesigned C backend implements the first public attachment surface
+The current pouch backend implements the first public attachment surface
 by storing attachment payloads as durable internal records under
 `.lockd/attachments`, keyed by escaped namespace, state key, and attachment
 name. Client-level and bound-lease upload, list, get, delete, and delete-all
@@ -2510,7 +2362,7 @@ The pouch backend supports an optional retention sweep through
 `lc_pouch_maintenance_run()`. The sweep scans current namespace state metadata
 and removes state when `updated_at_unix` is older than
 `retention_updated_before_unix`. Sweep failures for individual keys do not abort
-the whole pass. The logstore directories themselves remain; deletion is
+the whole pass. Namespace history directories themselves remain; deletion is
 represented by append-log tombstone records and later reclaimed by compaction.
 
 Cleanup tasks must be restartable and idempotent:
@@ -2677,19 +2529,16 @@ comparison suite. It starts the current `pkt.systems/lockd` disk backend,
 exercises equivalent public LQL scenarios against that server and an actual
 liblockdc pouch instance, and reports matched documents, page counts, stream
 bytes, first-page and later-page latency, pouch query candidate metadata, and
-C-side pouch timings. Pouch results also report private result-cache entry,
-hit, miss, and put counters so repeated-page and repeated-query runs can show
-when the sorted matched-key vector is reused instead of rebuilt. This suite is
+C-side pouch timings. This suite is
 intentionally outside the
 liblockdc release gate: it is a performance and stress-test tool for iterative
 tuning, including short iteration runs and larger multi-page datasets that expose
 cursor, segment, and index behavior.
-The 4096-document tuning run found the first major result-cache-era regression
-in the numeric range path: primary range candidate collection was revalidating
-the same positive range term for each candidate key, producing a quadratic
-first-page cost. The docID helper now skips the already-selected primary range
-term, matching the equality path's primary-term handling while preserving
-additional positive ranges and negative range filters.
+The 4096-document tuning run found a numeric range regression: primary range
+candidate collection was revalidating the same positive range term for each
+candidate key, producing a quadratic first-page cost. The active range reader
+now skips the already-selected primary range term while preserving additional
+positive ranges and negative range filters.
 The benchmark output includes allocation/free counts and peak outstanding bytes
 for cases that run through the benchmark allocator. These are smoke-sized local
 benchmarks rather than performance gates; the larger matrix above remains the
@@ -2763,10 +2612,10 @@ Integration tests:
   using ordered metadata summaries with stable pagination, stream results,
   exclude query-hidden metadata, and load state payloads only for document rows
 - query pagination, namespace isolation, public-read results, and streamed
-  document responses work against disk summaries
+  document responses work against pouch summaries
 - query flush-wait and refresh-wait contracts observe committed summary rows
   without full payload reads
-- query index rebuild/upgrade handles existing disk state
+- query index rebuild/upgrade handles existing pouch state
 - large-namespace low-match queries do not require loading every payload
 - remove semantics: empty remove, remove version bump, keepalive after remove,
   stale remove/update CAS failures, remove then recreate
@@ -2800,7 +2649,7 @@ Integration tests:
   internal transaction/backend-id records remain usable
 
 Current default local integration coverage in `tests/integration` exercises
-public `pouch://` clients sharing one disk root for state and attachment
+public `pouch://` clients sharing one pouch root for state and attachment
 persistence, query-hidden metadata versioning and persistence, attachment
 prevent-overwrite and overwrite semantics, attachment delete/delete-all
 semantics, client-level attachment APIs, namespace query-engine configuration
@@ -2844,7 +2693,7 @@ errors for LQL-shaped selector field projections, durable namespace query
 configuration, index flush, and local single-node transaction-coordinator
 leader, cluster, and resource-manager state.
 
-Current disk unit coverage includes queue nack and extend allocator-failure
+Current pouch unit coverage includes queue nack and extend allocator-failure
 paths, TTL expiry, retry-exhaustion replay paths that prove failed
 redelivery-control mutations leave the active lease ackable and terminal queue
 states remain terminal after reopen, forked cross-process CAS contention that
@@ -2853,19 +2702,19 @@ retention sweep replay idempotence after reopen, and forked queue dequeue
 contention that proves a single message is leased to only one independent
 process, plus `if_needed` compaction skip reasons for both below-min-log-size
 and below-obsolete-threshold stores. A source-level allocator contract also
-rejects raw platform allocation calls in the storage interface and disk-log
+rejects raw platform allocation calls in the storage interface and pouch log
 backend.
 
 The storage tests should use fault-injection allocators and fault-injection file
 operations where practical. Correctness should be demonstrated by reopening a
-fresh store and rebuilding indexes from disk, not only by observing in-memory
-state after writes.
+fresh store and rebuilding indexes from pouch history, not only by observing
+in-memory state after writes.
 
 ## Implementation Order
 
 1. Private pouch allocator, buffers, error helpers, and test allocator.
 2. Backend interface and no-op/fake backend used by tests.
-3. Disk layout, key normalization, file locking, and lock cache.
+3. Pouch layout, key normalization, file locking, and lock cache.
 4. Record encoder/decoder with tests and fuzz target.
 5. Namespace open/refresh/replay and in-memory indexes.
 6. Metadata and state operations with CAS and fsync.

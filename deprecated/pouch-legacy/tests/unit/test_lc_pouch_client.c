@@ -140,8 +140,7 @@ static void test_cleanup_tree(const char *path) {
     struct stat st;
     int written;
 
-    if (strcmp(entry->d_name, ".") == 0 ||
-        strcmp(entry->d_name, "..") == 0) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
     written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);

@@ -299,8 +299,10 @@ func benchmarkLockdDisk(b *testing.B, documents bool) {
 					for _, scenario := range scenarios {
 						scenario := scenario
 						b.Run(scenario, func(b *testing.B) {
+							matched := runLockdDiskQuery(b, h, rows, engine, scenario, documents)
+							b.StopTimer()
 							b.ResetTimer()
-							var matched int
+							b.StartTimer()
 							for i := 0; i < b.N; i++ {
 								matched = runLockdDiskQuery(b, h, rows, engine, scenario, documents)
 							}
@@ -324,8 +326,10 @@ func BenchmarkFastLockdDisk(b *testing.B) {
 		"RecursiveExists"} {
 		scenario := scenario
 		b.Run("Keys/Docs"+strconv.FormatInt(rows, 10)+"/index/"+scenario, func(b *testing.B) {
+			matched := runLockdDiskQuery(b, h, rows, "index", scenario, false)
+			b.StopTimer()
 			b.ResetTimer()
-			var matched int
+			b.StartTimer()
 			for i := 0; i < b.N; i++ {
 				matched = runLockdDiskQuery(b, h, rows, "index", scenario, false)
 			}

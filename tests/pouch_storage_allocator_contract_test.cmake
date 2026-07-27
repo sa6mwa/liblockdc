@@ -5,8 +5,21 @@ endif()
 set(pouch_storage_files
     "src/lc_pouch.h"
     "src/lc_pouch.c"
+    "src/lc_pouch_client.c"
+    "src/lc_pouch_index.c"
+    "src/lc_pouch_index.h"
+    "src/lc_pouch_index_doc.c"
+    "src/lc_pouch_index_posting.c"
+    "src/lc_pouch_index_result.c"
+    "src/lc_pouch_index_terms.c"
+    "src/lc_pouch_internal.h"
     "src/lc_pouch_namespace.c"
+    "src/lc_pouch_namespace.h"
     "src/lc_pouch_path.c"
+    "src/lc_pouch_path.h"
+    "src/lc_pouch_query_index.c"
+    "src/lc_pouch_query_index.h"
+    "src/lc_pouch_state.c"
 )
 
 foreach(pouch_storage_file IN LISTS pouch_storage_files)

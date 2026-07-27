@@ -345,8 +345,7 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
   open_opts.query_engine = "index";
   open_opts.single_writer = 1;
   store = NULL;
-  rc = lc_pouch_open_with_options(root, &allocator, &open_opts, &store,
-                                       error);
+  rc = lc_pouch_open_with_options(root, &allocator, &open_opts, &store, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -405,8 +404,8 @@ static int seed_field_rows(const char *root, uint64_t rows, lc_error *error) {
       meta.owner = owner;
       meta.state_etag = put_res.new_state_etag;
       meta.version = put_res.new_version;
-      rc = store->store_meta(store, "bench", key, &meta, NULL, &meta_res,
-                             error);
+      rc =
+          store->store_meta(store, "bench", key, &meta, NULL, &meta_res, error);
     }
     if (source != NULL) {
       lc_source_close(source);

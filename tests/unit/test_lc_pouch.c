@@ -1,7 +1,7 @@
+#include <errno.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,13 +9,13 @@
 
 #include <cmocka.h>
 
+#include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_pouch.h"
 #include "lc_pouch_index.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
-#include "../support/lc_test_tmp.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -23,7 +23,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define POUCH_UNIT_TMP_PREFIX "/tmp/liblockdc-unit-pouch-redesign-"
+#define POUCH_UNIT_TMP_PREFIX "/tmp/liblockdc-unit-pouch-"
 
 typedef struct pouch_value_doc {
   lonejson_int64 value;
@@ -64,9 +64,8 @@ static void make_root(const char *suffix, char *root, size_t root_size) {
   written = snprintf(template_path, sizeof(template_path),
                      POUCH_UNIT_TMP_PREFIX "%s-XXXXXX", suffix);
   assert_true(written > 0 && (size_t)written < sizeof(template_path));
-  assert_true(
-      lc_test_tmp_mkdtemp(template_path, root, root_size,
-                          POUCH_UNIT_TMP_PREFIX));
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, root_size,
+                                  POUCH_UNIT_TMP_PREFIX));
 }
 
 static void make_endpoint(const char *root, char *endpoint,
@@ -79,7 +78,7 @@ static void cleanup_root(const char *root) {
 }
 
 static void cleanup_all_roots(void) {
-  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-pouch-redesign-",
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-pouch-",
                             POUCH_UNIT_TMP_PREFIX);
 }
 
@@ -198,8 +197,8 @@ static void test_index_docid_set_merges_sorted_sets(void **state) {
   assert_int_equal(out.items[1], 9UL);
 
   lc_pouch_index_docid_set_cleanup(&allocator, &out);
-  rc = lc_pouch_index_docid_set_subtract_sorted(&left, &right, &out,
-                                                &allocator, &error);
+  rc = lc_pouch_index_docid_set_subtract_sorted(&left, &right, &out, &allocator,
+                                                &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(out.count, 1);
   assert_int_equal(out.items[0], 1UL);
@@ -299,8 +298,7 @@ static void test_index_doc_table_maps_sorted_keys_to_docids(void **state) {
   lc_pouch_index_doc_table_cleanup(&allocator, &table);
 }
 
-static void test_index_result_key_list_sorts_and_compacts_docids(
-    void **state) {
+static void test_index_result_key_list_sorts_and_compacts_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_result_key_list list;
   lc_error error;
@@ -353,8 +351,8 @@ static void test_index_result_key_list_sorts_and_compacts_docids(
   lc_error_cleanup(&error);
 }
 
-static void test_index_result_docid_list_sorts_and_compacts_docids(
-    void **state) {
+static void
+test_index_result_docid_list_sorts_and_compacts_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_result_docid_list list;
   lc_error error;
@@ -365,24 +363,18 @@ static void test_index_result_docid_list_sorts_and_compacts_docids(
   lc_error_init(&error);
   memset(&list, 0, sizeof(list));
 
-  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 3UL, 2U,
-                                            &error);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 3UL, 2U, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 1UL, 1U,
-                                            &error);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 1UL, 1U, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 2UL, 0U,
-                                            &error);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 2UL, 0U, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 2UL, 3U,
-                                            &error);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 2UL, 3U, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 3UL, 1U,
-                                            &error);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 3UL, 1U, &error);
   assert_int_equal(rc, LC_OK);
 
-  rc = lc_pouch_index_result_docid_list_sort_compact(&allocator, &list,
-                                                     &error);
+  rc = lc_pouch_index_result_docid_list_sort_compact(&allocator, &list, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 3);
   assert_int_equal(list.items[0].doc_id, 1);
@@ -462,14 +454,14 @@ static void test_index_term_fields_find_sorted_ranges(void **state) {
 
   first = 99UL;
   count = 88UL;
-  found = lc_pouch_index_term_fields_find(fields, 3U, "6e616d65", &first,
-                                          &count);
+  found =
+      lc_pouch_index_term_fields_find(fields, 3U, "6e616d65", &first, &count);
   assert_true(found);
   assert_int_equal(first, 2);
   assert_int_equal(count, 4);
 
-  found = lc_pouch_index_term_fields_find(fields, 3U, "6f776e6572", &first,
-                                          &count);
+  found =
+      lc_pouch_index_term_fields_find(fields, 3U, "6f776e6572", &first, &count);
   assert_false(found);
   assert_int_equal(first, 2);
   assert_int_equal(count, 4);
@@ -517,14 +509,14 @@ static void test_index_term_values_find_sorted_ranges(void **state) {
 
   first = 99UL;
   count = 88UL;
-  found = lc_pouch_index_term_values_find(
-      values, 4U, "6e616d65", "626f62", &first, &count);
+  found = lc_pouch_index_term_values_find(values, 4U, "6e616d65", "626f62",
+                                          &first, &count);
   assert_true(found);
   assert_int_equal(first, 3);
   assert_int_equal(count, 1);
 
-  found = lc_pouch_index_term_values_find(
-      values, 4U, "6e616d65", "6361726f6c", &first, &count);
+  found = lc_pouch_index_term_values_find(values, 4U, "6e616d65", "6361726f6c",
+                                          &first, &count);
   assert_false(found);
   assert_int_equal(first, 3);
   assert_int_equal(count, 1);
@@ -607,8 +599,8 @@ static void test_index_term_rejects_invalid_sidecar_records(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
-  rc = lc_pouch_index_term_value_parse_line(bad_value_byte, &value,
-                                            &allocator, &error);
+  rc = lc_pouch_index_term_value_parse_line(bad_value_byte, &value, &allocator,
+                                            &error);
   assert_int_equal(rc, LC_ERR_INVALID);
 
   lc_free_with_allocator(&allocator, field.field_hex);
@@ -659,25 +651,25 @@ static void test_index_term_keys_sort_find_and_cleanup(void **state) {
   assert_string_equal(terms[3].field_hex, "74616773");
 
   found_index = 99U;
-  found = lc_pouch_index_term_keys_find(terms, 4U, "6e616d65", "626f62",
-                                        's', &found_index);
+  found = lc_pouch_index_term_keys_find(terms, 4U, "6e616d65", "626f62", 's',
+                                        &found_index);
   assert_true(found);
   assert_int_equal(found_index, 2);
   found = lc_pouch_index_term_keys_find(terms, 4U, "6e616d65", "616c696365",
                                         's', &found_index);
   assert_false(found);
-  found = lc_pouch_index_term_keys_find(terms, 4U, "6e616d65", "626f62",
-                                        'n', &found_index);
+  found = lc_pouch_index_term_keys_find(terms, 4U, "6e616d65", "626f62", 'n',
+                                        &found_index);
   assert_false(found);
 
   lc_pouch_index_term_keys_cleanup(&allocator, terms, 4U);
 }
 
-static void test_index_term_keys_build_exact_sorts_and_deduplicates(
-    void **state) {
+static void
+test_index_term_keys_build_exact_sorts_and_deduplicates(void **state) {
   lc_allocator allocator;
   lc_error error;
-  lc_pouch_index_plain_term raw_terms[4];
+  lc_pouch_index_plain_term raw_terms[5];
   lc_pouch_index_term_key *terms;
   size_t term_count;
   int rc;
@@ -697,11 +689,14 @@ static void test_index_term_keys_build_exact_sorts_and_deduplicates(
   raw_terms[3].field = "/name";
   raw_terms[3].value = "bob";
   raw_terms[3].value_type = 's';
+  raw_terms[4].field = "/age";
+  raw_terms[4].value = "30.0";
+  raw_terms[4].value_type = 'n';
   terms = NULL;
   term_count = 0U;
 
-  rc = lc_pouch_index_term_keys_build_exact(
-      raw_terms, 4U, &terms, &term_count, &allocator, &error);
+  rc = lc_pouch_index_term_keys_build_exact(raw_terms, 5U, &terms, &term_count,
+                                            &allocator, &error);
 
   assert_int_equal(rc, LC_OK);
   assert_non_null(terms);
@@ -716,12 +711,12 @@ static void test_index_term_keys_build_exact_sorts_and_deduplicates(
   assert_string_equal(terms[2].value_hex, "706c616e");
   assert_int_equal(terms[2].value_type, 's');
 
-  lc_pouch_index_term_keys_cleanup(&allocator, terms, 4U);
+  lc_pouch_index_term_keys_cleanup(&allocator, terms, 5U);
   lc_error_cleanup(&error);
 }
 
-static void test_index_term_keys_build_exact_rejects_invalid_terms(
-    void **state) {
+static void
+test_index_term_keys_build_exact_rejects_invalid_terms(void **state) {
   lc_allocator allocator;
   lc_error error;
   lc_pouch_index_plain_term raw_terms[2];
@@ -741,8 +736,8 @@ static void test_index_term_keys_build_exact_rejects_invalid_terms(
   terms = (lc_pouch_index_term_key *)1;
   term_count = 99U;
 
-  rc = lc_pouch_index_term_keys_build_exact(
-      raw_terms, 2U, &terms, &term_count, &allocator, &error);
+  rc = lc_pouch_index_term_keys_build_exact(raw_terms, 2U, &terms, &term_count,
+                                            &allocator, &error);
 
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(terms);
@@ -755,8 +750,22 @@ static void test_index_term_keys_build_exact_rejects_invalid_terms(
   raw_terms[1].value_type = 's';
   terms = (lc_pouch_index_term_key *)1;
   term_count = 99U;
-  rc = lc_pouch_index_term_keys_build_exact(
-      raw_terms, 2U, &terms, &term_count, &allocator, &error);
+  rc = lc_pouch_index_term_keys_build_exact(raw_terms, 2U, &terms, &term_count,
+                                            &allocator, &error);
+
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(terms);
+  assert_int_equal(term_count, 0);
+  lc_error_cleanup(&error);
+
+  lc_error_init(&error);
+  raw_terms[1].field = "/age";
+  raw_terms[1].value = "not-a-number";
+  raw_terms[1].value_type = 'n';
+  terms = (lc_pouch_index_term_key *)1;
+  term_count = 99U;
+  rc = lc_pouch_index_term_keys_build_exact(raw_terms, 2U, &terms, &term_count,
+                                            &allocator, &error);
 
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(terms);
@@ -846,80 +855,6 @@ static void test_index_term_keys_build_exact_for_field_rejects_invalid_values(
   lc_error_cleanup(&error);
 }
 
-static void test_index_term_values_collect_exact_ranges(void **state) {
-  lc_allocator allocator;
-  lc_error error;
-  lc_pouch_index_term_value values[4];
-  lc_pouch_index_term_key terms[4];
-  lc_pouch_index_term_range *ranges;
-  size_t range_count;
-  int rc;
-
-  (void)state;
-  lc_allocator_init(&allocator);
-  lc_error_init(&error);
-  memset(values, 0, sizeof(values));
-  values[0].field_hex = "616765";
-  values[0].value_hex = "3330";
-  values[0].first_line = 0UL;
-  values[0].line_count = 1UL;
-  values[0].first_byte = 0UL;
-  values[0].byte_count = 17UL;
-  values[1].field_hex = "6e616d65";
-  values[1].value_hex = "616c696365";
-  values[1].first_line = 1UL;
-  values[1].line_count = 2UL;
-  values[1].first_byte = 17UL;
-  values[1].byte_count = 43UL;
-  values[2].field_hex = "6e616d65";
-  values[2].value_hex = "626f62";
-  values[2].first_line = 3UL;
-  values[2].line_count = 1UL;
-  values[2].first_byte = 60UL;
-  values[2].byte_count = 19UL;
-  values[3].field_hex = "74616773";
-  values[3].value_hex = "706c616e";
-  values[3].first_line = 4UL;
-  values[3].line_count = 5UL;
-  values[3].first_byte = 79UL;
-  values[3].byte_count = 91UL;
-  terms[0].field_hex = "616765";
-  terms[0].value_hex = "3330";
-  terms[0].value_type = 'n';
-  terms[1].field_hex = "6e616d65";
-  terms[1].value_hex = "626f62";
-  terms[1].value_type = 's';
-  terms[2].field_hex = "74616773";
-  terms[2].value_hex = "706c616e";
-  terms[2].value_type = 'b';
-  terms[3].field_hex = "74616773";
-  terms[3].value_hex = "706c616e";
-  terms[3].value_type = 's';
-  ranges = NULL;
-  range_count = 99U;
-
-  rc = lc_pouch_index_term_values_collect_ranges(
-      values, 4U, terms, 4U, &ranges, &range_count, &allocator, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(range_count, 3);
-  assert_non_null(ranges);
-  assert_int_equal(ranges[0].first_line, 0);
-  assert_int_equal(ranges[0].line_count, 1);
-  assert_int_equal(ranges[0].first_byte, 0);
-  assert_int_equal(ranges[0].byte_count, 17);
-  assert_int_equal(ranges[1].first_line, 3);
-  assert_int_equal(ranges[1].line_count, 1);
-  assert_int_equal(ranges[1].first_byte, 60);
-  assert_int_equal(ranges[1].byte_count, 19);
-  assert_int_equal(ranges[2].first_line, 4);
-  assert_int_equal(ranges[2].line_count, 5);
-  assert_int_equal(ranges[2].first_byte, 79);
-  assert_int_equal(ranges[2].byte_count, 91);
-
-  lc_pouch_index_term_ranges_cleanup(&allocator, ranges);
-  lc_error_cleanup(&error);
-}
-
 static void test_index_term_fields_select_merged_range(void **state) {
   lc_pouch_index_term_field fields[3];
   lc_pouch_index_term_key terms[2];
@@ -955,9 +890,9 @@ static void test_index_term_fields_select_merged_range(void **state) {
   first_byte = 77UL;
   byte_count = 66UL;
 
-  found = lc_pouch_index_term_fields_select_range(
-      fields, 3U, NULL, terms, 2U, 9UL, 171UL, &first, &count, &first_byte,
-      &byte_count);
+  found = lc_pouch_index_term_fields_select_range(fields, 3U, NULL, terms, 2U,
+                                                  9UL, 171UL, &first, &count,
+                                                  &first_byte, &byte_count);
   assert_true(found);
   assert_int_equal(first, 0);
   assert_int_equal(count, 9);
@@ -965,8 +900,8 @@ static void test_index_term_fields_select_merged_range(void **state) {
   assert_int_equal(byte_count, 171);
 
   found = lc_pouch_index_term_fields_select_range(
-      fields, 3U, "6e616d65", NULL, 0U, 9UL, 171UL, &first, &count,
-      &first_byte, &byte_count);
+      fields, 3U, "6e616d65", NULL, 0U, 9UL, 171UL, &first, &count, &first_byte,
+      &byte_count);
   assert_true(found);
   assert_int_equal(first, 2);
   assert_int_equal(count, 4);
@@ -1008,34 +943,34 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   generation.index_seq = 17UL;
   generation.row_count = 6UL;
   generation.row_hash = 12345UL;
-  rc = lc_pouch_index_term_table_find_or_add(
-      &allocator, &generation.terms, "2f76", "31", 'n', &numeric_term_id,
-      &error);
+  rc = lc_pouch_index_term_table_find_or_add(&allocator, &generation.terms,
+                                             "2f76", "31", 'n',
+                                             &numeric_term_id, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_index_term_table_find_or_add(
-      &allocator, &generation.terms, "2f76", "31", 'n',
-      &numeric_term_id_again, &error);
+  rc = lc_pouch_index_term_table_find_or_add(&allocator, &generation.terms,
+                                             "2f76", "31", 'n',
+                                             &numeric_term_id_again, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(numeric_term_id_again, numeric_term_id);
-  rc = lc_pouch_index_term_table_find_or_add(
-      &allocator, &generation.terms, "2f76", "31", 's', &string_term_id,
-      &error);
+  rc = lc_pouch_index_term_table_find_or_add(&allocator, &generation.terms,
+                                             "2f76", "31", 's', &string_term_id,
+                                             &error);
   assert_int_equal(rc, LC_OK);
   assert_true(string_term_id != numeric_term_id);
 
   numeric_doc_ids[0] = 1UL;
   numeric_doc_ids[1] = 3UL;
   numeric_doc_ids[2] = 5UL;
-  rc = lc_pouch_index_term_posting_table_put(
-      &allocator, &generation.postings, numeric_term_id, numeric_doc_ids, 3U,
-      &error);
+  rc = lc_pouch_index_term_posting_table_put(&allocator, &generation.postings,
+                                             numeric_term_id, numeric_doc_ids,
+                                             3U, &error);
   assert_int_equal(rc, LC_OK);
   for (index = 0U; index < 64U; ++index) {
     string_doc_ids[index] = (unsigned long)index;
   }
-  rc = lc_pouch_index_term_posting_table_put(
-      &allocator, &generation.postings, string_term_id, string_doc_ids, 64U,
-      &error);
+  rc = lc_pouch_index_term_posting_table_put(&allocator, &generation.postings,
+                                             string_term_id, string_doc_ids,
+                                             64U, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
@@ -1051,8 +986,8 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   assert_int_equal(decoded.row_count, 6);
   assert_int_equal(decoded.row_hash, 12345);
 
-  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "2f76", "31",
-                                             'n', &found_term_id));
+  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "2f76", "31", 'n',
+                                             &found_term_id));
   assert_int_equal(found_term_id, numeric_term_id);
   rc = lc_pouch_index_term_posting_table_append_to_set(
       &decoded.postings, found_term_id, &numeric_set, &allocator, &error);
@@ -1062,8 +997,8 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   assert_int_equal(numeric_set.items[1], 3);
   assert_int_equal(numeric_set.items[2], 5);
 
-  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "2f76", "31",
-                                             's', &found_term_id));
+  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "2f76", "31", 's',
+                                             &found_term_id));
   assert_int_equal(found_term_id, string_term_id);
   rc = lc_pouch_index_term_posting_table_append_to_set(
       &decoded.postings, found_term_id, &string_set, &allocator, &error);
@@ -1080,8 +1015,8 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_index_term_generation_rejects_corrupt_identity_and_payload(
-    void **state) {
+static void
+test_index_term_generation_rejects_corrupt_identity_and_payload(void **state) {
   lc_allocator allocator;
   lc_error error;
   lc_pouch_index_term_generation generation;
@@ -1114,8 +1049,8 @@ static void test_index_term_generation_rejects_corrupt_identity_and_payload(
   assert_int_equal(rc, LC_OK);
   doc_ids[0] = 2UL;
   doc_ids[1] = 4UL;
-  rc = lc_pouch_index_term_posting_table_put(
-      &allocator, &generation.postings, term_id, doc_ids, 2U, &error);
+  rc = lc_pouch_index_term_posting_table_put(&allocator, &generation.postings,
+                                             term_id, doc_ids, 2U, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
                                              &length, &error);
@@ -1240,24 +1175,24 @@ static void test_index_posting_roundtrips_dense_docids(void **state) {
   lc_error_init(&error);
   posting.length = 0U;
 
-  rc = lc_pouch_index_dense_posting_append_sorted_unique(
-      &posting, 1UL, &added, &allocator, &error);
+  rc = lc_pouch_index_dense_posting_append_sorted_unique(&posting, 1UL, &added,
+                                                         &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
-  rc = lc_pouch_index_dense_posting_append_sorted_unique(
-      &posting, 2UL, &added, &allocator, &error);
+  rc = lc_pouch_index_dense_posting_append_sorted_unique(&posting, 2UL, &added,
+                                                         &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
-  rc = lc_pouch_index_dense_posting_append_sorted_unique(
-      &posting, 2UL, &added, &allocator, &error);
+  rc = lc_pouch_index_dense_posting_append_sorted_unique(&posting, 2UL, &added,
+                                                         &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 0);
-  rc = lc_pouch_index_dense_posting_append_sorted_unique(
-      &posting, 3UL, &added, &allocator, &error);
+  rc = lc_pouch_index_dense_posting_append_sorted_unique(&posting, 3UL, &added,
+                                                         &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
-  rc = lc_pouch_index_dense_posting_append_sorted_unique(
-      &posting, 10UL, &added, &allocator, &error);
+  rc = lc_pouch_index_dense_posting_append_sorted_unique(&posting, 10UL, &added,
+                                                         &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
   assert_int_equal(posting.count, 4);
@@ -1272,8 +1207,8 @@ static void test_index_posting_roundtrips_dense_docids(void **state) {
   assert_int_equal(decoded.items[2], 3UL);
   assert_int_equal(decoded.items[3], 10UL);
 
-  rc = lc_pouch_index_dense_posting_append_sorted_unique(
-      &posting, 9UL, &added, &allocator, &error);
+  rc = lc_pouch_index_dense_posting_append_sorted_unique(&posting, 9UL, &added,
+                                                         &allocator, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_non_null(strstr(error.message, "requires sorted input"));
 
@@ -1335,28 +1270,28 @@ static void test_index_posting_selects_adaptive_encoding(void **state) {
   assert_int_equal(decoded.items[1], 130000UL);
 
   lc_pouch_index_docid_set_cleanup(&allocator, &decoded);
-  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
-      &dense, 1UL, &added, &allocator, &error);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(&dense, 1UL, &added,
+                                                            &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
-  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
-      &dense, 2UL, &added, &allocator, &error);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(&dense, 2UL, &added,
+                                                            &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
-  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
-      &dense, 2UL, &added, &allocator, &error);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(&dense, 2UL, &added,
+                                                            &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 0);
-  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
-      &dense, 3UL, &added, &allocator, &error);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(&dense, 3UL, &added,
+                                                            &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
-  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
-      &dense, 4UL, &added, &allocator, &error);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(&dense, 4UL, &added,
+                                                            &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
-  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
-      &dense, 5UL, &added, &allocator, &error);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(&dense, 5UL, &added,
+                                                            &allocator, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(added, 1);
   assert_int_equal(lc_pouch_index_adaptive_posting_selected_kind(&dense),
@@ -1371,8 +1306,8 @@ static void test_index_posting_selects_adaptive_encoding(void **state) {
   assert_int_equal(decoded.items[3], 4UL);
   assert_int_equal(decoded.items[4], 5UL);
 
-  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
-      &dense, 4UL, &added, &allocator, &error);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(&dense, 4UL, &added,
+                                                            &allocator, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_non_null(strstr(error.message, "requires sorted input"));
 
@@ -1469,8 +1404,8 @@ static int pouch_query_count_begin(void *context, lc_error *error) {
   return 1;
 }
 
-static int pouch_query_count_chunk(void *context, const char *bytes,
-                                   size_t len, lc_error *error) {
+static int pouch_query_count_chunk(void *context, const char *bytes, size_t len,
+                                   lc_error *error) {
   (void)context;
   (void)bytes;
   (void)len;
@@ -1565,8 +1500,8 @@ static void append_text_file(const char *path, const char *text) {
   assert_int_equal(fclose(fp), 0);
 }
 
-static void test_index_doc_table_generation_loads_identity_matched_file(
-    void **state) {
+static void
+test_index_doc_table_generation_loads_identity_matched_file(void **state) {
   lc_allocator allocator;
   lc_error error;
   lc_pouch_index_doc_table table;
@@ -1640,16 +1575,14 @@ static void test_index_doc_table_generation_loads_identity_matched_file(
   assert_false(valid);
   assert_int_equal(loaded.count, 0);
 
-  write_text_file(path,
-                  "format=pouch-doc-table-generation\nversion=1\n"
-                  "index_seq=77\nrow_count=2\nrow_hash=12345\n"
-                  "doc 0b 4 12 1 1\n"
-                  "doc 0a 3 11 1 0\n");
+  write_text_file(path, "format=pouch-doc-table-generation\nversion=1\n"
+                        "index_seq=77\nrow_count=2\nrow_hash=12345\n"
+                        "doc 0b 4 12 1 1\n"
+                        "doc 0a 3 11 1 0\n");
   present = 0;
   valid = 1;
   rc = lc_pouch_index_doc_table_generation_load_file(
-      &allocator, path, 77UL, 2UL, 12345UL, &loaded, &present, &valid,
-      &error);
+      &allocator, path, 77UL, 2UL, 12345UL, &loaded, &present, &valid, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(present);
   assert_false(valid);
@@ -1676,7 +1609,7 @@ static void replace_text_file_first(const char *path, const char *needle,
   length = ftell(fp);
   assert_true(length >= 0L);
   assert_int_equal(fseek(fp, 0L, SEEK_SET), 0);
-  bytes = (char *)malloc((size_t)length + 1U);
+  bytes = (char *)lc_alloc_with_allocator(NULL, (size_t)length + 1U);
   assert_non_null(bytes);
   assert_int_equal(fread(bytes, 1U, (size_t)length, fp), (size_t)length);
   assert_int_equal(fclose(fp), 0);
@@ -1692,12 +1625,12 @@ static void replace_text_file_first(const char *path, const char *needle,
                    (size_t)(match - bytes));
   assert_int_equal(fwrite(replacement, 1U, replacement_len, fp),
                    replacement_len);
-  assert_int_equal(
-      fwrite(match + needle_len, 1U,
-             (size_t)length - (size_t)(match - bytes) - needle_len, fp),
-      (size_t)length - (size_t)(match - bytes) - needle_len);
+  assert_int_equal(fwrite(match + needle_len, 1U,
+                          (size_t)length - (size_t)(match - bytes) - needle_len,
+                          fp),
+                   (size_t)length - (size_t)(match - bytes) - needle_len);
   assert_int_equal(fclose(fp), 0);
-  free(bytes);
+  lc_free_with_allocator(NULL, bytes);
 }
 
 typedef struct pouch_compaction_drift_hook_state {
@@ -1767,17 +1700,19 @@ static void assert_file_contains(const char *path, const char *needle) {
   length = ftell(fp);
   assert_true(length >= 0L);
   assert_int_equal(fseek(fp, 0L, SEEK_SET), 0);
-  bytes = (char *)malloc((size_t)length + 1U);
+  bytes = (char *)lc_alloc_with_allocator(NULL, (size_t)length + 1U);
   assert_non_null(bytes);
   nread = fread(bytes, 1U, (size_t)length, fp);
   assert_int_equal(nread, (size_t)length);
   assert_int_equal(fclose(fp), 0);
   bytes[nread] = '\0';
   if (strstr(bytes, needle) == NULL) {
-    free(bytes);
+    fprintf(stderr, "missing needle in %s: %s\n", path, needle);
+    fprintf(stderr, "file contents:\n%.*s\n", (int)nread, bytes);
+    lc_free_with_allocator(NULL, bytes);
     assert_non_null(NULL);
   }
-  free(bytes);
+  lc_free_with_allocator(NULL, bytes);
 }
 
 static void assert_file_not_contains(const char *path, const char *needle) {
@@ -1792,17 +1727,17 @@ static void assert_file_not_contains(const char *path, const char *needle) {
   length = ftell(fp);
   assert_true(length >= 0L);
   assert_int_equal(fseek(fp, 0L, SEEK_SET), 0);
-  bytes = (char *)malloc((size_t)length + 1U);
+  bytes = (char *)lc_alloc_with_allocator(NULL, (size_t)length + 1U);
   assert_non_null(bytes);
   nread = fread(bytes, 1U, (size_t)length, fp);
   assert_int_equal(nread, (size_t)length);
   assert_int_equal(fclose(fp), 0);
   bytes[nread] = '\0';
   if (strstr(bytes, needle) != NULL) {
-    free(bytes);
+    lc_free_with_allocator(NULL, bytes);
     assert_null(needle);
   }
-  free(bytes);
+  lc_free_with_allocator(NULL, bytes);
 }
 
 static void assert_path_file_contains(const char *root, const char *leaf,
@@ -1850,7 +1785,7 @@ static void find_single_marker_path(const char *root,
   }
   assert_int_equal(closedir(dir), 0);
   assert_int_equal(found, 1);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
 }
 
 static void make_peer_marker_path(const char *root, const char *namespace_name,
@@ -1863,11 +1798,10 @@ static void make_peer_marker_path(const char *root, const char *namespace_name,
   assert_non_null(namespace_path);
   written = snprintf(path, path_size, "%s/markers/%s", namespace_path, leaf);
   assert_true(written > 0 && (size_t)written < path_size);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
 }
 
-static void make_queue_notify_path(const char *root,
-                                   const char *namespace_name,
+static void make_queue_notify_path(const char *root, const char *namespace_name,
                                    const char *queue, char *path,
                                    size_t path_size) {
   char *namespace_path;
@@ -1881,8 +1815,8 @@ static void make_queue_notify_path(const char *root,
   written = snprintf(path, path_size, "%s/queue-notify/%s.notify",
                      namespace_path, escaped_queue);
   assert_true(written > 0 && (size_t)written < path_size);
-  free(escaped_queue);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, escaped_queue);
+  lc_free_with_allocator(NULL, namespace_path);
 }
 
 static unsigned long read_marker_sequence(const char *path, size_t *size) {
@@ -1959,13 +1893,12 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
   rc = lc_pouch_namespace_touch_marker(NULL, namespace_path,
                                        "writer-self.marker", 1UL, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
-                                               "writer-self.marker",
-                                               &self_snapshot, &error);
+  rc = lc_pouch_namespace_marker_snapshot_read(
+      NULL, namespace_path, "writer-self.marker", &self_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(self_snapshot.marker_count, 0UL);
-  assert_int_equal(lc_pouch_namespace_marker_snapshot_changed(
-                       &empty_snapshot, &self_snapshot),
+  assert_int_equal(lc_pouch_namespace_marker_snapshot_changed(&empty_snapshot,
+                                                              &self_snapshot),
                    0);
 
   make_peer_marker_path(root, "default", "writer-000000000002.marker",
@@ -1974,9 +1907,8 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
                         peer_a_path, sizeof(peer_a_path));
   write_text_file(peer_b_path, "writer_pid=2\nsequence=1\n");
   write_text_file(peer_a_path, "writer_pid=1\nsequence=1\npad=x\n");
-  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
-                                               "writer-self.marker",
-                                               &peer_snapshot, &error);
+  rc = lc_pouch_namespace_marker_snapshot_read(
+      NULL, namespace_path, "writer-self.marker", &peer_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(peer_snapshot.marker_count, 2UL);
   peer_a = strstr(peer_snapshot.fingerprint, "writer-000000000001.marker");
@@ -1984,22 +1916,20 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
   assert_non_null(peer_a);
   assert_non_null(peer_b);
   assert_true(peer_a < peer_b);
-  assert_int_equal(lc_pouch_namespace_marker_snapshot_changed(
-                       &self_snapshot, &peer_snapshot),
+  assert_int_equal(lc_pouch_namespace_marker_snapshot_changed(&self_snapshot,
+                                                              &peer_snapshot),
                    1);
 
-  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
-                                               "writer-self.marker",
-                                               &unchanged_snapshot, &error);
+  rc = lc_pouch_namespace_marker_snapshot_read(
+      NULL, namespace_path, "writer-self.marker", &unchanged_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lc_pouch_namespace_marker_snapshot_changed(
                        &peer_snapshot, &unchanged_snapshot),
                    0);
 
   write_text_file(peer_a_path, "writer_pid=1\nsequence=2\npad=longer\n");
-  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
-                                               "writer-self.marker",
-                                               &changed_snapshot, &error);
+  rc = lc_pouch_namespace_marker_snapshot_read(
+      NULL, namespace_path, "writer-self.marker", &changed_snapshot, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(changed_snapshot.marker_count, 2UL);
   assert_int_equal(lc_pouch_namespace_marker_snapshot_changed(
@@ -2011,14 +1941,14 @@ static void test_marker_snapshots_detect_peer_changes(void **state) {
   lc_pouch_namespace_marker_snapshot_cleanup(NULL, &peer_snapshot);
   lc_pouch_namespace_marker_snapshot_cleanup(NULL, &self_snapshot);
   lc_pouch_namespace_marker_snapshot_cleanup(NULL, &empty_snapshot);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
 
-static void test_marker_snapshots_treat_same_process_handles_as_peers(
-    void **state) {
+static void
+test_marker_snapshots_treat_same_process_handles_as_peers(void **state) {
   lc_pouch *first;
   lc_pouch *second;
   lc_pouch_namespace_marker_snapshot first_view;
@@ -2058,17 +1988,15 @@ static void test_marker_snapshots_treat_same_process_handles_as_peers(
                                        second->writer_marker_leaf, 1UL, &error);
   assert_int_equal(rc, LC_OK);
 
-  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
-                                               first->writer_marker_leaf,
-                                               &first_view, &error);
+  rc = lc_pouch_namespace_marker_snapshot_read(
+      NULL, namespace_path, first->writer_marker_leaf, &first_view, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(first_view.marker_count, 1UL);
   assert_non_null(strstr(first_view.fingerprint, second->writer_marker_leaf));
   assert_null(strstr(first_view.fingerprint, first->writer_marker_leaf));
 
-  rc = lc_pouch_namespace_marker_snapshot_read(NULL, namespace_path,
-                                               second->writer_marker_leaf,
-                                               &second_view, &error);
+  rc = lc_pouch_namespace_marker_snapshot_read(
+      NULL, namespace_path, second->writer_marker_leaf, &second_view, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(second_view.marker_count, 1UL);
   assert_non_null(strstr(second_view.fingerprint, first->writer_marker_leaf));
@@ -2076,15 +2004,15 @@ static void test_marker_snapshots_treat_same_process_handles_as_peers(
 
   lc_pouch_namespace_marker_snapshot_cleanup(NULL, &second_view);
   lc_pouch_namespace_marker_snapshot_cleanup(NULL, &first_view);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(second);
   lc_pouch_close(first);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
 
-static void test_marker_refresh_uses_directory_fast_path_and_force(
-    void **state) {
+static void
+test_marker_refresh_uses_directory_fast_path_and_force(void **state) {
   lc_pouch *pouch;
   lc_pouch_namespace_marker_refresh_state refresh;
   lc_pouch_namespace_marker_directory_snapshot before_dir;
@@ -2127,8 +2055,8 @@ static void test_marker_refresh_uses_directory_fast_path_and_force(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 0);
 
-  rc = lc_pouch_namespace_marker_directory_snapshot_read(
-      NULL, namespace_path, &before_dir, &error);
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(NULL, namespace_path,
+                                                         &before_dir, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_namespace_touch_marker(NULL, namespace_path,
                                        "writer-self.marker", 1UL, &error);
@@ -2142,8 +2070,8 @@ static void test_marker_refresh_uses_directory_fast_path_and_force(
   make_peer_marker_path(root, "default", "writer-000000000009.marker",
                         peer_path, sizeof(peer_path));
   write_text_file(peer_path, "writer_pid=9\nsequence=1\n");
-  rc = lc_pouch_namespace_marker_directory_snapshot_read(
-      NULL, namespace_path, &after_dir, &error);
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(NULL, namespace_path,
+                                                         &after_dir, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lc_pouch_namespace_marker_directory_snapshot_changed(
                        &before_dir, &after_dir),
@@ -2154,12 +2082,12 @@ static void test_marker_refresh_uses_directory_fast_path_and_force(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(should_scan, 1);
 
-  rc = lc_pouch_namespace_marker_directory_snapshot_read(
-      NULL, namespace_path, &before_dir, &error);
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(NULL, namespace_path,
+                                                         &before_dir, &error);
   assert_int_equal(rc, LC_OK);
   write_text_file(peer_path, "writer_pid=9\nsequence=2\npad=longer\n");
-  rc = lc_pouch_namespace_marker_directory_snapshot_read(
-      NULL, namespace_path, &after_dir, &error);
+  rc = lc_pouch_namespace_marker_directory_snapshot_read(NULL, namespace_path,
+                                                         &after_dir, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lc_pouch_namespace_marker_directory_snapshot_changed(
                        &before_dir, &after_dir),
@@ -2187,7 +2115,7 @@ static void test_marker_refresh_uses_directory_fast_path_and_force(
   assert_int_equal(should_scan, 1);
 
   lc_pouch_namespace_marker_refresh_state_cleanup(NULL, &refresh);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -2246,8 +2174,8 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
   options.single_writer = 1;
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "default", "cache/key", source, NULL,
                             &write_res, &error);
@@ -2280,8 +2208,8 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
 
   lc_pouch_state_read_result_cleanup(NULL, &read_res);
   lc_pouch_state_write_result_cleanup(NULL, &write_res);
-  free(segment_leaf);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, segment_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -2314,8 +2242,8 @@ test_shared_state_projection_cache_refreshes_peer_markers(void **state) {
   rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
-  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(writer, "default", "cache/key", source, NULL,
                             &write_res, &error);
@@ -2331,8 +2259,8 @@ test_shared_state_projection_cache_refreshes_peer_markers(void **state) {
   assert_string_equal(buffer, "{\"value\":1}");
   lc_pouch_state_read_result_cleanup(NULL, &read_res);
 
-  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(writer, "default", "cache/key", source, NULL,
                             &write_res, &error);
@@ -2348,8 +2276,8 @@ test_shared_state_projection_cache_refreshes_peer_markers(void **state) {
   assert_string_equal(buffer, "{\"value\":2}");
   lc_pouch_state_read_result_cleanup(NULL, &read_res);
 
-  rc = lc_source_from_memory("{\"value\":3}", strlen("{\"value\":3}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":3}", strlen("{\"value\":3}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(reader, "default", "cache/key", source, NULL,
                             &write_res, &error);
@@ -2407,10 +2335,8 @@ static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
 }
 
 static void write_client_state(lc_client *client, const char *key,
-                               const char *json,
-                               const char *expected_etag,
-                               long expected_version,
-                               int has_expected_version,
+                               const char *json, const char *expected_etag,
+                               long expected_version, int has_expected_version,
                                lc_update_res *out, lc_error *error) {
   lc_update_req update_req;
   lc_source *source;
@@ -2470,8 +2396,8 @@ static int pouch_acquire_for_update_handler(
     lc_error_init(&observer_error);
     rc = lc_sink_to_memory(&sink, &observer_error);
     assert_int_equal(rc, LC_OK);
-    rc = state->observer->get(state->observer, state->key, NULL, sink,
-                              &get_res, &observer_error);
+    rc = state->observer->get(state->observer, state->key, NULL, sink, &get_res,
+                              &observer_error);
     assert_int_equal(rc, LC_OK);
     if (state->expected_visible_during_update != NULL) {
       assert_false(get_res.no_content);
@@ -2489,12 +2415,12 @@ static int pouch_acquire_for_update_handler(
       char staging_key[256];
       const char *stage_id;
 
-      stage_id = update->lease->txn_id != NULL &&
-                         update->lease->txn_id[0] != '\0'
-                     ? update->lease->txn_id
-                     : update->lease->lease_id;
-      snprintf(staging_key, sizeof(staging_key), "%s/.staging/%s",
-               state->key, stage_id);
+      stage_id =
+          update->lease->txn_id != NULL && update->lease->txn_id[0] != '\0'
+              ? update->lease->txn_id
+              : update->lease->lease_id;
+      snprintf(staging_key, sizeof(staging_key), "%s/.staging/%s", state->key,
+               stage_id);
       sink = NULL;
       rc = lc_sink_to_memory(&sink, &observer_error);
       assert_int_equal(rc, LC_OK);
@@ -2592,14 +2518,14 @@ static void test_ensure_namespace_creates_per_namespace_layout(void **state) {
   assert_path_file_contains(namespace_path, "manifest",
                             "active_segment=seg-00000000000000000001.log");
 
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
 
-static void test_pouch_endpoint_opens_new_backend_without_http_engine(
-    void **state) {
+static void
+test_pouch_endpoint_opens_new_backend_without_http_engine(void **state) {
   lc_client_config config;
   lc_client *client;
   lc_error error;
@@ -2629,8 +2555,8 @@ static void test_pouch_endpoint_opens_new_backend_without_http_engine(
   lc_error_cleanup(&error);
 }
 
-static void test_pouch_endpoint_query_engine_routes_implicit_queries(
-    void **state) {
+static void
+test_pouch_endpoint_query_engine_routes_implicit_queries(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   lc_client *client;
@@ -2732,8 +2658,8 @@ static void test_pouch_endpoint_query_engine_routes_implicit_queries(
   lc_error_cleanup(&error);
 }
 
-static void test_pouch_namespace_config_persists_and_routes_implicit_queries(
-    void **state) {
+static void
+test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   static const char namespace_name[] = "docs/ns-config";
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
@@ -2868,8 +2794,8 @@ static void test_pouch_namespace_config_persists_and_routes_implicit_queries(
   cleanup_root(root);
 }
 
-static void test_pouch_tc_surface_persists_local_single_node_state(
-    void **state) {
+static void
+test_pouch_tc_surface_persists_local_single_node_state(void **state) {
   lc_client *client;
   lc_tc_lease_acquire_req acquire_req;
   lc_tc_lease_acquire_res acquire_res;
@@ -3204,7 +3130,7 @@ static void test_state_writes_roll_active_manifest_segment(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
   lc_pouch_state_write_result_cleanup(NULL, &second);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -3282,14 +3208,14 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   lc_pouch_close(pouch);
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, "team/alpha", "state/a", &read_result,
-                           &error);
+  rc =
+      lc_pouch_state_read(pouch, "team/alpha", "state/a", &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
 
-  rc = lc_pouch_state_read(pouch, "team/alpha", "state/b", &read_result,
-                           &error);
+  rc =
+      lc_pouch_state_read(pouch, "team/alpha", "state/b", &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   assert_string_equal(read_result.etag, "pouch-state-3");
@@ -3300,7 +3226,7 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &write_a);
   lc_pouch_state_write_result_cleanup(NULL, &delete_a);
   lc_pouch_state_write_result_cleanup(NULL, &write_b);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -3353,8 +3279,8 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_maintenance_retention_sweep_deletes_expired_state(
-    void **state) {
+static void
+test_maintenance_retention_sweep_deletes_expired_state(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_maintenance_options maintenance_options;
@@ -3449,8 +3375,8 @@ static void test_maintenance_retention_sweep_deletes_expired_state(
   lc_error_cleanup(&error);
 }
 
-static void test_maintenance_creates_namespace_without_prior_writes(
-    void **state) {
+static void
+test_maintenance_creates_namespace_without_prior_writes(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
   lc_pouch_maintenance_options maintenance_options;
@@ -3491,7 +3417,7 @@ static void test_maintenance_creates_namespace_without_prior_writes(
   assert_path_dir(namespace_path, "index");
   assert_path_file(namespace_path, "manifest");
 
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -3529,14 +3455,14 @@ static void test_maintenance_reports_threshold_skip(void **state) {
 
   rc = lc_source_from_memory("one", strlen("one"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
-                            &first, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL, &first,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
   rc = lc_source_from_memory("two", strlen("two"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
-                            &second, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL, &second,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
@@ -3544,8 +3470,7 @@ static void test_maintenance_reports_threshold_skip(void **state) {
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(maintenance_result.diagnostic,
-                      "below-segment-threshold");
+  assert_string_equal(maintenance_result.diagnostic, "below-segment-threshold");
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
   assert_true(maintenance_result.candidate_segment_count < 4UL);
@@ -3591,14 +3516,14 @@ static void test_maintenance_force_installs_snapshot(void **state) {
 
   rc = lc_source_from_memory("one", strlen("one"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
-                            &first, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL, &first,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
   rc = lc_source_from_memory("two", strlen("two"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
-                            &second, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL, &second,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
@@ -3622,8 +3547,8 @@ static void test_maintenance_force_installs_snapshot(void **state) {
   lc_pouch_close(pouch);
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, "team/alpha", "state/b", &read_result,
-                           &error);
+  rc =
+      lc_pouch_state_read(pouch, "team/alpha", "state/b", &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, bytes, sizeof(bytes));
@@ -3633,7 +3558,7 @@ static void test_maintenance_force_installs_snapshot(void **state) {
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
   lc_pouch_state_write_result_cleanup(NULL, &second);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -3677,14 +3602,14 @@ static void test_manifest_open_ignores_unmanifested_snapshot(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("one", strlen("one"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
-                            &first, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL, &first,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
   rc = lc_source_from_memory("two", strlen("two"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
-                            &second, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL, &second,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
@@ -3698,29 +3623,28 @@ static void test_manifest_open_ignores_unmanifested_snapshot(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
-  stray_snapshot_path =
-      lc_pouch_path_join(NULL, namespace_path, "snapshots/"
-                         "snapshot-00000000000000000099.log");
+  stray_snapshot_path = lc_pouch_path_join(NULL, namespace_path,
+                                           "snapshots/"
+                                           "snapshot-00000000000000000099.log");
   assert_non_null(stray_snapshot_path);
   write_text_file(stray_snapshot_path, "H 99\n");
 
-  rc = lc_pouch_namespace_manifest_open(
-      NULL, root, "team/alpha", &manifest, &cleanup_deleted_count,
-      &cleanup_pending_count, &error);
+  rc = lc_pouch_namespace_manifest_open(NULL, root, "team/alpha", &manifest,
+                                        &cleanup_deleted_count,
+                                        &cleanup_pending_count, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(manifest.latest_snapshot,
                       "snapshot-00000000000000000002.log");
   assert_int_equal(manifest.latest_snapshot_segment_id, 2UL);
-  assert_path_file_not_contains(
-      namespace_path, "manifest",
-      "snapshot=snapshot-00000000000000000099.log");
+  assert_path_file_not_contains(namespace_path, "manifest",
+                                "snapshot=snapshot-00000000000000000099.log");
 
   lc_pouch_namespace_manifest_cleanup(NULL, &manifest);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
   lc_pouch_state_write_result_cleanup(NULL, &second);
-  free(stray_snapshot_path);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, stray_snapshot_path);
+  lc_free_with_allocator(NULL, namespace_path);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -3790,13 +3714,12 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   assert_true(maintenance_result.aborted);
   assert_false(maintenance_result.compacted);
   assert_false(maintenance_result.skipped);
-  assert_path_file_not_contains(
-      namespace_path, "manifest",
-      "snapshot=snapshot-00000000000000000001.log");
+  assert_path_file_not_contains(namespace_path, "manifest",
+                                "snapshot=snapshot-00000000000000000001.log");
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(peer);
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -3882,14 +3805,13 @@ static void test_maintenance_aborts_on_same_size_segment_drift(void **state) {
   assert_true(maintenance_result.aborted);
   assert_false(maintenance_result.compacted);
   assert_false(maintenance_result.skipped);
-  assert_path_file_not_contains(
-      namespace_path, "manifest",
-      "snapshot=snapshot-00000000000000000001.log");
+  assert_path_file_not_contains(namespace_path, "manifest",
+                                "snapshot=snapshot-00000000000000000001.log");
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  free(segment_leaf);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, segment_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -3929,14 +3851,14 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
 
   rc = lc_source_from_memory("one", strlen("one"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
-                            &first, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL, &first,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
   rc = lc_source_from_memory("two", strlen("two"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
-                            &second, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL, &second,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
@@ -3944,9 +3866,8 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
   assert_non_null(namespace_path);
   snapshots_path = lc_pouch_path_join(NULL, namespace_path, "snapshots");
   assert_non_null(snapshots_path);
-  snapshot_path =
-      lc_pouch_path_join(NULL, snapshots_path,
-                         "snapshot-00000000000000000002.log");
+  snapshot_path = lc_pouch_path_join(NULL, snapshots_path,
+                                     "snapshot-00000000000000000002.log");
   assert_non_null(snapshot_path);
   assert_int_equal(chmod(snapshots_path, 0555), 0);
 
@@ -3968,9 +3889,9 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
   lc_pouch_state_write_result_cleanup(NULL, &second);
-  free(snapshot_path);
-  free(snapshots_path);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, snapshot_path);
+  lc_free_with_allocator(NULL, snapshots_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -4035,7 +3956,7 @@ static void test_maintenance_reports_interval_skip(void **state) {
   assert_path_file(namespace_path,
                    "snapshots/snapshot-00000000000000000002.log");
 
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -4080,31 +4001,27 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
 
   rc = lc_source_from_memory("one", strlen("one"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
-                            &first, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL, &first,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
   rc = lc_source_from_memory("two", strlen("two"), &body, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
-                            &second, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL, &second,
+                            &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
-  snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
-           namespace_path);
-  snprintf(segments_path, sizeof(segments_path), "%s/segments",
-           namespace_path);
+  snprintf(manifest_path, sizeof(manifest_path), "%s/manifest", namespace_path);
+  snprintf(segments_path, sizeof(segments_path), "%s/segments", namespace_path);
   snprintf(snapshots_path, sizeof(snapshots_path), "%s/snapshots",
            namespace_path);
   segment_one_path =
-      lc_pouch_path_join(NULL, segments_path,
-                         "seg-00000000000000000001.log");
+      lc_pouch_path_join(NULL, segments_path, "seg-00000000000000000001.log");
   segment_two_path =
-      lc_pouch_path_join(NULL, segments_path,
-                         "seg-00000000000000000002.log");
+      lc_pouch_path_join(NULL, segments_path, "seg-00000000000000000002.log");
   assert_non_null(segment_one_path);
   assert_non_null(segment_two_path);
   assert_true(path_is_file(segment_one_path));
@@ -4156,14 +4073,12 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   assert_false(path_is_file(segment_two_path));
   assert_file_not_contains(manifest_path, "obsolete_segment=");
 
-  stale_snapshot_path =
-      lc_pouch_path_join(NULL, snapshots_path,
-                         "snapshot-00000000000000000099.log");
+  stale_snapshot_path = lc_pouch_path_join(NULL, snapshots_path,
+                                           "snapshot-00000000000000000099.log");
   assert_non_null(stale_snapshot_path);
   write_text_file(stale_snapshot_path, "stale\n");
-  append_text_file(
-      manifest_path,
-      "obsolete_snapshot=snapshot-00000000000000000099.log\n");
+  append_text_file(manifest_path,
+                   "obsolete_snapshot=snapshot-00000000000000000099.log\n");
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
@@ -4178,10 +4093,10 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
   lc_pouch_state_write_result_cleanup(NULL, &second);
-  free(segment_one_path);
-  free(segment_two_path);
-  free(stale_snapshot_path);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, segment_one_path);
+  lc_free_with_allocator(NULL, segment_two_path);
+  lc_free_with_allocator(NULL, stale_snapshot_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -4255,9 +4170,8 @@ static void test_snapshot_high_water_survives_compaction_reopen(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
-  assert_path_file_contains(namespace_path,
-                            "snapshots/snapshot-00000000000000000003.log",
-                            "H 3\n");
+  assert_path_file_contains(
+      namespace_path, "snapshots/snapshot-00000000000000000003.log", "H 3\n");
   lc_pouch_close(pouch);
 
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
@@ -4276,7 +4190,7 @@ static void test_snapshot_high_water_survives_compaction_reopen(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &write_a);
   lc_pouch_state_write_result_cleanup(NULL, &delete_a);
   lc_pouch_state_write_result_cleanup(NULL, &write_b);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -4335,9 +4249,8 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   assert_non_null(namespace_path);
   assert_path_file(namespace_path,
                    "snapshots/snapshot-00000000000000000002.log");
-  assert_path_file_contains(namespace_path,
-                            "snapshots/snapshot-00000000000000000002.log",
-                            " 1 1");
+  assert_path_file_contains(
+      namespace_path, "snapshots/snapshot-00000000000000000002.log", " 1 1");
 
   lc_pouch_close(pouch);
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
@@ -4356,14 +4269,14 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_state_write_result_cleanup(NULL, &metadata_result);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
 
-static void test_namespace_manifest_repairs_from_existing_segments(
-    void **state) {
+static void
+test_namespace_manifest_repairs_from_existing_segments(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_state_write_result write_result;
@@ -4394,8 +4307,7 @@ static void test_namespace_manifest_repairs_from_existing_segments(
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
-  snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
-           namespace_path);
+  snprintf(manifest_path, sizeof(manifest_path), "%s/manifest", namespace_path);
   write_text_file(manifest_path, "broken=true\nactive_segment=bad\n");
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
@@ -4411,7 +4323,7 @@ static void test_namespace_manifest_repairs_from_existing_segments(
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -4450,17 +4362,17 @@ static void test_staged_state_writes_durable_decision_records(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "team/alpha", "state/decision", source,
-                            NULL, &committed, &error);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/decision", source, NULL,
+                            &committed, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "team/alpha", "state/decision",
                                   "commit-txn", source, NULL, &staged_commit,
@@ -4473,12 +4385,12 @@ static void test_staged_state_writes_durable_decision_records(void **state) {
                                      &error);
   assert_int_equal(rc, LC_OK);
 
-  rc = lc_source_from_memory("{\"value\":3}", strlen("{\"value\":3}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":3}", strlen("{\"value\":3}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "team/alpha", "state/discard",
-                                  "discard-txn", source, NULL,
-                                  &staged_discard, &error);
+                                  "discard-txn", source, NULL, &staged_discard,
+                                  &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -4501,8 +4413,8 @@ static void test_staged_state_writes_durable_decision_records(void **state) {
   assert_file_contains(segment_path, committed_hex);
   assert_file_contains(segment_path, discarded_hex);
 
-  free(segment_leaf);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, segment_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_state_write_result_cleanup(NULL, &staged_discard);
   lc_pouch_state_write_result_cleanup(NULL, &promoted);
   lc_pouch_state_write_result_cleanup(NULL, &staged_commit);
@@ -4512,8 +4424,8 @@ static void test_staged_state_writes_durable_decision_records(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_staged_decision_recovery_tombstones_interrupted_discard(
-    void **state) {
+static void
+test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
   lc_pouch *pouch;
   lc_source *source;
   lc_pouch_state_write_result staged;
@@ -4544,12 +4456,11 @@ static void test_staged_decision_recovery_tombstones_interrupted_discard(
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_source_from_memory("{\"value\":9}", strlen("{\"value\":9}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":9}", strlen("{\"value\":9}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "team/alpha", "state/recover",
-                                  "txn-recover", source, NULL, &staged,
-                                  &error);
+                                  "txn-recover", source, NULL, &staged, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -4584,8 +4495,8 @@ static void test_staged_decision_recovery_tombstones_interrupted_discard(
   assert_file_contains(segment_path, staged_key_hex);
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  free(segment_leaf);
-  free(namespace_path);
+  lc_free_with_allocator(NULL, segment_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_state_write_result_cleanup(NULL, &staged);
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -4641,8 +4552,8 @@ static void test_client_update_get_load_roundtrips_state(void **state) {
   lc_get_res_cleanup(&get_res);
   memset(&get_res, 0, sizeof(get_res));
 
-  rc = reader->load(reader, key, &pouch_value_map, &doc, NULL, &get_res,
-                    &error);
+  rc =
+      reader->load(reader, key, &pouch_value_map, &doc, NULL, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   assert_int_equal(doc.value, 42);
@@ -4679,8 +4590,8 @@ static void test_client_update_enforces_state_preconditions(void **state) {
   lc_update_req_init(&update_req);
   update_req.lease.key = "state/current";
   update_req.if_state_etag = "wrong";
-  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &second, &error);
   source->close(source);
@@ -4693,8 +4604,8 @@ static void test_client_update_enforces_state_preconditions(void **state) {
   update_req.if_state_etag = first.new_state_etag;
   update_req.if_version = 99L;
   update_req.has_if_version = 1;
-  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &second, &error);
   source->close(source);
@@ -4742,8 +4653,8 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
   snprintf(key, sizeof(key), "state/mutate/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
-  write_client_state(client, key, "{\"counter\":1,\"drop\":true}", NULL, 0L,
-                     0, &update_res, &error);
+  write_client_state(client, key, "{\"counter\":1,\"drop\":true}", NULL, 0L, 0,
+                     &update_res, &error);
 
   mutations[0] = "/counter++";
   mutations[1] = "/status=\"ok\"";
@@ -5359,8 +5270,8 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_txn_decisions_stage_state_update_mutate_and_index_refresh(
-    void **state) {
+static void
+test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   const char *mutations[2];
@@ -5456,8 +5367,7 @@ static void test_txn_decisions_stage_state_update_mutate_and_index_refresh(
   enqueue_req.namespace_name = "docs/txn-index";
   enqueue_req.queue = "txn-mixed";
   enqueue_req.visibility_timeout_seconds = 120L;
-  rc = lc_source_from_memory("mixed-job", strlen("mixed-job"), &source,
-                             &error);
+  rc = lc_source_from_memory("mixed-job", strlen("mixed-job"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
   source->close(source);
@@ -5536,8 +5446,8 @@ static void test_txn_decisions_stage_state_update_mutate_and_index_refresh(
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, state_bytes, sizeof(state_bytes));
-  assert_true(bytes_contain_text(state_bytes, strlen(state_bytes),
-                                 "\"counter\":42"));
+  assert_true(
+      bytes_contain_text(state_bytes, strlen(state_bytes), "\"counter\":42"));
   assert_true(bytes_contain_text(state_bytes, strlen(state_bytes),
                                  "\"status\":\"mutated\""));
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -5551,9 +5461,9 @@ static void test_txn_decisions_stage_state_update_mutate_and_index_refresh(
   update_req.lease.key = "doc/rollback";
   update_req.lease.txn_id = "txn-state-rollback";
   update_req.content_type = "application/json";
-  rc = lc_source_from_memory("{\"category\":\"planning\",\"counter\":7}",
-                             strlen("{\"category\":\"planning\",\"counter\":7}"),
-                             &source, &error);
+  rc = lc_source_from_memory(
+      "{\"category\":\"planning\",\"counter\":7}",
+      strlen("{\"category\":\"planning\",\"counter\":7}"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &update_res, &error);
   source->close(source);
@@ -5694,8 +5604,8 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_client_queue_mutations_touch_notification_marker(
-    void **state) {
+static void
+test_client_queue_mutations_touch_notification_marker(void **state) {
   lc_client *client;
   lc_source *source;
   lc_enqueue_req enqueue_req;
@@ -5810,8 +5720,8 @@ static void test_client_queue_dequeue_batch_returns_page(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_client_queue_dequeue_with_state_uses_pouch_lease(
-    void **state) {
+static void
+test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
   lc_client *client;
   lc_source *source;
   lc_sink *sink;
@@ -5873,8 +5783,8 @@ static void test_client_queue_dequeue_with_state_uses_pouch_lease(
   assert_int_equal(state_lease->lease_expires_at_unix,
                    message->not_visible_until_unix);
 
-  rc = lc_source_from_memory("{\"handled\":true}",
-                             strlen("{\"handled\":true}"), &source, &error);
+  rc = lc_source_from_memory("{\"handled\":true}", strlen("{\"handled\":true}"),
+                             &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = state_lease->update(state_lease, source, NULL, &error);
   source->close(source);
@@ -6043,8 +5953,8 @@ static int pouch_subscribe_state_ack_handler(void *context, lc_message *message,
 }
 
 static int pouch_subscribe_missing_terminal_handler(void *context,
-                                                   lc_message *message,
-                                                   lc_error *error) {
+                                                    lc_message *message,
+                                                    lc_error *error) {
   pouch_subscribe_capture *capture;
 
   (void)error;
@@ -6288,8 +6198,7 @@ static int pouch_watch_commit_txn_ack_with_client(lc_client *client,
   return rc;
 }
 
-static int pouch_watch_commit_txn_ack_child(const char *root,
-                                            const char *queue,
+static int pouch_watch_commit_txn_ack_child(const char *root, const char *queue,
                                             const char *txn_id) {
   lc_client_config config;
   lc_client *client;
@@ -6424,8 +6333,8 @@ static void test_client_queue_watch_polling_detects_change(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_client_queue_watch_detects_transaction_ack_commit(
-    void **state) {
+static void
+test_client_queue_watch_detects_transaction_ack_commit(void **state) {
   lc_client *client;
   lc_source *source;
   lc_enqueue_req enqueue_req;
@@ -6452,8 +6361,7 @@ static void test_client_queue_watch_detects_transaction_ack_commit(
   open_pouch_client(root, &client, &error);
   enqueue_req.queue = "watch-txn";
   enqueue_req.visibility_timeout_seconds = 120L;
-  rc = lc_source_from_memory("watch-txn", strlen("watch-txn"), &source,
-                             &error);
+  rc = lc_source_from_memory("watch-txn", strlen("watch-txn"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
   source->close(source);
@@ -6480,8 +6388,8 @@ static void test_client_queue_watch_detects_transaction_ack_commit(
   lc_error_cleanup(&error);
 }
 
-static void test_client_queue_watch_detects_peer_transaction_ack_commit(
-    void **state) {
+static void
+test_client_queue_watch_detects_peer_transaction_ack_commit(void **state) {
   lc_client *watcher;
   lc_client *actor;
   lc_source *source;
@@ -6540,8 +6448,8 @@ static void test_client_queue_watch_detects_peer_transaction_ack_commit(
   lc_error_cleanup(&error);
 }
 
-static void test_client_queue_watch_detects_forked_transaction_ack_commit(
-    void **state) {
+static void
+test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
   lc_client *watcher;
   lc_source *source;
   lc_enqueue_req enqueue_req;
@@ -6597,8 +6505,8 @@ static void test_client_queue_watch_detects_forked_transaction_ack_commit(
   lc_error_cleanup(&error);
 }
 
-static void test_client_remove_tombstones_state_and_enforces_preconditions(
-    void **state) {
+static void
+test_client_remove_tombstones_state_and_enforces_preconditions(void **state) {
   lc_client *client;
   lc_sink *sink;
   lc_update_res update_res;
@@ -6835,8 +6743,8 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   assert_string_equal(lease->owner, "lc-unit-pouch");
   assert_int_equal(lease->version, 0L);
 
-  rc = lc_source_from_memory("{\"value\":7}", strlen("{\"value\":7}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":7}", strlen("{\"value\":7}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lease->update(lease, source, NULL, &error);
   source->close(source);
@@ -7065,8 +6973,8 @@ static void test_lease_attachments_use_pouch_object_store(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_lease_save_streams_mapped_json_and_replays_after_reopen(
-    void **state) {
+static void
+test_lease_save_streams_mapped_json_and_replays_after_reopen(void **state) {
   lc_client *client;
   lc_client *reader;
   lc_lease *lease;
@@ -7137,8 +7045,7 @@ static void test_lease_save_streams_mapped_json_and_replays_after_reopen(
   lc_error_cleanup(&error);
 }
 
-static void test_lease_keepalive_and_release_use_local_lifecycle(
-    void **state) {
+static void test_lease_keepalive_and_release_use_local_lifecycle(void **state) {
   lc_client *client;
   lc_lease *lease;
   lc_source *source;
@@ -7178,8 +7085,8 @@ static void test_lease_keepalive_and_release_use_local_lifecycle(
   assert_int_equal(rc, LC_OK);
   assert_true(lease->lease_expires_at_unix >= before + 30L);
 
-  rc = lc_source_from_memory("{\"value\":9}", strlen("{\"value\":9}"),
-                             &source, &error);
+  rc = lc_source_from_memory("{\"value\":9}", strlen("{\"value\":9}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lease->update(lease, source, NULL, &error);
   source->close(source);
@@ -7390,8 +7297,7 @@ static void test_client_metadata_enforces_version_precondition(void **state) {
   lc_error_init(&error);
   make_root("metadata-precondition", root, sizeof(root));
   cleanup_root(root);
-  snprintf(key, sizeof(key), "state/metadata-precondition/%ld",
-           (long)getpid());
+  snprintf(key, sizeof(key), "state/metadata-precondition/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
   acquire_req.key = key;
@@ -7508,8 +7414,8 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
                              strlen("{\"category\":\"planning\",\"n\":4}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query", "doc/hidden", source,
-                            &options, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query", "doc/hidden", source, &options,
+                            &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -7538,8 +7444,8 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   query_req.engine = "scan";
   query_req.selector_json = selector;
   query_req.limit = 1L;
-  rc = client->query_keys(client, &query_req, &handler, &first_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &first_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(first_page.count, 1);
   assert_non_null(query_res.cursor);
@@ -7761,8 +7667,8 @@ static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
   query_req.namespace_name = "docs/query-index";
   query_req.refresh = "wait_for";
   query_req.limit = 1L;
-  rc = client->query_keys(client, &query_req, &handler, &first_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &first_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(first_page.count, 1);
   assert_non_null(query_res.cursor);
@@ -7774,8 +7680,7 @@ static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
   assert_true(query_res.index_seq > 0UL);
   namespace_path = lc_pouch_namespace_path(NULL, root, "docs/query-index");
   assert_non_null(namespace_path);
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "row_count=3");
+  assert_path_file_contains(namespace_path, "index/query.index", "row_count=3");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "term_field_count=");
   assert_path_file_contains(namespace_path, "index/query.index",
@@ -7823,7 +7728,7 @@ static void test_query_keys_index_summary_uses_sidecar_rows(void **state) {
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
 
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -7889,22 +7794,21 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
 
   rc = lc_source_from_memory(
       "{\"tags\":[\"planning\",\"finance\"],\"n\":1}",
-      strlen("{\"tags\":[\"planning\",\"finance\"],\"n\":1}"), &source,
-      &error);
+      strlen("{\"tags\":[\"planning\",\"finance\"],\"n\":1}"), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/a", source,
-                            NULL, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/a", source, NULL,
+                            &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
   rc = lc_source_from_memory("{\"tags\":[\"ops\"],\"n\":2}",
-                             strlen("{\"tags\":[\"ops\"],\"n\":2}"),
-                             &source, &error);
+                             strlen("{\"tags\":[\"ops\"],\"n\":2}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/b", source,
-                            NULL, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/b", source, NULL,
+                            &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -7914,8 +7818,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                              strlen("{\"tags\":[\"finance\"],\"n\":3}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/c", source,
-                            NULL, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/c", source, NULL,
+                            &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -7924,8 +7828,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   rc = lc_source_from_memory("{\"n\":2.5}", strlen("{\"n\":2.5}"), &source,
                              &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/decimal",
-                            source, NULL, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/decimal", source,
+                            NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -7935,9 +7839,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                              strlen("{\"needle\":\"\\u0006\\u0016 \"}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-in",
-                            "doc/odd-nibble", source, NULL, &write_result,
-                            &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/odd-nibble",
+                            source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -7949,8 +7852,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                              strlen("{\"tags\":[\"planning\"],\"n\":4}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/hidden",
-                            source, &hidden_options, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/hidden", source,
+                            &hidden_options, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -7960,14 +7863,14 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                              strlen("{\"tags\":[\"finance\"],\"n\":5}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/deleted",
-                            source, NULL, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/deleted", source,
+                            NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  rc = lc_pouch_state_delete(pouch, "docs/query-index-in", "doc/deleted",
-                             NULL, &delete_result, &error);
+  rc = lc_pouch_state_delete(pouch, "docs/query-index-in", "doc/deleted", NULL,
+                             &delete_result, &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &delete_result);
   lc_pouch_close(pouch);
@@ -7982,8 +7885,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   query_req.engine = "index";
   query_req.refresh = "wait_for";
   query_req.limit = 1L;
-  rc = client->query_keys(client, &query_req, &handler, &first_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &first_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(first_page.count, 1);
   assert_non_null(query_res.cursor);
@@ -7991,8 +7894,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
-  namespace_path =
-      lc_pouch_namespace_path(NULL, root, "docs/query-index-in");
+  namespace_path = lc_pouch_namespace_path(NULL, root, "docs/query-index-in");
   assert_non_null(namespace_path);
   assert_path_file_contains(namespace_path, "index/query.index",
                             "term_index_complete=1");
@@ -8000,8 +7902,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                             "presence_index_complete=1");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "2f746167732f5b5d");
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "2f74616773");
+  assert_path_file_contains(namespace_path, "index/query.index", "2f74616773");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "706c616e6e696e67");
 
@@ -8141,8 +8042,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
 
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
-  query_req.selector_json =
-      "{\"prefix\":{\"field\":\"/n\",\"value\":\"2\"}}";
+  query_req.selector_json = "{\"prefix\":{\"field\":\"/n\",\"value\":\"2\"}}";
   query_req.limit = 0L;
   rc = client->query_keys(client, &query_req, &handler, &numeric_prefix_page,
                           &query_res, &error);
@@ -8156,11 +8056,10 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
 
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
-  query_req.selector_json =
-      "{\"range\":{\"field\":\"/n\",\"gte\":2,\"lt\":4}}";
+  query_req.selector_json = "{\"range\":{\"field\":\"/n\",\"gte\":2,\"lt\":4}}";
   query_req.limit = 0L;
-  rc = client->query_keys(client, &query_req, &handler, &range_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &range_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(range_page.count, 3);
   assert_null(query_res.cursor);
@@ -8186,7 +8085,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                                  "supports exact scalar equality, in, exists, "
                                  "prefix, contains, range, and date"));
 
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -8215,6 +8114,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   size_t document_length;
   char *namespace_path;
   char doc_table_path[1024];
+  char exact_term_path[1024];
   char root[512];
   int rc;
 
@@ -8244,9 +8144,8 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
 
-  pouch_write_json_state(pouch, "docs/query-index-scalar-types",
-                         "doc/number", "{\"v\":1,\"flag\":false}", NULL,
-                         &error);
+  pouch_write_json_state(pouch, "docs/query-index-scalar-types", "doc/number",
+                         "{\"v\":1,\"flag\":false}", NULL, &error);
   pouch_write_json_state(pouch, "docs/query-index-scalar-types",
                          "doc/number-float", "{\"v\":1.0}", NULL, &error);
   pouch_write_json_state(pouch, "docs/query-index-scalar-types",
@@ -8260,8 +8159,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   pouch_write_json_state(pouch, "docs/query-index-scalar-types", "doc/null",
                          "{\"v\":null}", NULL, &error);
   pouch_write_json_state(pouch, "docs/query-index-scalar-types",
-                         "doc/string-null", "{\"v\":\"null\"}", NULL,
-                         &error);
+                         "doc/string-null", "{\"v\":\"null\"}", NULL, &error);
   lc_pouch_close(pouch);
   pouch = NULL;
 
@@ -8276,8 +8174,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(pouch_query_capture_has(&scan_number_page, "doc/number"));
-  assert_false(pouch_query_capture_has(&scan_number_page,
-                                       "doc/string-number"));
+  assert_false(pouch_query_capture_has(&scan_number_page, "doc/string-number"));
   lc_query_res_cleanup(&query_res);
 
   query_req.engine = "index";
@@ -8288,13 +8185,26 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   assert_int_equal(number_page.count, scan_number_page.count);
   assert_true(pouch_query_capture_has(&number_page, "doc/number"));
   assert_false(pouch_query_capture_has(&number_page, "doc/string-number"));
-  assert_int_equal(pouch_query_capture_has(&number_page, "doc/number-float"),
-                   pouch_query_capture_has(&scan_number_page,
-                                           "doc/number-float"));
+  assert_int_equal(
+      pouch_query_capture_has(&number_page, "doc/number-float"),
+      pouch_query_capture_has(&scan_number_page, "doc/number-float"));
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"query_candidates\":2"));
   lc_query_res_cleanup(&query_res);
+
+  namespace_path =
+      lc_pouch_namespace_path(NULL, root, "docs/query-index-scalar-types");
+  assert_non_null(namespace_path);
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "format=pouch-term-generation");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            " n 2f76 31");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            " s 2f76 31");
+  snprintf(exact_term_path, sizeof(exact_term_path),
+           "%s/index/query.index.lcpttg", namespace_path);
+  write_text_file(exact_term_path, "broken\n");
 
   memset(&lql_number_page, 0, sizeof(lql_number_page));
   query_req.selector_lql = "eq{field=/v,value=1}";
@@ -8304,15 +8214,17 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lql_number_page.count, scan_number_page.count);
   assert_true(pouch_query_capture_has(&lql_number_page, "doc/number"));
-  assert_false(pouch_query_capture_has(&lql_number_page,
-                                       "doc/string-number"));
-  assert_int_equal(pouch_query_capture_has(&lql_number_page,
-                                           "doc/number-float"),
-                   pouch_query_capture_has(&scan_number_page,
-                                           "doc/number-float"));
+  assert_false(pouch_query_capture_has(&lql_number_page, "doc/string-number"));
+  assert_int_equal(
+      pouch_query_capture_has(&lql_number_page, "doc/number-float"),
+      pouch_query_capture_has(&scan_number_page, "doc/number-float"));
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"query_candidates\":2"));
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "format=pouch-term-generation");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            " n 2f76 31");
   lc_query_res_cleanup(&query_res);
 
   memset(&string_page, 0, sizeof(string_page));
@@ -8328,6 +8240,10 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"query_candidates\":1"));
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "format=pouch-term-generation");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            " s 2f76 31");
   lc_query_res_cleanup(&query_res);
 
   memset(&lql_string_page, 0, sizeof(lql_string_page));
@@ -8348,8 +8264,8 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   memset(&bool_page, 0, sizeof(bool_page));
   query_req.selector_lql = "eq{field=/flag,value=true}";
   query_req.selector_json = NULL;
-  rc = client->query_keys(client, &query_req, &handler, &bool_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &bool_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(bool_page.count, 1);
   assert_true(pouch_query_capture_has(&bool_page, "doc/bool"));
@@ -8362,8 +8278,8 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   memset(&false_page, 0, sizeof(false_page));
   query_req.selector_lql = "eq{field=/flag,value=false}";
   query_req.selector_json = NULL;
-  rc = client->query_keys(client, &query_req, &handler, &false_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &false_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(false_page.count, 1);
   assert_true(pouch_query_capture_has(&false_page, "doc/number"));
@@ -8376,8 +8292,8 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   memset(&null_page, 0, sizeof(null_page));
   query_req.selector_lql = NULL;
   query_req.selector_json = "{\"eq\":{\"field\":\"/v\",\"value\":null}}";
-  rc = client->query_keys(client, &query_req, &handler, &null_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &null_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(null_page.count, 1);
   assert_true(pouch_query_capture_has(&null_page, "doc/null"));
@@ -8425,9 +8341,6 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
                                  "\"query_candidates\":5"));
   lc_query_res_cleanup(&query_res);
 
-  namespace_path =
-      lc_pouch_namespace_path(NULL, root, "docs/query-index-scalar-types");
-  assert_non_null(namespace_path);
   snprintf(doc_table_path, sizeof(doc_table_path),
            "%s/index/query.index.lcpdtg", namespace_path);
   write_text_file(doc_table_path, "broken\n");
@@ -8444,8 +8357,8 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
                             &error);
   assert_int_equal(rc, LC_OK);
   assert_true(document_length > 0U);
-  assert_true(bytes_contain_text(document_bytes, document_length,
-                                 "\"flag\":false"));
+  assert_true(
+      bytes_contain_text(document_bytes, document_length, "\"flag\":false"));
   assert_false(bytes_contain_text(document_bytes, document_length,
                                   "\"flag\":\"false\""));
   assert_true(bytes_contain_text(query_res.metadata_json,
@@ -8456,7 +8369,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
                             "row_count=7");
 
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_sink_close(document_sink);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
@@ -8512,17 +8425,17 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   assert_int_equal(rc, LC_OK);
 
   pouch_write_json_state(pouch, "docs/query-index-or", "doc/a",
-                         "{\"bucket\":\"needle\",\"flag\":false,\"n\":1}",
-                         NULL, &error);
+                         "{\"bucket\":\"needle\",\"flag\":false,\"n\":1}", NULL,
+                         &error);
   pouch_write_json_state(pouch, "docs/query-index-or", "doc/b",
                          "{\"bucket\":\"hay\",\"flag\":true,\"n\":2}", NULL,
                          &error);
   pouch_write_json_state(pouch, "docs/query-index-or", "doc/overlap",
-                         "{\"bucket\":\"needle\",\"flag\":true,\"n\":3}",
-                         NULL, &error);
+                         "{\"bucket\":\"needle\",\"flag\":true,\"n\":3}", NULL,
+                         &error);
   pouch_write_json_state(pouch, "docs/query-index-or", "doc/string-flag",
-                         "{\"bucket\":\"hay\",\"flag\":\"true\",\"n\":4}",
-                         NULL, &error);
+                         "{\"bucket\":\"hay\",\"flag\":\"true\",\"n\":4}", NULL,
+                         &error);
   pouch_write_json_state(pouch, "docs/query-index-or", "doc/no-match",
                          "{\"bucket\":\"hay\",\"flag\":false,\"n\":5}", NULL,
                          &error);
@@ -8534,8 +8447,8 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   pouch_write_json_state(pouch, "docs/query-index-or", "doc/deleted",
                          "{\"bucket\":\"hay\",\"flag\":true,\"n\":7}", NULL,
                          &error);
-  rc = lc_pouch_state_delete(pouch, "docs/query-index-or", "doc/deleted",
-                             NULL, &delete_result, &error);
+  rc = lc_pouch_state_delete(pouch, "docs/query-index-or", "doc/deleted", NULL,
+                             &delete_result, &error);
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &delete_result);
   lc_pouch_close(pouch);
@@ -8576,8 +8489,8 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   query_req.cursor = NULL;
   query_req.selector_lql = selector_lql;
   query_req.limit = 2L;
-  rc = client->query_keys(client, &query_req, &handler, &first_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &first_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(first_page.count, 2);
   assert_string_equal(first_page.keys[0], "doc/a");
@@ -8699,9 +8612,9 @@ static void test_query_keys_index_text_stops_after_target_field(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_source_from_memory("{\"a\":\"alphabet timeout\",\"z\":\"later\"}",
-                             strlen("{\"a\":\"alphabet timeout\",\"z\":\"later\"}"),
-                             &source, &error);
+  rc = lc_source_from_memory(
+      "{\"a\":\"alphabet timeout\",\"z\":\"later\"}",
+      strlen("{\"a\":\"alphabet timeout\",\"z\":\"later\"}"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-index-text-stop", "doc/a",
                             source, NULL, &write_result, &error);
@@ -8766,15 +8679,15 @@ static void test_query_keys_index_text_stops_after_target_field(void **state) {
   assert_int_equal(prefix_page.count, 1);
   assert_true(pouch_query_capture_has(&prefix_page, "doc/a"));
 
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
 
-static void test_query_keys_index_date_lql_filters_temporal_candidates(
-    void **state) {
+static void
+test_query_keys_index_date_lql_filters_temporal_candidates(void **state) {
   lc_client *client;
   lc_pouch *pouch;
   lc_source *source;
@@ -8808,11 +8721,11 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
 
   rc = lc_source_from_memory(
       "{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":1}",
-      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":1}"),
-      &source, &error);
+      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":1}"), &source,
+      &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/new",
-                            source, NULL, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/new", source,
+                            NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -8820,8 +8733,8 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
 
   rc = lc_source_from_memory(
       "{\"created_at\":\"2025-01-01T02:00:00+01:00\",\"n\":7}",
-      strlen("{\"created_at\":\"2025-01-01T02:00:00+01:00\",\"n\":7}"),
-      &source, &error);
+      strlen("{\"created_at\":\"2025-01-01T02:00:00+01:00\",\"n\":7}"), &source,
+      &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/offset",
                             source, NULL, &write_result, &error);
@@ -8846,8 +8759,8 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
       strlen("{\"created_at\":\"2025-01-01T00:00:01\",\"n\":9}"), &source,
       &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/naive",
-                            source, NULL, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/naive", source,
+                            NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -8855,8 +8768,8 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
 
   rc = lc_source_from_memory(
       "{\"created_at\":\"2025-01-01T00:00:00.500Z\",\"n\":10}",
-      strlen("{\"created_at\":\"2025-01-01T00:00:00.500Z\",\"n\":10}"),
-      &source, &error);
+      strlen("{\"created_at\":\"2025-01-01T00:00:00.500Z\",\"n\":10}"), &source,
+      &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/fractional",
                             source, NULL, &write_result, &error);
@@ -8867,11 +8780,11 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
 
   rc = lc_source_from_memory(
       "{\"created_at\":\"2024-01-01T00:00:00Z\",\"n\":2}",
-      strlen("{\"created_at\":\"2024-01-01T00:00:00Z\",\"n\":2}"),
-      &source, &error);
+      strlen("{\"created_at\":\"2024-01-01T00:00:00Z\",\"n\":2}"), &source,
+      &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/old",
-                            source, NULL, &write_result, &error);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/old", source,
+                            NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -8903,8 +8816,8 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
   hidden_options.query_hidden = 1;
   rc = lc_source_from_memory(
       "{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":5}",
-      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":5}"),
-      &source, &error);
+      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":5}"), &source,
+      &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/hidden",
                             source, &hidden_options, &write_result, &error);
@@ -8915,8 +8828,8 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
 
   rc = lc_source_from_memory(
       "{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":6}",
-      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":6}"),
-      &source, &error);
+      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":6}"), &source,
+      &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/deleted",
                             source, NULL, &write_result, &error);
@@ -8939,8 +8852,8 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
   query_req.selector_lql = "date{field=/created_at,after=2025-01-01}";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
-  rc = client->query_keys(client, &query_req, &handler, &date_page,
-                          &query_res, &error);
+  rc = client->query_keys(client, &query_req, &handler, &date_page, &query_res,
+                          &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(date_page.count, 5);
   assert_true(pouch_query_capture_has(&date_page, "doc/new"));
@@ -8965,8 +8878,8 @@ static void test_query_keys_index_date_lql_filters_temporal_candidates(
   lc_error_cleanup(&error);
 }
 
-static void test_query_keys_index_recursive_exists_uses_container_presence(
-    void **state) {
+static void
+test_query_keys_index_recursive_exists_uses_container_presence(void **state) {
   lc_client *client;
   lc_pouch *pouch;
   lc_source *source;
@@ -9309,8 +9222,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
 
   rc = lc_source_from_memory(
       "{\"tags\":[\"planning\",\"finance\"],\"n\":1}",
-      strlen("{\"tags\":[\"planning\",\"finance\"],\"n\":1}"), &source,
-      &error);
+      strlen("{\"tags\":[\"planning\",\"finance\"],\"n\":1}"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-docs-index", "doc/a", source,
                             NULL, &write_result, &error);
@@ -9320,8 +9232,8 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
   rc = lc_source_from_memory("{\"tags\":[\"ops\"],\"n\":2}",
-                             strlen("{\"tags\":[\"ops\"],\"n\":2}"),
-                             &source, &error);
+                             strlen("{\"tags\":[\"ops\"],\"n\":2}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-docs-index", "doc/b", source,
                             NULL, &write_result, &error);
@@ -9406,8 +9318,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = client->query(client, &query_req, second_sink, &query_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_sink_memory_bytes(second_sink, &second_bytes, &second_length,
-                            &error);
+  rc = lc_sink_memory_bytes(second_sink, &second_bytes, &second_length, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(second_length > 0U);
   assert_null(query_res.cursor);
@@ -9437,8 +9348,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = client->query(client, &query_req, exists_sink, &query_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_sink_memory_bytes(exists_sink, &exists_bytes, &exists_length,
-                            &error);
+  rc = lc_sink_memory_bytes(exists_sink, &exists_bytes, &exists_length, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(exists_length > 0U);
   assert_null(query_res.cursor);
@@ -9454,8 +9364,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
 
   memset(&query_res, 0, sizeof(query_res));
   query_req.cursor = NULL;
-  query_req.selector_json =
-      "{\"range\":{\"field\":\"/n\",\"gte\":2,\"lt\":4}}";
+  query_req.selector_json = "{\"range\":{\"field\":\"/n\",\"gte\":2,\"lt\":4}}";
   query_req.limit = 0L;
   rc = lc_sink_to_memory(&range_sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -9532,16 +9441,19 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = client->query(client, &query_req, icontains_sink, &query_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_sink_memory_bytes(icontains_sink, &icontains_bytes,
-                            &icontains_length, &error);
+  rc = lc_sink_memory_bytes(icontains_sink, &icontains_bytes, &icontains_length,
+                            &error);
   assert_int_equal(rc, LC_OK);
   assert_true(icontains_length > 0U);
   assert_null(query_res.cursor);
   assert_true(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":1"));
   assert_true(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":3"));
-  assert_false(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":2"));
-  assert_false(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":4"));
-  assert_false(bytes_contain_text(icontains_bytes, icontains_length, "\"n\":5"));
+  assert_false(
+      bytes_contain_text(icontains_bytes, icontains_length, "\"n\":2"));
+  assert_false(
+      bytes_contain_text(icontains_bytes, icontains_length, "\"n\":4"));
+  assert_false(
+      bytes_contain_text(icontains_bytes, icontains_length, "\"n\":5"));
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
@@ -9556,8 +9468,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = client->query(client, &query_req, prefix_sink, &query_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_sink_memory_bytes(prefix_sink, &prefix_bytes, &prefix_length,
-                            &error);
+  rc = lc_sink_memory_bytes(prefix_sink, &prefix_bytes, &prefix_length, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(prefix_length > 0U);
   assert_null(query_res.cursor);
@@ -9613,6 +9524,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   char *namespace_path;
   char sidecar_path[1024];
   char doc_table_path[1024];
+  char exact_term_path[1024];
   char root[512];
   unsigned long delete_version;
   int rc;
@@ -9637,8 +9549,8 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"kind\":\"flush\",\"n\":1}",
-                             strlen("{\"kind\":\"flush\",\"n\":1}"),
-                             &source, &error);
+                             strlen("{\"kind\":\"flush\",\"n\":1}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(writer, "docs/flush", "doc/a", source, NULL,
                             &write_result, &error);
@@ -9648,8 +9560,8 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
   rc = lc_source_from_memory("{\"kind\":\"flush\",\"n\":2}",
-                             strlen("{\"kind\":\"flush\",\"n\":2}"),
-                             &source, &error);
+                             strlen("{\"kind\":\"flush\",\"n\":2}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(writer, "docs/flush", "doc/live", source, NULL,
                             &live_result, &error);
@@ -9661,8 +9573,8 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   hidden_options.has_query_hidden = 1;
   hidden_options.query_hidden = 1;
   rc = lc_source_from_memory("{\"kind\":\"flush\",\"n\":3}",
-                             strlen("{\"kind\":\"flush\",\"n\":3}"),
-                             &source, &error);
+                             strlen("{\"kind\":\"flush\",\"n\":3}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(writer, "docs/flush", "doc/hidden", source,
                             &hidden_options, &hidden_result, &error);
@@ -9698,10 +9610,8 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_path_file_contains(namespace_path, "index/query.index", "version=11");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "state_index_seq=4");
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "row_count=2");
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "term_count=");
+  assert_path_file_contains(namespace_path, "index/query.index", "row_count=2");
+  assert_path_file_contains(namespace_path, "index/query.index", "term_count=");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "term_field_count=");
   assert_path_file_contains(namespace_path, "index/query.index",
@@ -9728,16 +9638,12 @@ static void test_flush_index_reports_projection_high_water(void **state) {
                             "summary_hash=");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "646f632f6c697665");
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "row 3 ");
+  assert_path_file_contains(namespace_path, "index/query.index", "row 3 ");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "646f632f68696464656e");
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "row 2 ");
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "2f6b696e64");
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "666c757368");
+  assert_path_file_contains(namespace_path, "index/query.index", "row 2 ");
+  assert_path_file_contains(namespace_path, "index/query.index", "2f6b696e64");
+  assert_path_file_contains(namespace_path, "index/query.index", "666c757368");
   assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
                             "format=pouch-doc-table-generation");
   assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
@@ -9752,6 +9658,24 @@ static void test_flush_index_reports_projection_high_water(void **state) {
                             "doc 646f632f6c697665 ");
   assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
                             "doc 646f632f68696464656e ");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "format=pouch-term-generation");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "version=1");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "index_seq=4");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "row_count=2");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "row_hash=");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "namespace_hex=646f63732f666c757368");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "term ");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            " s 2f6b696e64 666c757368");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "posting ");
   lc_index_flush_res_cleanup(&flush_res);
 
   snprintf(doc_table_path, sizeof(doc_table_path),
@@ -9767,6 +9691,22 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
                             "index_seq=4");
   assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "row_count=2");
+  lc_index_flush_res_cleanup(&flush_res);
+
+  snprintf(exact_term_path, sizeof(exact_term_path),
+           "%s/index/query.index.lcpttg", namespace_path);
+  write_text_file(exact_term_path, "broken\n");
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
+  assert_true(flush_res.index_seq >= delete_version);
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "format=pouch-term-generation");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
+                            "index_seq=4");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpttg",
                             "row_count=2");
   lc_index_flush_res_cleanup(&flush_res);
 
@@ -9786,8 +9726,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
                             "format=pouch-query-index");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "state_index_seq=4");
-  assert_path_file_contains(namespace_path, "index/query.index",
-                            "row_count=2");
+  assert_path_file_contains(namespace_path, "index/query.index", "row_count=2");
   lc_index_flush_res_cleanup(&flush_res);
 
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
@@ -9798,9 +9737,10 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   flush_req.mode = "eventually";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
-  assert_string_equal(error.message, "pouch flush_index mode must be wait or sync");
+  assert_string_equal(error.message,
+                      "pouch flush_index mode must be wait or sync");
 
-  free(namespace_path);
+  lc_free_with_allocator(NULL, namespace_path);
   lc_error_cleanup(&error);
   lc_client_close(client);
   cleanup_root(root);
@@ -9869,8 +9809,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_source_from_memory("committed-order-1",
-                             strlen("committed-order-1"), &source, &error);
+  rc = lc_source_from_memory("committed-order-1", strlen("committed-order-1"),
+                             &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/eu", "state/order-1",
                                   "txn-pouch-records", source, NULL,
@@ -9880,8 +9820,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
-  rc = lc_source_from_memory("committed-order-2",
-                             strlen("committed-order-2"), &source, &error);
+  rc = lc_source_from_memory("committed-order-2", strlen("committed-order-2"),
+                             &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/us", "state/order-2",
                                   "txn-pouch-records", source, NULL,
@@ -9891,8 +9831,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
-  rc = lc_source_from_memory("rolled-back-order",
-                             strlen("rolled-back-order"), &source, &error);
+  rc = lc_source_from_memory("rolled-back-order", strlen("rolled-back-order"),
+                             &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/eu", "state/order-1",
                                   "txn-pouch-rollback", source, NULL,
@@ -9929,8 +9869,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   lc_txn_replay_res_cleanup(&replay_res);
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, "orders/eu", "state/order-1",
-                           &read_result, &error);
+  rc = lc_pouch_state_read(pouch, "orders/eu", "state/order-1", &read_result,
+                           &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, state_bytes, sizeof(state_bytes));
@@ -9942,8 +9882,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  rc = lc_pouch_state_read(pouch, "orders/eu", "state/order-1",
-                           &read_result, &error);
+  rc = lc_pouch_state_read(pouch, "orders/eu", "state/order-1", &read_result,
+                           &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, state_bytes, sizeof(state_bytes));
@@ -10116,8 +10056,8 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
 
   attach_op.lease.txn_id = "txn-attachment-rollback";
   attach_op.name = "rolled-back.txt";
-  rc = lc_source_from_memory("rolled-back-object",
-                             strlen("rolled-back-object"), &source, &error);
+  rc = lc_source_from_memory("rolled-back-object", strlen("rolled-back-object"),
+                             &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->attach(client, &attach_op, source, &attach_res, &error);
   source->close(source);
@@ -10206,9 +10146,8 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   assert_true(written > 0 && (size_t)written < sizeof(record));
   rc = lc_source_from_memory(record, strlen(record), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, ".lockd/txn",
-                            "txn/txn-attachment-recover", source, NULL,
-                            &write_result, &error);
+  rc = lc_pouch_state_write(pouch, ".lockd/txn", "txn/txn-attachment-recover",
+                            source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -10229,9 +10168,8 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".lockd/txn",
-                           "txn/txn-attachment-recover", &read_result,
-                           &error);
+  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-attachment-recover",
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -10279,8 +10217,8 @@ static int pouch_attachment_list_has_name(const lc_attachment_list *list,
   return 0;
 }
 
-static void test_txn_decisions_apply_mixed_object_queue_side_effects(
-    void **state) {
+static void
+test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   lc_client *client;
   lc_source *source;
   lc_txn_participant participant;
@@ -10388,8 +10326,7 @@ static void test_txn_decisions_apply_mixed_object_queue_side_effects(
   message = NULL;
 
   pouch_attach_text(client, "objects/mixed", "state/object-queue",
-                    "txn-mixed-rollback", "rollback.txt", "rollback",
-                    &error);
+                    "txn-mixed-rollback", "rollback.txt", "rollback", &error);
   rc = lc_source_from_memory("rollback-job", strlen("rollback-job"), &source,
                              &error);
   assert_int_equal(rc, LC_OK);
@@ -10438,8 +10375,7 @@ static void test_txn_decisions_apply_mixed_object_queue_side_effects(
   lc_error_cleanup(&error);
 }
 
-static void test_txn_decisions_apply_attachment_delete_and_clear(
-    void **state) {
+static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   lc_client *client;
   lc_txn_participant participant;
   lc_txn_decision_req decision_req;
@@ -10628,9 +10564,8 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
                              &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/recover",
-                                  "state/recover-commit",
-                                  "txn-recover-commit", source, NULL,
-                                  &write_result, &error);
+                                  "state/recover-commit", "txn-recover-commit",
+                                  source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -10652,13 +10587,12 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
                      "participant %s %s %s\n",
                      namespace_hex, key_hex, backend_hex);
   assert_true(written > 0 && (size_t)written < sizeof(record));
-  rc = lc_source_from_memory("expired-stage", strlen("expired-stage"),
-                             &source, &error);
+  rc = lc_source_from_memory("expired-stage", strlen("expired-stage"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_stage_write(pouch, "orders/recover",
-                                  "state/recover-expired",
-                                  "txn-recover-expired", source, NULL,
-                                  &write_result, &error);
+  rc = lc_pouch_state_stage_write(
+      pouch, "orders/recover", "state/recover-expired", "txn-recover-expired",
+      source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -10697,8 +10631,7 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(query_capture.count, 1);
-  assert_true(pouch_query_capture_has(&query_capture,
-                                      "state/recover-commit"));
+  assert_true(pouch_query_capture_has(&query_capture, "state/recover-commit"));
   assert_null(query_res.cursor);
   assert_non_null(query_res.metadata_json);
   assert_true(bytes_contain_text(query_res.metadata_json,
@@ -10706,10 +10639,9 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
                                  "\"engine\":\"index\""));
   lc_query_res_cleanup(&query_res);
 
-  rc = lc_pouch_state_read(
-      pouch, "orders/recover",
-      "state/recover-expired/.staging/txn-recover-expired", &read_result,
-      &error);
+  rc = lc_pouch_state_read(pouch, "orders/recover",
+                           "state/recover-expired/.staging/txn-recover-expired",
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -10736,8 +10668,8 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_lease_remove_tombstones_state_and_refreshes_view(
-    void **state) {
+static void
+test_lease_remove_tombstones_state_and_refreshes_view(void **state) {
   lc_client *client;
   lc_lease *lease;
   lc_source *source;
@@ -10974,10 +10906,8 @@ int main(void) {
       cmocka_unit_test(test_index_term_keys_build_exact_for_field_values),
       cmocka_unit_test(
           test_index_term_keys_build_exact_for_field_rejects_invalid_values),
-      cmocka_unit_test(test_index_term_values_collect_exact_ranges),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
-      cmocka_unit_test(
-          test_index_term_generation_roundtrips_typed_postings),
+      cmocka_unit_test(test_index_term_generation_roundtrips_typed_postings),
       cmocka_unit_test(
           test_index_term_generation_rejects_corrupt_identity_and_payload),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
@@ -10998,8 +10928,7 @@ int main(void) {
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),
       cmocka_unit_test(test_maintenance_retention_sweep_deletes_expired_state),
-      cmocka_unit_test(
-          test_maintenance_creates_namespace_without_prior_writes),
+      cmocka_unit_test(test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
       cmocka_unit_test(test_manifest_open_ignores_unmanifested_snapshot),
@@ -11010,8 +10939,7 @@ int main(void) {
       cmocka_unit_test(test_compaction_retries_manifest_obsolete_cleanup),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
-      cmocka_unit_test(
-          test_namespace_manifest_repairs_from_existing_segments),
+      cmocka_unit_test(test_namespace_manifest_repairs_from_existing_segments),
       cmocka_unit_test(test_staged_state_writes_durable_decision_records),
       cmocka_unit_test(
           test_staged_decision_recovery_tombstones_interrupted_discard),
@@ -11025,15 +10953,13 @@ int main(void) {
       cmocka_unit_test(
           test_txn_decisions_stage_state_update_mutate_and_index_refresh),
       cmocka_unit_test(test_txn_recovery_applies_queue_side_effects),
-      cmocka_unit_test(
-          test_client_queue_mutations_touch_notification_marker),
+      cmocka_unit_test(test_client_queue_mutations_touch_notification_marker),
       cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),
       cmocka_unit_test(test_client_queue_subscribe_polling_paths),
       cmocka_unit_test(test_client_queue_watch_polling_detects_change),
-      cmocka_unit_test(
-          test_client_queue_watch_detects_transaction_ack_commit),
+      cmocka_unit_test(test_client_queue_watch_detects_transaction_ack_commit),
       cmocka_unit_test(
           test_client_queue_watch_detects_peer_transaction_ack_commit),
       cmocka_unit_test(
@@ -11044,8 +10970,7 @@ int main(void) {
       cmocka_unit_test(test_marker_snapshots_detect_peer_changes),
       cmocka_unit_test(
           test_marker_snapshots_treat_same_process_handles_as_peers),
-      cmocka_unit_test(
-          test_marker_refresh_uses_directory_fast_path_and_force),
+      cmocka_unit_test(test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
       cmocka_unit_test(
           test_shared_state_projection_cache_refreshes_peer_markers),

@@ -12,8 +12,7 @@ typedef struct lockdc_pouch_bench_result {
 
 typedef struct lockdc_pouch_bench_fixture lockdc_pouch_bench_fixture;
 
-int lockdc_pouch_bench_fixture_open(long rows,
-                                    lockdc_pouch_bench_fixture **out,
+int lockdc_pouch_bench_fixture_open(long rows, lockdc_pouch_bench_fixture **out,
                                     lockdc_pouch_bench_result *result);
 int lockdc_pouch_bench_fixture_query(lockdc_pouch_bench_fixture *fixture,
                                      const char *scenario, const char *engine,

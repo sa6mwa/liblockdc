@@ -4,8 +4,8 @@
 #include "lc_pouch.h"
 
 int lc_pouch_namespace_ensure(const lc_allocator *allocator,
-                              const char *root_path,
-                              const char *namespace_name, lc_error *error);
+                              const char *root_path, const char *namespace_name,
+                              lc_error *error);
 int lc_pouch_namespace_ensure_layout(const lc_allocator *allocator,
                                      const char *root_path,
                                      const char *namespace_name,
@@ -111,11 +111,12 @@ int lc_pouch_namespace_marker_refresh_should_scan(
     lc_pouch_namespace_marker_refresh_state *state,
     unsigned long force_after_skips, int *should_scan, lc_error *error);
 void lc_pouch_namespace_marker_snapshot_cleanup(
-    const lc_allocator *allocator, lc_pouch_namespace_marker_snapshot *snapshot);
+    const lc_allocator *allocator,
+    lc_pouch_namespace_marker_snapshot *snapshot);
 void lc_pouch_namespace_marker_refresh_state_cleanup(
     const lc_allocator *allocator,
     lc_pouch_namespace_marker_refresh_state *state);
-void lc_pouch_namespace_manifest_cleanup(
-    const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest);
+void lc_pouch_namespace_manifest_cleanup(const lc_allocator *allocator,
+                                         lc_pouch_namespace_manifest *manifest);
 
 #endif

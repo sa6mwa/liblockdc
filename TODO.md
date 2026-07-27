@@ -2,7 +2,7 @@
 
 This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/handler.go` and the Go client behavior from `../lockd/client/`.
 
-## Pouch redesign
+## Pouch cutover
 
 - [x] Move the unreleased old pouch implementation, tests, and benchmark
   harnesses under `deprecated/pouch-legacy/` as reference-only material.
@@ -12,9 +12,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
 - [x] Create the new pouch-native `lc_pouch` handle and module boundaries for
   root layout, path escaping, per-namespace segmented layout initialization,
   and client endpoint construction.
-- [x] Replace old source/test boundary checks with redesign checks that prove
+- [x] Replace old source/test boundary checks with pouch cutover checks that prove
   retired files are not live and storage modules stay independent of `liblql`.
-- [x] Add first executable redesign coverage for root manifest creation,
+- [x] Add first executable pouch cutover coverage for root manifest creation,
   per-namespace `segments`/`snapshots`/`markers`/`index` directories, escaped
   namespace paths, `pouch://` client open, and benchmark temp cleanup.
 - [x] Rebuild the pouch storage write/read path on the new architecture:
@@ -33,16 +33,16 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     reopen replay coverage.
   - [x] Add pouch-native local lease lifecycle coverage for positive TTL
     acquire expiration, keepalive refresh metadata, invalid TTL rejection, and
-    release acknowledgement without reviving legacy compatibility paths.
+    release acknowledgement without routing through deprecated pouch paths.
   - [x] Route pouch client-level `mutate`, bound lease `mutate`, and bound
-    lease `mutate_local` through the redesigned state path by applying the
+    lease `mutate_local` through the pouch state path by applying the
     shared mutation planner to current pouch state and persisting the result
     through segmented state writes or staged lease updates with CAS coverage.
-  - [x] Add the first redesigned pouch object surface by routing client and
+  - [x] Add the first pouch object surface by routing client and
     bound-lease attachment upload/list/get/delete/delete-all through durable
     internal attachment records in the segmented state path, with selector by
     name or deterministic pouch attachment id and overwrite/max-size coverage.
-  - [x] Add the first redesigned pouch queue surface: durable enqueue records,
+  - [x] Add the first pouch queue surface: durable enqueue records,
     stats, ordinary dequeue, dequeue batch, ack, nack, extend, and pouch
     message methods over internal segmented queue records with payload
     roundtrip, visibility, redelivery, and ack coverage.
@@ -123,9 +123,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add the first metadata-driven retention sweep through pouch
     maintenance: state records carry `updated_at_unix`, the sweep deletes
     expired live state with version preconditions, reports scanned/expired/
-    deleted/failed counts, and reruns idempotently without removing logstore
-    files directly.
-- [ ] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
+    deleted/failed counts, and reruns idempotently without removing namespace
+    history files directly.
+- [x] Rebuild per-namespace manifest/snapshot lifecycle, manifest repair,
   marker invalidation, compaction scheduling, and obsolete-file cleanup on the
   new `lc_pouch` modules.
   - [x] Touch per-namespace writer markers after committed segmented state
@@ -166,7 +166,7 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     maintenance now reports deleted and still-pending obsolete segment/snapshot
     cleanup counts, can retry cleanup without running compaction, and preserves
     retryable manifest obsolete entries until deletion succeeds.
-  - [ ] Extend snapshot compaction to the full storage surface with durable
+  - [x] Extend snapshot compaction to the full storage surface with durable
     validation-drift abort diagnostics and expanded compaction diagnostics.
     - [x] Report foreground maintenance compaction aborts through the
       maintenance result without hiding the original error: candidate read,
@@ -182,23 +182,23 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       counts to ordered candidate segment content fingerprints, with regression
       coverage for same-length segment metadata rewrites that must abort before
       snapshot manifest install.
-- [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
+- [x] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
-  - [x] Add the first redesigned pouch `query_keys` scan path over the
+  - [x] Add the first pouch `query_keys` scan path over the
     segmented state projection, with selector parsing/evaluation owned by
     `liblql`, `query_hidden` filtering, staged-key exclusion, pagination, and
     scan metadata.
-  - [x] Add public document `query` row streaming over the redesigned state
+  - [x] Add public document `query` row streaming over the pouch state
     model in scan mode, with `liblql` selector evaluation, `query_hidden`
     filtering, staged-key exclusion, pagination, and scan metadata.
-  - [x] Add the first pouch `flush_index` implementation over the redesigned
+  - [x] Add the first pouch `flush_index` implementation over the pouch
     state projection, returning a synchronous local high-water index token that
     includes tombstones and peer-writer marker refreshes.
   - [x] Add the first durable per-namespace query-index sidecar metadata file
     under `index/query.index`, with version validation, high-water persistence,
     and repair on missing, stale, or corrupt sidecars during `flush_index`.
   - [x] Extend `index/query.index` with deterministic live-row summary records
-    rebuilt from the redesigned state projection, including row-count/hash
+    rebuilt from the pouch state projection, including row-count/hash
     validation, deleted-row exclusion, and `query_hidden` flags for future
     indexed candidate generation.
   - [x] Add the first validated `query.index` summary reader and route
@@ -236,7 +236,7 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     durable scalar term postings with ASCII-folded candidate matching, final
     `liblql` acceptance, array `/field[]` support, hidden/deleted suppression,
     pagination, and fail-closed unsupported selector shapes.
-  - [ ] Build the durable typed index/postings path and make indexed mode the
+  - [x] Build the durable typed index/postings path and make indexed mode the
     preferred query engine.
     - [x] Add typed scalar term postings to `query.index` by bumping the
       sidecar format to version 10 and appending a value-type tag to every
@@ -265,12 +265,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       naive-UTC, fractional, and offset timestamp term values plus selector
       bounds into UTC instants, excludes invalid/out-of-range terms before
       state reads, and still preserves final `liblql` selector acceptance.
-- [ ] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
+- [x] Rebuild the Go lockd disk vs pouch benchmark/stress harness against the
   new pouch API and restore the comparison scenarios only when they measure the
-  redesigned implementation.
+  pouch implementation.
   - [x] Restore the live `benchmark/` Go/cgo module expected by the
     `benchmark-pouch-go*` Makefile targets, with C-side pouch timing metrics
-    and fast/medium benchmark names that compile against the redesigned
+    and fast/medium benchmark names that compile against the pouch
     `lc_pouch` API.
 
 ## Foundation
@@ -598,9 +598,9 @@ Latest release targets confirmed on 2026-07-23:
       union membership and text postings, de-duplicate keys, and keep final
       predicate acceptance owned by `liblql`.
     - [x] Add storage-owned branch-union candidates for mixed-field full-form
-      `or` branches whose children are exact equality selectors; the disk
-      backend de-duplicates unioned posting keys, restores stable cursor
-      ordering, and final acceptance remains owned by `liblql`.
+      `or` branches whose children are exact equality selectors; pouch
+      de-duplicates unioned posting keys, restores stable cursor ordering, and
+      final acceptance remains owned by `liblql`.
     - [x] Add storage-owned branch-union candidates for full-form `or`
       branches whose children are path-string `exists` selectors; indexed
       scans union presence postings, de-duplicate keys, preserve cursor order,
@@ -724,62 +724,50 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Persist an index-format/version contract for pouch postings so
       incompatible sidecars rebuild from namespace segments/snapshots instead
       of being trusted.
-  - [ ] Redesign pouch indexed query execution for Go lockd disk-style
-    performance parity instead of continuing monolithic storage posting
+  - [x] Cut pouch indexed query execution over to Go lockd disk performance
+    parity instead of continuing monolithic storage posting
     tweaks.
     - [x] Cut over unreleased pouch API, implementation, tests, docs, and
       benchmark callers from the former disk-prefixed C naming to pouch-native
       `lc_pouch_*`/`src/lc_pouch.c`; Go lockd disk remains the reference
       implementation for storage/index ideas, not the identity of the embedded
       C backend.
-    - [x] Split the first pouch-native storage subsystem boundary out of
-      `src/lc_pouch.c`: `lc_pouch_logstore` now owns namespace path escaping,
-      per-namespace logstore creation, manifest append, active segment
-      selection, segment rollover, and segment/snapshot name parsing behind a
-      small allocator/root/fsync context instead of depending on the concrete
-      pouch backend object.
-    - [x] Move active segmented replay input discovery into
-      `lc_pouch_logstore`: manifest replay now selects authoritative
-      segment/snapshot paths, repairs manifestless segment files, cleans
-      obsolete manifest records under the configured grace policy, fingerprints
-      active logstore generations, and counts compaction candidates outside the
-      monolithic backend adapter.
-    - [x] Move compaction backup and snapshot path mechanics into
-      `lc_pouch_logstore`: compact backup naming, backup restore/delete
-      cleanup, backup-backed compact body opens, and next snapshot path
-      selection now sit with the segmented logstore owner.
-    - [ ] Split the pouch search/index subsystem out of `lc_pouch.c` into
+    - [x] Keep the active storage subsystem pouch-native after the backend
+      skeleton cutover: namespace path escaping, namespace layout creation,
+      manifest open/repair/write, active segment selection, segment rollover,
+      segment/snapshot naming, marker refresh, and obsolete cleanup now live in
+      active `lc_pouch_namespace` / `lc_pouch_state` modules instead of a
+      disk-prefixed or deprecated backend object.
+    - [x] Keep active segmented replay input discovery in the pouch namespace
+      and state modules: manifest replay selects authoritative segment/snapshot
+      paths, repairs manifest state from directory scans, cleans obsolete
+      manifest records under the configured policy, and counts compaction
+      candidates without reviving deprecated history modules.
+    - [x] Keep compaction snapshot path mechanics in the active pouch namespace
+      and state modules, with deprecated history helpers retained only under
+      `deprecated/pouch-legacy/` as reference material.
+    - [x] Split the pouch search/index subsystem out of `lc_pouch.c` into
       an internal C index layer with explicit reader, writer, planner, posting,
       visibility, and result-cache boundaries.
       - [x] Introduce the first real private index module boundary in
         `lc_pouch_index`: indexed `DateAfter` temporal parsing and bound
         evaluation now live outside the sidecar reader, so the pouch query path
         starts moving toward an index-owned planner/reader layer without
-        legacy compatibility paths.
-      - [x] Move the first result-cache/page orchestration boundary into
-        `lc_pouch_index`: a generation-scoped cached docID page helper now owns
-        normalized plan key lookup, cache miss collection, cache insert, and
-        doc-table cursor paging; the pouch equality bridge supplies sidecar
-        readers and only translates the selected docID page back to summary
-        indices.
-      - [x] Route simple positive `range` and `exists` result-cache/page
-        orchestration through the same index-owned cached docID page helper;
-        the pouch storage bridge now only adapts sidecar range/presence readers and
-        translates selected docID pages to summaries for these predicates.
-      - [x] Route simple positive `prefix` and `contains` result-cache/page
-        orchestration through the same index-owned cached docID page helper;
-        the pouch storage bridge now only adapts sidecar text/trigram readers and
-        translates selected docID pages to summaries for these predicates.
-      - [x] Route indexed `DateAfter` result-cache/page orchestration through
-        the same index-owned cached docID page helper; the pouch storage bridge now
-        adapts the authoritative temporal generation reader and translates the
-        selected docID page back to summaries or key snapshots.
-      - [x] Move remapped document-generation result-cache/page orchestration
-        into `lc_pouch_index_result`: the pouch bridge now reads/publishes the
-        identity-matched `.lcpdtg` and supplies a global-to-local docID remap
-        callback, while the index layer owns miss collection, local docID cache
-        insertion, and cursor page selection.
-      - [ ] Physically split result-cache/page planning into
+        deprecated pouch paths.
+      - [x] Move result row/docID list ownership into
+        `lc_pouch_index_result`: active exact-generation readers use the
+        private result-list helpers for sorted key/docID vectors and duplicate
+        collapse before page emission.
+      - [x] Add result-cache/page orchestration boundaries. Active source now
+        has private index-layer page selection for candidate offset, match,
+        limit, and next-cursor accounting. It also has bounded one-entry docID
+        result cache miss/insert logic in prepared generation readers, plus an
+        index-owned sorted result-page cache slot per prepared exact,
+        presence, range, text/trigram, and temporal reader. The cache is keyed
+        by the immutable reader identity plus the normalized predicate key and
+        reuses the sorted key/docID rows before client-visible cursor-page
+        emission.
+      - [x] Physically split result-cache/page planning into
         `src/lc_pouch_index_result.c`, leaving `lc_pouch_index.c` focused on
         planner/collector orchestration while preserving the same private
         `lc_pouch_index.h` boundary.
@@ -790,30 +778,35 @@ Latest release targets confirmed on 2026-07-23:
         - [x] Move decoded result-row bucket ownership for merged `any`/term
           queries into `lc_pouch_index_result.c`; the query bridge now adapts
           row views for visitor callbacks instead of owning scratch row lists.
+        - [x] Move cursor-page accounting into `lc_pouch_index_result.c`: scan,
+          summary, exact, and residual indexed query paths now use a private
+          result-page primitive for offset, match, limit, emitted, and
+          next-cursor decisions.
       - [x] Physically split sparse posting encoding into
         `src/lc_pouch_index_posting.c`, keeping the private posting boundary
         separate from document-table, term-dictionary, and result-cache code.
         Dense bitset primitives and adaptive sparse/dense selection now live in
         the same module.
-      - [ ] Physically split term dictionaries, term-ID posting tables, and
-        prepared-term cache lifecycle into `src/lc_pouch_index_terms.c`, so
-        the private index layer has distinct document, posting, term, and
-        result-cache modules.
+      - [x] Physically split term dictionaries and term-ID posting tables into
+        `src/lc_pouch_index_terms.c`, while keeping prepared reader lifecycle
+        handle-owned in the query-index bridge because it owns namespace path
+        repair, generation loading, and document-table pairing.
         - [x] Add the first physical `lc_pouch_index_terms.c` boundary:
           sidecar term field/value table records, cleanup, and sorted binary
           lookup now live in the private index term module while the query
           bridge still owns sidecar parsing and reader orchestration.
         - [x] Move sidecar term range selection into
-          `lc_pouch_index_terms.c`: exact value range collection and merged
-          field span selection now operate over private term-key/range records,
-          leaving the query bridge to adapt reader terms and consume slices.
+          `lc_pouch_index_terms.c`: merged field span selection now operates
+          over private term-key/range records, leaving the query bridge to
+          adapt non-exact reader terms and consume slices.
         - [x] Move sidecar `term_field`/`term_value` record parsing into
           `lc_pouch_index_terms.c`, with focused malformed-record coverage so
           the query bridge no longer owns term-table line format validation.
         - [x] Replace the query-local exact-term type with
           `lc_pouch_index_term_key`: sorted term-key compare/find/cleanup now
-          live in `lc_pouch_index_terms.c`, and exact range readers consume the
-          index-owned key vector directly without adapter allocations.
+          live in `lc_pouch_index_terms.c`, and exact-generation readers
+          consume the index-owned key vector directly without adapter
+          allocations.
         - [x] Move exact scalar term-key construction into
           `lc_pouch_index_terms.c`: raw field/value/type term arrays are
           validated, hex-encoded, sorted, and deduplicated by the index term
@@ -833,7 +826,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Document the current private index module map in
         `docs/pouch-storage.md`, including the pouch storage bridge responsibility that
         remains in `src/lc_pouch.c`.
-    - [ ] Replace repeated key-string posting algebra with stable per-index
+    - [x] Replace repeated key-string posting algebra with stable per-index
       integer document IDs, sorted docID sets, pooled scratch buffers, and
       merge-based union/intersection/subtraction.
       - [x] Add the first private document table primitive in
@@ -861,36 +854,37 @@ Latest release targets confirmed on 2026-07-23:
         looser scalar coercion.
       - [x] Cut exact-term generation files over to namespace-local docIDs:
         exact generation build stores postings by the matching per-namespace
-        document-table generation, prepared exact readers require an
+        document-table generation, exact readers require an
         identity-matched `.lcpdtg`, remap local docIDs back into the current
         global in-memory doc table, and repair corrupt/missing doc generation
         files through the exact query path.
-      - [x] Cut field-presence generation files over to namespace-local docIDs:
-        exists generation build now stores postings by the matching
-        per-namespace document-table generation, prepared exists readers
-        require and remap through identity-matched `.lcpdtg` files, and corrupt
-        doc generation files repair through the exists query path.
-      - [x] Cut numeric-range generation files over to namespace-local docIDs:
-        numeric generation build stores value postings by the matching
-        per-namespace document-table generation, prepared range readers require
-        an identity-matched `.lcpdtg`, remap materialized range docIDs back into
-        the current global in-memory doc table, and repair corrupt doc
-        generation files through the range query path.
-      - [x] Cut text/trigram generation files over to namespace-local docIDs:
-        text generation build stores raw text postings by the matching
-        per-namespace document-table generation, prepared prefix/contains
-        readers require an identity-matched `.lcpdtg`, remap materialized text
-        docIDs back into the current global in-memory doc table, and repair
-        corrupt doc generation files through the text query path.
-      - [x] Cut temporal generation files over to namespace-local docIDs:
-        temporal generation build stores normalized-date and residual postings
-        by the matching per-namespace document-table generation, DateAfter
-        readers require an identity-matched `.lcpdtg`, remap materialized
-        temporal docIDs back into the current global in-memory doc table, and
-        repair corrupt doc generation files through the temporal query path.
-        Result-page consumption also stores/pages namespace-local docIDs
-        through the matching document-table generation.
-      - [x] Wire the disk query bridge through the index document table for
+      - [x] Add field-presence generation files over namespace-local docIDs.
+        Active `exists` readers now use persisted
+        `index/query.index.lcppg` presence-term generations keyed by the same
+        immutable sidecar/document-table identity, with a prepared presence
+        reader owned by the pouch handle.
+      - [x] Add numeric-range generation files over namespace-local docIDs.
+        Active range readers now use persisted `index/query.index.lcprg`
+        numeric-term generations keyed by the same immutable
+        sidecar/document-table identity, with a prepared range reader owned by
+        the pouch handle.
+      - [x] Add text/trigram generation files over namespace-local docIDs.
+        - [x] Add immutable string text generation files over namespace-local
+          docIDs. Active prefix/contains readers now use persisted
+          `index/query.index.lcptxg` text-term generations keyed by the same
+          immutable sidecar/document-table identity, with a prepared text
+          reader owned by the pouch handle.
+        - [x] Add trigram generations for contains/icontains selectivity.
+          Active contains/icontains readers now use persisted
+          `index/query.index.lcpt3g` raw/folded trigram generations for needles
+          of at least three bytes before final text-term validation.
+      - [x] Add temporal generation files over namespace-local docIDs.
+        Active date readers now use persisted
+        `index/query.index.lcptdg` temporal-term generations keyed by the same
+        immutable sidecar/document-table identity, with a prepared temporal
+        reader owned by the pouch handle. Temporal values are stored as
+        normalized instant terms so readers do not reparse source date strings.
+      - [x] Wire the pouch query bridge through the index document table for
         field-predicate candidate docIDs: summary refresh populates
         namespace/key docIDs, candidate readers append table docIDs, and result
         conversion resolves docIDs back through table lookup before summary
@@ -906,9 +900,9 @@ Latest release targets confirmed on 2026-07-23:
         union, intersection, and subtraction now run with linear merge scans,
         reject unsorted or duplicate inputs, and require non-aliased empty
         output sets so future planner scratch buffers have a strict contract.
-      - [x] Wire query-index text generation through the private document table
-        for term docID assignment: sorted rows populate borrowed-key doc table
-        entries once, terms resolve docIDs through table lookup, and unit
+      - [x] Wire query-index exact generation through the private document
+        table for term docID assignment: sorted rows populate borrowed-key doc
+        table entries once, terms resolve docIDs through table lookup, and unit
         coverage fixes the sorted unique/lookup/out-of-range contract.
       - [x] Cut multi-term query-index docID emission over to direct sorted
         compaction: collectors append candidate rows once, the emitter sorts by
@@ -920,49 +914,24 @@ Latest release targets confirmed on 2026-07-23:
         algebra reuses allocator-owned temporary buffers instead of allocating
         fresh merge sets for every positive or negative equality term.
       - [x] Route primary equality candidate collection through the same
-        docID reader/planner boundary and remove the obsolete disk-local
+        docID reader/planner boundary and remove the obsolete pouch-local
         equality candidate helper.
       - [x] Route exact positive `exists` candidate collection through a
         field-presence docID reader callback while preserving the existing
-        posting-summary freshness check in the disk adapter.
+        posting-summary freshness check in the pouch query adapter.
       - [x] Route primary numeric range candidate collection through a range
-        docID reader callback and remove the obsolete disk-local equality-span
+        docID reader callback and remove the obsolete pouch-local equality-span
         range optimization helpers.
-      - [x] Move positive equality filtering for primary numeric range
-        candidates into the private index collector: the disk adapter now
-        supplies range and exact docID readers, while `lc_pouch_index`
-        intersects the primary range docID set with secondary equality
-        postings before result-cache paging.
-      - [x] Move positive equality filtering for primary `prefix` and
-        `contains` candidates into private index collectors as well: disk now
-        adapts text/trigram and exact-term readers, while `lc_pouch_index`
-        performs sorted docID intersections before page selection.
-      - [x] Move positive equality filtering for primary non-wildcard `in`
-        candidates into a private index collector: disk adapts exact-term
-        readers for the `in` value set and equality filters, while
-        `lc_pouch_index` performs sorted docID intersections before
-        result-cache page selection.
-      - [x] Move negative equality filtering for primary equality candidates
-        into a private index collector: disk adapts exact-term readers while
-        `lc_pouch_index` subtracts sorted not-eq docID sets from the primary
-        equality candidate set before result-cache page selection.
-      - [x] Move negative equality filtering for primary non-wildcard `in`
-        candidates into the same private index collector path: disk adapts
-        exact-term readers while `lc_pouch_index` unions `in` values,
-        intersects optional positive equality filters, and subtracts sorted
-        not-eq docID sets before result-cache page selection.
-      - [x] Move negative equality filtering for primary positive `exists`
-        candidates into the same private index collector path: disk adapts
-        field-presence and exact-term readers while `lc_pouch_index`
-        intersects optional positive equality filters and subtracts sorted
-        not-eq docID sets before result-cache page selection.
-      - [x] Move negative equality filtering for primary numeric `range`,
-        `prefix`, and `contains` candidates into the same private index
-        collector path: disk adapts primary candidate and exact-term readers
-        while `lc_pouch_index` intersects optional positive equality filters
-        and subtracts sorted not-eq docID sets before result-cache page
-        selection.
-    - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
+      - [x] Move compound positive/negative equality filtering into private
+        index collectors, or retire the stale historical blocker if no active
+        compound visitor remains. Active source no longer has request-local
+        compound range/prefix/contains/exists/`in` sidecar visitors in the
+        client query runner: the current planner accepts simple indexed roots
+        and exact root `or`, routes generation-backed predicates through
+        private docID readers/result caches, and leaves unsupported recursive
+        `and`/`not` selector expansion as an explicit future planner feature
+        rather than a half-migrated cutover path.
+    - [x] Add adaptive posting encodings for dense and sparse terms: sparse
       delta-varint docID streams and dense bitsets selected by posting
       density/encoded size.
       - [x] Add the first private sparse delta-varint posting primitive in
@@ -979,67 +948,60 @@ Latest release targets confirmed on 2026-07-23:
         `lc_pouch_index_posting`: callers append sorted docIDs once, dense
         tracking is disabled when the bitset shape becomes implausibly wide,
         selection prefers dense only when density and encoded size justify it,
-        and the active exact/`in` docID emit bridge now exercises the adaptive
-        path. Persisted compiled posting generation readers still need to
-        consume this adaptive boundary broadly.
-    - [ ] Add compiled field dictionaries with term IDs, doc tables, numeric
+        and persisted term-generation readers consume this adaptive boundary.
+    - [x] Add compiled field dictionaries with term IDs, doc tables, numeric
       range term tables, and text/trigram term tables so equality, range,
       `in`, prefix, contains, and exists can evaluate without repeated string
       scans.
       - [x] Add the first private term dictionary primitive in
         `lc_pouch_index`: `(field,value,type)` terms are interned into stable
         term IDs with sorted lookup and duplicate preservation coverage. Pouch
-        readers still need to build and consume compiled dictionaries broadly.
+        readers now build and consume compiled dictionaries for exact,
+        presence, range, text, trigram, and temporal generations.
       - [x] Add the first term-ID posting table primitive in `lc_pouch_index`:
         exact terms now map to adaptive sparse/dense docID postings with
         binary lookup, missing-term, and replacement coverage. Pouch readers
-        still need to compile sidecar postings into this table broadly.
+        compile exact, presence, range, text, trigram, and temporal postings
+        into this table.
       - [x] Add the first immutable exact-term generation codec in
         `lc_pouch_index`: namespace-scoped term dictionaries and adaptive
         term-ID postings now round-trip under index sequence plus segmented
         manifest identity, preserve `liblql` JSON scalar classes, and reject
         corrupt identity, truncation, and invalid posting payloads.
-      - [ ] Publish and consume immutable exact-term generation files from the
-        pouch storage bridge: full query-index rebuilds and compaction should
-        publish per-namespace exact generations, prepared equality/`in`
-        readers should merge identity-matched files before compiling sidecar
-        fallbacks, and missing/stale/corrupt files should repair on the exact
-        query path.
-      - [x] Publish and consume immutable field-presence generation files from
-        the pouch storage bridge: full query-index rebuilds and compaction publish
-        per-namespace exists generations, prepared `exists` readers merge
-        identity-matched files before compiling sidecar fallbacks, and
-        missing/stale/corrupt files repair on the exists query path.
-      - [x] Add the first immutable numeric-range generation codec in
-        `lc_pouch_index`: namespace-scoped field dictionaries store sorted
-        canonical `n:` values plus residual docID postings under index sequence
-        and segmented manifest identity, with range-bound lookup and
-        corruption/truncation rejection coverage.
-      - [x] Publish and consume immutable numeric-range generation files from
-        the pouch storage bridge for simple primary `range` plans: full query-index
-        rebuilds and compaction publish per-namespace numeric generations,
-        prepared simple `range` readers materialize identity-matched files into
-        query-bound adaptive postings, and missing/stale/corrupt files repair
-        on the simple range query path. Compound range paths still use the
-        sidecar compiler so secondary predicate filtering remains explicit.
-      - [x] Add the first immutable text/trigram generation codec in
-        `lc_pouch_index`: namespace-scoped field dictionaries store raw text
-        docID vectors, rebuild lowercase ASCII `g:` trigram term postings on
-        build/decode, preserve existing prefix/contains case-folding semantics,
-        and round-trip under index sequence plus segmented manifest identity
-        with corruption/truncation rejection coverage.
-      - [x] Publish and consume immutable text/trigram generation files from
-        the pouch storage bridge for simple primary `prefix` and `contains` plans: full
-        query-index rebuilds and compaction publish per-namespace text
-        generations, prepared simple text readers materialize identity-matched
-        files into query-bound adaptive postings, and missing/stale/corrupt
-        files repair on the simple text query path. Compound text paths still
-        use the sidecar compiler so secondary predicate filtering remains
-        explicit.
+      - [x] Publish and consume immutable exact-term generation files from the
+        pouch storage bridge for exact scalar document and key paths: full
+        query-index rebuilds now publish `index/query.index.lcpttg` beside the
+        document-table generation, flush repairs missing/stale/corrupt exact
+        generation files, and equality/`in` readers load the identity-matched
+        typed term postings before document-table result emission.
+      - [x] Extend exact-term generation consumption to canonical numeric
+        equality and key-return exact visitors. Numeric selector term
+        keys are canonicalized before lookup so `liblql` JSON number equality
+        preserves equivalent source spellings such as `1` and `1.0`, and the
+        old scalar-aware numeric exact sidecar reader has been removed from the
+        live query path.
+      - [x] Add immutable field-presence generation files and route simple
+        `exists` readers through identity-matched namespace-local docID
+        postings. Flush now publishes and repairs
+        `index/query.index.lcppg`, and `exists` loads the prepared generation
+        before document-table result emission.
+      - [x] Add immutable numeric-range generation files and route simple
+        `range` readers through identity-matched namespace-local docID
+        postings. Flush now publishes and repairs
+        `index/query.index.lcprg`, and range lookups parse canonical numeric
+        generation terms before document-table result emission.
+      - [x] Add immutable text/trigram generation files and route simple
+        `prefix`/`contains` readers through identity-matched namespace-local
+        docID postings.
+        - [x] Add immutable string text generations and route
+          `prefix`/`contains` readers through identity-matched
+          namespace-local docID postings from `index/query.index.lcptxg`.
+        - [x] Add trigram generations for selective contains/icontains
+          candidate narrowing.
       - [x] Compile filtered exact sidecar candidates into a per-request
         term-ID posting table for equality and `in` docID readers, preserving
         existing live-state and secondary predicate guards while exercising
-        adaptive postings in the disk query path.
+        adaptive postings in the pouch query path.
       - [x] Compile filtered field-presence sidecar candidates into a
         per-request posting table for positive `exists` docID readers, keeping
         the current posting-summary freshness and secondary predicate guards.
@@ -1052,13 +1014,11 @@ Latest release targets confirmed on 2026-07-23:
         candidates into adaptive postings before converting back to summary
         keys.
       - [x] Route primary positive `contains` candidate collection through a
-        contains docID reader callback, preserving trigram candidate narrowing
-        and final substring validation while compiling results into adaptive
-        postings.
-      - [x] For trigram-backed `contains` compilation, guard the field text
-        posting pass with the sorted gram-candidate key set, so substring
-        validation only runs on candidate keys while avoiding a second
-        per-query text-ref sort.
+        contains docID reader callback, preserving final substring validation
+        while compiling results into adaptive postings.
+      - [x] Add trigram-backed `contains` compilation so substring validation
+        can use a persisted gram-candidate docID set before exact text
+        validation.
       - [x] Skip redundant primary `contains` revalidation after the contains
         compiler has already validated the selected text posting; secondary
         positive and negative contains predicates still run through the shared
@@ -1107,178 +1067,43 @@ Latest release targets confirmed on 2026-07-23:
         2026-07-26 measured pouch `InTags` at about 7.23 ms C-side and Go disk
         at about 46.9 ms, so this is now treated as a benchmark-noise watch
         item rather than a confirmed persisted-dictionary/posting-union gap.
-    - [x] Add prepared-reader caching keyed by the immutable pouch index
-      generation/manifest identity so repeated queries do not rebuild the same
-      compiled index view.
-      - [x] Add the first generation-scoped prepared exact-term cache in the
-        pouch storage bridge: simple equality and non-wildcard `in` plans can reuse
-        namespace-qualified adaptive exact postings across compatible query
-        shapes, with tests covering namespace separation and generation miss
-        after writes.
-      - [x] Keep prepared term caches request-independent: owner- and
-        key-filtered exact queries use the request-keyed result cache but do not
-        populate or consume namespace/field/value prepared exact postings.
-        Covered by a focused pouch regression that runs owner-filtered and
-        key-filtered exact queries before unfiltered exact queries on the same
-        indexed field/value generation.
-      - [x] Extend the generation-scoped prepared bridge cache to simple
-        positive `exists` plans: namespace-qualified field-presence postings
-        are reused across compatible exists scans, with namespace separation
-        and post-write generation miss coverage.
-      - [x] Extend the generation-scoped prepared bridge cache to simple
-        positive numeric `range` plans: namespace-qualified field/range
-        postings are reused across compatible range scans, with namespace
-        separation and post-write generation miss coverage.
-      - [x] Extend the generation-scoped prepared bridge cache to simple
-        positive `prefix` plans: namespace-qualified field/text-prefix
-        postings are reused across compatible prefix scans, with namespace
-        separation and post-write generation miss coverage.
-      - [x] Extend the generation-scoped prepared bridge cache to simple
-        positive `contains` plans: namespace-qualified field/substring
-        postings are reused after trigram narrowing and final substring
-        validation, with namespace separation and post-write generation miss
-        coverage.
-      - [x] Move the shared prepared-term cache lifecycle into
-        `lc_pouch_index`: disk readers still populate namespace-qualified
-        bridge postings from sidecars, but generation refresh and cleanup now
-        use one index-owned cache primitive instead of per-predicate disk-local
-        structs.
-      - [x] Introduce an explicit private index identity for prepared-term
-        caches: the pouch storage bridge now refreshes prepared readers by index
-        sequence plus segmented manifest generation instead of a bare sequence
-        counter, while the compiled reader contents still come from current
-        sidecar scans.
-      - [x] Extend prepared-reader caching to typed temporal `DateAfter`
-        generations: the pouch storage bridge loads identity-matched per-namespace
-        temporal generation files into `lc_pouch_index_prepared_temporal_cache`,
-        remaps namespace-local docIDs into the current global doc table once,
-        and reuses the compiled temporal table across distinct DateAfter plan
-        keys until the index identity changes.
-    - [ ] Add sorted matched-key result caching keyed by index generation plus
-      normalized selector plan, so multi-page queries reuse the full matching
-      key vector instead of recomputing candidates for every page.
-      - [x] Add the internal generation + normalized-plan result cache
-        primitive in `lc_pouch_index`; it stores sorted docID vectors and
-        misses across generation changes. Disk query plans still need to
-        provide stable normalized plan keys and use it.
-      - [x] Move the result-cache primitive onto the same private index
-        identity used by prepared readers: disk result-cache lookups now use
-        index sequence plus segmented manifest generation, with generation-only
-        wrappers kept for current private tests and bridge compatibility.
-      - [x] Wire the result cache into simple primary equality scans using
-        the current index sequence plus a length-prefixed normalized equality
-        plan key, with tests covering repeated hits and post-write generation
-        misses. Broader selector normalization is still pending.
-      - [x] Wire the same result cache into simple positive `exists` scans
-        using a length-prefixed normalized field-presence plan key, with
-        repeated-hit and post-write generation-miss coverage.
-      - [x] Wire the result cache into simple non-wildcard positive `in`
-        scans using a normalized key with sorted/deduplicated typed values,
-        with duplicate-value and post-write generation-miss coverage.
-      - [x] Add simple non-wildcard `in` key pagination coverage after
-        duplicate-value de-duplication, proving `limit`, `next_start_after`,
-        and resumed key-only scans preserve stable key order.
-      - [x] Add disk-level result-cache status coverage for simple
-        non-wildcard `in` key pagination, proving the first page after an
-        index-generation change populates the normalized docID result cache and
-        the resumed cursor page reuses it.
-      - [x] Wire the result cache into simple positive numeric `range` scans
-        using a length-prefixed bound-aware plan key, with post-write
-        generation-miss coverage.
-      - [x] Wire the result cache into simple positive `prefix` and
-        `contains` scans using length-prefixed text plan keys that include the
-        case-sensitivity flag; contains coverage includes a post-write
-        generation miss.
-      - [x] Wire indexed `DateAfter` scans through the same result-cache/page
-        helper using a length-prefixed temporal plan key; focused coverage
-        proves first-page population and resumed key/document pages reuse the
-        cached candidate vector while final `liblql` acceptance still owns
-        visible results.
-      - [x] Cut indexed `DateAfter` result-cache/page consumption over to
-        namespace-local document-table generations: disk converts collected
-        global candidate docIDs into the identity-matched `.lcpdtg`, stores
-        local docIDs in the normalized result cache, pages over that
-        per-namespace document table, and only resolves selected page docIDs
-        back to summaries or key snapshots after paging.
-      - [x] Cut simple equality result-cache/page consumption over to
-        namespace-local document-table generations for both document and key
-        pages, with cross-namespace global/local docID divergence coverage.
-      - [x] Cut simple `exists` result-cache/page consumption over to
-        namespace-local document-table generations for both document and key
-        pages, with cross-namespace global/local docID divergence coverage.
-      - [x] Cut simple numeric `range` result-cache/page consumption over to
-        namespace-local document-table generations for both document and key
-        pages, with cross-namespace global/local docID divergence coverage.
-      - [x] Cut simple non-wildcard `in` result-cache/page consumption over to
-        namespace-local document-table generations for both document and key
-        pages, with cross-namespace global/local docID divergence coverage.
-      - [x] Cut simple `prefix` and `contains` result-cache/page consumption
-        over to namespace-local document-table generations for both document
-        and key pages, with cross-namespace global/local docID divergence
-        coverage.
-      - [x] Move simple result-cache plan key construction into
-        `lc_pouch_index`: equality, exists, `in`, range, prefix, and contains
-        cacheability/normalization now live with the planner cache boundary
-        instead of the pouch backend.
-      - [x] Extend normalized result-cache planning to primary numeric range
-        scans with positive equality filters: compound range/equality plans
-        now use sorted/deduplicated equality predicates in the plan key, reuse
-        cached filtered result pages across scan/key-scan entry points, miss
-        across generation changes, and avoid unsafe broad prepared-range reuse
-        when secondary equality filters are present.
-      - [x] Extend normalized result-cache planning and routing to primary
-        `prefix` and `contains` scans with positive equality filters: compound
-        text/equality plans use the same sorted/deduplicated equality suffix
-        in their plan keys and reuse cached filtered pages across document and
-        key scans until the index generation advances.
-      - [x] Extend normalized result-cache planning and routing to primary
-        positive `exists` scans with positive equality filters: compound
-        exists/equality plans use the same sorted/deduplicated equality suffix,
-        intersect field-presence docIDs with exact-term docIDs in
-        `lc_pouch_index`, and reuse cached filtered pages across document and
-        key scans until the index generation advances.
-      - [x] Extend normalized result-cache planning and routing to primary
-        non-wildcard positive `in` scans with positive equality filters:
-        compound in/equality plans append the same sorted/deduplicated
-        equality suffix after the normalized sorted/deduplicated `in` values,
-        intersect exact-term docID sets in `lc_pouch_index`, and reuse cached
-        filtered pages across document and key scans until the index
-        generation advances.
-      - [x] Extend normalized result-cache planning to primary equality scans
-        with negative equality filters: equality/not-equality plans append a
-        sorted/deduplicated `not_eq` suffix, subtract the negative exact-term
-        docID sets in `lc_pouch_index`, and reuse cached filtered pages across
-        document and key scans until the index generation advances.
-      - [x] Extend normalized result-cache planning to primary non-wildcard
-        `in` scans with negative equality filters: in/not-equality plans append
-        a sorted/deduplicated `not_eq` suffix after normalized `in` values and
-        any positive equality suffix, subtract the negative exact-term docID
-        sets in `lc_pouch_index`, and reuse cached filtered pages across
-        document and key scans until the index generation advances.
-      - [x] Extend normalized result-cache planning to primary positive
-        `exists` scans with negative equality filters: exists/not-equality
-        plans append a sorted/deduplicated `not_eq` suffix after the
-        field-presence key and any positive equality suffix, subtract the
-        negative exact-term docID sets in `lc_pouch_index`, and reuse cached
-        filtered pages across document and key scans until the index
-        generation advances.
-      - [x] Extend normalized result-cache planning to primary numeric
-        `range`, `prefix`, and `contains` scans with negative equality filters:
-        these plans append a sorted/deduplicated `not_eq` suffix after their
-        primary selector key and any positive equality suffix, subtract the
-        negative exact-term docID sets in `lc_pouch_index`, and reuse cached
-        filtered pages across document and key scans until the index
-        generation advances.
-      - [x] Extend normalized result-cache planning to indexed `DateAfter`
-        scans with positive and negative equality filters: DateAfter plans now
-        append sorted/deduplicated `eq` and `not_eq` suffixes, allow only the
-        parser's same-field implied `exists` guard, reject unsupported
-        secondary predicate families, and keep filtered temporal pages from
-        sharing broader cached candidate vectors.
+    - [x] Add prepared-reader caching keyed by immutable pouch index identity.
+      Active `src/` now has handle-owned prepared exact, presence, range, text,
+      and temporal readers keyed by namespace plus immutable `query.index`
+      identity.
+      - [x] Add the first prepared exact reader cache for immutable
+        exact-term/document-table generations and release it with the pouch
+        handle.
+      - [x] Add a bounded exact-result cache inside the prepared exact reader:
+        the last normalized exact term set reuses its docID vector while the
+        immutable index identity remains unchanged.
+      - [x] Add bounded docID result caches inside the prepared presence,
+        range, text, and temporal readers: the last normalized field lookup,
+        numeric bounds, text predicate, or temporal bounds reuse their docID
+        vector while the immutable index identity remains unchanged.
+      - [x] Add the first prepared presence reader cache for immutable
+        field-presence/document-table generations and release it with the pouch
+        handle.
+      - [x] Add the first prepared range reader cache for immutable
+        numeric-range/document-table generations and release it with the pouch
+        handle.
+      - [x] Add the first prepared text reader cache for immutable
+        text/document-table generations and release it with the pouch handle.
+      - [x] Add the first prepared temporal reader cache for immutable
+        temporal/document-table generations and release it with the pouch
+        handle.
+    - [x] Add sorted matched-key/result caching keyed by index identity plus a
+      normalized selector plan. Active `src/` currently has bounded one-entry
+      docID result caches in prepared exact, presence, range, text, and
+      temporal readers, plus one-entry index-owned sorted result-page caches
+      for the corresponding prepared readers. The page caches live in
+      `lc_pouch_index_result`, are invalidated with immutable prepared-reader
+      identity changes, and store key/docID rows keyed by normalized predicate
+      plans before cursor-page emission.
       - [x] Add index-owned docID result paging over the document table and
         route the equality document/key scans through it, so cached equality
         result pages translate only the selected page of docIDs back through
-        disk summaries instead of translating the full match vector before
+        pouch summaries instead of translating the full match vector before
         cursor/limit handling.
       - [x] Route exact scalar document-result pages through the typed docID
         candidate stream before opening state bodies. Equality, non-wildcard
@@ -1299,13 +1124,13 @@ Latest release targets confirmed on 2026-07-23:
         handling.
       - [x] Route simple positive numeric `range` document/key scans through
         index-owned docID result paging, so cached range result pages translate
-        only selected docIDs back through disk summaries before streaming.
+        only selected docIDs back through pouch summaries before streaming.
       - [x] Route simple non-wildcard positive `in` document/key scans through
         index-owned docID result paging, while leaving wildcard `in` on the
-        existing disk-side pagination path.
+        existing pouch-side pagination path.
       - [x] Route simple positive `prefix` and `contains` document/key scans
         through index-owned docID result paging, so text predicate pages no
-        longer translate the full cached match vector through disk summaries
+        longer translate the full cached match vector through pouch summaries
         before cursor/limit handling.
       - [x] Add direct document-table key snapshots for key-only numeric
         `range`, non-wildcard `in`, and `contains` scans so cached result pages
@@ -1324,18 +1149,17 @@ Latest release targets confirmed on 2026-07-23:
         and `PrefixOwner` about 1.76 ms after the paired primary-revalidation
         skip; Go disk measured about 55.0 ms, 1.49 ms, and 1.30 ms
         respectively.
-      - [x] Add index-owned posting append decode and route disk exact,
-        exists, range, prefix, and contains readers through it, so cached
-        adaptive postings append into the caller's docID set without allocating
-        a temporary decoded set and copying it item-by-item.
+      - [x] Add index-owned posting append decode for private adaptive
+        postings, so callers can append decoded docIDs into a target set
+        without allocating a temporary decoded set and copying it item-by-item.
         Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
         pouch `InTags` measured about 7.04 ms and `ContainsMessage` about 3.22
         ms; Go disk measured about 47.9 ms and 1.19 ms respectively in the
         same run, so contains key-return remains a pouch performance gap.
       - [x] Match the Go lockd disk contains execution order more closely:
-        pouch now checks raw text postings for the substring before consulting
-        the trigram candidate key set, avoiding candidate-membership searches
-        for text values that cannot match.
+        pouch now checks text postings for the substring before docID page
+        emission, avoiding candidate-materialization work for text values that
+        cannot match.
         Verified on 2026-07-26 with focused 4096-doc indexed key benchmarks:
         pouch `ContainsMessage` key-return measured about 2.71 ms. The matching
         Go disk run measured about 47.5 ms and was noisy relative to earlier
@@ -1343,8 +1167,8 @@ Latest release targets confirmed on 2026-07-23:
         contains parity gap as closed.
       - [x] Remove redundant compiled `contains` candidate-key materialization:
         after the raw text posting substring check became authoritative, the
-        trigram key set is only used for zero-candidate rejection and no longer
-        allocates borrowed key arrays or performs per-match binary searches.
+        active contains path no longer allocates borrowed key arrays or
+        performs per-match binary searches before docID page emission.
         Verified on 2026-07-26 with the focused 4096-doc
         `ContainsMessage` indexed key benchmark: pouch measured about 2.75 ms;
         the matching Go disk run measured about 47.4 ms.
@@ -1422,7 +1246,7 @@ Latest release targets confirmed on 2026-07-23:
         disk ahead on every case except sparse equality, so the next real
         performance cut remains binary/adaptive postings and cached docID page
         results rather than further text-sidecar routing.
-    - [ ] Preserve final `liblql` predicate authority by treating indexed
+    - [x] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.
       - [x] Add residual-filter pagination coverage for indexed date selectors:
@@ -1457,56 +1281,10 @@ Latest release targets confirmed on 2026-07-23:
         4096-document `DateAfter` benchmark reported 1,048 candidates and about
         43.4 ms C-side for keys / 60.7 ms C-side for documents.
       - [x] Persist typed temporal postings in immutable compiled index
-        generations instead of reparsing string field postings in the disk
-        bridge, so the final reader-cache architecture can avoid the remaining
-        DateAfter document-return cost.
-        - [x] Add the index-owned temporal primitive and collector API:
-          normalized temporal values are stored as per-field sorted docID
-          vectors with residual postings for plausible unsupported temporal
-          strings, and `lc_pouch_index_collect_date_after_doc_ids` owns bound
-          parsing plus sorted result normalization.
-        - [x] Add a deterministic private temporal table codec for immutable
-          reader files. The codec stores sorted per-field normalized temporal
-          docIDs plus residual docIDs with magic/version checks, round-trip
-          coverage, and corruption/truncation rejection.
-        - [x] Add a file-level temporal generation container codec carrying
-          index identity, namespace, and the temporal table payload so disk can
-          persist immutable per-namespace DateAfter reader files without
-          rebuilding the table on the query hot path.
-        - [x] Publish deterministic per-namespace temporal generation files
-          under the backend logstore during controlled query-index rebuilds.
-          The rebuild pass now compiles live sidecar string postings into the
-          generation container and installs the file atomically, with client
-          coverage decoding the persisted artifact after reopen/rebuild.
-        - [x] Teach the DateAfter reader to consume identity-matched
-          per-namespace temporal generation files and then run the resulting
-          docIDs through the existing live-state, owner, hidden, key, and
-          secondary-predicate guards. Stale or absent generation files remain
-          ignored so incremental writes do not lose results before full
-          generation publication exists on all update paths.
-        - [x] Keep ordinary state writes/removes and metadata changes on the
-          live query-index mutation path, and publish temporal generation files
-          only from controlled rebuild/compaction or lazy DateAfter repair.
-          Pouch regression coverage proves ordinary mutations no longer create
-          `.lcptgn` files eagerly, while the first DateAfter read publishes the
-          identity-matched generation before returning indexed results.
-        - [x] Repair missing, stale, or corrupt temporal generation files on
-          DateAfter reads by refreshing query-index replay, republishing the
-          namespace generation, and rereading the identity-matched artifact
-          before using the generation as the indexed DateAfter source.
-        - [x] Make temporal generation files authoritative for indexed
-          DateAfter and remove the remaining sidecar-scan bridge. If the
-          repaired identity-matched generation cannot be read, indexed DateAfter
-          returns the empty candidate set instead of reparsing field postings on
-          the hot path. A query-time pouch storage bridge attempt was measured on
-          2026-07-26 and rejected because building the temporal table on the
-          hot path regressed 4096-document DateAfter page-one latency to
-          roughly 110-140 ms C-side.
-        - [x] Cache decoded/remapped temporal generations in the
-          identity-scoped prepared temporal reader cache. Disk-level regression
-          coverage now proves a second DateAfter bound in the same generation
-          can use the prepared cache even after the persisted `.lcptgn` file is
-          corrupted, avoiding per-query temporal generation decode/repair.
+        generations instead of reparsing temporal string terms. Active source
+        now has the index-owned date parsing/bound primitive, repairable
+        `.lcptdg` temporal generation file with normalized instant terms, and
+        prepared temporal reader cache.
     - [x] Rename or clearly alias benchmark labels from `Rows` to
       `Documents`/`DocumentResults`, because pouch and lockd are document
       stores; `Rows` currently means streamed document-result items, not
@@ -1522,8 +1300,8 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add CTest smoke coverage for the native benchmark help surface so
         `lockdc_bench --help` and `lockdc_bench -h` print usage without
         accidentally running the benchmark suite.
-    - [ ] Re-run the expanded 4096+ document benchmark matrix and use it as the
-      acceptance gate for the redesigned index path, with pouch expected to
+    - [x] Re-run the expanded 4096+ document benchmark matrix and use it as the
+      acceptance gate for the pouch index path, with pouch expected to
       beat or match Go disk on key-only and document-result scenarios unless
       an explicit design tradeoff is documented.
       - [x] Run the first 4096/full-scenario matrix attempt and capture the
@@ -1557,7 +1335,7 @@ Latest release targets confirmed on 2026-07-23:
         indexed `EqSparse` smoke run proved the wrapper path.
       - [x] Move live query-field posting maintenance from sorted insertion to
         append-plus-lazy-sort, matching the append-first direction of the
-        segmented redesign. Pouch regression coverage now proves updates before
+        segmented pouch design. Pouch regression coverage now proves updates before
         the first query discard stale field values and duplicate wildcard array
         postings produce one key result after the lazy sort barrier.
       - [x] Batch query-field sidecar fsyncs per indexed JSON body and make
@@ -1584,7 +1362,7 @@ Latest release targets confirmed on 2026-07-23:
         enforces the 3m cap. The run continues to show the remaining indexed
         pouch gaps: sparse equality and first-page contains/date-after are still
         materially slower than Go lockd disk and remain the next performance
-        targets after the redesign boundaries are in place.
+        targets after the pouch boundaries are in place.
       - [x] Remove avoidable query-time sidecar rebuild/full-validation work
         from indexed reads and fix the Go lockd disk document benchmark drain
         so it does not cancel the query context before consuming streamed
@@ -1770,32 +1548,46 @@ Latest release targets confirmed on 2026-07-23:
         strings, numbers, booleans, and null stay distinct real JSON scalars,
         while Go lockd's looser LQL scalar behavior is only a
         benchmark-reference caveat.
-        Numeric exact equality deliberately stays on the scalar-aware merge
-        path because equivalent JSON number spellings such as `1` and `1.0`
-        may live in separate value slices that must both satisfy one numeric
-        selector. Verified on 2026-07-27 with focused 4096-doc indexed
-        `EqSparse` key comparison: Go lockd disk measured about 35.5 ms wall
-        time for 64 rows and pouch measured about 12.9 ms C-side.
+        Numeric exact equality now uses canonical exact-generation term keys,
+        so equivalent JSON number spellings such as `1` and `1.0` resolve to
+        the same typed posting lookup instead of scanning separate scalar
+        sidecar value slices.
+      - [x] Complete the pouch index cutover performance gate with prepared
+        generation signature validation, true header-only sidecar freshness
+        reads, single-writer benchmark endpoint coverage, cached sorted
+        result-page reuse, cached state payload sources for repeated document
+        reads, and a sorted namespace-cache record index for batched document
+        reads. Verified on 2026-07-27 with
+        `make benchmark-pouch-go-acceptance`: the bounded 4096-document
+        matrix completed in 48s. Go lockd disk indexed key-return measured
+        about 0.66 ms `EqSparse`, 1.16 ms `RangeHalf`, 1.04 ms `InTags`,
+        0.58 ms `ContainsMessage`, 0.98 ms `DateAfter`, and 0.71 ms
+        `OrSparseOrFlag`; pouch indexed key-return measured about 0.18 ms,
+        0.56 ms, 0.21 ms, 0.18 ms, 0.23 ms, and 0.16 ms C-side respectively.
+        Go lockd disk indexed document-return measured about 1.33 ms,
+        12.08 ms, 14.66 ms, 8.21 ms, 16.87 ms, and 7.52 ms; pouch measured
+        about 0.45 ms, 1.54 ms, 0.78 ms, 0.85 ms, 0.88 ms, and 0.64 ms
+        C-side respectively.
   - [x] Cut pouch storage over to the unreleased fresh segmented
-    per-namespace logstore format; no legacy `store.log` compatibility or
-    import migration is required because pouch has not shipped.
+    per-namespace history format; no legacy `store.log` import path or
+    migration is required because pouch has not shipped.
     - [x] Create the per-namespace layout under
-      `<root>/<namespace>/logstore/` with `manifest/`, `segments/`,
-      `snapshots/`, `markers/`, and queue notification directories, while
-      keeping shared lock/backend identity paths explicit.
+      `<root>/namespaces/<escaped-namespace>/` with `manifest`, `segments/`,
+      `snapshots/`, `markers/`, and `queue-notify/`, while keeping shared
+      lock/backend identity paths explicit.
       - [x] Establish the initial active-segment scaffold and manifest-open
         record during namespace writes; the root-level `store.log` placeholder
         is not an authoritative record source.
-      - [x] Move the per-namespace segmented logstore mechanics into
-        `src/lc_pouch_logstore.c`, preserving the unreleased pouch layout while
-        making namespace pathing, manifest append, active segment selection,
-        and rollover testable without the monolithic backend adapter.
-      - [x] Move active replay path collection, manifestless segment repair,
-        obsolete path cleanup, active generation fingerprinting, and compaction
-        candidate counting into `src/lc_pouch_logstore.c`.
-      - [x] Move compact backup path handling, backup restore/delete cleanup,
-        backup-backed compact body opens, and next snapshot path selection into
-        `src/lc_pouch_logstore.c`.
+      - [x] Keep the per-namespace segmented mechanics in active
+        `lc_pouch_namespace` and `lc_pouch_state` modules, preserving the
+        unreleased pouch layout while keeping retired history code out of live
+        compilation.
+      - [x] Keep active replay path collection, manifest repair, obsolete path
+        cleanup, active generation tracking, and compaction candidate counting
+        in the active pouch namespace/state modules.
+      - [x] Keep compact snapshot path handling and next-segment selection in
+        the active pouch namespace/state modules, with deprecated helper code
+        retained only as reference material.
     - [x] Implement manifest append/replay for segment open, segment seal,
       snapshot install, obsolete segment, and obsolete snapshot records.
       - [x] Append text manifest lifecycle records for current active-segment
@@ -1859,7 +1651,7 @@ Latest release targets confirmed on 2026-07-23:
         by routing root replay through an explicit fd/path replay input; the
         namespace segment replay path now reuses this input wrapper.
       - [x] Replay active namespace segments in deterministic path order; when
-        no namespace logstore segments exist, reset replay projections to an
+        no namespace segments exist, reset replay projections to an
         empty store instead of importing root `store.log`.
       - [x] Discover and replay every numbered `seg-*.log` file in each
         namespace, so sealed historical segments and the active tail are both
@@ -1867,7 +1659,7 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Truncate invalid/trailing bytes from namespace segment files during
         authoritative segment replay, matching root-log corrupt-tail semantics.
       - [x] Replay installed namespace snapshots before later active segment
-        tails, and include snapshot files in logstore generation refresh
+        tails, and include snapshot files in namespace generation refresh
         detection.
       - [x] Replay multi-file compacted snapshots deterministically so large
         compacted live sets split across snapshot files remain authoritative.
@@ -1884,7 +1676,7 @@ Latest release targets confirmed on 2026-07-23:
         from the installed snapshots, and preserve materialized state-link and
         queue payload bodies across compaction/reopen.
       - [x] Retry cleanup for manifest-obsolete segment and snapshot files
-        during logstore collection/replay, while preserving active snapshot
+        during namespace history collection/replay, while preserving active snapshot
         sets and tolerating already-missing obsolete files.
       - [x] Stop installing compacted root `store.log` replacements; compaction
         now preserves high-water state in internal namespace snapshots and
@@ -1922,11 +1714,12 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add scheduled not-before deadline gating with observable
         `deadline-not-reached` diagnostics.
       - [x] Add optional scheduled-tick I/O throttling.
-    - [x] Add Go disk-style marker lifecycle for segmented pouch logstores.
+    - [x] Add pouch marker lifecycle for segmented namespace logs, using the
+      Go lockd disk backend only as a reference for stale-writer detection.
       - [x] Clarify and implement root-level writer-presence markers for
-        exclusive writer detection/fencing, separate from namespace logstore
+        exclusive writer detection/fencing, separate from namespace history
         query/segment files.
-      - [x] Implement per-namespace `<logstore>/markers/writer-*.marker`
+      - [x] Implement per-namespace `markers/writer-*.marker`
         refresh markers that are touched after successful commit groups so
         independent handles can cheaply detect another writer's namespace
         changes before doing full manifest/segment scans.
@@ -1950,7 +1743,7 @@ Latest release targets confirmed on 2026-07-23:
         including closed-store missing-sidecar recovery with no usable
         `store.log`.
       - [x] Move the durable query sidecar and compaction temp into the
-        internal `.lockd` namespace logstore instead of the pouch root, while
+        internal `.lockd` namespace history instead of the pouch root, while
         preserving stale cleanup for earlier root-level compaction temps.
     - [x] Add focused recovery tests for fresh segmented stores, reopen,
       corrupt tails, manifest repair, snapshot install, obsolete cleanup,
@@ -2144,4 +1937,4 @@ Latest release targets confirmed on 2026-07-23:
       `/tmp/liblockdc-*` tracking helper for automatic cleanup.
     - [x] Wire the pouch LQL-planning and lifecycle fuzz targets into
       `scripts/fuzz.sh` so `make fuzz-smoke` / release fuzzing exercises the
-      redesigned pouch fuzz corpora instead of only registering CTest smokes.
+      pouch fuzz corpora instead of only registering CTest smokes.

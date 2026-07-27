@@ -21,8 +21,7 @@ static int lc_pouch_temporal_leap_year(int year) {
 }
 
 static int lc_pouch_temporal_month_days(int year, int month) {
-  static const int days[] = {31, 28, 31, 30, 31, 30,
-                             31, 31, 30, 31, 30, 31};
+  static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
   if (month < 1 || month > 12) {
     return 0;
@@ -33,8 +32,7 @@ static int lc_pouch_temporal_month_days(int year, int month) {
   return days[month - 1];
 }
 
-static int64_t lc_pouch_temporal_days_from_civil(int year, int month,
-                                                 int day) {
+static int64_t lc_pouch_temporal_days_from_civil(int year, int month, int day) {
   int y;
   int era;
   unsigned yoe;
@@ -50,8 +48,7 @@ static int64_t lc_pouch_temporal_days_from_civil(int year, int month,
 }
 
 static int lc_pouch_temporal_valid_date_time(int year, int month, int day,
-                                             int hour, int minute,
-                                             int second) {
+                                             int hour, int minute, int second) {
   return month >= 1 && month <= 12 && day >= 1 &&
          day <= lc_pouch_temporal_month_days(year, month) && hour >= 0 &&
          hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 &&
@@ -182,9 +179,8 @@ static const char *lc_pouch_temporal_trim_end(const char *begin) {
   const char *end;
 
   end = begin + strlen(begin);
-  while (end > begin &&
-         (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' ||
-          end[-1] == '\r')) {
+  while (end > begin && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' ||
+                         end[-1] == '\r')) {
     --end;
   }
   return end;

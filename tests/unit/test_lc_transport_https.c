@@ -22,10 +22,10 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_api_internal.h"
 #include "lc_engine_api.h"
-#include "../support/lc_test_tmp.h"
 
 #define HTTPS_TRANSPORT_TMP_PREFIX "/tmp/liblockdc-transport-"
 
@@ -5342,11 +5342,9 @@ static void test_public_query_keys_streams_chunks_and_headers(void **state) {
   static const char *query_headers[] = {
       "Content-Type: application/json",
       "Accept: application/x-ndjson, application/json"};
-  static const char *query_body[] = {"\"namespace\":\"transport-ns\"",
-                                     "\"selector\":{\"eq\"",
-                                     "\"field\":\"/owner\"",
-                                     "\"value\":\"owner-a\"",
-                                     "\"return\":\"keys\""};
+  static const char *query_body[] = {
+      "\"namespace\":\"transport-ns\"", "\"selector\":{\"eq\"",
+      "\"field\":\"/owner\"", "\"value\":\"owner-a\"", "\"return\":\"keys\""};
   static const char *response_headers[] = {
       "X-Correlation-Id: corr-query-keys",
       "X-Lockd-Query-Cursor: cursor-keys-1",

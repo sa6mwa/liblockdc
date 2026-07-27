@@ -12,9 +12,9 @@
 
 #include <cmocka.h>
 
+#include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_pouch.h"
-#include "../support/lc_test_tmp.h"
 
 #define POUCH_E2E_TMP_PREFIX "/tmp/liblockdc-e2e-pouch-"
 #define LOCAL_MUTATE_TMP_PREFIX "/tmp/liblockdc-local-mutate-"
@@ -3703,8 +3703,7 @@ static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
 
 static void pouch_e2e_run_maintenance(const char *root,
                                       const char *namespace_name, int force,
-                                      int cleanup_only,
-                                      long retention_cutoff,
+                                      int cleanup_only, long retention_cutoff,
                                       lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
@@ -3722,9 +3721,8 @@ static void pouch_e2e_run_maintenance(const char *root,
   maintenance_options.force = force;
   maintenance_options.cleanup_only = cleanup_only;
   maintenance_options.retention_updated_before_unix = retention_cutoff;
-  rc =
-      lc_pouch_maintenance_run(pouch, &maintenance_options, &maintenance_result,
-                               error);
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, error);
   assert_lc_ok(rc, error);
   if (force) {
     assert_true(maintenance_result.compacted || maintenance_result.skipped);
@@ -3799,12 +3797,11 @@ static void pouch_e2e_write_segmented_docs_direct(const char *root,
   for (index = 0U; index < doc_count; ++index) {
     written = snprintf(key, sizeof(key), "pouch/large/%s/%04zu", kind, index);
     assert_true(written > 0 && (size_t)written < sizeof(key));
-    written = snprintf(
-        body, sizeof(body),
-        "{\"kind\":\"%s\",\"ordinal\":%zu,\"group\":\"%s\","
-        "\"tags\":[\"pouch\",\"large\",\"%s\"],\"pad\":\"%s\"}",
-        kind, index, index % 2U == 0U ? "even" : "odd",
-        index % 3U == 0U ? "planning" : "finance", pad);
+    written = snprintf(body, sizeof(body),
+                       "{\"kind\":\"%s\",\"ordinal\":%zu,\"group\":\"%s\","
+                       "\"tags\":[\"pouch\",\"large\",\"%s\"],\"pad\":\"%s\"}",
+                       kind, index, index % 2U == 0U ? "even" : "odd",
+                       index % 3U == 0U ? "planning" : "finance", pad);
     assert_true(written > 0 && (size_t)written < sizeof(body));
     rc = lc_source_from_memory(body, strlen(body), &source, error);
     assert_lc_ok(rc, error);
@@ -3834,9 +3831,8 @@ static void pouch_e2e_force_maintenance_expect_segments(
   assert_lc_ok(rc, error);
   maintenance_options.namespace_name = namespace_name;
   maintenance_options.force = 1;
-  rc =
-      lc_pouch_maintenance_run(pouch, &maintenance_options, &maintenance_result,
-                               error);
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, error);
   assert_lc_ok(rc, error);
   assert_true(maintenance_result.compacted);
   assert_true(maintenance_result.candidate_segment_count > 1UL);
@@ -3845,8 +3841,8 @@ static void pouch_e2e_force_maintenance_expect_segments(
   lc_pouch_close(pouch);
 }
 
-static void test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(
-    void **state) {
+static void
+test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
   lc_client *client;
   lc_client *reader;
   lc_lease *lease;
@@ -3919,8 +3915,8 @@ static void test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(
   }
   attach_req.name = "life.txt";
   attach_req.content_type = "text/plain";
-  rc = lc_source_from_memory("life-object", strlen("life-object"), &src,
-                             &error);
+  rc =
+      lc_source_from_memory("life-object", strlen("life-object"), &src, &error);
   assert_lc_ok(rc, &error);
   rc = lease->attach(lease, &attach_req, src, &attach_res, &error);
   lc_source_close(src);
@@ -3969,8 +3965,7 @@ static void test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(
 
   pouch_e2e_run_maintenance(root, "life", 1, 0, 0L, &error);
   pouch_e2e_run_maintenance(root, "life", 0, 1, 0L, &error);
-  pouch_e2e_run_maintenance(root, "life-retention", 0, 0, 2147483647L,
-                            &error);
+  pouch_e2e_run_maintenance(root, "life-retention", 0, 0, 2147483647L, &error);
 
   open_pouch_client(endpoint, &reader, &error);
   rows = pouch_e2e_query_key_count(reader, "life", selector_json, &error);
@@ -4011,8 +4006,8 @@ static void test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_direct_large_namespace_segmented_index_reopen(
-    void **state) {
+static void
+test_pouch_direct_large_namespace_segmented_index_reopen(void **state) {
   lc_client *client;
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;
@@ -4038,8 +4033,7 @@ static void test_pouch_direct_large_namespace_segmented_index_reopen(
   snprintf(selector_json, sizeof(selector_json),
            "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
 
-  pouch_e2e_write_segmented_docs_direct(root, "large", kind, doc_count,
-                                        &error);
+  pouch_e2e_write_segmented_docs_direct(root, "large", kind, doc_count, &error);
 
   open_pouch_client(endpoint, &client, &error);
   flush_req.namespace_name = "large";
@@ -4070,8 +4064,8 @@ static void test_pouch_direct_large_namespace_segmented_index_reopen(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot(
-    void **state) {
+static void
+test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot(void **state) {
   lc_client *client;
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;

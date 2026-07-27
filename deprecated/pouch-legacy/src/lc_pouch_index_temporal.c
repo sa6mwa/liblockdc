@@ -43,8 +43,8 @@ static int lc_pouch_index_temporal_doc_qsort_compare(const void *left,
   a = (const lc_pouch_index_temporal_doc_entry *)left;
   b = (const lc_pouch_index_temporal_doc_entry *)right;
   return lc_pouch_index_temporal_doc_compare_value(
-      a->unix_seconds, a->nanosecond, a->doc_id, b->unix_seconds,
-      b->nanosecond, b->doc_id);
+      a->unix_seconds, a->nanosecond, a->doc_id, b->unix_seconds, b->nanosecond,
+      b->doc_id);
 }
 
 static int lc_pouch_index_temporal_doc_after_bound(
@@ -305,10 +305,10 @@ int lc_pouch_index_temporal_posting_table_build_postings(
       return 0;
     }
     if (table->fields[index].doc_ids.count > 1U) {
-      if (!lc_pouch_index_posting_build(
-              allocator, &table->fields[index].posting,
-              table->fields[index].doc_ids.items,
-              table->fields[index].doc_ids.count)) {
+      if (!lc_pouch_index_posting_build(allocator,
+                                        &table->fields[index].posting,
+                                        table->fields[index].doc_ids.items,
+                                        table->fields[index].doc_ids.count)) {
         return 0;
       }
       table->fields[index].posting_ready = 1;
@@ -344,8 +344,7 @@ static size_t lc_pouch_index_temporal_field_upper_bound(
 int lc_pouch_index_temporal_posting_table_append_after(
     const lc_pouch_allocator *allocator,
     const lc_pouch_index_temporal_posting_table *table, const char *field,
-    int64_t unix_seconds, int32_t nanosecond,
-    lc_pouch_index_doc_id_set *dst) {
+    int64_t unix_seconds, int32_t nanosecond, lc_pouch_index_doc_id_set *dst) {
   const lc_pouch_index_temporal_field_entry *entry;
   size_t position;
   size_t index;
@@ -398,8 +397,7 @@ static uint64_t lc_pouch_index_temporal_zigzag_i64(int64_t value) {
   return ((uint64_t)value) << 1U;
 }
 
-static int lc_pouch_index_temporal_unzigzag_i64(uint64_t value,
-                                                int64_t *out) {
+static int lc_pouch_index_temporal_unzigzag_i64(uint64_t value, int64_t *out) {
   uint64_t magnitude;
 
   if (out == NULL) {
@@ -478,7 +476,8 @@ int lc_pouch_index_temporal_posting_table_encoded_size(
     }
     field_len = strlen(field->field);
     if (field_len > UINT32_MAX ||
-        field->value_count > ((size_t)-1) / LC_POUCH_INDEX_TEMPORAL_VALUE_SIZE ||
+        field->value_count >
+            ((size_t)-1) / LC_POUCH_INDEX_TEMPORAL_VALUE_SIZE ||
         field->doc_ids.count > ((size_t)-1) / sizeof(uint32_t)) {
       return 0;
     }
@@ -547,7 +546,8 @@ int lc_pouch_index_temporal_posting_table_encode(
       cursor += 4U;
     }
     for (value_index = 0U; value_index < field->doc_ids.count; ++value_index) {
-      lc_pouch_index_temporal_put_u32(cursor, field->doc_ids.items[value_index]);
+      lc_pouch_index_temporal_put_u32(cursor,
+                                      field->doc_ids.items[value_index]);
       cursor += 4U;
     }
   }
@@ -642,9 +642,8 @@ int lc_pouch_index_temporal_posting_table_decode(
       offset += 4U;
       doc_id = lc_pouch_index_temporal_get_u32(src + offset);
       offset += 4U;
-      if (raw_nanosecond > 999999999U ||
-          !lc_pouch_index_temporal_unzigzag_i64(encoded_seconds,
-                                                &unix_seconds)) {
+      if (raw_nanosecond > 999999999U || !lc_pouch_index_temporal_unzigzag_i64(
+                                             encoded_seconds, &unix_seconds)) {
         lc_pouch_free(allocator, field_name);
         lc_pouch_index_temporal_posting_table_cleanup(allocator, &decoded);
         return 0;
@@ -711,8 +710,8 @@ int lc_pouch_index_temporal_generation_encoded_size(
   }
   if (generation == NULL || generation->namespace_name == NULL ||
       size_out == NULL ||
-      !lc_pouch_index_temporal_posting_table_encoded_size(
-          &generation->postings, &table_size)) {
+      !lc_pouch_index_temporal_posting_table_encoded_size(&generation->postings,
+                                                          &table_size)) {
     return 0;
   }
   namespace_len = strlen(generation->namespace_name);
@@ -740,12 +739,12 @@ int lc_pouch_index_temporal_generation_encode(
   if (written_out != NULL) {
     *written_out = 0U;
   }
-  if (generation == NULL || generation->namespace_name == NULL ||
-      dst == NULL || written_out == NULL ||
+  if (generation == NULL || generation->namespace_name == NULL || dst == NULL ||
+      written_out == NULL ||
       !lc_pouch_index_temporal_generation_encoded_size(generation, &needed) ||
       dst_size < needed ||
-      !lc_pouch_index_temporal_posting_table_encoded_size(
-          &generation->postings, &table_size)) {
+      !lc_pouch_index_temporal_posting_table_encoded_size(&generation->postings,
+                                                          &table_size)) {
     return 0;
   }
   namespace_len = strlen(generation->namespace_name);
@@ -827,8 +826,7 @@ int lc_pouch_index_temporal_generation_decode(
                                               (size_t)table_size_u64) ||
       offset + (size_t)table_size_u64 != src_size ||
       !lc_pouch_index_temporal_posting_table_decode(
-          allocator, &decoded.postings, src + offset,
-          (size_t)table_size_u64)) {
+          allocator, &decoded.postings, src + offset, (size_t)table_size_u64)) {
     lc_pouch_index_temporal_generation_cleanup(allocator, &decoded);
     return 0;
   }

@@ -528,8 +528,7 @@ int lc_lonejson_parse_file(lonejson *runtime, FILE *fp, const lonejson_map *map,
         NULL, NULL, NULL);
   }
   lc_lonejson_prepare_parse_destination(runtime, map, dst);
-  return lc_lonejson_parse_prepared_file(runtime, fp, map, dst, error,
-                                         message);
+  return lc_lonejson_parse_prepared_file(runtime, fp, map, dst, error, message);
 }
 
 int lc_lonejson_parse_prepared_file(lonejson *runtime, FILE *fp,

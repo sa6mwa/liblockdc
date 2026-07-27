@@ -17407,8 +17407,8 @@ static char *lc_pouch_lql_field_copy_with_array_wildcards(const char *field) {
   return copy;
 }
 
-static char *lc_pouch_lql_ast_field_copy_with_array_wildcards(
-    lql_string_view view) {
+static char *
+lc_pouch_lql_ast_field_copy_with_array_wildcards(lql_string_view view) {
   char *raw;
   char *normalized;
 
@@ -18410,8 +18410,8 @@ static int lc_pouch_lql_view_absent(lql_string_view view) {
   return view.data == NULL || view.len == 0U;
 }
 
-static int lc_pouch_lql_ast_fast_date_after_parse(
-    lc_pouch_lql_document_filter *filter) {
+static int
+lc_pouch_lql_ast_fast_date_after_parse(lc_pouch_lql_document_filter *filter) {
   lql_selector_node root;
   lql_selector_date_term source;
   lc_pouch_document_date_after_term *term;
@@ -18527,7 +18527,8 @@ static size_t lc_pouch_lql_document_filter_index_term_count(
   return filter->document_eq_term_count + filter->document_or_eq_term_count +
          filter->document_range_term_count +
          filter->document_or_range_term_count + filter->document_in_term_count +
-         filter->document_or_in_term_count + filter->document_prefix_term_count +
+         filter->document_or_in_term_count +
+         filter->document_prefix_term_count +
          filter->document_or_prefix_term_count +
          filter->document_contains_term_count +
          filter->document_or_contains_term_count +
@@ -18556,8 +18557,7 @@ static int lc_pouch_lql_document_filter_index_covers_selector(
     return 0;
   }
   leaf_count = 0U;
-  if (!lc_pouch_lql_ast_index_cover_count(filter->runtime, root,
-                                          &leaf_count)) {
+  if (!lc_pouch_lql_ast_index_cover_count(filter->runtime, root, &leaf_count)) {
     return 0;
   }
   if (root.kind == LQL_SELECTOR_NODE_ALL) {
@@ -18788,8 +18788,7 @@ lc_pouch_lql_document_filter_init(lc_pouch_lql_document_filter *filter,
   (void)lc_pouch_lql_ast_not_text_hint_parse(filter);
   (void)lc_pouch_lql_ast_not_exists_hint_parse(filter);
   filter->index_covers_selector =
-      lc_pouch_lql_document_filter_index_covers_selector(filter,
-                                                         &capabilities);
+      lc_pouch_lql_document_filter_index_covers_selector(filter, &capabilities);
   filter->enabled = 1;
   return LC_OK;
 }
@@ -18818,9 +18817,7 @@ typedef struct lc_pouch_lql_fast_match_visit {
   int fast_date_unsupported;
 } lc_pouch_lql_fast_match_visit;
 
-static int lc_pouch_lql_fast_bit_capacity(size_t count) {
-  return count <= 63U;
-}
+static int lc_pouch_lql_fast_bit_capacity(size_t count) { return count <= 63U; }
 
 static int lc_pouch_lql_fast_filter_applicable(
     const lc_pouch_lql_document_filter *filter) {
@@ -18850,14 +18847,12 @@ static int lc_pouch_lql_fast_filter_applicable(
       !lc_pouch_lql_fast_bit_capacity(filter->document_exists_term_count)) {
     return 0;
   }
-  and_count = filter->document_eq_term_count +
-              filter->document_range_term_count +
-              filter->document_in_term_count +
-              filter->document_exists_term_count;
-  or_count = filter->document_or_eq_term_count +
-             filter->document_or_range_term_count +
-             filter->document_or_in_term_count +
-             filter->document_or_exists_term_count;
+  and_count =
+      filter->document_eq_term_count + filter->document_range_term_count +
+      filter->document_in_term_count + filter->document_exists_term_count;
+  or_count =
+      filter->document_or_eq_term_count + filter->document_or_range_term_count +
+      filter->document_or_in_term_count + filter->document_or_exists_term_count;
   return and_count + or_count > 0U;
 }
 
@@ -18929,9 +18924,9 @@ static int lc_pouch_lql_fast_set_path(lc_pouch_lql_fast_match_visit *visit,
                                       &visit->field_capacity, "~1", 2U)) {
           return 0;
         }
-      } else if (!lc_pouch_lql_fast_append(
-                     visit, &visit->field, &visit->field_len,
-                     &visit->field_capacity, &ch, 1U)) {
+      } else if (!lc_pouch_lql_fast_append(visit, &visit->field,
+                                           &visit->field_len,
+                                           &visit->field_capacity, &ch, 1U)) {
         return 0;
       }
     }
@@ -18965,8 +18960,9 @@ static int lc_pouch_lql_fast_field_matches(const char *term_field,
   return 0;
 }
 
-static int lc_pouch_lql_fast_range_matches(
-    const char *value, const lc_pouch_document_range_term *term) {
+static int
+lc_pouch_lql_fast_range_matches(const char *value,
+                                const lc_pouch_document_range_term *term) {
   int cmp;
 
   if (value == NULL || term == NULL || strncmp(value, "n:", 2U) != 0) {
@@ -19004,7 +19000,8 @@ lc_pouch_lql_fast_in_value_matches(const lc_pouch_document_in_term *term,
     return 0;
   }
   for (index = 0U; index < term->value_count; ++index) {
-    if (term->values[index] != NULL && strcmp(term->values[index], value) == 0) {
+    if (term->values[index] != NULL &&
+        strcmp(term->values[index], value) == 0) {
       return 1;
     }
   }
@@ -19484,9 +19481,9 @@ static int lc_pouch_lql_document_filter_match_fast_bytes(
     return LC_OK;
   }
   or_required = filter->document_or_eq_term_count +
-                filter->document_or_range_term_count +
-                filter->document_or_in_term_count +
-                filter->document_or_exists_term_count >
+                    filter->document_or_range_term_count +
+                    filter->document_or_in_term_count +
+                    filter->document_or_exists_term_count >
                 0U;
   *matched = !or_required || visit.or_matched;
   return LC_OK;
@@ -20044,8 +20041,7 @@ static int lc_pouch_query_row_prefix_len(const char *key,
                                          const lc_pouch_state_info *state,
                                          char *version_text,
                                          size_t version_capacity,
-                                         size_t *prefix_len,
-                                         lc_error *error) {
+                                         size_t *prefix_len, lc_error *error) {
   static const char key_field[] = "{\"key\":";
   static const char content_type_field[] = ",\"content_type\":";
   static const char etag_field[] = ",\"etag\":";
@@ -20068,10 +20064,8 @@ static int lc_pouch_query_row_prefix_len(const char *key,
   }
   content_type = state != NULL ? state->content_type : NULL;
   etag = state != NULL ? state->etag : NULL;
-  written =
-      snprintf(version_text, version_capacity, "%ld", state != NULL
-                                                         ? state->version
-                                                         : 0L);
+  written = snprintf(version_text, version_capacity, "%ld",
+                     state != NULL ? state->version : 0L);
   if (written < 0 || (size_t)written >= version_capacity) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "failed to format pouch query row version", NULL, NULL,
@@ -20144,8 +20138,7 @@ static int lc_pouch_query_format_row_prefix(char *dst, size_t capacity,
   return LC_OK;
 }
 
-static int lc_pouch_query_sink_write_json_value(lc_sink *dst,
-                                                const char *value,
+static int lc_pouch_query_sink_write_json_value(lc_sink *dst, const char *value,
                                                 lc_error *error) {
   char escape[7];
   const unsigned char *cursor;
@@ -20272,12 +20265,12 @@ static int lc_pouch_query_write_row_prefix(lc_sink *dst, const char *key,
     rc = lc_pouch_query_sink_write_json_value(dst, etag, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_sink_write_all(dst, version_field,
-                                 sizeof(version_field) - 1U, error);
+    rc = lc_pouch_sink_write_all(dst, version_field, sizeof(version_field) - 1U,
+                                 error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_sink_write_all(dst, version_text, strlen(version_text),
-                                 error);
+    rc =
+        lc_pouch_sink_write_all(dst, version_text, strlen(version_text), error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_sink_write_all(dst, document_field,
@@ -20439,8 +20432,8 @@ static int lc_pouch_query_scan_write_row(lc_pouch_query_scan_context *scan,
       }
       return LC_OK;
     }
-    rc = lc_pouch_query_write_row_prefix(scan->dst, row->key, state_view,
-                                         error);
+    rc =
+        lc_pouch_query_write_row_prefix(scan->dst, row->key, state_view, error);
     if (rc == LC_OK) {
       rc = lc_pouch_sink_write_all(scan->dst, payload, payload_len, error);
     }
@@ -21345,8 +21338,7 @@ static int lc_pouch_client_query_keys_index(lc_client_handle *client,
     return rc;
   }
 
-  if (residual_filter && scan_context.has_more &&
-      scan_context.cursor != NULL) {
+  if (residual_filter && scan_context.has_more && scan_context.cursor != NULL) {
     out->cursor = scan_context.cursor;
     scan_context.cursor = NULL;
   } else if (!residual_filter && scan_res.next_start_after != NULL) {

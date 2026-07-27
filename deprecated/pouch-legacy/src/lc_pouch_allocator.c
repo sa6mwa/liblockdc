@@ -205,8 +205,8 @@ void lc_pouch_namespace_list_cleanup(const lc_pouch_allocator *allocator,
   memset(list, 0, sizeof(*list));
 }
 
-void lc_pouch_query_index_scan_res_cleanup(
-    const lc_pouch_allocator *allocator, lc_pouch_query_index_scan_res *res) {
+void lc_pouch_query_index_scan_res_cleanup(const lc_pouch_allocator *allocator,
+                                           lc_pouch_query_index_scan_res *res) {
   if (res == NULL) {
     return;
   }
@@ -256,8 +256,8 @@ void lc_pouch_query_config_cleanup(const lc_pouch_allocator *allocator,
   memset(config, 0, sizeof(*config));
 }
 
-void lc_pouch_queue_wake_status_cleanup(
-    const lc_pouch_allocator *allocator, lc_pouch_queue_wake_status *status) {
+void lc_pouch_queue_wake_status_cleanup(const lc_pouch_allocator *allocator,
+                                        lc_pouch_queue_wake_status *status) {
   if (status == NULL) {
     return;
   }
@@ -349,8 +349,8 @@ void lc_pouch_object_list_cleanup(const lc_pouch_allocator *allocator,
   memset(list, 0, sizeof(*list));
 }
 
-void lc_pouch_scan_object_keys_res_cleanup(
-    const lc_pouch_allocator *allocator, lc_pouch_scan_object_keys_res *res) {
+void lc_pouch_scan_object_keys_res_cleanup(const lc_pouch_allocator *allocator,
+                                           lc_pouch_scan_object_keys_res *res) {
   if (res == NULL) {
     return;
   }

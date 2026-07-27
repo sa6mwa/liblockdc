@@ -33,9 +33,10 @@ int lc_pouch_logstore_snapshot_name_parse(const char *name,
                                           unsigned long *number_out);
 void lc_pouch_logstore_segment_name(char *buffer, size_t buffer_size,
                                     unsigned long number);
-char *lc_pouch_logstore_make_namespace_segment_path(
-    const lc_pouch_logstore *logstore, const char *namespace_name,
-    unsigned long segment_number);
+char *
+lc_pouch_logstore_make_namespace_segment_path(const lc_pouch_logstore *logstore,
+                                              const char *namespace_name,
+                                              unsigned long segment_number);
 int lc_pouch_logstore_open_active_segment_for_append(
     const lc_pouch_logstore *logstore, const char *namespace_name,
     char **path_out, int *fd_out, lc_error *error);
@@ -50,20 +51,19 @@ void lc_pouch_logstore_paths_cleanup(const lc_pouch_logstore *logstore,
 int lc_pouch_logstore_paths_add_take(const lc_pouch_logstore *logstore,
                                      lc_pouch_logstore_paths *paths,
                                      char *path);
-int lc_pouch_logstore_collect_active_paths(
-    const lc_pouch_logstore *logstore, lc_pouch_logstore_paths *paths,
-    lc_error *error);
+int lc_pouch_logstore_collect_active_paths(const lc_pouch_logstore *logstore,
+                                           lc_pouch_logstore_paths *paths,
+                                           lc_error *error);
 size_t lc_pouch_logstore_compaction_candidate_file_count(
     const lc_pouch_logstore_paths *paths);
-unsigned long
-lc_pouch_logstore_mix_stat_generation(unsigned long current,
-                                      const struct stat *st);
+unsigned long lc_pouch_logstore_mix_stat_generation(unsigned long current,
+                                                    const struct stat *st);
 int lc_pouch_logstore_active_generation(const lc_pouch_logstore *logstore,
-                                        int *found,
-                                        unsigned long *generation,
+                                        int *found, unsigned long *generation,
                                         lc_error *error);
-char *lc_pouch_logstore_make_compact_backup_path(
-    const lc_pouch_logstore *logstore, const char *path);
+char *
+lc_pouch_logstore_make_compact_backup_path(const lc_pouch_logstore *logstore,
+                                           const char *path);
 void lc_pouch_logstore_compact_backups_cleanup(
     const lc_pouch_logstore *logstore, lc_pouch_logstore_paths *backups,
     int restore);
@@ -71,10 +71,11 @@ int lc_pouch_logstore_prepare_compact_backups(
     const lc_pouch_logstore *logstore,
     const lc_pouch_logstore_paths *active_paths,
     lc_pouch_logstore_paths *backups, lc_error *error);
-int lc_pouch_logstore_open_compact_body_fd(
-    const lc_pouch_logstore *logstore, const char *path, lc_error *error);
-char *lc_pouch_logstore_make_compact_snapshot_path(
-    const lc_pouch_logstore *logstore, const char *segment_path,
-    lc_error *error);
+int lc_pouch_logstore_open_compact_body_fd(const lc_pouch_logstore *logstore,
+                                           const char *path, lc_error *error);
+char *
+lc_pouch_logstore_make_compact_snapshot_path(const lc_pouch_logstore *logstore,
+                                             const char *segment_path,
+                                             lc_error *error);
 
 #endif

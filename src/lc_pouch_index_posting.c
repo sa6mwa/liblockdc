@@ -17,9 +17,10 @@ void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
   memset(posting, 0, sizeof(*posting));
 }
 
-static int lc_pouch_index_posting_reserve(
-    lc_pouch_index_posting *posting, size_t needed,
-    const lc_allocator *allocator, lc_error *error) {
+static int lc_pouch_index_posting_reserve(lc_pouch_index_posting *posting,
+                                          size_t needed,
+                                          const lc_allocator *allocator,
+                                          lc_error *error) {
   unsigned char *next_bytes;
   size_t next_capacity;
 
@@ -35,13 +36,13 @@ static int lc_pouch_index_posting_reserve(
   while (next_capacity < needed) {
     if (next_capacity > ((size_t)-1 / 2U)) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "pouch index posting exceeds local limit", NULL,
-                          NULL, NULL);
+                          "pouch index posting exceeds local limit", NULL, NULL,
+                          NULL);
     }
     next_capacity *= 2U;
   }
-  next_bytes = (unsigned char *)lc_alloc_with_allocator(allocator,
-                                                        next_capacity);
+  next_bytes =
+      (unsigned char *)lc_alloc_with_allocator(allocator, next_capacity);
   if (next_bytes == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch index posting", NULL, NULL,
@@ -56,9 +57,10 @@ static int lc_pouch_index_posting_reserve(
   return LC_OK;
 }
 
-static int lc_pouch_index_posting_append_varint(
-    lc_pouch_index_posting *posting, unsigned long value,
-    const lc_allocator *allocator, lc_error *error) {
+static int lc_pouch_index_posting_append_varint(lc_pouch_index_posting *posting,
+                                                unsigned long value,
+                                                const lc_allocator *allocator,
+                                                lc_error *error) {
   unsigned char encoded[sizeof(unsigned long) * 2U];
   size_t encoded_length;
   int rc;
@@ -84,8 +86,8 @@ static int lc_pouch_index_posting_append_varint(
                         "pouch index posting varint exceeds local limit", NULL,
                         NULL, NULL);
   }
-  rc = lc_pouch_index_posting_reserve(
-      posting, posting->length + encoded_length, allocator, error);
+  rc = lc_pouch_index_posting_reserve(posting, posting->length + encoded_length,
+                                      allocator, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -94,9 +96,11 @@ static int lc_pouch_index_posting_append_varint(
   return LC_OK;
 }
 
-int lc_pouch_index_posting_append_sorted_unique(
-    lc_pouch_index_posting *posting, unsigned long doc_id, int *added,
-    const lc_allocator *allocator, lc_error *error) {
+int lc_pouch_index_posting_append_sorted_unique(lc_pouch_index_posting *posting,
+                                                unsigned long doc_id,
+                                                int *added,
+                                                const lc_allocator *allocator,
+                                                lc_error *error) {
   unsigned long delta;
   int rc;
 
@@ -111,7 +115,7 @@ int lc_pouch_index_posting_append_sorted_unique(
     if (doc_id < posting->last_doc_id) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index posting append requires sorted input",
-                          NULL, NULL, "pouch-redesign");
+                          NULL, NULL, "pouch");
     }
     if (doc_id == posting->last_doc_id) {
       return LC_OK;
@@ -131,16 +135,17 @@ int lc_pouch_index_posting_append_sorted_unique(
   return LC_OK;
 }
 
-static int lc_pouch_index_posting_read_varint(
-    const lc_pouch_index_posting *posting, size_t *offset,
-    unsigned long *out, lc_error *error) {
+static int
+lc_pouch_index_posting_read_varint(const lc_pouch_index_posting *posting,
+                                   size_t *offset, unsigned long *out,
+                                   lc_error *error) {
   unsigned long value;
   unsigned int shift;
 
   if (posting == NULL || offset == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch index posting varint read requires inputs",
-                        NULL, NULL, NULL);
+                        "pouch index posting varint read requires inputs", NULL,
+                        NULL, NULL);
   }
   value = 0UL;
   shift = 0U;
@@ -151,8 +156,8 @@ static int lc_pouch_index_posting_read_varint(
     ++*offset;
     if (shift >= (unsigned int)(sizeof(unsigned long) * CHAR_BIT)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch index posting varint is too large", NULL,
-                          NULL, "pouch-redesign");
+                          "pouch index posting varint is too large", NULL, NULL,
+                          "pouch");
     }
     value |= ((unsigned long)(byte & 0x7FU)) << shift;
     if ((byte & 0x80U) == 0U) {
@@ -163,12 +168,13 @@ static int lc_pouch_index_posting_read_varint(
   }
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch index posting varint is truncated", NULL, NULL,
-                      "pouch-redesign");
+                      "pouch");
 }
 
-int lc_pouch_index_posting_append_to_set(
-    const lc_pouch_index_posting *posting, lc_pouch_index_docid_set *set,
-    const lc_allocator *allocator, lc_error *error) {
+int lc_pouch_index_posting_append_to_set(const lc_pouch_index_posting *posting,
+                                         lc_pouch_index_docid_set *set,
+                                         const lc_allocator *allocator,
+                                         lc_error *error) {
   unsigned long doc_id;
   unsigned long delta;
   size_t offset;
@@ -192,18 +198,18 @@ int lc_pouch_index_posting_append_to_set(
     }
     if (index > 0U && delta > ULONG_MAX - doc_id) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch index posting docID delta overflows", NULL,
-                        NULL, "pouch-redesign");
+                        "pouch index posting docID delta overflows", NULL, NULL,
+                        "pouch");
       break;
     }
     doc_id = index == 0U ? delta : doc_id + delta;
-    rc = lc_pouch_index_docid_set_append_sorted_unique(
-        set, doc_id, &added, allocator, error);
+    rc = lc_pouch_index_docid_set_append_sorted_unique(set, doc_id, &added,
+                                                       allocator, error);
   }
   if (rc == LC_OK && offset != posting->length) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch index posting has trailing bytes", NULL, NULL,
-                      "pouch-redesign");
+                      "pouch");
   }
   return rc;
 }
@@ -235,13 +241,13 @@ static int lc_pouch_index_dense_posting_reserve(
   while (next_capacity < needed) {
     if (next_capacity > ((size_t)-1 / 2U)) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "pouch index dense posting exceeds local limit",
-                          NULL, NULL, NULL);
+                          "pouch index dense posting exceeds local limit", NULL,
+                          NULL, NULL);
     }
     next_capacity *= 2U;
   }
-  next_bits = (unsigned char *)lc_alloc_with_allocator(allocator,
-                                                       next_capacity);
+  next_bits =
+      (unsigned char *)lc_alloc_with_allocator(allocator, next_capacity);
   if (next_bits == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch index dense posting", NULL,
@@ -276,8 +282,8 @@ int lc_pouch_index_dense_posting_append_sorted_unique(
     if (doc_id < posting->last_doc_id) {
       return lc_error_set(
           error, LC_ERR_INVALID, 0L,
-          "pouch index dense posting append requires sorted input", NULL,
-          NULL, "pouch-redesign");
+          "pouch index dense posting append requires sorted input", NULL, NULL,
+          "pouch");
     }
     if (doc_id == posting->last_doc_id) {
       return LC_OK;
@@ -290,8 +296,8 @@ int lc_pouch_index_dense_posting_append_sorted_unique(
                         NULL, NULL);
   }
   byte_index = (size_t)byte_index_ul;
-  rc = lc_pouch_index_dense_posting_reserve(posting, byte_index + 1U,
-                                            allocator, error);
+  rc = lc_pouch_index_dense_posting_reserve(posting, byte_index + 1U, allocator,
+                                            error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -300,8 +306,8 @@ int lc_pouch_index_dense_posting_append_sorted_unique(
   }
   mask = (unsigned char)(1U << (unsigned int)(doc_id % CHAR_BIT));
   if ((posting->bits[byte_index] & mask) == 0U) {
-    posting->bits[byte_index] = (unsigned char)(posting->bits[byte_index] |
-                                                mask);
+    posting->bits[byte_index] =
+        (unsigned char)(posting->bits[byte_index] | mask);
     ++posting->count;
     *added = 1;
   }
@@ -324,13 +330,13 @@ int lc_pouch_index_dense_posting_append_to_set(
   if (posting == NULL || set == NULL) {
     return lc_error_set(
         error, LC_ERR_INVALID, 0L,
-        "pouch index dense posting decode requires posting and set", NULL,
-        NULL, NULL);
+        "pouch index dense posting decode requires posting and set", NULL, NULL,
+        NULL);
   }
   if (posting->length > 0U && posting->bits == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index dense posting is missing bit storage",
-                        NULL, NULL, "pouch-redesign");
+                        NULL, NULL, "pouch");
   }
   seen = 0U;
   rc = LC_OK;
@@ -344,13 +350,12 @@ int lc_pouch_index_dense_posting_append_to_set(
       doc_id = ((unsigned long)byte_index * (unsigned long)CHAR_BIT) +
                (unsigned long)bit_index;
       if (!posting->has_last_doc_id || doc_id > posting->max_doc_id) {
-        return lc_error_set(
-            error, LC_ERR_INVALID, 0L,
-            "pouch index dense posting bit exceeds max docID", NULL, NULL,
-            "pouch-redesign");
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch index dense posting bit exceeds max docID",
+                            NULL, NULL, "pouch");
       }
-      rc = lc_pouch_index_docid_set_append_sorted_unique(
-          set, doc_id, &added, allocator, error);
+      rc = lc_pouch_index_docid_set_append_sorted_unique(set, doc_id, &added,
+                                                         allocator, error);
       if (rc != LC_OK) {
         break;
       }
@@ -360,7 +365,7 @@ int lc_pouch_index_dense_posting_append_to_set(
   if (rc == LC_OK && seen != posting->count) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch index dense posting count mismatch", NULL, NULL,
-                      "pouch-redesign");
+                      "pouch");
   }
   return rc;
 }
@@ -389,8 +394,8 @@ static int lc_pouch_index_adaptive_should_track_dense(
     return 0;
   }
   dense_length = (size_t)dense_length_ul;
-  sparse_limit = posting->sparse.length *
-                 LC_POUCH_INDEX_DENSE_TRACK_SPARSE_MULTIPLIER;
+  sparse_limit =
+      posting->sparse.length * LC_POUCH_INDEX_DENSE_TRACK_SPARSE_MULTIPLIER;
   if (sparse_limit < LC_POUCH_INDEX_DENSE_TRACK_MIN_BYTES) {
     sparse_limit = LC_POUCH_INDEX_DENSE_TRACK_MIN_BYTES;
   }
@@ -409,8 +414,8 @@ int lc_pouch_index_adaptive_posting_append_sorted_unique(
                         "posting and added",
                         NULL, NULL, NULL);
   }
-  rc = lc_pouch_index_posting_append_sorted_unique(
-      &posting->sparse, doc_id, added, allocator, error);
+  rc = lc_pouch_index_posting_append_sorted_unique(&posting->sparse, doc_id,
+                                                   added, allocator, error);
   if (rc != LC_OK || !*added) {
     return rc;
   }
@@ -428,7 +433,7 @@ int lc_pouch_index_adaptive_posting_append_sorted_unique(
   if (!dense_added) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index adaptive posting dense append lost docID",
-                        NULL, NULL, "pouch-redesign");
+                        NULL, NULL, "pouch");
   }
   return LC_OK;
 }

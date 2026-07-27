@@ -12,8 +12,7 @@
 static void *lc_subscribe_handler_main(void *context);
 
 static int lc_client_query_request_selector_json(const lc_query_req *req,
-                                                 char **out,
-                                                 lc_error *error) {
+                                                 char **out, lc_error *error) {
   lql *runtime;
   lql_selector *selector;
   lql_error lql_error_value;
@@ -25,13 +24,12 @@ static int lc_client_query_request_selector_json(const lc_query_req *req,
 
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "query selector output is required", NULL, NULL,
-                        NULL);
+                        "query selector output is required", NULL, NULL, NULL);
   }
   *out = NULL;
   if (req == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "query request is required", NULL, NULL, NULL);
+    return lc_error_set(error, LC_ERR_INVALID, 0L, "query request is required",
+                        NULL, NULL, NULL);
   }
   if (req->selector_json != NULL && req->selector_json[0] != '\0' &&
       req->selector_lql != NULL && req->selector_lql[0] != '\0') {
@@ -51,20 +49,17 @@ static int lc_client_query_request_selector_json(const lc_query_req *req,
   lql_error_init(&lql_error_value);
   status = lql_new(&runtime, &lql_error_value);
   if (status != LQL_STATUS_OK) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "failed to initialize query LQL runtime",
-                        lql_error_value.message, lql_status_string(status),
-                        "liblql");
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L, "failed to initialize query LQL runtime",
+        lql_error_value.message, lql_status_string(status), "liblql");
   }
-  status =
-      runtime->selector_parse(runtime, req->selector_lql, &selector,
-                              &lql_error_value);
+  status = runtime->selector_parse(runtime, req->selector_lql, &selector,
+                                   &lql_error_value);
   if (status != LQL_STATUS_OK) {
     runtime->destroy(runtime);
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "failed to parse query selector_lql",
-                        lql_error_value.message, lql_status_string(status),
-                        "liblql");
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L, "failed to parse query selector_lql",
+        lql_error_value.message, lql_status_string(status), "liblql");
   }
   fp = tmpfile();
   if (fp == NULL) {
@@ -74,15 +69,15 @@ static int lc_client_query_request_selector_json(const lc_query_req *req,
                         "failed to create query selector serialization file",
                         strerror(errno), NULL, "liblql");
   }
-  status = runtime->selector_write_json(runtime, selector, fp, &lql_error_value);
+  status =
+      runtime->selector_write_json(runtime, selector, fp, &lql_error_value);
   runtime->selector_destroy(runtime, selector);
   if (status != LQL_STATUS_OK) {
     fclose(fp);
     runtime->destroy(runtime);
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "failed to serialize query selector_lql",
-                        lql_error_value.message, lql_status_string(status),
-                        "liblql");
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L, "failed to serialize query selector_lql",
+        lql_error_value.message, lql_status_string(status), "liblql");
   }
   runtime->destroy(runtime);
   runtime = NULL;

@@ -275,8 +275,7 @@ int lc_pouch_client_watch_queue_method(lc_client *self,
 int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                                  lc_sink *dst, lc_query_res *out,
                                  lc_error *error);
-int lc_pouch_client_query_keys_method(lc_client *self,
-                                      const lc_query_req *req,
+int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
                                       const lc_query_key_handler *handler,
                                       void *context, lc_query_res *out,
                                       lc_error *error);
@@ -292,8 +291,7 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                                        lc_error *error);
 int lc_pouch_client_txn_replay_method(lc_client *self,
                                       const lc_txn_replay_req *req,
-                                      lc_txn_replay_res *out,
-                                      lc_error *error);
+                                      lc_txn_replay_res *out, lc_error *error);
 int lc_pouch_client_txn_prepare_method(lc_client *self,
                                        const lc_txn_decision_req *req,
                                        lc_txn_decision_res *out,
@@ -307,16 +305,18 @@ int lc_pouch_client_txn_rollback_method(lc_client *self,
                                         lc_txn_decision_res *out,
                                         lc_error *error);
 int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error);
-int lc_pouch_client_tc_lease_acquire_method(
-    lc_client *self, const lc_tc_lease_acquire_req *req,
-    lc_tc_lease_acquire_res *out, lc_error *error);
+int lc_pouch_client_tc_lease_acquire_method(lc_client *self,
+                                            const lc_tc_lease_acquire_req *req,
+                                            lc_tc_lease_acquire_res *out,
+                                            lc_error *error);
 int lc_pouch_client_tc_lease_renew_method(lc_client *self,
                                           const lc_tc_lease_renew_req *req,
                                           lc_tc_lease_renew_res *out,
                                           lc_error *error);
-int lc_pouch_client_tc_lease_release_method(
-    lc_client *self, const lc_tc_lease_release_req *req,
-    lc_tc_lease_release_res *out, lc_error *error);
+int lc_pouch_client_tc_lease_release_method(lc_client *self,
+                                            const lc_tc_lease_release_req *req,
+                                            lc_tc_lease_release_res *out,
+                                            lc_error *error);
 int lc_pouch_client_tc_leader_method(lc_client *self, lc_tc_leader_res *out,
                                      lc_error *error);
 int lc_pouch_client_tc_cluster_announce_method(
@@ -330,11 +330,10 @@ int lc_pouch_client_tc_cluster_list_method(lc_client *self,
                                            lc_error *error);
 int lc_pouch_client_tc_rm_register_method(lc_client *self,
                                           const lc_tc_rm_register_req *req,
-                                          lc_tc_rm_res *out,
-                                          lc_error *error);
-int lc_pouch_client_tc_rm_unregister_method(
-    lc_client *self, const lc_tc_rm_unregister_req *req, lc_tc_rm_res *out,
-    lc_error *error);
+                                          lc_tc_rm_res *out, lc_error *error);
+int lc_pouch_client_tc_rm_unregister_method(lc_client *self,
+                                            const lc_tc_rm_unregister_req *req,
+                                            lc_tc_rm_res *out, lc_error *error);
 int lc_pouch_client_tc_rm_list_method(lc_client *self, lc_tc_rm_list_res *out,
                                       lc_error *error);
 int lc_pouch_message_ack_method(lc_message *self, lc_error *error);

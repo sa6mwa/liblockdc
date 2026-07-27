@@ -36,8 +36,7 @@ static int lc_pouch_index_date_is_leap(int year) {
 }
 
 static int lc_pouch_index_date_month_days(int year, int month) {
-  static const int days[] = {31, 28, 31, 30, 31, 30,
-                             31, 31, 30, 31, 30, 31};
+  static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
   if (month < 1 || month > 12) {
     return 0;
@@ -59,8 +58,8 @@ static double lc_pouch_index_days_from_civil(int year, int month, int day) {
   y -= month <= 2 ? 1L : 0L;
   era = y >= 0L ? y / 400L : (y - 399L) / 400L;
   yoe = y - era * 400L;
-  doy = (153L * (long)(month + (month > 2 ? -3 : 9)) + 2L) / 5L +
-        (long)day - 1L;
+  doy =
+      (153L * (long)(month + (month > 2 ? -3 : 9)) + 2L) / 5L + (long)day - 1L;
   doe = yoe * 365L + yoe / 4L - yoe / 100L + doy;
   return (double)(era * 146097L + doe - 719468L);
 }
@@ -171,19 +170,17 @@ int lc_pouch_index_parse_lql_datetime(const char *text,
     return 0;
   }
   days = lc_pouch_index_days_from_civil(year, month, day);
-  seconds = days * 86400.0 + (double)hour * 3600.0 +
-            (double)minute * 60.0 + (double)second + fraction;
-  offset_seconds = (double)offset_sign *
-                   ((double)offset_hour * 3600.0 +
-                    (double)offset_minute * 60.0);
+  seconds = days * 86400.0 + (double)hour * 3600.0 + (double)minute * 60.0 +
+            (double)second + fraction;
+  offset_seconds = (double)offset_sign * ((double)offset_hour * 3600.0 +
+                                          (double)offset_minute * 60.0);
   seconds -= offset_seconds;
   out->seconds = seconds;
   return 1;
 }
 
-static int lc_pouch_index_instant_compare(
-    const lc_pouch_index_instant *left,
-    const lc_pouch_index_instant *right) {
+static int lc_pouch_index_instant_compare(const lc_pouch_index_instant *left,
+                                          const lc_pouch_index_instant *right) {
   if (left->seconds < right->seconds) {
     return -1;
   }
@@ -220,9 +217,9 @@ int lc_pouch_index_date_contains_value(
   return 1;
 }
 
-int lc_pouch_index_parse_date_bounds(
-    const lc_pouch_index_date_bounds *bounds,
-    lc_pouch_index_parsed_date_bounds *out, lc_error *error) {
+int lc_pouch_index_parse_date_bounds(const lc_pouch_index_date_bounds *bounds,
+                                     lc_pouch_index_parsed_date_bounds *out,
+                                     lc_error *error) {
   if (bounds == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index date lookup requires date bounds", NULL,
@@ -233,7 +230,7 @@ int lc_pouch_index_parse_date_bounds(
     if (!lc_pouch_index_parse_lql_datetime(bounds->gt, &out->gt)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index date gt bound is invalid", NULL, NULL,
-                          "pouch-redesign");
+                          "pouch");
     }
     out->has_gt = 1;
   }
@@ -241,7 +238,7 @@ int lc_pouch_index_parse_date_bounds(
     if (!lc_pouch_index_parse_lql_datetime(bounds->gte, &out->gte)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index date gte bound is invalid", NULL, NULL,
-                          "pouch-redesign");
+                          "pouch");
     }
     out->has_gte = 1;
   }
@@ -249,7 +246,7 @@ int lc_pouch_index_parse_date_bounds(
     if (!lc_pouch_index_parse_lql_datetime(bounds->lt, &out->lt)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index date lt bound is invalid", NULL, NULL,
-                          "pouch-redesign");
+                          "pouch");
     }
     out->has_lt = 1;
   }
@@ -257,14 +254,14 @@ int lc_pouch_index_parse_date_bounds(
     if (!lc_pouch_index_parse_lql_datetime(bounds->lte, &out->lte)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch index date lte bound is invalid", NULL, NULL,
-                          "pouch-redesign");
+                          "pouch");
     }
     out->has_lte = 1;
   }
   if (!out->has_gt && !out->has_gte && !out->has_lt && !out->has_lte) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index date lookup requires bounded selector",
-                        NULL, NULL, "pouch-redesign");
+                        NULL, NULL, "pouch");
   }
   return LC_OK;
 }

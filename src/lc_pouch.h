@@ -97,8 +97,8 @@ typedef struct lc_pouch_state_visit_entry {
   int query_hidden;
 } lc_pouch_state_visit_entry;
 
-typedef int (*lc_pouch_state_visit_fn)(
-    const lc_pouch_state_visit_entry *entry, void *context, lc_error *error);
+typedef int (*lc_pouch_state_visit_fn)(const lc_pouch_state_visit_entry *entry,
+                                       void *context, lc_error *error);
 #define LC_POUCH_STATE_READ_MANY_STOP (-1000)
 typedef int (*lc_pouch_state_read_many_fn)(
     const char *key, const lc_pouch_state_read_result *result, void *context,
@@ -114,10 +114,9 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
                              lc_pouch_status *status);
 int lc_pouch_maintenance_run(lc_pouch *pouch,
                              const lc_pouch_maintenance_options *options,
-                             lc_pouch_maintenance_result *out,
-                             lc_error *error);
-void lc_pouch_maintenance_result_cleanup(
-    const lc_allocator *allocator, lc_pouch_maintenance_result *result);
+                             lc_pouch_maintenance_result *out, lc_error *error);
+void lc_pouch_maintenance_result_cleanup(const lc_allocator *allocator,
+                                         lc_pouch_maintenance_result *result);
 int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
                               lc_error *error);
 int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
@@ -128,15 +127,17 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
                           const char *key,
                           const lc_pouch_state_write_options *options,
                           lc_pouch_state_write_result *out, lc_error *error);
-int lc_pouch_state_update_metadata(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
-    const lc_pouch_state_write_options *options,
-    lc_pouch_state_write_result *out, lc_error *error);
-int lc_pouch_state_stage_write(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
-    const char *txn_id, lc_source *body,
-    const lc_pouch_state_write_options *options,
-    lc_pouch_state_write_result *out, lc_error *error);
+int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
+                                   const char *key,
+                                   const lc_pouch_state_write_options *options,
+                                   lc_pouch_state_write_result *out,
+                                   lc_error *error);
+int lc_pouch_state_stage_write(lc_pouch *pouch, const char *namespace_name,
+                               const char *key, const char *txn_id,
+                               lc_source *body,
+                               const lc_pouch_state_write_options *options,
+                               lc_pouch_state_write_result *out,
+                               lc_error *error);
 int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
                                   const char *key, const char *txn_id,
                                   const char *expected_committed_etag,
@@ -159,12 +160,11 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                         lc_error *error);
 int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
                              const char *const *keys, size_t key_count,
-                             lc_pouch_state_read_many_fn visitor,
-                             void *context, lc_error *error);
+                             lc_pouch_state_read_many_fn visitor, void *context,
+                             lc_error *error);
 int lc_pouch_state_read_many_metadata(lc_pouch *pouch,
                                       const char *namespace_name,
-                                      const char *const *keys,
-                                      size_t key_count,
+                                      const char *const *keys, size_t key_count,
                                       lc_pouch_state_read_many_fn visitor,
                                       void *context, lc_error *error);
 int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,

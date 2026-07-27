@@ -51,9 +51,23 @@ func runPouchFixtureC(b *testing.B, fixture *pouchFixture, engine, scenario stri
 
 	var totalCNS uint64
 	var result C.lockdc_pouch_bench_result
+	var warmResult C.lockdc_pouch_bench_result
+	b.StopTimer()
+	rc := C.lockdc_pouch_bench_fixture_query(
+		fixture.ptr,
+		cScenario,
+		cEngine,
+		C.int(boolToInt(documents)),
+		&warmResult,
+	)
+	if rc != 0 {
+		b.Fatalf("pouch C benchmark warmup failed: rc=%d scenario=%s rows=%d engine=%s documents=%t error=%q", int(rc), scenario, fixture.rows, engine, documents, C.GoString(&warmResult.error[0]))
+	}
+	b.ResetTimer()
+	b.StartTimer()
 	for i := 0; i < b.N; i++ {
 		result = C.lockdc_pouch_bench_result{}
-		rc := C.lockdc_pouch_bench_fixture_query(
+		rc = C.lockdc_pouch_bench_fixture_query(
 			fixture.ptr,
 			cScenario,
 			cEngine,

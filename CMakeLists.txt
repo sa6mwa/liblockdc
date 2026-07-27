@@ -906,12 +906,12 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(devenv_compose_config_test PROPERTIES RUN_SERIAL TRUE)
 
-    add_test(NAME pouch_redesign_boundary_test
+    add_test(NAME pouch_boundary_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/pouch_redesign_boundary_test.cmake
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/pouch_boundary_test.cmake
     )
-    set_tests_properties(pouch_redesign_boundary_test PROPERTIES RUN_SERIAL TRUE)
+    set_tests_properties(pouch_boundary_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME pslog_build_modes_test
         COMMAND ${CMAKE_COMMAND}

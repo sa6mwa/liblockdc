@@ -55,21 +55,19 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                unsigned long state_index_seq,
                                lc_pouch_query_index_flush_result *out,
                                lc_error *error);
-int lc_pouch_query_index_ensure_current(
-    lc_pouch *pouch, const char *namespace_name, unsigned long state_index_seq,
-    lc_pouch_query_index_flush_result *out, lc_error *error);
+int lc_pouch_query_index_ensure_current(lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        unsigned long state_index_seq,
+                                        lc_pouch_query_index_flush_result *out,
+                                        lc_error *error);
 int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_query_index_row_visit_fn visit,
                                void *context, unsigned long *index_seq,
                                lc_error *error);
-int lc_pouch_query_index_visit_scalar(lc_pouch *pouch,
-                                      const char *namespace_name,
-                                      const char *field,
-                                      const char *value, char value_type,
-                                      lc_pouch_query_index_key_visit_fn visit,
-                                      void *context,
-                                      unsigned long *index_seq,
-                                      lc_error *error);
+int lc_pouch_query_index_visit_scalar(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *value, char value_type, lc_pouch_query_index_key_visit_fn visit,
+    void *context, unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_scalar_any(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *const *values, const char *value_types, size_t value_count,
@@ -102,18 +100,18 @@ int lc_pouch_query_index_visit_scalar_any_merged(
     unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                                       const char *namespace_name,
-                                      const char *field,
-                                      const char *prefix,
+                                      const char *field, const char *prefix,
                                       int ignore_case,
                                       lc_pouch_query_index_key_visit_fn visit,
-                                      void *context,
-                                      unsigned long *index_seq,
+                                      void *context, unsigned long *index_seq,
                                       lc_error *error);
-int lc_pouch_query_index_visit_contains(
-    lc_pouch *pouch, const char *namespace_name, const char *field,
-    const char *needle, int ignore_case,
-    lc_pouch_query_index_key_visit_fn visit, void *context,
-    unsigned long *index_seq, lc_error *error);
+int lc_pouch_query_index_visit_contains(lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        const char *field, const char *needle,
+                                        int ignore_case,
+                                        lc_pouch_query_index_key_visit_fn visit,
+                                        void *context, unsigned long *index_seq,
+                                        lc_error *error);
 int lc_pouch_query_index_visit_range(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const lc_pouch_query_index_range_bounds *bounds,
@@ -128,8 +126,8 @@ int lc_pouch_query_index_visit_exists(lc_pouch *pouch,
                                       const char *namespace_name,
                                       const char *field,
                                       lc_pouch_query_index_key_visit_fn visit,
-                                      void *context,
-                                      unsigned long *index_seq,
+                                      void *context, unsigned long *index_seq,
                                       lc_error *error);
+void lc_pouch_query_index_prepared_cache_cleanup(lc_pouch *pouch);
 
 #endif

@@ -1,6 +1,6 @@
+#include "../tests/support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_pouch.h"
-#include "../tests/support/lc_test_tmp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,7 +85,7 @@ static int bench_pouch_root_path(char *buffer, size_t buffer_size,
     return 1;
   }
   return lc_test_tmp_mkdtemp(template_path, buffer, buffer_size,
-                            BENCH_POUCH_TMP_PREFIX)
+                             BENCH_POUCH_TMP_PREFIX)
              ? 0
              : 1;
 }
@@ -358,8 +358,8 @@ done:
 
 static int bench_pouch_query_iprefix_index_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL,
-      "index", 0};
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL, "index",
+      0};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
@@ -374,8 +374,8 @@ static int bench_pouch_query_iprefix_scan_keys(long iterations) {
 
 static int bench_pouch_query_iprefix_index_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL,
-      "index", 1};
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL, "index",
+      1};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
@@ -398,8 +398,8 @@ static int bench_pouch_query_icontains_index_keys(long iterations) {
 
 static int bench_pouch_query_icontains_scan_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL,
-      "scan", 0};
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL, "scan",
+      0};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
@@ -414,8 +414,8 @@ static int bench_pouch_query_icontains_index_documents(long iterations) {
 
 static int bench_pouch_query_icontains_scan_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL,
-      "scan", 1};
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL, "scan",
+      1};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
@@ -434,8 +434,7 @@ static int bench_pouch_query_recursive_exists_scan_keys(long iterations) {
   return bench_pouch_query_text(iterations, &query_case);
 }
 
-static int bench_pouch_query_recursive_exists_index_documents(
-    long iterations) {
+static int bench_pouch_query_recursive_exists_index_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
       "{\"exists\":\"/details/**\"}", NULL, "index", 1};
 
@@ -450,7 +449,7 @@ static int bench_pouch_query_recursive_exists_scan_documents(long iterations) {
 }
 
 #define BENCH_POUCH_LQL_FUNC(function_name, selector_text, engine_text,        \
-                             documents_value)                                 \
+                             documents_value)                                  \
   static int function_name(long iterations) {                                  \
     static const bench_pouch_query_case query_case = {                         \
         NULL, selector_text, engine_text, documents_value};                    \
@@ -499,14 +498,14 @@ BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_index_documents,
 BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_scan_documents,
                      "in{field=/tags[],any=planning|finance}", "scan", 1)
 BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_index_keys,
-                     "contains{field=/details/message,value=timeout}",
-                     "index", 0)
+                     "contains{field=/details/message,value=timeout}", "index",
+                     0)
 BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_scan_keys,
                      "contains{field=/details/message,value=timeout}", "scan",
                      0)
 BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_index_documents,
-                     "contains{field=/details/message,value=timeout}",
-                     "index", 1)
+                     "contains{field=/details/message,value=timeout}", "index",
+                     1)
 BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_scan_documents,
                      "contains{field=/details/message,value=timeout}", "scan",
                      1)
@@ -666,8 +665,8 @@ static int bench_run_one(const bench_case *bench, long iterations) {
   start = bench_now_seconds();
   rc = bench->run(iterations);
   elapsed = bench_now_seconds() - start;
-  printf("%s iterations=%ld seconds=%.6f per_op_us=%.3f rc=%d\n",
-         bench->name, iterations, elapsed,
+  printf("%s iterations=%ld seconds=%.6f per_op_us=%.3f rc=%d\n", bench->name,
+         iterations, elapsed,
          iterations > 0L ? (elapsed * 1000000.0) / (double)iterations : 0.0,
          rc);
   return rc;
@@ -679,8 +678,8 @@ int main(int argc, char **argv) {
   const char *name;
   int failed;
 
-  if (argc > 1 && (strcmp(argv[1], "--help") == 0 ||
-                   strcmp(argv[1], "-h") == 0)) {
+  if (argc > 1 &&
+      (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
     bench_usage(argv[0]);
     return 0;
   }

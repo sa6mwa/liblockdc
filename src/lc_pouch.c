@@ -5,6 +5,7 @@
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
+#include "lc_pouch_query_index.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -105,8 +106,7 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
   writer_id = ++lc_pouch_next_writer_marker_id;
   snprintf(leaf, sizeof(leaf), "writer-%ld-%020lu.marker", (long)getpid(),
            writer_id);
-  pouch->writer_marker_leaf =
-      lc_strdup_with_allocator(&pouch->allocator, leaf);
+  pouch->writer_marker_leaf = lc_strdup_with_allocator(&pouch->allocator, leaf);
   if (pouch->writer_marker_leaf == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch writer marker leaf", NULL,
@@ -154,8 +154,8 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
       strcmp(pouch->query_engine, "scan") != 0) {
     lc_pouch_close(pouch);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query_engine must be index or scan", NULL,
-                        NULL, "pouch-redesign");
+                        "pouch query_engine must be index or scan", NULL, NULL,
+                        "pouch");
   }
   if (pouch->query_fallback_engine[0] != '\0' &&
       strcmp(pouch->query_fallback_engine, "index") != 0 &&
@@ -163,7 +163,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query_fallback_engine must be index or scan",
-                        NULL, NULL, "pouch-redesign");
+                        NULL, NULL, "pouch");
   }
   rc = lc_pouch_init_writer_marker(pouch, error);
   if (rc != LC_OK) {
@@ -186,6 +186,7 @@ void lc_pouch_close(lc_pouch *pouch) {
     return;
   }
   allocator = pouch->allocator;
+  lc_pouch_query_index_prepared_cache_cleanup(pouch);
   lc_pouch_state_cache_cleanup(pouch);
   lc_free_with_allocator(&allocator, pouch->writer_marker_leaf);
   lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
@@ -202,14 +203,14 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
                         NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  out->root_path = lc_strdup_with_allocator(&pouch->allocator,
-                                            pouch->root_path);
+  out->root_path =
+      lc_strdup_with_allocator(&pouch->allocator, pouch->root_path);
   out->layout_name =
       lc_strdup_with_allocator(&pouch->allocator, LC_POUCH_LAYOUT_NAME);
   if (out->root_path == NULL || out->layout_name == NULL) {
     lc_pouch_status_cleanup(&pouch->allocator, out);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy pouch status", NULL, NULL, NULL);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to copy pouch status",
+                        NULL, NULL, NULL);
   }
   out->layout_version = LC_POUCH_LAYOUT_VERSION;
   out->segment_target_bytes = pouch->segment_target_bytes;
@@ -221,13 +222,12 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   out->single_writer = pouch->single_writer;
   out->query_engine =
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_engine);
-  out->query_fallback_engine = lc_strdup_with_allocator(
-      &pouch->allocator, pouch->query_fallback_engine);
+  out->query_fallback_engine =
+      lc_strdup_with_allocator(&pouch->allocator, pouch->query_fallback_engine);
   if (out->query_engine == NULL || out->query_fallback_engine == NULL) {
     lc_pouch_status_cleanup(&pouch->allocator, out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy pouch query status", NULL, NULL,
-                        NULL);
+                        "failed to copy pouch query status", NULL, NULL, NULL);
   }
   return LC_OK;
 }

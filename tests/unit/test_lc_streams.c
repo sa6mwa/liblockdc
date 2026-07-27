@@ -8,8 +8,8 @@
 
 #include <cmocka.h>
 
-#include "lc/lc.h"
 #include "../support/lc_test_tmp.h"
+#include "lc/lc.h"
 
 #define STREAMS_TMP_PREFIX "/tmp/liblockdc-streams-"
 
@@ -269,9 +269,8 @@ static void test_file_constructors_report_transport_failures(void **state) {
   assert_int_equal(error.code, LC_ERR_TRANSPORT);
   assert_null(source);
 
-  assert_true(
-      lc_test_tmp_mkdtemp(template_dir, temp_dir, sizeof(temp_dir),
-                          STREAMS_TMP_PREFIX));
+  assert_true(lc_test_tmp_mkdtemp(template_dir, temp_dir, sizeof(temp_dir),
+                                  STREAMS_TMP_PREFIX));
   lc_error_cleanup(&error);
   lc_error_init(&error);
   rc = lc_sink_to_file(temp_dir, &sink, &error);

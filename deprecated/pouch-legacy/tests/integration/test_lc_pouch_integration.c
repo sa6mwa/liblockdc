@@ -1,11 +1,11 @@
-#include <setjmp.h>
-#include <stdarg.h>
-#include <stddef.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <setjmp.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,8 +107,7 @@ static void cleanup_pouch_tree(const char *path) {
     struct stat st;
     int written;
 
-    if (strcmp(entry->d_name, ".") == 0 ||
-        strcmp(entry->d_name, "..") == 0) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
     written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
@@ -215,8 +214,7 @@ static void set_first_query_index_match_record_version(const char *root,
                     SEEK_SET),
               record_offset + POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET);
           assert_int_equal(
-              write(fd,
-                    header + POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET,
+              write(fd, header + POUCH_TEST_QUERY_INDEX_RECORD_VERSION_OFFSET,
                     4U),
               4);
           found = 1;
@@ -226,13 +224,13 @@ static void set_first_query_index_match_record_version(const char *root,
     }
     free(payload);
     if (!found) {
-      assert_int_equal(
-          lseek(fd,
-                record_offset + POUCH_TEST_QUERY_INDEX_HEADER_SIZE +
-                    (off_t)payload_len,
-                SEEK_SET),
-          record_offset + POUCH_TEST_QUERY_INDEX_HEADER_SIZE +
-              (off_t)payload_len);
+      assert_int_equal(lseek(fd,
+                             record_offset +
+                                 POUCH_TEST_QUERY_INDEX_HEADER_SIZE +
+                                 (off_t)payload_len,
+                             SEEK_SET),
+                       record_offset + POUCH_TEST_QUERY_INDEX_HEADER_SIZE +
+                           (off_t)payload_len);
     }
   }
   close(fd);
@@ -281,8 +279,7 @@ static void open_pouch_client(const char *endpoint, lc_client **out,
 
 static void open_pouch_client_with_namespace(const char *endpoint,
                                              const char *namespace_name,
-                                             lc_client **out,
-                                             lc_error *error) {
+                                             lc_client **out, lc_error *error) {
   lc_client_config config;
   const char *endpoints[1];
   int rc;
@@ -371,8 +368,8 @@ static int query_key_capture_begin(void *context, lc_error *error) {
   return 1;
 }
 
-static int query_key_capture_chunk(void *context, const char *bytes,
-                                   size_t len, lc_error *error) {
+static int query_key_capture_chunk(void *context, const char *bytes, size_t len,
+                                   lc_error *error) {
   query_key_capture *capture;
 
   (void)error;
@@ -701,8 +698,7 @@ static int pouch_consumer_state_handle(void *context,
   rc = lc_sink_to_memory(&sink, error);
   assert_lc_ok(rc, error);
   written = 0U;
-  rc = message->message->write_payload(message->message, sink, &written,
-                                       error);
+  rc = message->message->write_payload(message->message, sink, &written, error);
   assert_lc_ok(rc, error);
   assert_int_equal(written, strlen("stateful-work"));
   assert_sink_text(sink, "stateful-work", error);
@@ -716,8 +712,8 @@ static int pouch_consumer_state_handle(void *context,
 
   lc_update_opts_init(&update_opts);
   update_opts.content_type = "application/json";
-  source = source_from_text("{\"consumer\":\"stateful\",\"saved\":true}",
-                            error);
+  source =
+      source_from_text("{\"consumer\":\"stateful\",\"saved\":true}", error);
   rc = message->state->update(message->state, source, &update_opts, error);
   lc_source_close(source);
   assert_lc_ok(rc, error);
@@ -748,8 +744,7 @@ static int pouch_consumer_failure_handle(void *context,
   rc = lc_sink_to_memory(&sink, error);
   assert_lc_ok(rc, error);
   written = 0U;
-  rc = message->message->write_payload(message->message, sink, &written,
-                                       error);
+  rc = message->message->write_payload(message->message, sink, &written, error);
   assert_lc_ok(rc, error);
   assert_int_equal(written, strlen("retry-work"));
   assert_sink_text(sink, "retry-work", error);
@@ -772,8 +767,9 @@ static int pouch_consumer_failure_handle(void *context,
   return LC_OK;
 }
 
-static int pouch_consumer_failure_on_error(
-    void *context, const lc_consumer_error *event, lc_error *error) {
+static int pouch_consumer_failure_on_error(void *context,
+                                           const lc_consumer_error *event,
+                                           lc_error *error) {
   pouch_consumer_failure_test *state;
 
   (void)error;
@@ -811,8 +807,7 @@ static int pouch_consumer_ack_handle(void *context,
   rc = lc_sink_to_memory(&sink, error);
   assert_lc_ok(rc, error);
   written = 0U;
-  rc = message->message->write_payload(message->message, sink, &written,
-                                       error);
+  rc = message->message->write_payload(message->message, sink, &written, error);
   assert_lc_ok(rc, error);
   assert_int_equal(written, strlen("ack-work"));
   assert_sink_text(sink, "ack-work", error);
@@ -848,8 +843,7 @@ static int pouch_consumer_auto_ack_handle(void *context,
   rc = lc_sink_to_memory(&sink, error);
   assert_lc_ok(rc, error);
   written = 0U;
-  rc = message->message->write_payload(message->message, sink, &written,
-                                       error);
+  rc = message->message->write_payload(message->message, sink, &written, error);
   assert_lc_ok(rc, error);
   assert_int_equal(written, strlen("auto-work"));
   assert_sink_text(sink, "auto-work", error);
@@ -863,8 +857,9 @@ static int pouch_consumer_auto_ack_handle(void *context,
   return LC_OK;
 }
 
-static void pouch_consumer_lifecycle_on_start(
-    void *context, const lc_consumer_lifecycle_event *event) {
+static void
+pouch_consumer_lifecycle_on_start(void *context,
+                                  const lc_consumer_lifecycle_event *event) {
   pouch_consumer_ack_test *state;
 
   state = (pouch_consumer_ack_test *)context;
@@ -879,12 +874,12 @@ static void pouch_consumer_lifecycle_on_start(
   state->start_attempt = event->attempt;
   state->start_with_state = event->with_state;
   snprintf(state->start_name, sizeof(state->start_name), "%s", event->name);
-  snprintf(state->start_queue, sizeof(state->start_queue), "%s",
-           event->queue);
+  snprintf(state->start_queue, sizeof(state->start_queue), "%s", event->queue);
 }
 
-static void pouch_consumer_lifecycle_on_stop(
-    void *context, const lc_consumer_lifecycle_event *event) {
+static void
+pouch_consumer_lifecycle_on_stop(void *context,
+                                 const lc_consumer_lifecycle_event *event) {
   pouch_consumer_ack_test *state;
 
   state = (pouch_consumer_ack_test *)context;
@@ -922,8 +917,7 @@ static int pouch_consumer_defer_handle(void *context,
   rc = lc_sink_to_memory(&sink, error);
   assert_lc_ok(rc, error);
   written = 0U;
-  rc = message->message->write_payload(message->message, sink, &written,
-                                       error);
+  rc = message->message->write_payload(message->message, sink, &written, error);
   assert_lc_ok(rc, error);
   assert_int_equal(written, strlen("defer-work"));
   assert_sink_text(sink, "defer-work", error);
@@ -994,8 +988,8 @@ static int pouch_subscribe_state_handle(void *context, lc_message *message,
 
   lc_update_opts_init(&update_opts);
   update_opts.content_type = "application/json";
-  source = source_from_text("{\"subscribe\":\"stateful\",\"saved\":true}",
-                            error);
+  source =
+      source_from_text("{\"subscribe\":\"stateful\",\"saved\":true}", error);
   rc = queue_state->update(queue_state, source, &update_opts, error);
   lc_source_close(source);
   assert_lc_ok(rc, error);
@@ -1041,8 +1035,7 @@ static int pouch_subscribe_wait_handle(void *context, lc_message *message,
       memcmp(bytes, "waited-work", length) == 0) {
     test->payload_ok = 1;
   } else if (rc == LC_OK) {
-    rc = pouch_test_error(error,
-                          "subscribe wait test saw unexpected payload");
+    rc = pouch_test_error(error, "subscribe wait test saw unexpected payload");
   }
   lc_sink_close(sink);
   if (rc != LC_OK) {
@@ -1406,8 +1399,8 @@ static void test_pouch_public_metadata_query_hidden_persists(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_documents_replays_after_reopen(
-    void **state) {
+static void
+test_pouch_public_scan_query_documents_replays_after_reopen(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -1484,7 +1477,8 @@ static void test_pouch_public_scan_query_documents_replays_after_reopen(
   assert_lc_ok(rc, &error);
   text = sink_text(sink, &error);
   assert_non_null(strstr(text, "\"key\":\"integration/query/alpha\""));
-  assert_non_null(strstr(text, "\"document\":{\"kind\":\"scan\",\"ordinal\":1}"));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"scan\",\"ordinal\":1}"));
   assert_null(strstr(text, "integration/query/bravo"));
   assert_string_equal(query_res.cursor, "integration/query/alpha");
   assert_string_equal(query_res.return_mode, "documents");
@@ -1502,7 +1496,8 @@ static void test_pouch_public_scan_query_documents_replays_after_reopen(
   assert_lc_ok(rc, &error);
   text = sink_text(sink, &error);
   assert_non_null(strstr(text, "\"key\":\"integration/query/bravo\""));
-  assert_non_null(strstr(text, "\"document\":{\"kind\":\"scan\",\"ordinal\":2}"));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"scan\",\"ordinal\":2}"));
   assert_null(strstr(text, "integration/query/alpha"));
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "documents");
@@ -1516,8 +1511,8 @@ static void test_pouch_public_scan_query_documents_replays_after_reopen(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_can_be_configured_by_endpoint(
-    void **state) {
+static void
+test_pouch_public_scan_query_can_be_configured_by_endpoint(void **state) {
   char root[256];
   char writer_endpoint[320];
   char scan_endpoint[384];
@@ -1596,8 +1591,8 @@ static void test_pouch_public_scan_query_can_be_configured_by_endpoint(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_namespace_config_reports_query_mode(
-    void **state) {
+static void
+test_pouch_public_namespace_config_reports_query_mode(void **state) {
   char root[256];
   char default_endpoint[320];
   char scan_endpoint[384];
@@ -1622,8 +1617,7 @@ static void test_pouch_public_namespace_config_reports_query_mode(
   open_pouch_client(default_endpoint, &default_client, &error);
   lc_namespace_config_req_init(&req);
   req.namespace_name = "default";
-  rc = default_client->get_namespace_config(default_client, &req, &res,
-                                            &error);
+  rc = default_client->get_namespace_config(default_client, &req, &res, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(res.namespace_name, "default");
   assert_string_equal(res.preferred_engine, "index");
@@ -1819,8 +1813,8 @@ static void test_pouch_public_rejects_reserved_namespaces(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_query_rejects_signed_oversized_limits(
-    void **state) {
+static void
+test_pouch_public_query_rejects_signed_oversized_limits(void **state) {
   char scan_root[256];
   char scan_endpoint[320];
   char index_root[256];
@@ -1859,8 +1853,8 @@ static void test_pouch_public_query_rejects_signed_oversized_limits(
   query_req.selector_json = "{}";
   query_req.limit = LONG_MIN;
   rc = scan_client->query(scan_client, &query_req, sink, &query_res, &error);
-  assert_invalid_query_limit_error(
-      rc, &error, "pouch query limit must be non-negative");
+  assert_invalid_query_limit_error(rc, &error,
+                                   "pouch query limit must be non-negative");
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
@@ -1868,8 +1862,8 @@ static void test_pouch_public_query_rejects_signed_oversized_limits(
   query_req.selector_json = "{}";
   query_req.limit = LONG_MIN;
   rc = index_client->query(index_client, &query_req, sink, &query_res, &error);
-  assert_invalid_query_limit_error(
-      rc, &error, "pouch query limit must be non-negative");
+  assert_invalid_query_limit_error(rc, &error,
+                                   "pouch query limit must be non-negative");
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
@@ -1902,8 +1896,8 @@ static void test_pouch_public_query_rejects_signed_oversized_limits(
   cleanup_pouch_root(index_root);
 }
 
-static void test_pouch_public_compound_selector_scan_index_parity(
-    void **state) {
+static void
+test_pouch_public_compound_selector_scan_index_parity(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -1998,8 +1992,8 @@ static void test_pouch_public_compound_selector_scan_index_parity(
   query_req.selector_json =
       "{\"key\":\"integration/parity/alpha\",\"owner\":\"parity-owner\"}";
   query_req.limit = 4L;
-  rc = scan_client->query(scan_client, &query_req, scan_sink, &scan_res,
-                          &error);
+  rc =
+      scan_client->query(scan_client, &query_req, scan_sink, &scan_res, &error);
   assert_lc_ok(rc, &error);
   rc = index_client->query(index_client, &query_req, index_sink, &index_res,
                            &error);
@@ -2076,8 +2070,8 @@ static void test_pouch_public_compound_selector_scan_index_parity(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_endpoint_query_engine_selects_index(
-    void **state) {
+static void
+test_pouch_public_endpoint_query_engine_selects_index(void **state) {
   char root[256];
   char writer_endpoint[320];
   char index_endpoint[384];
@@ -2168,8 +2162,7 @@ static void test_pouch_public_endpoint_query_engine_selects_index(
 }
 
 static void
-test_pouch_public_endpoint_query_fallback_selects_scan(
-    void **state) {
+test_pouch_public_endpoint_query_fallback_selects_scan(void **state) {
   char root[256];
   char writer_endpoint[320];
   char scan_endpoint[384];
@@ -2252,8 +2245,7 @@ test_pouch_public_endpoint_query_fallback_selects_scan(
 }
 
 static void
-test_pouch_public_endpoint_query_keys_fallback_selects_scan(
-    void **state) {
+test_pouch_public_endpoint_query_keys_fallback_selects_scan(void **state) {
   char root[256];
   char writer_endpoint[320];
   char scan_endpoint[384];
@@ -2338,8 +2330,8 @@ test_pouch_public_endpoint_query_keys_fallback_selects_scan(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_ignores_corrupt_index_sidecar(
-    void **state) {
+static void
+test_pouch_public_scan_query_ignores_corrupt_index_sidecar(void **state) {
   char root[256];
   char writer_endpoint[320];
   char scan_endpoint[384];
@@ -2421,8 +2413,8 @@ static void test_pouch_public_scan_query_ignores_corrupt_index_sidecar(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_ignores_future_index_sidecar(
-    void **state) {
+static void
+test_pouch_public_scan_query_ignores_future_index_sidecar(void **state) {
   char root[256];
   char writer_endpoint[320];
   char scan_endpoint[384];
@@ -2527,8 +2519,8 @@ static void test_pouch_public_scan_query_ignores_future_index_sidecar(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_ignores_absent_index_sidecar(
-    void **state) {
+static void
+test_pouch_public_scan_query_ignores_absent_index_sidecar(void **state) {
   char root[256];
   char writer_endpoint[320];
   char scan_endpoint[384];
@@ -2620,8 +2612,7 @@ static void test_pouch_public_scan_query_ignores_absent_index_sidecar(
                           &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(capture.key_count, 1U);
-  assert_string_equal(capture.keys[0],
-                      "integration/query-absent-index/alpha");
+  assert_string_equal(capture.keys[0], "integration/query-absent-index/alpha");
   assert_string_equal(query_res.return_mode, "keys");
   assert_int_equal(query_res.index_seq, 0UL);
   assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
@@ -2700,8 +2691,8 @@ test_pouch_public_scan_query_endpoint_uses_index_fallback_for_refresh(
   assert_lc_ok(rc, &error);
 
   text = sink_text(sink, &error);
-  assert_non_null(strstr(text,
-                         "\"key\":\"integration/query-endpoint/fallback\""));
+  assert_non_null(
+      strstr(text, "\"key\":\"integration/query-endpoint/fallback\""));
   assert_non_null(
       strstr(text, "\"document\":{\"kind\":\"scan-endpoint-fallback\"}"));
   assert_string_equal(query_res.return_mode, "documents");
@@ -2895,8 +2886,8 @@ test_pouch_public_scan_query_explicit_engine_bypasses_refresh_fallback(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_keys_can_be_configured_by_endpoint(
-    void **state) {
+static void
+test_pouch_public_scan_query_keys_can_be_configured_by_endpoint(void **state) {
   char root[256];
   char writer_endpoint[320];
   char scan_endpoint[384];
@@ -2973,8 +2964,8 @@ static void test_pouch_public_scan_query_keys_can_be_configured_by_endpoint(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_owner_selector_filters_candidates(
-    void **state) {
+static void
+test_pouch_public_scan_query_owner_selector_filters_candidates(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -3121,8 +3112,8 @@ static void test_pouch_public_scan_query_owner_selector_filters_candidates(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_key_selector_filters_candidates(
-    void **state) {
+static void
+test_pouch_public_scan_query_key_selector_filters_candidates(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -3298,8 +3289,8 @@ static void test_pouch_public_scan_query_key_selector_filters_candidates(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_documents_refreshes_open_reader(
-    void **state) {
+static void
+test_pouch_public_scan_query_documents_refreshes_open_reader(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -3380,8 +3371,7 @@ static void test_pouch_public_scan_query_documents_refreshes_open_reader(
   acquire.key = "integration/query-open/hidden";
   rc = writer->acquire(writer, &acquire, &hidden, &error);
   assert_lc_ok(rc, &error);
-  source = source_from_text("{\"kind\":\"scan-open\",\"hidden\":true}",
-                            &error);
+  source = source_from_text("{\"kind\":\"scan-open\",\"hidden\":true}", &error);
   rc = hidden->update(hidden, source, &update_opts, &error);
   lc_source_close(source);
   source = NULL;
@@ -3433,8 +3423,8 @@ static void test_pouch_public_scan_query_documents_refreshes_open_reader(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_keys_refreshes_open_reader(
-    void **state) {
+static void
+test_pouch_public_scan_query_keys_refreshes_open_reader(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -3542,8 +3532,8 @@ static void test_pouch_public_scan_query_keys_refreshes_open_reader(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_documents_replays_after_reopen(
-    void **state) {
+static void
+test_pouch_public_index_query_documents_replays_after_reopen(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -3620,9 +3610,11 @@ static void test_pouch_public_index_query_documents_replays_after_reopen(
   assert_lc_ok(rc, &error);
   text = sink_text(sink, &error);
   assert_non_null(strstr(text, "\"key\":\"integration/index-query/alpha\""));
-  assert_non_null(strstr(text, "\"document\":{\"kind\":\"index\",\"ordinal\":1}"));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"index\",\"ordinal\":1}"));
   assert_non_null(strstr(text, "\"key\":\"integration/index-query/bravo\""));
-  assert_non_null(strstr(text, "\"document\":{\"kind\":\"index\",\"ordinal\":2}"));
+  assert_non_null(
+      strstr(text, "\"document\":{\"kind\":\"index\",\"ordinal\":2}"));
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "documents");
   assert_string_equal(query_res.metadata_json, "{\"query_candidates\":2}");
@@ -3636,8 +3628,8 @@ static void test_pouch_public_index_query_documents_replays_after_reopen(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_keys_replays_after_reopen(
-    void **state) {
+static void
+test_pouch_public_index_query_keys_replays_after_reopen(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -3869,8 +3861,8 @@ static void test_pouch_public_index_query_isolates_namespaces(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_paginates_documents_and_keys(
-    void **state) {
+static void
+test_pouch_public_index_query_paginates_documents_and_keys(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -4135,8 +4127,7 @@ static void run_pouch_public_query_paginates_across_removed_candidate(
   text = sink_text(sink, &error);
   assert_null(strstr(text, "integration/page-removed/alpha"));
   assert_null(strstr(text, "integration/page-removed/bravo"));
-  assert_non_null(
-      strstr(text, "\"key\":\"integration/page-removed/charlie\""));
+  assert_non_null(strstr(text, "\"key\":\"integration/page-removed/charlie\""));
   assert_non_null(strstr(text, "\"document\":{\"page\":\"charlie\"}"));
   assert_string_equal(query_res.cursor, "integration/page-removed/charlie");
   assert_string_equal(query_res.return_mode, "documents");
@@ -4257,8 +4248,8 @@ test_pouch_public_index_query_paginates_across_removed_candidate(void **state) {
       "index-query-page-removed", 0);
 }
 
-static void test_pouch_public_index_query_wait_for_refreshes_open_reader(
-    void **state) {
+static void
+test_pouch_public_index_query_wait_for_refreshes_open_reader(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -4370,8 +4361,8 @@ static void test_pouch_public_index_query_wait_for_refreshes_open_reader(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_documents_refreshes_open_reader(
-    void **state) {
+static void
+test_pouch_public_index_query_documents_refreshes_open_reader(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -4453,8 +4444,8 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   acquire.key = "integration/index-open/hidden";
   rc = writer->acquire(writer, &acquire, &hidden, &error);
   assert_lc_ok(rc, &error);
-  source = source_from_text("{\"kind\":\"index-open\",\"hidden\":true}",
-                            &error);
+  source =
+      source_from_text("{\"kind\":\"index-open\",\"hidden\":true}", &error);
   rc = hidden->update(hidden, source, &update_opts, &error);
   lc_source_close(source);
   source = NULL;
@@ -4506,8 +4497,8 @@ static void test_pouch_public_index_query_documents_refreshes_open_reader(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_owner_selector_filters_candidates(
-    void **state) {
+static void
+test_pouch_public_index_query_owner_selector_filters_candidates(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -4638,8 +4629,8 @@ static void test_pouch_public_index_query_owner_selector_filters_candidates(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_owner_selector_hides_metadata(
-    void **state) {
+static void
+test_pouch_public_index_query_owner_selector_hides_metadata(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -4846,8 +4837,8 @@ static void test_pouch_public_index_query_owner_selector_hides_metadata(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_owner_selector_skips_removed(
-    void **state) {
+static void
+test_pouch_public_index_query_owner_selector_skips_removed(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -5046,8 +5037,8 @@ static void test_pouch_public_index_query_owner_selector_skips_removed(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_owner_selector_paginates(
-    void **state) {
+static void
+test_pouch_public_index_query_owner_selector_paginates(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -5342,8 +5333,7 @@ test_pouch_public_index_query_owner_selector_narrows_large_namespace(
                           &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(capture.key_count, 1U);
-  assert_string_equal(capture.keys[0],
-                      "integration/index-owner-large/target");
+  assert_string_equal(capture.keys[0], "integration/index-owner-large/target");
   assert_null(query_res.cursor);
   assert_string_equal(query_res.return_mode, "keys");
   assert_string_equal(query_res.metadata_json, "{\"query_candidates\":1}");
@@ -5354,8 +5344,8 @@ test_pouch_public_index_query_owner_selector_narrows_large_namespace(
   assert_lc_ok(rc, &error);
   target_lease = NULL;
   for (index = 0U; index < 32U; ++index) {
-    rc = noise_leases[index]->release(noise_leases[index], &release_req,
-                                      &error);
+    rc =
+        noise_leases[index]->release(noise_leases[index], &release_req, &error);
     assert_lc_ok(rc, &error);
     noise_leases[index] = NULL;
   }
@@ -5364,8 +5354,8 @@ test_pouch_public_index_query_owner_selector_narrows_large_namespace(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_key_selector_filters_candidates(
-    void **state) {
+static void
+test_pouch_public_index_query_key_selector_filters_candidates(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -5461,9 +5451,8 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   rc = lc_sink_to_memory(&sink, &error);
   assert_lc_ok(rc, &error);
   lc_query_req_init(&query_req);
-  query_req.selector_json =
-      "{\"key\":\"integration/index-key/bravo\","
-      "\"owner\":\"index-key-owner-b\"}";
+  query_req.selector_json = "{\"key\":\"integration/index-key/bravo\","
+                            "\"owner\":\"index-key-owner-b\"}";
   rc = client->query(client, &query_req, sink, &query_res, &error);
   assert_lc_ok(rc, &error);
   text = sink_text(sink, &error);
@@ -5484,9 +5473,8 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   rc = lc_sink_to_memory(&sink, &error);
   assert_lc_ok(rc, &error);
   lc_query_req_init(&query_req);
-  query_req.selector_json =
-      "{\"key\":\"integration/index-key/bravo\","
-      "\"owner\":\"index-key-owner-a\"}";
+  query_req.selector_json = "{\"key\":\"integration/index-key/bravo\","
+                            "\"owner\":\"index-key-owner-a\"}";
   rc = client->query(client, &query_req, sink, &query_res, &error);
   assert_lc_ok(rc, &error);
   text = sink_text(sink, &error);
@@ -5505,8 +5493,8 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   handler.chunk = query_key_capture_chunk;
   handler.end = query_key_capture_end;
   lc_query_req_init(&query_req);
-  query_req.selector_json =
-      "{\"key\":\"integration/index-key/bravo\",\"owner\":\"index-key-owner-b\"}";
+  query_req.selector_json = "{\"key\":\"integration/index-key/"
+                            "bravo\",\"owner\":\"index-key-owner-b\"}";
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
                           &error);
   assert_lc_ok(rc, &error);
@@ -5519,9 +5507,8 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
 
   lc_query_res_cleanup(&query_res);
   memset(&capture, 0, sizeof(capture));
-  query_req.selector_json =
-      "{\"key\":\"integration/index-key/bravo\","
-      "\"owner\":\"index-key-owner-a\"}";
+  query_req.selector_json = "{\"key\":\"integration/index-key/bravo\","
+                            "\"owner\":\"index-key-owner-a\"}";
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
                           &error);
   assert_lc_ok(rc, &error);
@@ -5544,8 +5531,8 @@ static void test_pouch_public_index_query_key_selector_filters_candidates(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_index_query_keys_refreshes_open_reader(
-    void **state) {
+static void
+test_pouch_public_index_query_keys_refreshes_open_reader(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *writer;
@@ -5652,8 +5639,9 @@ static void test_pouch_public_index_query_keys_refreshes_open_reader(
   cleanup_pouch_root(root);
 }
 
-static void run_pouch_public_query_key_selector_skips_removed(
-    const char *root_suffix, int scan_mode) {
+static void
+run_pouch_public_query_key_selector_skips_removed(const char *root_suffix,
+                                                  int scan_mode) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -5749,9 +5737,8 @@ static void run_pouch_public_query_key_selector_skips_removed(
   rc = lc_sink_to_memory(&sink, &error);
   assert_lc_ok(rc, &error);
   lc_query_req_init(&query_req);
-  query_req.selector_json =
-      "{\"key\":\"integration/key-removed/removed\","
-      "\"owner\":\"key-removed-target-owner\"}";
+  query_req.selector_json = "{\"key\":\"integration/key-removed/removed\","
+                            "\"owner\":\"key-removed-target-owner\"}";
   query_req.limit = 10L;
   rc = client->query(client, &query_req, sink, &query_res, &error);
   assert_lc_ok(rc, &error);
@@ -5796,9 +5783,8 @@ static void run_pouch_public_query_key_selector_skips_removed(
 
   memset(&capture, 0, sizeof(capture));
   lc_query_req_init(&query_req);
-  query_req.selector_json =
-      "{\"key\":\"integration/key-removed/removed\","
-      "\"owner\":\"key-removed-target-owner\"}";
+  query_req.selector_json = "{\"key\":\"integration/key-removed/removed\","
+                            "\"owner\":\"key-removed-target-owner\"}";
   query_req.limit = 10L;
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
                           &error);
@@ -5829,18 +5815,18 @@ static void run_pouch_public_query_key_selector_skips_removed(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_scan_query_key_selector_skips_removed(
-    void **state) {
+static void
+test_pouch_public_scan_query_key_selector_skips_removed(void **state) {
   (void)state;
-  run_pouch_public_query_key_selector_skips_removed(
-      "scan-query-key-removed", 1);
+  run_pouch_public_query_key_selector_skips_removed("scan-query-key-removed",
+                                                    1);
 }
 
-static void test_pouch_public_index_query_key_selector_skips_removed(
-    void **state) {
+static void
+test_pouch_public_index_query_key_selector_skips_removed(void **state) {
   (void)state;
-  run_pouch_public_query_key_selector_skips_removed(
-      "index-query-key-removed", 0);
+  run_pouch_public_query_key_selector_skips_removed("index-query-key-removed",
+                                                    0);
 }
 
 static void test_pouch_public_flush_index_refreshes_open_reader(void **state) {
@@ -5959,8 +5945,8 @@ static void test_pouch_public_flush_index_refreshes_open_reader(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_attachment_survives_compaction_reopen(
-    void **state) {
+static void
+test_pouch_public_attachment_survives_compaction_reopen(void **state) {
   char root[256];
   char endpoint[320];
   char payload[4096];
@@ -6198,8 +6184,8 @@ static void test_pouch_public_attachment_delete_semantics(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_attachment_rollback_discards(
-    void **state) {
+static void
+test_pouch_public_transaction_attachment_rollback_discards(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -6281,8 +6267,8 @@ static void test_pouch_public_transaction_attachment_rollback_discards(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_attachment_commit_publishes(
-    void **state) {
+static void
+test_pouch_public_transaction_attachment_commit_publishes(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -6525,8 +6511,7 @@ test_pouch_public_transaction_attachment_replay_commit_publishes(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void
-test_pouch_public_transaction_attachment_replay_rollback_discards(
+static void test_pouch_public_transaction_attachment_replay_rollback_discards(
     void **state) {
   char root[256];
   char endpoint[320];
@@ -6638,8 +6623,8 @@ test_pouch_public_transaction_attachment_replay_rollback_discards(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_attachment_staged_put_is_visible(
-    void **state) {
+static void
+test_pouch_public_transaction_attachment_staged_put_is_visible(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -6729,8 +6714,8 @@ static void test_pouch_public_transaction_attachment_staged_put_is_visible(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_attachment_staged_delete_is_hidden(
-    void **state) {
+static void
+test_pouch_public_transaction_attachment_staged_delete_is_hidden(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -6837,8 +6822,8 @@ static void test_pouch_public_transaction_attachment_staged_delete_is_hidden(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_attachment_delete_rollback_keeps(
-    void **state) {
+static void
+test_pouch_public_transaction_attachment_delete_rollback_keeps(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -6940,8 +6925,8 @@ static void test_pouch_public_transaction_attachment_delete_rollback_keeps(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_attachment_delete_commit_removes(
-    void **state) {
+static void
+test_pouch_public_transaction_attachment_delete_commit_removes(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -7303,8 +7288,8 @@ test_pouch_public_transaction_attachment_delete_replay_rollback_keeps(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_attachment_clear_rollback_keeps(
-    void **state) {
+static void
+test_pouch_public_transaction_attachment_clear_rollback_keeps(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -7410,8 +7395,8 @@ static void test_pouch_public_transaction_attachment_clear_rollback_keeps(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_attachment_clear_commit_removes(
-    void **state) {
+static void
+test_pouch_public_transaction_attachment_clear_commit_removes(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -7742,8 +7727,8 @@ static void test_pouch_public_client_level_attachment_apis(void **state) {
   lc_attachment_delete_all_op_init(&delete_all_op);
   lease_ref_from_lease(lease, &delete_all_op.lease);
   deleted_count = 0;
-  rc = lc_delete_all_attachments(client, &delete_all_op, &deleted_count,
-                                 &error);
+  rc =
+      lc_delete_all_attachments(client, &delete_all_op, &deleted_count, &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(deleted_count, 1);
 
@@ -7768,8 +7753,8 @@ static void test_pouch_public_client_level_attachment_apis(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_client_level_transaction_attachment_stages(
-    void **state) {
+static void
+test_pouch_public_client_level_transaction_attachment_stages(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -8189,8 +8174,8 @@ static void test_pouch_public_queue_shared_handles(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_transaction_ack_rollback_redelivers(
-    void **state) {
+static void
+test_pouch_public_queue_transaction_ack_rollback_redelivers(void **state) {
   char root[256];
   char endpoint[320];
   char participant_namespace[64];
@@ -8288,8 +8273,8 @@ static void test_pouch_public_queue_transaction_ack_rollback_redelivers(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_transaction_ack_commit_removes(
-    void **state) {
+static void
+test_pouch_public_queue_transaction_ack_commit_removes(void **state) {
   char root[256];
   char endpoint[320];
   char participant_namespace[64];
@@ -8366,8 +8351,7 @@ static void test_pouch_public_queue_transaction_ack_commit_removes(
   assert_lc_ok(rc, &error);
   assert_string_equal(decision_res.state, "committed");
   lc_txn_decision_res_cleanup(&decision_res);
-  assert_client_state_text(client, participant_key, "{\"acked\":true}",
-                           &error);
+  assert_client_state_text(client, participant_key, "{\"acked\":true}", &error);
 
   lc_dequeue_req_init(&dequeue_req);
   dequeue_req.queue = "txn-jobs";
@@ -8384,8 +8368,8 @@ static void test_pouch_public_queue_transaction_ack_commit_removes(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_only_transaction_ack_rollback_redelivers(
-    void **state) {
+static void
+test_pouch_public_queue_only_transaction_ack_rollback_redelivers(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -8464,8 +8448,8 @@ static void test_pouch_public_queue_only_transaction_ack_rollback_redelivers(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_only_transaction_ack_commit_removes(
-    void **state) {
+static void
+test_pouch_public_queue_only_transaction_ack_commit_removes(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -8644,8 +8628,8 @@ test_pouch_public_queue_transaction_recovery_rolls_back_ack(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_mixed_state_queue_transaction_commit(
-    void **state) {
+static void
+test_pouch_public_mixed_state_queue_transaction_commit(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -8760,8 +8744,8 @@ static void test_pouch_public_mixed_state_queue_transaction_commit(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_mixed_state_queue_transaction_rollback(
-    void **state) {
+static void
+test_pouch_public_mixed_state_queue_transaction_rollback(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -8880,8 +8864,8 @@ static void test_pouch_public_mixed_state_queue_transaction_rollback(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_mixed_state_queue_transaction_replay_commit(
-    void **state) {
+static void
+test_pouch_public_mixed_state_queue_transaction_replay_commit(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -9036,8 +9020,7 @@ static void test_pouch_public_mixed_state_queue_transaction_replay_commit(
 }
 
 static void
-test_pouch_public_expired_mixed_state_queue_transaction_recovers(
-    void **state) {
+test_pouch_public_expired_mixed_state_queue_transaction_recovers(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -9171,8 +9154,8 @@ test_pouch_public_expired_mixed_state_queue_transaction_recovers(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_initial_delay_hides_until_visible(
-    void **state) {
+static void
+test_pouch_public_queue_initial_delay_hides_until_visible(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *producer;
@@ -9281,8 +9264,7 @@ static void test_pouch_public_queue_initial_delay_hides_until_visible(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_ttl_expiry_removes_candidate(
-    void **state) {
+static void test_pouch_public_queue_ttl_expiry_removes_candidate(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *producer;
@@ -9376,8 +9358,8 @@ static void test_pouch_public_queue_ttl_expiry_removes_candidate(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_inflight_ttl_expiry_rejects_ack(
-    void **state) {
+static void
+test_pouch_public_queue_inflight_ttl_expiry_rejects_ack(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *producer;
@@ -10069,8 +10051,8 @@ static void test_pouch_public_queue_stats_is_read_only(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_batch_no_duplicate_acked_delivery(
-    void **state) {
+static void
+test_pouch_public_queue_batch_no_duplicate_acked_delivery(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *producer;
@@ -10121,8 +10103,8 @@ static void test_pouch_public_queue_batch_no_duplicate_acked_delivery(
   enqueue_req.max_attempts = 3;
   for (index = 0U; index < 4U; ++index) {
     source = source_from_text(payloads[index], &error);
-    rc = producer->enqueue(producer, &enqueue_req, source,
-                           &enqueue_res[index], &error);
+    rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res[index],
+                           &error);
     lc_source_close(source);
     assert_lc_ok(rc, &error);
   }
@@ -10193,8 +10175,8 @@ static void test_pouch_public_queue_batch_no_duplicate_acked_delivery(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_queue_batch_honors_start_after_cursor(
-    void **state) {
+static void
+test_pouch_public_queue_batch_honors_start_after_cursor(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *producer;
@@ -10240,8 +10222,8 @@ static void test_pouch_public_queue_batch_honors_start_after_cursor(
   enqueue_req.max_attempts = 3;
   for (index = 0U; index < 3U; ++index) {
     source = source_from_text(payloads[index], &error);
-    rc = producer->enqueue(producer, &enqueue_req, source,
-                           &enqueue_res[index], &error);
+    rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res[index],
+                           &error);
     lc_source_close(source);
     assert_lc_ok(rc, &error);
   }
@@ -10255,12 +10237,10 @@ static void test_pouch_public_queue_batch_honors_start_after_cursor(
   rc = worker->dequeue_batch(worker, &dequeue_req, &batch, &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(batch.count, 2U);
-  assert_string_equal(batch.messages[0]->message_id,
-                      enqueue_res[1].message_id);
+  assert_string_equal(batch.messages[0]->message_id, enqueue_res[1].message_id);
   assert_string_equal(batch.messages[0]->next_cursor,
                       enqueue_res[1].message_id);
-  assert_string_equal(batch.messages[1]->message_id,
-                      enqueue_res[2].message_id);
+  assert_string_equal(batch.messages[1]->message_id, enqueue_res[2].message_id);
   assert_string_equal(batch.messages[1]->next_cursor,
                       enqueue_res[2].message_id);
 
@@ -10291,8 +10271,8 @@ static void test_pouch_public_queue_batch_honors_start_after_cursor(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_dequeue_with_state_honors_start_after_cursor(
-    void **state) {
+static void
+test_pouch_public_dequeue_with_state_honors_start_after_cursor(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *producer;
@@ -10340,8 +10320,8 @@ static void test_pouch_public_dequeue_with_state_honors_start_after_cursor(
   enqueue_req.max_attempts = 3;
   for (index = 0U; index < 3U; ++index) {
     source = source_from_text(payloads[index], &error);
-    rc = producer->enqueue(producer, &enqueue_req, source,
-                           &enqueue_res[index], &error);
+    rc = producer->enqueue(producer, &enqueue_req, source, &enqueue_res[index],
+                           &error);
     lc_source_close(source);
     assert_lc_ok(rc, &error);
   }
@@ -10552,9 +10532,9 @@ static void test_pouch_public_subscribe_with_state(void **state) {
   lc_queue_stats_res_cleanup(&stats);
 
   open_pouch_client(endpoint, &verifier, &error);
-  assert_client_state_text(
-      verifier, subscribe_state.state_key,
-      "{\"subscribe\":\"stateful\",\"saved\":true}", &error);
+  assert_client_state_text(verifier, subscribe_state.state_key,
+                           "{\"subscribe\":\"stateful\",\"saved\":true}",
+                           &error);
   verifier->close(verifier);
   verifier = NULL;
 
@@ -10591,10 +10571,9 @@ static void test_pouch_public_subscribe_waits_for_later_enqueue(void **state) {
   memset(&subscribe_state, 0, sizeof(subscribe_state));
   subscribe_state.endpoint = endpoint;
 
-  assert_int_equal(
-      pthread_create(&subscribe_thread, NULL, pouch_subscribe_wait_main,
-                     &subscribe_state),
-      0);
+  assert_int_equal(pthread_create(&subscribe_thread, NULL,
+                                  pouch_subscribe_wait_main, &subscribe_state),
+                   0);
   usleep(200000U);
 
   open_pouch_client(endpoint, &producer, &error);
@@ -10660,10 +10639,9 @@ static void test_pouch_public_dequeue_waits_for_later_enqueue(void **state) {
   enqueue_test.endpoint = endpoint;
   enqueue_test.queue = "dequeue-wait";
   enqueue_test.payload = "waited-dequeue";
-  assert_int_equal(
-      pthread_create(&enqueue_thread, NULL, pouch_delayed_enqueue_main,
-                     &enqueue_test),
-      0);
+  assert_int_equal(pthread_create(&enqueue_thread, NULL,
+                                  pouch_delayed_enqueue_main, &enqueue_test),
+                   0);
 
   lc_dequeue_req_init(&dequeue_req);
   dequeue_req.queue = "dequeue-wait";
@@ -10782,9 +10760,9 @@ static void test_pouch_public_consumer_service_with_state(void **state) {
   lc_queue_stats_res_cleanup(&stats);
 
   open_pouch_client(endpoint, &verifier, &error);
-  assert_client_state_text(
-      verifier, consumer_state.state_key,
-      "{\"consumer\":\"stateful\",\"saved\":true}", &error);
+  assert_client_state_text(verifier, consumer_state.state_key,
+                           "{\"consumer\":\"stateful\",\"saved\":true}",
+                           &error);
   verifier->close(verifier);
   verifier = NULL;
 
@@ -10794,8 +10772,8 @@ static void test_pouch_public_consumer_service_with_state(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_consumer_service_start_wait_with_state(
-    void **state) {
+static void
+test_pouch_public_consumer_service_start_wait_with_state(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *producer;
@@ -10874,9 +10852,9 @@ static void test_pouch_public_consumer_service_start_wait_with_state(
   lc_queue_stats_res_cleanup(&stats);
 
   open_pouch_client(endpoint, &verifier, &error);
-  assert_client_state_text(
-      verifier, consumer_state.state_key,
-      "{\"consumer\":\"stateful\",\"saved\":true}", &error);
+  assert_client_state_text(verifier, consumer_state.state_key,
+                           "{\"consumer\":\"stateful\",\"saved\":true}",
+                           &error);
   verifier->close(verifier);
   verifier = NULL;
 
@@ -10886,8 +10864,8 @@ static void test_pouch_public_consumer_service_start_wait_with_state(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_consumer_service_polls_later_enqueue(
-    void **state) {
+static void
+test_pouch_public_consumer_service_polls_later_enqueue(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *producer;
@@ -10967,9 +10945,9 @@ static void test_pouch_public_consumer_service_polls_later_enqueue(
   lc_queue_stats_res_cleanup(&stats);
 
   open_pouch_client(endpoint, &verifier, &error);
-  assert_client_state_text(
-      verifier, consumer_state.state_key,
-      "{\"consumer\":\"stateful\",\"saved\":true}", &error);
+  assert_client_state_text(verifier, consumer_state.state_key,
+                           "{\"consumer\":\"stateful\",\"saved\":true}",
+                           &error);
   verifier->close(verifier);
   verifier = NULL;
 
@@ -10979,8 +10957,8 @@ static void test_pouch_public_consumer_service_polls_later_enqueue(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_consumer_service_failure_redelivery(
-    void **state) {
+static void
+test_pouch_public_consumer_service_failure_redelivery(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -11110,9 +11088,8 @@ static void test_pouch_public_acquire_for_update_stages_state(void **state) {
   handler_state.expected_snapshot = "{\"value\":1}";
   handler_state.expected_visible_during_update = "{\"value\":1}";
   handler_state.next_state = "{\"value\":2,\"via\":\"commit\"}";
-  rc = lc_acquire_for_update(client, &acquire,
-                             pouch_acquire_for_update_handler, &handler_state,
-                             &error);
+  rc = lc_acquire_for_update(client, &acquire, pouch_acquire_for_update_handler,
+                             &handler_state, &error);
   assert_lc_ok(rc, &error);
   assert_true(handler_state.saw_snapshot);
   assert_true(handler_state.checked_staged_invisible);
@@ -11120,9 +11097,8 @@ static void test_pouch_public_acquire_for_update_stages_state(void **state) {
                            "{\"value\":2,\"via\":\"commit\"}", &error);
 
   acquire.owner = "rollback";
-  rc = lc_acquire_for_update(client, &acquire,
-                             pouch_acquire_for_update_failing_handler, NULL,
-                             &error);
+  rc = lc_acquire_for_update(
+      client, &acquire, pouch_acquire_for_update_failing_handler, NULL, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_int_equal(error.code, LC_ERR_INVALID);
   assert_non_null(error.message);
@@ -11139,8 +11115,8 @@ static void test_pouch_public_acquire_for_update_stages_state(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_acquire_for_update_creates_empty_state(
-    void **state) {
+static void
+test_pouch_public_acquire_for_update_creates_empty_state(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -11181,9 +11157,8 @@ static void test_pouch_public_acquire_for_update_creates_empty_state(
   memset(&handler_state, 0, sizeof(handler_state));
   acquire.key = "integration/acquire-for-update-empty-rollback-key";
   acquire.owner = "empty-rollback";
-  rc = lc_acquire_for_update(client, &acquire,
-                             pouch_acquire_for_update_failing_handler, NULL,
-                             &error);
+  rc = lc_acquire_for_update(
+      client, &acquire, pouch_acquire_for_update_failing_handler, NULL, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_int_equal(error.code, LC_ERR_INVALID);
   assert_non_null(error.message);
@@ -11191,9 +11166,8 @@ static void test_pouch_public_acquire_for_update_creates_empty_state(
                       "intentional pouch acquire_for_update failure");
   lc_error_cleanup(&error);
   lc_error_init(&error);
-  assert_client_state_empty(client,
-                            "integration/acquire-for-update-empty-rollback-key",
-                            &error);
+  assert_client_state_empty(
+      client, "integration/acquire-for-update-empty-rollback-key", &error);
 
   client->close(client);
   observer->close(observer);
@@ -11201,8 +11175,8 @@ static void test_pouch_public_acquire_for_update_creates_empty_state(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_acquire_for_update_noop_releases_unchanged(
-    void **state) {
+static void
+test_pouch_public_acquire_for_update_noop_releases_unchanged(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -11276,9 +11250,8 @@ static void test_pouch_public_acquire_for_update_noop_releases_unchanged(
   assert_lc_ok(rc, &error);
   assert_true(handler_state.saw_snapshot);
   assert_true(handler_state.checked_staged_invisible);
-  assert_client_state_empty(client,
-                            "integration/acquire-for-update-noop-empty-key",
-                            &error);
+  assert_client_state_empty(
+      client, "integration/acquire-for-update-noop-empty-key", &error);
 
   acquire.owner = "after-noop-empty";
   rc = client->acquire(client, &acquire, &lease, &error);
@@ -11627,8 +11600,8 @@ static void test_pouch_public_mutate_local_shared_state(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_prepare_survives_reopen(
-    void **state) {
+static void
+test_pouch_public_transaction_prepare_survives_reopen(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -11728,8 +11701,8 @@ static void test_pouch_public_transaction_prepare_survives_reopen(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_rollback_discards_update(
-    void **state) {
+static void
+test_pouch_public_transaction_rollback_discards_update(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -11892,8 +11865,8 @@ test_pouch_public_transaction_rejects_wrong_target_backend_hash(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_commit_across_namespaces(
-    void **state) {
+static void
+test_pouch_public_transaction_commit_across_namespaces(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -12005,8 +11978,8 @@ static void test_pouch_public_transaction_commit_across_namespaces(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_rollback_across_namespaces(
-    void **state) {
+static void
+test_pouch_public_transaction_rollback_across_namespaces(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -12266,8 +12239,7 @@ test_pouch_public_transaction_prepare_replays_across_namespaces(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void
-test_pouch_public_expired_transaction_rolls_back_across_namespaces(
+static void test_pouch_public_expired_transaction_rolls_back_across_namespaces(
     void **state) {
   char root[256];
   char endpoint[320];
@@ -12397,8 +12369,8 @@ test_pouch_public_expired_transaction_rolls_back_across_namespaces(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_mutate_uses_staged_state(
-    void **state) {
+static void
+test_pouch_public_transaction_mutate_uses_staged_state(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -12553,8 +12525,8 @@ static void test_pouch_public_transaction_remove_commits_delete(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_transaction_remove_rollback_keeps_state(
-    void **state) {
+static void
+test_pouch_public_transaction_remove_rollback_keeps_state(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -12803,8 +12775,8 @@ static void test_pouch_public_consumer_service_auto_ack(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_consumer_service_lifecycle_callbacks(
-    void **state) {
+static void
+test_pouch_public_consumer_service_lifecycle_callbacks(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -12895,8 +12867,8 @@ static void test_pouch_public_consumer_service_lifecycle_callbacks(
   cleanup_pouch_root(root);
 }
 
-static void test_pouch_public_consumer_service_explicit_defer_redelivery(
-    void **state) {
+static void
+test_pouch_public_consumer_service_explicit_defer_redelivery(void **state) {
   char root[256];
   char endpoint[320];
   lc_client *client;
@@ -13002,17 +12974,12 @@ int main(void) {
           test_pouch_public_scan_query_documents_replays_after_reopen),
       cmocka_unit_test(
           test_pouch_public_scan_query_can_be_configured_by_endpoint),
-      cmocka_unit_test(
-          test_pouch_public_namespace_config_reports_query_mode),
+      cmocka_unit_test(test_pouch_public_namespace_config_reports_query_mode),
       cmocka_unit_test(test_pouch_public_rejects_reserved_namespaces),
-      cmocka_unit_test(
-          test_pouch_public_query_rejects_signed_oversized_limits),
-      cmocka_unit_test(
-          test_pouch_public_compound_selector_scan_index_parity),
-      cmocka_unit_test(
-          test_pouch_public_endpoint_query_engine_selects_index),
-      cmocka_unit_test(
-          test_pouch_public_endpoint_query_fallback_selects_scan),
+      cmocka_unit_test(test_pouch_public_query_rejects_signed_oversized_limits),
+      cmocka_unit_test(test_pouch_public_compound_selector_scan_index_parity),
+      cmocka_unit_test(test_pouch_public_endpoint_query_engine_selects_index),
+      cmocka_unit_test(test_pouch_public_endpoint_query_fallback_selects_scan),
       cmocka_unit_test(
           test_pouch_public_endpoint_query_keys_fallback_selects_scan),
       cmocka_unit_test(
@@ -13033,18 +13000,15 @@ int main(void) {
           test_pouch_public_scan_query_owner_selector_filters_candidates),
       cmocka_unit_test(
           test_pouch_public_scan_query_key_selector_filters_candidates),
-      cmocka_unit_test(
-          test_pouch_public_scan_query_key_selector_skips_removed),
+      cmocka_unit_test(test_pouch_public_scan_query_key_selector_skips_removed),
       cmocka_unit_test(
           test_pouch_public_scan_query_paginates_across_removed_candidate),
       cmocka_unit_test(
           test_pouch_public_scan_query_documents_refreshes_open_reader),
-      cmocka_unit_test(
-          test_pouch_public_scan_query_keys_refreshes_open_reader),
+      cmocka_unit_test(test_pouch_public_scan_query_keys_refreshes_open_reader),
       cmocka_unit_test(
           test_pouch_public_index_query_documents_replays_after_reopen),
-      cmocka_unit_test(
-          test_pouch_public_index_query_keys_replays_after_reopen),
+      cmocka_unit_test(test_pouch_public_index_query_keys_replays_after_reopen),
       cmocka_unit_test(test_pouch_public_index_query_isolates_namespaces),
       cmocka_unit_test(
           test_pouch_public_index_query_paginates_documents_and_keys),
@@ -13060,8 +13024,7 @@ int main(void) {
           test_pouch_public_index_query_owner_selector_hides_metadata),
       cmocka_unit_test(
           test_pouch_public_index_query_owner_selector_skips_removed),
-      cmocka_unit_test(
-          test_pouch_public_index_query_owner_selector_paginates),
+      cmocka_unit_test(test_pouch_public_index_query_owner_selector_paginates),
       cmocka_unit_test(
           test_pouch_public_index_query_owner_selector_narrows_large_namespace),
       cmocka_unit_test(
@@ -13071,8 +13034,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_index_query_keys_refreshes_open_reader),
       cmocka_unit_test(test_pouch_public_flush_index_refreshes_open_reader),
-      cmocka_unit_test(
-          test_pouch_public_attachment_survives_compaction_reopen),
+      cmocka_unit_test(test_pouch_public_attachment_survives_compaction_reopen),
       cmocka_unit_test(test_pouch_public_attachment_delete_semantics),
       cmocka_unit_test(
           test_pouch_public_transaction_attachment_rollback_discards),
@@ -13108,16 +13070,14 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_queue_shared_handles),
       cmocka_unit_test(
           test_pouch_public_queue_transaction_ack_rollback_redelivers),
-      cmocka_unit_test(
-          test_pouch_public_queue_transaction_ack_commit_removes),
+      cmocka_unit_test(test_pouch_public_queue_transaction_ack_commit_removes),
       cmocka_unit_test(
           test_pouch_public_queue_only_transaction_ack_rollback_redelivers),
       cmocka_unit_test(
           test_pouch_public_queue_only_transaction_ack_commit_removes),
       cmocka_unit_test(
           test_pouch_public_queue_transaction_recovery_rolls_back_ack),
-      cmocka_unit_test(
-          test_pouch_public_mixed_state_queue_transaction_commit),
+      cmocka_unit_test(test_pouch_public_mixed_state_queue_transaction_commit),
       cmocka_unit_test(
           test_pouch_public_mixed_state_queue_transaction_rollback),
       cmocka_unit_test(
@@ -13127,8 +13087,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_public_queue_initial_delay_hides_until_visible),
       cmocka_unit_test(test_pouch_public_queue_ttl_expiry_removes_candidate),
-      cmocka_unit_test(
-          test_pouch_public_queue_inflight_ttl_expiry_rejects_ack),
+      cmocka_unit_test(test_pouch_public_queue_inflight_ttl_expiry_rejects_ack),
       cmocka_unit_test(test_pouch_public_queue_visibility_redelivery),
       cmocka_unit_test(
           test_pouch_public_queue_closed_handle_redelivers_after_visibility),
@@ -13137,8 +13096,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_queue_stats_is_read_only),
       cmocka_unit_test(
           test_pouch_public_queue_batch_no_duplicate_acked_delivery),
-      cmocka_unit_test(
-          test_pouch_public_queue_batch_honors_start_after_cursor),
+      cmocka_unit_test(test_pouch_public_queue_batch_honors_start_after_cursor),
       cmocka_unit_test(
           test_pouch_public_dequeue_with_state_honors_start_after_cursor),
       cmocka_unit_test(test_pouch_public_watch_queue_snapshots),
@@ -13148,13 +13106,11 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_consumer_service_with_state),
       cmocka_unit_test(
           test_pouch_public_consumer_service_start_wait_with_state),
-      cmocka_unit_test(
-          test_pouch_public_consumer_service_polls_later_enqueue),
+      cmocka_unit_test(test_pouch_public_consumer_service_polls_later_enqueue),
       cmocka_unit_test(test_pouch_public_consumer_service_failure_redelivery),
       cmocka_unit_test(test_pouch_public_consumer_service_explicit_ack),
       cmocka_unit_test(test_pouch_public_consumer_service_auto_ack),
-      cmocka_unit_test(
-          test_pouch_public_consumer_service_lifecycle_callbacks),
+      cmocka_unit_test(test_pouch_public_consumer_service_lifecycle_callbacks),
       cmocka_unit_test(
           test_pouch_public_consumer_service_explicit_defer_redelivery),
       cmocka_unit_test(test_pouch_public_acquire_for_update_stages_state),
@@ -13165,22 +13121,18 @@ int main(void) {
       cmocka_unit_test(test_pouch_public_cas_across_clients),
       cmocka_unit_test(test_pouch_public_remove_recreate_semantics),
       cmocka_unit_test(test_pouch_public_mutate_local_shared_state),
-      cmocka_unit_test(
-          test_pouch_public_transaction_prepare_survives_reopen),
-      cmocka_unit_test(
-          test_pouch_public_transaction_rollback_discards_update),
+      cmocka_unit_test(test_pouch_public_transaction_prepare_survives_reopen),
+      cmocka_unit_test(test_pouch_public_transaction_rollback_discards_update),
       cmocka_unit_test(
           test_pouch_public_transaction_rejects_wrong_target_backend_hash),
-      cmocka_unit_test(
-          test_pouch_public_transaction_commit_across_namespaces),
+      cmocka_unit_test(test_pouch_public_transaction_commit_across_namespaces),
       cmocka_unit_test(
           test_pouch_public_transaction_rollback_across_namespaces),
       cmocka_unit_test(
           test_pouch_public_transaction_prepare_replays_across_namespaces),
       cmocka_unit_test(
           test_pouch_public_expired_transaction_rolls_back_across_namespaces),
-      cmocka_unit_test(
-          test_pouch_public_transaction_mutate_uses_staged_state),
+      cmocka_unit_test(test_pouch_public_transaction_mutate_uses_staged_state),
       cmocka_unit_test(test_pouch_public_transaction_remove_commits_delete),
       cmocka_unit_test(
           test_pouch_public_transaction_remove_rollback_keeps_state),

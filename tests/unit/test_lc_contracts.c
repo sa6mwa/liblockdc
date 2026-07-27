@@ -358,11 +358,10 @@ static void test_public_struct_layout_preserves_stable_prefixes(void **state) {
   assert_true(offsetof(lc_query_res, correlation_id) <
               offsetof(lc_query_res, metadata_json));
 
-  assert_int_equal(offsetof(lc_client_config, logger),
-                   offsetof(lc_client_config,
-                            http_json_response_limit_bytes) +
-                       sizeof(((lc_client_config *)0)
-                                  ->http_json_response_limit_bytes));
+  assert_int_equal(
+      offsetof(lc_client_config, logger),
+      offsetof(lc_client_config, http_json_response_limit_bytes) +
+          sizeof(((lc_client_config *)0)->http_json_response_limit_bytes));
   assert_int_equal(offsetof(lc_client_config, disable_logger_sys_field),
                    offsetof(lc_client_config, logger) +
                        sizeof(((lc_client_config *)0)->logger));

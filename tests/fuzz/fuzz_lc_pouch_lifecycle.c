@@ -4,9 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_pouch.h"
-#include "../support/lc_test_tmp.h"
 
 #define FUZZ_POUCH_LIFECYCLE_TMP_PREFIX "/tmp/liblockdc-pouch-lifecycle-fuzz-"
 
@@ -44,7 +44,8 @@ static void lifecycle_abort_if(int condition) {
   }
 }
 
-static lc_source *lifecycle_source_from_text(const char *text, lc_error *error) {
+static lc_source *lifecycle_source_from_text(const char *text,
+                                             lc_error *error) {
   lc_source *source;
 
   source = NULL;
@@ -290,18 +291,17 @@ static void lifecycle_damage_query_index(const char *root,
   } else if (mode == 2U) {
     lifecycle_write_text_file(path, "not-a-pouch-query-index\nterm broken\n");
   } else {
-    lifecycle_write_text_file(path,
-                              "format=pouch-query-index\n"
-                              "version=999999\n"
-                              "state_index_seq=999999\n"
-                              "row_count=1\n"
-                              "row_hash=1\n"
-                              "term_index_complete=1\n"
-                              "term_count=1\n"
-                              "term_hash=1\n"
-                              "presence_index_complete=1\n"
-                              "presence_count=1\n"
-                              "presence_hash=1\n");
+    lifecycle_write_text_file(path, "format=pouch-query-index\n"
+                                    "version=999999\n"
+                                    "state_index_seq=999999\n"
+                                    "row_count=1\n"
+                                    "row_hash=1\n"
+                                    "term_index_complete=1\n"
+                                    "term_count=1\n"
+                                    "term_hash=1\n"
+                                    "presence_index_complete=1\n"
+                                    "presence_count=1\n"
+                                    "presence_hash=1\n");
   }
 }
 
@@ -330,8 +330,9 @@ static int lifecycle_verify_survivors(lc_client *client, lc_error *error) {
   rc = lifecycle_flush_index(client, "life", error);
   if (rc == LC_OK) {
     rc = lifecycle_query_count(
-        client, "life", "{\"eq\":{\"field\":\"/bucket\",\"value\":\"survivor\"}}",
-        &rows, error);
+        client, "life",
+        "{\"eq\":{\"field\":\"/bucket\",\"value\":\"survivor\"}}", &rows,
+        error);
   }
   if (rc == LC_OK) {
     lifecycle_abort_if(rows != 1U);
@@ -393,8 +394,7 @@ static int lifecycle_verify_retention(lc_client *client, lc_error *error) {
   if (rc == LC_OK) {
     rc = lifecycle_query_count(
         client, "life-retain",
-        "{\"eq\":{\"field\":\"/bucket\",\"value\":\"expired\"}}", &rows,
-        error);
+        "{\"eq\":{\"field\":\"/bucket\",\"value\":\"expired\"}}", &rows, error);
   }
   if (rc == LC_OK) {
     lifecycle_abort_if(rows != 0U);
@@ -426,14 +426,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (rc == LC_OK) {
     stage = "put-life";
     rc = lifecycle_put_doc(client, "life", "state/keep",
-                           "{\"bucket\":\"survivor\",\"value\":1}", 1,
-                           &error);
+                           "{\"bucket\":\"survivor\",\"value\":1}", 1, &error);
   }
   if (rc == LC_OK) {
     stage = "put-retention";
     rc = lifecycle_put_doc(client, "life-retain", "state/dead",
-                           "{\"bucket\":\"expired\",\"value\":2}", 0,
-                           &error);
+                           "{\"bucket\":\"expired\",\"value\":2}", 0, &error);
   }
   if (rc == LC_OK) {
     stage = "enqueue";
