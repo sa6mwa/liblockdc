@@ -1484,6 +1484,15 @@ Latest release targets confirmed on 2026-07-23:
         only a modest improvement; the remaining path still collects matching
         postings before merge, so the next larger cut is a key-ordered or
         field/key/value posting layout that can stop after the cursor page.
+      - [x] Remove per-line allocation/copy from the hot scalar term sidecar
+        parser and tokenize the mutable read buffer directly. Verified on
+        2026-07-27 with focused 4096-document indexed `InTags`: pouch measured
+        about 25 ms keys C-side versus Go lockd disk at about 39 ms in that
+        sample. The bounded acceptance target completed in 1m07s after this
+        change, with pouch indexed key-return at about 6.0 ms `EqSparse`,
+        29 ms `RangeHalf`, 25 ms `InTags`, 41 ms `ContainsMessage`, and
+        9.9 ms `DateAfter`; document-return remained body-read-bound at about
+        8.0 ms, 67 ms, 61 ms, 45 ms, and 30 ms respectively.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

@@ -181,7 +181,14 @@ static void lc_test_tmp_remove_tree(const char *path) {
     (void)unlink(path);
     return;
   }
+  if ((st.st_mode & S_IWUSR) == 0) {
+    (void)chmod(path, st.st_mode | S_IRUSR | S_IWUSR | S_IXUSR);
+  }
   dir = opendir(path);
+  if (dir == NULL) {
+    (void)chmod(path, st.st_mode | S_IRUSR | S_IWUSR | S_IXUSR);
+    dir = opendir(path);
+  }
   if (dir == NULL) {
     (void)unlink(path);
     return;

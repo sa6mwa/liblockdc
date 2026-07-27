@@ -1498,35 +1498,24 @@ static int lc_pouch_query_index_term_reader_matches_any_value(
 }
 
 static int lc_pouch_query_index_parse_and_visit_term(
-    const char *line_bytes, lc_pouch_query_index_term_reader *reader,
+    char *line, lc_pouch_query_index_term_reader *reader,
     lc_error *error) {
   lc_pouch_query_index_key_view key_view;
-  char *line;
   char *cursor;
   char *field_hex;
   char *value_hex;
   char *key_hex;
   char *key;
-  size_t line_len;
   size_t value_index;
   int matched;
   int field_cmp;
   int value_cmp;
   int rc;
 
-  if (line_bytes == NULL || reader == NULL || reader->visit == NULL) {
+  if (line == NULL || reader == NULL || reader->visit == NULL) {
     return LC_OK;
   }
-  line_len = strlen(line_bytes);
-  line = (char *)lc_alloc_with_allocator(reader->allocator, line_len + 1U);
-  if (line == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index term parser",
-                        NULL, NULL, NULL);
-  }
-  memcpy(line, line_bytes, line_len + 1U);
   if (strncmp(line, "term ", sizeof("term ") - 1U) != 0) {
-    lc_free_with_allocator(reader->allocator, line);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index term has invalid prefix", NULL,
                         NULL, NULL);
@@ -1605,7 +1594,6 @@ static int lc_pouch_query_index_parse_and_visit_term(
     }
   }
   lc_free_with_allocator(reader->allocator, key);
-  lc_free_with_allocator(reader->allocator, line);
   return rc;
 }
 
