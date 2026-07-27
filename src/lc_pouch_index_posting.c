@@ -204,3 +204,160 @@ int lc_pouch_index_posting_append_to_set(
   }
   return rc;
 }
+
+void lc_pouch_index_dense_posting_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_dense_posting *posting) {
+  if (posting == NULL) {
+    return;
+  }
+  lc_free_with_allocator(allocator, posting->bits);
+  memset(posting, 0, sizeof(*posting));
+}
+
+static int lc_pouch_index_dense_posting_reserve(
+    lc_pouch_index_dense_posting *posting, size_t needed,
+    const lc_allocator *allocator, lc_error *error) {
+  unsigned char *next_bits;
+  size_t next_capacity;
+
+  if (posting == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index dense posting reserve requires posting",
+                        NULL, NULL, NULL);
+  }
+  if (needed <= posting->capacity) {
+    return LC_OK;
+  }
+  next_capacity = posting->capacity == 0U ? 16U : posting->capacity;
+  while (next_capacity < needed) {
+    if (next_capacity > ((size_t)-1 / 2U)) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch index dense posting exceeds local limit",
+                          NULL, NULL, NULL);
+    }
+    next_capacity *= 2U;
+  }
+  next_bits = (unsigned char *)lc_alloc_with_allocator(allocator,
+                                                       next_capacity);
+  if (next_bits == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index dense posting", NULL,
+                        NULL, NULL);
+  }
+  memset(next_bits, 0, next_capacity);
+  if (posting->bits != NULL) {
+    memcpy(next_bits, posting->bits, posting->length);
+    lc_free_with_allocator(allocator, posting->bits);
+  }
+  posting->bits = next_bits;
+  posting->capacity = next_capacity;
+  return LC_OK;
+}
+
+int lc_pouch_index_dense_posting_append_sorted_unique(
+    lc_pouch_index_dense_posting *posting, unsigned long doc_id, int *added,
+    const lc_allocator *allocator, lc_error *error) {
+  unsigned long byte_index_ul;
+  size_t byte_index;
+  unsigned char mask;
+  int rc;
+
+  if (posting == NULL || added == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index dense posting append requires posting "
+                        "and added",
+                        NULL, NULL, NULL);
+  }
+  *added = 0;
+  if (posting->has_last_doc_id) {
+    if (doc_id < posting->last_doc_id) {
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          "pouch index dense posting append requires sorted input", NULL,
+          NULL, "pouch-redesign");
+    }
+    if (doc_id == posting->last_doc_id) {
+      return LC_OK;
+    }
+  }
+  byte_index_ul = doc_id / CHAR_BIT;
+  if (byte_index_ul > (unsigned long)((size_t)-1)) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch index dense posting exceeds local limit", NULL,
+                        NULL, NULL);
+  }
+  byte_index = (size_t)byte_index_ul;
+  rc = lc_pouch_index_dense_posting_reserve(posting, byte_index + 1U,
+                                            allocator, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (posting->length < byte_index + 1U) {
+    posting->length = byte_index + 1U;
+  }
+  mask = (unsigned char)(1U << (unsigned int)(doc_id % CHAR_BIT));
+  if ((posting->bits[byte_index] & mask) == 0U) {
+    posting->bits[byte_index] = (unsigned char)(posting->bits[byte_index] |
+                                                mask);
+    ++posting->count;
+    *added = 1;
+  }
+  posting->max_doc_id = doc_id;
+  posting->last_doc_id = doc_id;
+  posting->has_last_doc_id = 1;
+  return LC_OK;
+}
+
+int lc_pouch_index_dense_posting_append_to_set(
+    const lc_pouch_index_dense_posting *posting, lc_pouch_index_docid_set *set,
+    const lc_allocator *allocator, lc_error *error) {
+  size_t byte_index;
+  unsigned int bit_index;
+  size_t seen;
+  unsigned long doc_id;
+  int added;
+  int rc;
+
+  if (posting == NULL || set == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch index dense posting decode requires posting and set", NULL,
+        NULL, NULL);
+  }
+  if (posting->length > 0U && posting->bits == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index dense posting is missing bit storage",
+                        NULL, NULL, "pouch-redesign");
+  }
+  seen = 0U;
+  rc = LC_OK;
+  for (byte_index = 0U; rc == LC_OK && byte_index < posting->length;
+       ++byte_index) {
+    for (bit_index = 0U; bit_index < (unsigned int)CHAR_BIT; ++bit_index) {
+      if ((posting->bits[byte_index] & (unsigned char)(1U << bit_index)) ==
+          0U) {
+        continue;
+      }
+      doc_id = ((unsigned long)byte_index * (unsigned long)CHAR_BIT) +
+               (unsigned long)bit_index;
+      if (!posting->has_last_doc_id || doc_id > posting->max_doc_id) {
+        return lc_error_set(
+            error, LC_ERR_INVALID, 0L,
+            "pouch index dense posting bit exceeds max docID", NULL, NULL,
+            "pouch-redesign");
+      }
+      rc = lc_pouch_index_docid_set_append_sorted_unique(
+          set, doc_id, &added, allocator, error);
+      if (rc != LC_OK) {
+        break;
+      }
+      ++seen;
+    }
+  }
+  if (rc == LC_OK && seen != posting->count) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch index dense posting count mismatch", NULL, NULL,
+                      "pouch-redesign");
+  }
+  return rc;
+}

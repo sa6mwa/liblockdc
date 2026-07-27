@@ -1414,8 +1414,9 @@ fuller compiled-index module map remains the target for the remaining work:
 - `src/lc_pouch_index_posting.c` currently owns sparse delta-varint docID
   posting streams. The active exact/`in` query-index docID bridge exercises
   that posting primitive while collapsing sorted candidate docIDs before key
-  emission. Dense bitsets and persisted posting generation files remain
-  pending.
+  emission. It also owns the first dense bitset posting primitive, with
+  sorted append and corruption-checked decode. Adaptive sparse/dense selection
+  and persisted posting generation files remain pending.
 - `src/lc_pouch_index_terms.c` owns term dictionaries, term-ID posting tables,
   and prepared-term cache identity refresh/cleanup. Prepared bridge caches are
   keyed by an explicit private index identity containing the current index

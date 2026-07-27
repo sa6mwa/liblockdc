@@ -786,7 +786,8 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Physically split sparse posting encoding into
         `src/lc_pouch_index_posting.c`, keeping the private posting boundary
         separate from document-table, term-dictionary, and result-cache code.
-        Dense bitsets remain pending.
+        Dense bitset primitives now live in the same module; adaptive
+        sparse/dense selection remains pending.
       - [ ] Physically split term dictionaries, term-ID posting tables, and
         prepared-term cache lifecycle into `src/lc_pouch_index_terms.c`, so
         the private index layer has distinct document, posting, term, and
@@ -913,8 +914,12 @@ Latest release targets confirmed on 2026-07-23:
         decode back into caller-owned docID sets, reject out-of-order appends,
         and detect truncated postings. The active multi-term exact/`in`
         query-index docID bridge now exercises this posting append path while
-        collapsing sorted candidate docIDs before key emission. Dense bitsets
-        and persisted compiled posting generation files remain pending.
+        collapsing sorted candidate docIDs before key emission.
+      - [x] Add the first private dense bitset posting primitive in
+        `lc_pouch_index_posting`: sorted docIDs set compact bit positions,
+        decode back into caller-owned docID sets, reject out-of-order appends,
+        and detect bit/count corruption. Adaptive sparse/dense selection and
+        persisted compiled posting generation files remain pending.
     - [ ] Add compiled field dictionaries with term IDs, doc tables, numeric
       range term tables, and text/trigram term tables so equality, range,
       `in`, prefix, contains, and exists can evaluate without repeated string
