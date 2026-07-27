@@ -289,6 +289,87 @@ static void test_index_posting_roundtrips_dense_docids(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_index_posting_selects_adaptive_encoding(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_adaptive_posting sparse;
+  lc_pouch_index_adaptive_posting dense;
+  lc_pouch_index_docid_set decoded;
+  lc_error error;
+  int added;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&sparse, 0, sizeof(sparse));
+  memset(&dense, 0, sizeof(dense));
+  memset(&decoded, 0, sizeof(decoded));
+
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &sparse, 2UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &sparse, 130000UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  assert_int_equal(lc_pouch_index_adaptive_posting_selected_kind(&sparse),
+                   LC_POUCH_INDEX_ADAPTIVE_POSTING_SPARSE);
+  rc = lc_pouch_index_adaptive_posting_append_to_set(&sparse, &decoded,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(decoded.count, 2);
+  assert_int_equal(decoded.items[0], 2UL);
+  assert_int_equal(decoded.items[1], 130000UL);
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &decoded);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &dense, 1UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &dense, 2UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &dense, 2UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 0);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &dense, 3UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &dense, 4UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &dense, 5UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  assert_int_equal(lc_pouch_index_adaptive_posting_selected_kind(&dense),
+                   LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE);
+  rc = lc_pouch_index_adaptive_posting_append_to_set(&dense, &decoded,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(decoded.count, 5);
+  assert_int_equal(decoded.items[0], 1UL);
+  assert_int_equal(decoded.items[1], 2UL);
+  assert_int_equal(decoded.items[2], 3UL);
+  assert_int_equal(decoded.items[3], 4UL);
+  assert_int_equal(decoded.items[4], 5UL);
+
+  rc = lc_pouch_index_adaptive_posting_append_sorted_unique(
+      &dense, 4UL, &added, &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "requires sorted input"));
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &decoded);
+  lc_pouch_index_adaptive_posting_cleanup(&allocator, &sparse);
+  lc_pouch_index_adaptive_posting_cleanup(&allocator, &dense);
+  lc_error_cleanup(&error);
+}
+
 static void pouch_write_json_state(lc_pouch *pouch, const char *namespace_name,
                                    const char *key, const char *json,
                                    const lc_pouch_state_write_options *options,
@@ -9423,6 +9504,7 @@ int main(void) {
       cmocka_unit_test(test_index_docid_set_keeps_sorted_unique_docids),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
+      cmocka_unit_test(test_index_posting_selects_adaptive_encoding),
       cmocka_unit_test(test_open_creates_segmented_root_layout),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(

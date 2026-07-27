@@ -1415,8 +1415,11 @@ fuller compiled-index module map remains the target for the remaining work:
   posting streams. The active exact/`in` query-index docID bridge exercises
   that posting primitive while collapsing sorted candidate docIDs before key
   emission. It also owns the first dense bitset posting primitive, with
-  sorted append and corruption-checked decode. Adaptive sparse/dense selection
-  and persisted posting generation files remain pending.
+  sorted append and corruption-checked decode. The first adaptive wrapper
+  appends sorted docIDs once, opportunistically tracks dense bits while the
+  shape remains plausible, and selects dense only when density and encoded
+  size justify it. Persisted posting generation files still need to consume
+  that adaptive boundary broadly.
 - `src/lc_pouch_index_terms.c` owns term dictionaries, term-ID posting tables,
   and prepared-term cache identity refresh/cleanup. Prepared bridge caches are
   keyed by an explicit private index identity containing the current index

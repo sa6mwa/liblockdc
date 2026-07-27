@@ -5,6 +5,9 @@
 #include <limits.h>
 #include <string.h>
 
+#define LC_POUCH_INDEX_DENSE_TRACK_MIN_BYTES 4096U
+#define LC_POUCH_INDEX_DENSE_TRACK_SPARSE_MULTIPLIER 2U
+
 void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
                                     lc_pouch_index_posting *posting) {
   if (posting == NULL) {
@@ -360,4 +363,121 @@ int lc_pouch_index_dense_posting_append_to_set(
                       "pouch-redesign");
   }
   return rc;
+}
+
+void lc_pouch_index_adaptive_posting_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_adaptive_posting *posting) {
+  if (posting == NULL) {
+    return;
+  }
+  lc_pouch_index_posting_cleanup(allocator, &posting->sparse);
+  lc_pouch_index_dense_posting_cleanup(allocator, &posting->dense);
+  memset(posting, 0, sizeof(*posting));
+}
+
+static int lc_pouch_index_adaptive_should_track_dense(
+    const lc_pouch_index_adaptive_posting *posting, unsigned long doc_id) {
+  unsigned long dense_length_ul;
+  size_t dense_length;
+  size_t sparse_limit;
+
+  if (posting == NULL || posting->dense_disabled) {
+    return 0;
+  }
+  dense_length_ul = (doc_id / CHAR_BIT) + 1UL;
+  if (dense_length_ul > (unsigned long)((size_t)-1)) {
+    return 0;
+  }
+  dense_length = (size_t)dense_length_ul;
+  sparse_limit = posting->sparse.length *
+                 LC_POUCH_INDEX_DENSE_TRACK_SPARSE_MULTIPLIER;
+  if (sparse_limit < LC_POUCH_INDEX_DENSE_TRACK_MIN_BYTES) {
+    sparse_limit = LC_POUCH_INDEX_DENSE_TRACK_MIN_BYTES;
+  }
+  return dense_length <= sparse_limit;
+}
+
+int lc_pouch_index_adaptive_posting_append_sorted_unique(
+    lc_pouch_index_adaptive_posting *posting, unsigned long doc_id, int *added,
+    const lc_allocator *allocator, lc_error *error) {
+  int dense_added;
+  int rc;
+
+  if (posting == NULL || added == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index adaptive posting append requires "
+                        "posting and added",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_index_posting_append_sorted_unique(
+      &posting->sparse, doc_id, added, allocator, error);
+  if (rc != LC_OK || !*added) {
+    return rc;
+  }
+  if (!lc_pouch_index_adaptive_should_track_dense(posting, doc_id)) {
+    posting->dense_disabled = 1;
+    lc_pouch_index_dense_posting_cleanup(allocator, &posting->dense);
+    return LC_OK;
+  }
+  dense_added = 0;
+  rc = lc_pouch_index_dense_posting_append_sorted_unique(
+      &posting->dense, doc_id, &dense_added, allocator, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!dense_added) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index adaptive posting dense append lost docID",
+                        NULL, NULL, "pouch-redesign");
+  }
+  return LC_OK;
+}
+
+lc_pouch_index_adaptive_posting_kind
+lc_pouch_index_adaptive_posting_selected_kind(
+    const lc_pouch_index_adaptive_posting *posting) {
+  unsigned long slots;
+  unsigned long dense_count;
+  unsigned long density_threshold;
+
+  if (posting == NULL || posting->dense_disabled ||
+      posting->dense.count != posting->sparse.count ||
+      posting->sparse.count == 0U) {
+    return LC_POUCH_INDEX_ADAPTIVE_POSTING_SPARSE;
+  }
+  slots = posting->dense.max_doc_id + 1UL;
+  if (slots < posting->dense.max_doc_id) {
+    return LC_POUCH_INDEX_ADAPTIVE_POSTING_SPARSE;
+  }
+  if (posting->dense.count > (size_t)ULONG_MAX) {
+    return LC_POUCH_INDEX_ADAPTIVE_POSTING_SPARSE;
+  }
+  dense_count = (unsigned long)posting->dense.count;
+  density_threshold = slots / 4UL;
+  if (slots % 4UL != 0UL) {
+    ++density_threshold;
+  }
+  if (posting->dense.length <= posting->sparse.length &&
+      dense_count >= density_threshold) {
+    return LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE;
+  }
+  return LC_POUCH_INDEX_ADAPTIVE_POSTING_SPARSE;
+}
+
+int lc_pouch_index_adaptive_posting_append_to_set(
+    const lc_pouch_index_adaptive_posting *posting,
+    lc_pouch_index_docid_set *set, const lc_allocator *allocator,
+    lc_error *error) {
+  if (posting == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index adaptive posting decode requires posting",
+                        NULL, NULL, NULL);
+  }
+  if (lc_pouch_index_adaptive_posting_selected_kind(posting) ==
+      LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE) {
+    return lc_pouch_index_dense_posting_append_to_set(&posting->dense, set,
+                                                      allocator, error);
+  }
+  return lc_pouch_index_posting_append_to_set(&posting->sparse, set, allocator,
+                                              error);
 }

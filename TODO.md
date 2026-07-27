@@ -918,8 +918,14 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add the first private dense bitset posting primitive in
         `lc_pouch_index_posting`: sorted docIDs set compact bit positions,
         decode back into caller-owned docID sets, reject out-of-order appends,
-        and detect bit/count corruption. Adaptive sparse/dense selection and
-        persisted compiled posting generation files remain pending.
+        and detect bit/count corruption.
+      - [x] Add the first adaptive sparse/dense posting wrapper in
+        `lc_pouch_index_posting`: callers append sorted docIDs once, dense
+        tracking is disabled when the bitset shape becomes implausibly wide,
+        selection prefers dense only when density and encoded size justify it,
+        and the active exact/`in` docID emit bridge now exercises the adaptive
+        path. Persisted compiled posting generation readers still need to
+        consume this adaptive boundary broadly.
     - [ ] Add compiled field dictionaries with term IDs, doc tables, numeric
       range term tables, and text/trigram term tables so equality, range,
       `in`, prefix, contains, and exists can evaluate without repeated string

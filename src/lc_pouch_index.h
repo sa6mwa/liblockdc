@@ -54,6 +54,17 @@ typedef struct lc_pouch_index_dense_posting {
   int has_last_doc_id;
 } lc_pouch_index_dense_posting;
 
+typedef enum lc_pouch_index_adaptive_posting_kind {
+  LC_POUCH_INDEX_ADAPTIVE_POSTING_SPARSE = 1,
+  LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE = 2
+} lc_pouch_index_adaptive_posting_kind;
+
+typedef struct lc_pouch_index_adaptive_posting {
+  lc_pouch_index_posting sparse;
+  lc_pouch_index_dense_posting dense;
+  int dense_disabled;
+} lc_pouch_index_adaptive_posting;
+
 void lc_pouch_index_docid_set_cleanup(const lc_allocator *allocator,
                                       lc_pouch_index_docid_set *set);
 int lc_pouch_index_docid_set_append_sorted_unique(
@@ -78,6 +89,18 @@ int lc_pouch_index_dense_posting_append_sorted_unique(
 int lc_pouch_index_dense_posting_append_to_set(
     const lc_pouch_index_dense_posting *posting, lc_pouch_index_docid_set *set,
     const lc_allocator *allocator, lc_error *error);
+void lc_pouch_index_adaptive_posting_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_adaptive_posting *posting);
+int lc_pouch_index_adaptive_posting_append_sorted_unique(
+    lc_pouch_index_adaptive_posting *posting, unsigned long doc_id, int *added,
+    const lc_allocator *allocator, lc_error *error);
+lc_pouch_index_adaptive_posting_kind
+lc_pouch_index_adaptive_posting_selected_kind(
+    const lc_pouch_index_adaptive_posting *posting);
+int lc_pouch_index_adaptive_posting_append_to_set(
+    const lc_pouch_index_adaptive_posting *posting,
+    lc_pouch_index_docid_set *set, const lc_allocator *allocator,
+    lc_error *error);
 int lc_pouch_index_parse_lql_datetime(const char *text,
                                       lc_pouch_index_instant *out);
 int lc_pouch_index_parse_date_bounds(
