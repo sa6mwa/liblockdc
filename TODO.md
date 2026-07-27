@@ -1463,6 +1463,17 @@ Latest release targets confirmed on 2026-07-23:
         has been removed. The bounded acceptance target completed in 1m10s
         after this change, with pouch indexed `InTags` at about 38 ms keys /
         51 ms documents C-side.
+      - [x] Cut the pouch query-index sidecar to v5 and store live metadata on
+        scalar term postings, allowing exact key-return queries to sort/dedup
+        candidate postings and emit from sidecar metadata without a namespace
+        state reread. Verified on 2026-07-27 with focused 4096-document
+        indexed key-return `RangeHalf`/`InTags`: pouch measured about
+        31 ms / 27 ms C-side versus Go lockd disk at about 31 ms / 1.5 ms.
+        The bounded acceptance target completed in 1m08s after this change,
+        with pouch indexed key-return at about 5.7 ms `EqSparse`, 30 ms
+        `RangeHalf`, 27 ms `InTags`, 59 ms `ContainsMessage`, and 10 ms
+        `DateAfter`; document-return stayed body-read-bound at about 7.5 ms,
+        70 ms, 58 ms, 46 ms, and 28 ms respectively.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

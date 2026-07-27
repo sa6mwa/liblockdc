@@ -154,7 +154,7 @@ typedef struct lc_pouch_query_index_plan {
 } lc_pouch_query_index_plan;
 
 typedef struct lc_pouch_query_index_key_set {
-  char **keys;
+  lc_pouch_query_index_key_view *keys;
   size_t count;
   size_t capacity;
 } lc_pouch_query_index_key_set;
@@ -1251,7 +1251,7 @@ static void lc_pouch_query_index_key_set_cleanup(
     return;
   }
   for (index = 0U; index < set->count; ++index) {
-    free(set->keys[index]);
+    free((char *)set->keys[index].key);
   }
   free(set->keys);
   memset(set, 0, sizeof(*set));
@@ -1259,20 +1259,21 @@ static void lc_pouch_query_index_key_set_cleanup(
 
 static int lc_pouch_query_index_key_compare(const void *left,
                                             const void *right) {
-  const char *const *a;
-  const char *const *b;
+  const lc_pouch_query_index_key_view *a;
+  const lc_pouch_query_index_key_view *b;
 
-  a = (const char *const *)left;
-  b = (const char *const *)right;
-  return strcmp(*a, *b);
+  a = (const lc_pouch_query_index_key_view *)left;
+  b = (const lc_pouch_query_index_key_view *)right;
+  return strcmp(a->key, b->key);
 }
 
 static int lc_pouch_query_index_key_set_add(
-    lc_pouch_query_index_key_set *set, const char *key, lc_error *error) {
-  char **next_keys;
+    lc_pouch_query_index_key_set *set,
+    const lc_pouch_query_index_key_view *key, lc_error *error) {
+  lc_pouch_query_index_key_view *next_keys;
   size_t next_capacity;
 
-  if (key == NULL || key[0] == '\0') {
+  if (key == NULL || key->key == NULL || key->key[0] == '\0') {
     return LC_OK;
   }
   if (set->count >= set->capacity) {
@@ -1285,7 +1286,8 @@ static int lc_pouch_query_index_key_set_add(
       }
       next_capacity *= 2U;
     }
-    next_keys = (char **)realloc(set->keys, next_capacity * sizeof(*next_keys));
+    next_keys = (lc_pouch_query_index_key_view *)realloc(
+        set->keys, next_capacity * sizeof(*next_keys));
     if (next_keys == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch query index key set", NULL,
@@ -1296,8 +1298,9 @@ static int lc_pouch_query_index_key_set_add(
     set->keys = next_keys;
     set->capacity = next_capacity;
   }
-  set->keys[set->count] = lc_strdup_local(key);
-  if (set->keys[set->count] == NULL) {
+  set->keys[set->count] = *key;
+  set->keys[set->count].key = lc_strdup_local(key->key);
+  if (set->keys[set->count].key == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch query index key", NULL, NULL,
                         NULL);
@@ -1309,8 +1312,39 @@ static int lc_pouch_query_index_key_set_add(
 static int lc_pouch_query_index_key_collect(
     const lc_pouch_query_index_key_view *key, void *context, lc_error *error) {
   return lc_pouch_query_index_key_set_add(
-      (lc_pouch_query_index_key_set *)context, key != NULL ? key->key : NULL,
-      error);
+      (lc_pouch_query_index_key_set *)context, key, error);
+}
+
+static int lc_pouch_query_index_process_exact_key(
+    lc_pouch_query_scan_context *context,
+    const lc_pouch_query_index_key_view *key, lc_error *error) {
+  int rc;
+
+  if (context == NULL || key == NULL || key->key == NULL) {
+    return LC_OK;
+  }
+  if (key->has_query_hidden && key->query_hidden) {
+    return LC_OK;
+  }
+  if (key->version > context->index_seq) {
+    context->index_seq = key->version;
+  }
+  if (context->seen++ < context->offset) {
+    return LC_OK;
+  }
+  ++context->matched;
+  if (context->emitted >= context->limit) {
+    if (context->next_offset == 0U) {
+      context->next_offset = context->seen - 1U;
+    }
+    return LC_OK;
+  }
+  rc = lc_pouch_query_emit_key(context->handler, context->handler_context,
+                               key->key, error);
+  if (rc == LC_OK && context->next_offset == 0U) {
+    ++context->emitted;
+  }
+  return rc;
 }
 
 static int lc_pouch_query_index_process_key_read(
@@ -1396,49 +1430,71 @@ static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
 static int lc_pouch_query_index_process_keys(
     lc_pouch_query_scan_context *context, lc_pouch_query_index_key_set *keys,
     lc_error *error) {
+  const char **read_keys;
   size_t index;
   size_t write_index;
+  int rc;
 
   if (context == NULL || keys == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch indexed query requires context and key set",
                         NULL, NULL, NULL);
   }
+  read_keys = NULL;
+  rc = LC_OK;
   if (keys->count > 1U) {
     qsort(keys->keys, keys->count, sizeof(keys->keys[0]),
           lc_pouch_query_index_key_compare);
   }
   write_index = 0U;
   for (index = 0U; index < keys->count; ++index) {
-    if (strncmp(keys->keys[index], ".staging/", sizeof(".staging/") - 1U) ==
-            0 ||
-        strstr(keys->keys[index], "/.staging/") != NULL) {
-      free(keys->keys[index]);
-      keys->keys[index] = NULL;
+    if (strncmp(keys->keys[index].key, ".staging/",
+                sizeof(".staging/") - 1U) == 0 ||
+        strstr(keys->keys[index].key, "/.staging/") != NULL) {
+      free((char *)keys->keys[index].key);
+      memset(&keys->keys[index], 0, sizeof(keys->keys[index]));
       continue;
     }
     if (write_index > 0U &&
-        strcmp(keys->keys[write_index - 1U], keys->keys[index]) == 0) {
-      free(keys->keys[index]);
-      keys->keys[index] = NULL;
+        strcmp(keys->keys[write_index - 1U].key, keys->keys[index].key) == 0) {
+      free((char *)keys->keys[index].key);
+      memset(&keys->keys[index], 0, sizeof(keys->keys[index]));
       continue;
     }
-    keys->keys[write_index++] = keys->keys[index];
+    if (write_index != index) {
+      keys->keys[write_index] = keys->keys[index];
+      memset(&keys->keys[index], 0, sizeof(keys->keys[index]));
+    }
+    ++write_index;
   }
   keys->count = write_index;
   if (keys->count == 0U) {
     return LC_OK;
   }
   if (!context->emit_documents && context->indexed_candidates_exact) {
-    return lc_pouch_state_read_many_metadata(
-        context->client->pouch, context->namespace_name,
-        (const char *const *)keys->keys, keys->count,
-        lc_pouch_query_index_process_key_read, context, error);
+    for (index = 0U; index < keys->count; ++index) {
+      rc = lc_pouch_query_index_process_exact_key(context, &keys->keys[index],
+                                                  error);
+      if (rc != LC_OK || context->next_offset != 0U) {
+        return rc;
+      }
+    }
+    return LC_OK;
   }
-  return lc_pouch_state_read_many(
-      context->client->pouch, context->namespace_name,
-      (const char *const *)keys->keys, keys->count,
+  read_keys = (const char **)calloc(keys->count, sizeof(*read_keys));
+  if (read_keys == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query index read keys", NULL,
+                        NULL, NULL);
+  }
+  for (index = 0U; index < keys->count; ++index) {
+    read_keys[index] = keys->keys[index].key;
+  }
+  rc = lc_pouch_state_read_many(
+      context->client->pouch, context->namespace_name, read_keys, keys->count,
       lc_pouch_query_index_process_key_read, context, error);
+  free(read_keys);
+  return rc;
 }
 
 static int lc_pouch_query_run_index_predicate(

@@ -12,7 +12,7 @@
 #include <string.h>
 
 #define LC_POUCH_QUERY_INDEX_FORMAT "pouch-query-index"
-#define LC_POUCH_QUERY_INDEX_VERSION 4UL
+#define LC_POUCH_QUERY_INDEX_VERSION 5UL
 #define LC_POUCH_QUERY_INDEX_LEAF "query.index"
 #define LC_POUCH_QUERY_INDEX_HASH_OFFSET 2166136261UL
 #define LC_POUCH_QUERY_INDEX_HASH_PRIME 16777619UL
@@ -32,6 +32,10 @@ typedef struct lc_pouch_query_index_term {
   char *field_hex;
   char *value_hex;
   char *key_hex;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
 } lc_pouch_query_index_term;
 
 typedef struct lc_pouch_query_index_presence {
@@ -118,6 +122,10 @@ typedef struct lc_pouch_query_index_source_reader {
 typedef struct lc_pouch_query_index_extract_context {
   lc_pouch_query_index_summary *summary;
   const char *key_hex;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
   char *field;
   size_t field_len;
   size_t field_capacity;
@@ -289,6 +297,8 @@ static int lc_pouch_query_index_term_reserve(
 static int lc_pouch_query_index_term_add(
     lc_pouch_query_index_summary *summary, const char *field, size_t field_len,
     const char *value, size_t value_len, const char *key_hex,
+    unsigned long version, unsigned long bytes, int has_query_hidden,
+    int query_hidden,
     lc_error *error) {
   lc_pouch_query_index_term *term;
   int rc;
@@ -320,6 +330,10 @@ static int lc_pouch_query_index_term_add(
                         "failed to allocate pouch query-index term", NULL,
                         NULL, NULL);
   }
+  term->version = version;
+  term->bytes = bytes;
+  term->has_query_hidden = has_query_hidden;
+  term->query_hidden = query_hidden;
   ++summary->term_count;
   return LC_OK;
 }
@@ -641,7 +655,8 @@ static lonejson_status lc_pouch_query_index_string_end(
   lc_error_init(&error);
   rc = lc_pouch_query_index_term_add(
       context->summary, context->field, context->field_len, context->value,
-      context->value_len, context->key_hex, &error);
+      context->value_len, context->key_hex, context->version, context->bytes,
+      context->has_query_hidden, context->query_hidden, &error);
   if (rc != LC_OK) {
     return lc_pouch_query_index_lonejson_error(lj_error, &error);
   }
@@ -684,7 +699,10 @@ static lonejson_status lc_pouch_query_index_boolean_value(
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_term_add(context->summary, context->field,
                                        context->field_len, text, strlen(text),
-                                       context->key_hex, &error);
+                                       context->key_hex, context->version,
+                                       context->bytes,
+                                       context->has_query_hidden,
+                                       context->query_hidden, &error);
   }
   if (rc != LC_OK) {
     return lc_pouch_query_index_lonejson_error(lj_error, &error);
@@ -709,7 +727,10 @@ static lonejson_status lc_pouch_query_index_null_value(
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_term_add(context->summary, context->field,
                                        context->field_len, "null", 4U,
-                                       context->key_hex, &error);
+                                       context->key_hex, context->version,
+                                       context->bytes,
+                                       context->has_query_hidden,
+                                       context->query_hidden, &error);
   }
   if (rc != LC_OK) {
     return lc_pouch_query_index_lonejson_error(lj_error, &error);
@@ -729,7 +750,7 @@ static void lc_pouch_query_index_extract_context_cleanup(
 
 static int lc_pouch_query_index_extract_terms(
     lc_pouch_query_index_summary *summary, const char *key,
-    const char *key_hex, lc_error *error) {
+    const lc_pouch_query_index_row *row, lc_error *error) {
   lc_pouch_state_read_result read_result;
   lc_pouch_query_index_source_reader reader;
   lc_pouch_query_index_extract_context context;
@@ -765,7 +786,11 @@ static int lc_pouch_query_index_extract_terms(
   reader.source = read_result.body;
   lc_error_init(&reader.error);
   context.summary = summary;
-  context.key_hex = key_hex;
+  context.key_hex = row->key_hex;
+  context.version = row->version;
+  context.bytes = row->bytes;
+  context.has_query_hidden = row->has_query_hidden;
+  context.query_hidden = row->query_hidden;
   visitor = lonejson_default_path_value_visitor();
   visitor.object_begin = lc_pouch_query_index_presence_value;
   visitor.array_begin = lc_pouch_query_index_presence_value;
@@ -847,8 +872,7 @@ static int lc_pouch_query_index_summary_visit(
   row->has_query_hidden = entry->has_query_hidden;
   row->query_hidden = entry->query_hidden;
   ++summary->count;
-  return lc_pouch_query_index_extract_terms(summary, entry->key, row->key_hex,
-                                            error);
+  return lc_pouch_query_index_extract_terms(summary, entry->key, row, error);
 }
 
 static int lc_pouch_query_index_row_compare(const void *left,
@@ -1492,28 +1516,44 @@ static int lc_pouch_query_index_parse_and_visit_term(
   }
   cursor = line + sizeof("term ") - 1U;
   key = NULL;
-  field_hex = lc_pouch_query_index_next_token(&cursor, 0);
-  value_hex = lc_pouch_query_index_next_token(&cursor, 0);
-  key_hex = lc_pouch_query_index_next_token(&cursor, 1);
-  if (field_hex == NULL || value_hex == NULL || key_hex == NULL ||
-      strcmp(field_hex, "-") == 0 || strcmp(key_hex, "-") == 0 ||
-      !lc_pouch_query_index_hex_token_valid(field_hex) ||
-      !lc_pouch_query_index_hex_token_valid(value_hex) ||
-      !lc_pouch_query_index_hex_token_valid(key_hex)) {
-    lc_free_with_allocator(reader->allocator, line);
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
+  rc = LC_OK;
+  memset(&key_view, 0, sizeof(key_view));
+  if (!lc_pouch_query_index_parse_ulong_token(&cursor, &key_view.version) ||
+      !lc_pouch_query_index_parse_ulong_token(&cursor, &key_view.bytes) ||
+      !lc_pouch_query_index_parse_int_token(&cursor,
+                                            &key_view.has_query_hidden) ||
+      !lc_pouch_query_index_parse_int_token(&cursor,
+                                            &key_view.query_hidden)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch query-index term has invalid numeric fields",
+                      NULL, NULL, NULL);
+  }
+  field_hex = NULL;
+  value_hex = NULL;
+  key_hex = NULL;
+  if (rc == LC_OK) {
+    field_hex = lc_pouch_query_index_next_token(&cursor, 0);
+    value_hex = lc_pouch_query_index_next_token(&cursor, 0);
+    key_hex = lc_pouch_query_index_next_token(&cursor, 1);
+    if (field_hex == NULL || value_hex == NULL || key_hex == NULL ||
+        strcmp(field_hex, "-") == 0 || strcmp(key_hex, "-") == 0 ||
+        !lc_pouch_query_index_hex_token_valid(field_hex) ||
+        !lc_pouch_query_index_hex_token_valid(value_hex) ||
+        !lc_pouch_query_index_hex_token_valid(key_hex)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index term has invalid hex fields", NULL,
                         NULL, NULL);
+    }
   }
-  rc = LC_OK;
   matched = 0;
-  field_cmp = strcmp(field_hex, reader->field_hex);
-  if ((!reader->prefix_match && !reader->contains_match &&
-       !reader->range_match && !reader->date_match && !reader->ignore_case &&
-       field_cmp > 0) ||
-      ((reader->range_match || reader->date_match) && field_cmp > 0)) {
+  field_cmp = rc == LC_OK ? strcmp(field_hex, reader->field_hex) : 0;
+  if (rc == LC_OK &&
+      (((!reader->prefix_match && !reader->contains_match &&
+         !reader->range_match && !reader->date_match && !reader->ignore_case &&
+         field_cmp > 0) ||
+        ((reader->range_match || reader->date_match) && field_cmp > 0)))) {
     reader->stop = 1;
-  } else if (field_cmp == 0) {
+  } else if (rc == LC_OK && field_cmp == 0) {
     if (!reader->prefix_match && !reader->contains_match &&
         !reader->range_match && !reader->date_match && !reader->ignore_case) {
       if (reader->value_hex_count > 0U) {
@@ -2292,8 +2332,19 @@ static int lc_pouch_query_index_build_text(
         lc_pouch_query_index_term_equal(&summary->terms[index - 1U], term)) {
       continue;
     }
-    rc = lc_pouch_query_index_text_append_cstr(&terms, "term ", &term_hash,
-                                               error);
+    written = snprintf(line, sizeof(line), "term %lu %lu %d %d ",
+                       term->version, term->bytes,
+                       term->has_query_hidden ? 1 : 0,
+                       term->query_hidden ? 1 : 0);
+    if (written < 0 || (size_t)written >= sizeof(line)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index term exceeds local limit", NULL,
+                        NULL, NULL);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_text_append(&terms, line, (size_t)written,
+                                            &term_hash, error);
+    }
     if (rc == LC_OK) {
       rc = lc_pouch_query_index_text_append_cstr(&terms, term->field_hex,
                                                  &term_hash, error);

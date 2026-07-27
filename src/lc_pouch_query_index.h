@@ -22,6 +22,10 @@ typedef int (*lc_pouch_query_index_row_visit_fn)(
 
 typedef struct lc_pouch_query_index_key_view {
   const char *key;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
 } lc_pouch_query_index_key_view;
 
 typedef struct lc_pouch_query_index_range_bounds {
