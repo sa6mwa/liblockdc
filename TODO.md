@@ -1706,6 +1706,18 @@ Latest release targets confirmed on 2026-07-23:
         `OrSparseOrFlag` measured about 31.5 ms keys / 36.5 ms documents
         C-side while Go disk measured about 1.1 ms keys / 10.0 ms documents,
         so typed docID/posting OR remains required to close the broader gap.
+      - [x] Mark exact typed-scalar root `or` plans as exact candidates so
+        key-only root `or` can use the docID-oriented scalar-term visitor
+        without re-reading candidate documents. This preserves liblql JSON
+        scalar semantics: strings, numbers, booleans, and null remain distinct
+        scalar classes instead of following Go LQL's looser scalar behavior.
+        Focused coverage now checks a root OR over numeric and boolean terms
+        does not match string `"1"` or string `"true"`. Verified on
+        2026-07-27 with:
+        `make __benchmark-pouch-go-fast POUCH_GO_FAST_BENCH='Fast(Pouch|LockdDisk)/Keys/Docs4096/index/OrSparseOrFlag' POUCH_GO_FAST_SEED_ROWS=4096 POUCH_GO_FAST_BENCHTIME=1x POUCH_GO_FAST_TIMEOUT=90s`
+        where Go lockd disk measured about 31.8 ms wall time for 640 rows and
+        pouch measured about 17.1 ms C-side for the same focused key-only
+        root-OR sample.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

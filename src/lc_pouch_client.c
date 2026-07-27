@@ -1924,6 +1924,7 @@ static int lc_pouch_query_index_plan_from_selector(
       }
     }
     plan->root_or = 1;
+    plan->candidates_exact = 1;
     lc_pouch_query_selector_scalar_list_cleanup(&scalars);
     return LC_OK;
   }

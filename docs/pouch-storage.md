@@ -1081,15 +1081,15 @@ default/index engines refresh the sidecar, validate its row count and hash,
 stream decoded keys from the sidecar, filter `query_hidden`, paginate by row
 offset, and report `engine=index-summary`. The first selector-bearing indexed
 paths for both `query_keys` and document `query` handle single-node scalar
-equality, scalar `in`, and field `exists` selectors by looking up durable
-sidecar postings, sorting/de-duplicating candidate keys, then loading only
-candidate documents for final `liblql` acceptance and `query_hidden`
-suppression when the index predicate is not exact. Exact key-only scalar
-queries preserve liblql JSON scalar semantics in the index itself: strings,
-numbers, booleans, and null do not coerce into each other, while numeric
-equality compares parsed JSON number values so equivalent spellings such as
-`1` and `1.0` match the same numeric selector. Unsupported indexed selector
-shapes fail closed instead of falling back to scan.
+equality, scalar `in`, root equality `or`, and field `exists` selectors by
+looking up durable sidecar postings, sorting/de-duplicating candidate keys,
+then loading only candidate documents for final `liblql` acceptance and
+`query_hidden` suppression when the index predicate is not exact. Exact
+key-only scalar queries preserve liblql JSON scalar semantics in the index
+itself: strings, numbers, booleans, and null do not coerce into each other,
+while numeric equality compares parsed JSON number values so equivalent
+spellings such as `1` and `1.0` match the same numeric selector. Unsupported
+indexed selector shapes fail closed instead of falling back to scan.
 Explicit scan mode remains available for full-log/full-summary scanning through
 the ordered metadata summary API, but it does not accept refresh hints because
 no durable query index is consulted.

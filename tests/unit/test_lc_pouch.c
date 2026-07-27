@@ -7885,6 +7885,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   pouch_query_key_capture number_page;
   pouch_query_key_capture string_page;
   pouch_query_key_capture bool_page;
+  pouch_query_key_capture root_or_page;
   pouch_query_key_capture mixed_in_page;
   lc_error error;
   char root[512];
@@ -7899,6 +7900,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   memset(&number_page, 0, sizeof(number_page));
   memset(&string_page, 0, sizeof(string_page));
   memset(&bool_page, 0, sizeof(bool_page));
+  memset(&root_or_page, 0, sizeof(root_or_page));
   memset(&mixed_in_page, 0, sizeof(mixed_in_page));
   lc_query_req_init(&query_req);
   lc_error_init(&error);
@@ -7985,6 +7987,24 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"query_candidates\":1"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&root_or_page, 0, sizeof(root_or_page));
+  query_req.selector_lql =
+      "or.eq{field=/v,value=1},or.eq{field=/flag,value=true}";
+  query_req.selector_json = NULL;
+  rc = client->query_keys(client, &query_req, &handler, &root_or_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(root_or_page.count, 3);
+  assert_true(pouch_query_capture_has(&root_or_page, "doc/number"));
+  assert_true(pouch_query_capture_has(&root_or_page, "doc/number-float"));
+  assert_true(pouch_query_capture_has(&root_or_page, "doc/bool"));
+  assert_false(pouch_query_capture_has(&root_or_page, "doc/string-number"));
+  assert_false(pouch_query_capture_has(&root_or_page, "doc/string-bool"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":3"));
   lc_query_res_cleanup(&query_res);
 
   memset(&mixed_in_page, 0, sizeof(mixed_in_page));
@@ -8105,6 +8125,9 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":3"));
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
