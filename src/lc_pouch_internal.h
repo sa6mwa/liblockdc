@@ -22,6 +22,12 @@ struct lc_pouch {
   lc_pouch_state_cache_namespace *state_cache_namespaces;
 };
 
+#ifdef LOCKDC_TEST_BUILD
+typedef int (*lc_pouch_test_hook)(void *context, lc_error *error);
+extern lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook;
+extern void *lc_pouch_test_after_snapshot_write_context;
+#endif
+
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
 
 #endif

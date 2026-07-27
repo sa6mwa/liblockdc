@@ -553,6 +553,7 @@ endif()
 if(LOCKDC_BUILD_TESTS)
     add_library(lc_test_static STATIC)
     lc_configure_library_target(lc_test_static)
+    target_compile_definitions(lc_test_static PRIVATE LOCKDC_TEST_BUILD=1)
     target_link_libraries(lc_test_static PRIVATE
         lc::curl_static
         lc::openssl_ssl_static

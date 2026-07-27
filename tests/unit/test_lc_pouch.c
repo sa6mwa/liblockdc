@@ -235,6 +235,33 @@ static void append_text_file(const char *path, const char *text) {
   assert_int_equal(fclose(fp), 0);
 }
 
+typedef struct pouch_compaction_drift_hook_state {
+  lc_pouch *peer;
+  int called;
+} pouch_compaction_drift_hook_state;
+
+static int pouch_compaction_drift_hook(void *context, lc_error *error) {
+  pouch_compaction_drift_hook_state *state;
+  lc_source *body;
+  lc_pouch_state_write_result write_result;
+  int rc;
+
+  state = (pouch_compaction_drift_hook_state *)context;
+  body = NULL;
+  memset(&write_result, 0, sizeof(write_result));
+  state->called = 1;
+  rc = lc_source_from_memory("peer", strlen("peer"), &body, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_write(state->peer, "team/alpha", "state/peer-drift",
+                              body, NULL, &write_result, error);
+  }
+  if (body != NULL) {
+    body->close(body);
+  }
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  return rc;
+}
+
 static void hex_encode_string(const char *value, char *out, size_t out_size) {
   static const char hex[] = "0123456789abcdef";
   const unsigned char *src;
@@ -284,6 +311,14 @@ static void assert_path_file_contains(const char *root, const char *leaf,
 
   snprintf(path, sizeof(path), "%s/%s", root, leaf);
   assert_file_contains(path, needle);
+}
+
+static void assert_path_file_not_contains(const char *root, const char *leaf,
+                                          const char *needle) {
+  char path[1024];
+
+  snprintf(path, sizeof(path), "%s/%s", root, leaf);
+  assert_file_not_contains(path, needle);
 }
 
 static void find_single_marker_path(const char *root,
@@ -1701,6 +1736,170 @@ static void test_maintenance_force_installs_snapshot(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &first);
   lc_pouch_state_write_result_cleanup(NULL, &second);
   free(namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_manifest_open_ignores_unmanifested_snapshot(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *stray_snapshot_path;
+  unsigned long cleanup_deleted_count;
+  unsigned long cleanup_pending_count;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  namespace_path = NULL;
+  stray_snapshot_path = NULL;
+  cleanup_deleted_count = 0UL;
+  cleanup_pending_count = 0UL;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&manifest, 0, sizeof(manifest));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  make_root("manifest-stray-snapshot", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &first, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/b", body, NULL,
+                            &second, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  stray_snapshot_path =
+      lc_pouch_path_join(NULL, namespace_path, "snapshots/"
+                         "snapshot-00000000000000000099.log");
+  assert_non_null(stray_snapshot_path);
+  write_text_file(stray_snapshot_path, "H 99\n");
+
+  rc = lc_pouch_namespace_manifest_open(
+      NULL, root, "team/alpha", &manifest, &cleanup_deleted_count,
+      &cleanup_pending_count, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(manifest.latest_snapshot,
+                      "snapshot-00000000000000000002.log");
+  assert_int_equal(manifest.latest_snapshot_segment_id, 2UL);
+  assert_path_file_not_contains(
+      namespace_path, "manifest",
+      "snapshot=snapshot-00000000000000000099.log");
+
+  lc_pouch_namespace_manifest_cleanup(NULL, &manifest);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
+  free(stray_snapshot_path);
+  free(namespace_path);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_maintenance_aborts_on_validation_drift(void **state) {
+  lc_pouch *pouch;
+  lc_pouch *peer;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  pouch_compaction_drift_hook_state hook_state;
+  lc_error error;
+  char root[512];
+  char key[128];
+  char *namespace_path;
+  int rc;
+  unsigned int i;
+
+  (void)state;
+  pouch = NULL;
+  peer = NULL;
+  namespace_path = NULL;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&hook_state, 0, sizeof(hook_state));
+  make_root("maintenance-validation-drift", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 100000000UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  for (i = 0U; i < 16U; ++i) {
+    snprintf(key, sizeof(key), "state/item/%04u", i);
+    rc = lc_source_from_memory("seed", strlen("seed"), &body, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, "team/alpha", key, body, NULL,
+                              &write_result, &error);
+    assert_int_equal(rc, LC_OK);
+    body->close(body);
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+    memset(&write_result, 0, sizeof(write_result));
+  }
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  rc = lc_pouch_open(root, NULL, &open_options, &peer, &error);
+  assert_int_equal(rc, LC_OK);
+  hook_state.peer = peer;
+  lc_pouch_test_after_snapshot_write_context = &hook_state;
+  lc_pouch_test_after_snapshot_write_hook = pouch_compaction_drift_hook;
+
+  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  lc_pouch_test_after_snapshot_write_hook = NULL;
+  lc_pouch_test_after_snapshot_write_context = NULL;
+  assert_true(hook_state.called);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(maintenance_result.diagnostic,
+                      "validation-drift-aborted");
+  assert_true(maintenance_result.aborted);
+  assert_false(maintenance_result.compacted);
+  assert_false(maintenance_result.skipped);
+  assert_path_file_not_contains(
+      namespace_path, "manifest",
+      "snapshot=snapshot-00000000000000000001.log");
+
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  free(namespace_path);
+  lc_pouch_close(peer);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -7956,6 +8155,8 @@ int main(void) {
           test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
+      cmocka_unit_test(test_manifest_open_ignores_unmanifested_snapshot),
+      cmocka_unit_test(test_maintenance_aborts_on_validation_drift),
       cmocka_unit_test(test_maintenance_reports_snapshot_write_abort),
       cmocka_unit_test(test_maintenance_reports_interval_skip),
       cmocka_unit_test(test_compaction_retries_manifest_obsolete_cleanup),

@@ -138,6 +138,7 @@ lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
 target_sources(lc_unit_pouch PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
+target_compile_definitions(lc_unit_pouch PRIVATE LOCKDC_TEST_BUILD=1)
 target_sources(lc_unit_streams PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )

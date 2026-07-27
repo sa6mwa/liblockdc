@@ -840,7 +840,7 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
                                        &out->obsolete_snapshots,
                                        &out->obsolete_snapshot_count);
   lc_free_with_allocator(allocator, manifest_path);
-  if (max_snapshot_id > manifest_snapshot_id &&
+  if (!manifest_valid && max_snapshot_id > manifest_snapshot_id &&
       !lc_pouch_namespace_manifest_list_contains(
           out->obsolete_snapshots, out->obsolete_snapshot_count,
           scanned_snapshot)) {

@@ -405,12 +405,15 @@ Required invariants:
   linked payload span before opening the payload reader.
 - Any segment or snapshot that is the target of a live state-link is protected
   from obsolete cleanup, even if it otherwise looks compactable.
-- Compaction installs a new snapshot only after validating that all captured
-  refs still match the current live indexes. Validation drift abandons the
-  snapshot and leaves indexes, manifest, and obsolete sets unchanged.
+- Compaction installs a new snapshot only after validating that the captured
+  manifest bytes and compacted candidate segment bytes still match the current
+  namespace lifecycle. Validation drift abandons the snapshot and leaves
+  indexes, manifest, and obsolete sets unchanged.
 - Manifest state accelerates lifecycle tracking but is not authoritative for
-  payload correctness. Missing or legacy manifest information must be repaired
-  by scanning segment and snapshot directories.
+  payload correctness. Missing or legacy manifest information can be repaired
+  by scanning segment and snapshot directories, but a valid manifest does not
+  adopt stray snapshot files that were never installed through a manifest
+  record.
 - Writer markers are optimization hints. A missing marker update must not hide
   committed data because forced refresh and segment scans remain authoritative.
 - Single-writer mode can skip peer-marker scans for the owning process, but it
@@ -735,9 +738,10 @@ candidate bytes, compacted segment id, and a concrete diagnostic such as
 foreground compaction attempts leave the original operation error intact while
 marking the result as `aborted` with the stage that failed, for example
 `candidate-read-aborted`, `snapshot-refresh-aborted`,
-`snapshot-write-aborted`, `snapshot-install-aborted`, or
-`obsolete-cleanup-aborted`. This keeps lifecycle work observable without
-introducing hidden worker threads or background I/O. Cleanup-only maintenance
+`snapshot-write-aborted`, `validation-drift-aborted`,
+`snapshot-install-aborted`, or `obsolete-cleanup-aborted`. This keeps lifecycle
+work observable without introducing hidden worker threads or background I/O.
+Cleanup-only maintenance
 can retry manifest-obsolete segment/snapshot deletion without running
 compaction and reports both deleted and still-pending cleanup counts so
 operators can distinguish completed cleanup from retryable filesystem failures.

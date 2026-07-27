@@ -167,6 +167,12 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
       maintenance result without hiding the original error: candidate read,
       snapshot refresh/prepare/write/install, and obsolete cleanup stages now
       set `aborted` plus a stage-specific diagnostic.
+    - [x] Add post-snapshot compaction validation drift detection for the
+      segmented state surface: compaction captures manifest bytes plus
+      candidate segment bytes before building the snapshot, revalidates them
+      before manifest install, aborts with `validation-drift-aborted` if a peer
+      write or manifest rewrite lands, removes the uninstalled snapshot, and
+      keeps valid manifests from adopting stray unmanifested snapshot files.
 - [ ] Rebuild the typed metadata index and `liblql`-backed public query/search
   engine against the new storage model, without fallback to deprecated code.
   - [x] Add the first redesigned pouch `query_keys` scan path over the
