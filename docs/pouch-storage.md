@@ -469,18 +469,12 @@ of rewritten JSON files.
 
 ## Non-Goals
 
-- Pouch v1 does not implement management APIs.
-- Public client surfaces that pouch does not yet implement, including
-  namespace/index mutation management and TC cluster/resource-manager calls,
-  must return deterministic local unsupported errors. Pouch may report the
-  locally configured query engine defaults through namespace configuration
-  reads. Public transaction prepare/commit/rollback and explicit replay are
-  local pouch operations backed by durable decision objects; open-time recovery
-  scans durable decision objects directly and also scans pending transactional
-  metadata as a compatibility fallback before replaying matching decisions. A
-  `pouch://` client must never fall through to HTTP transport for an
-  unimplemented server-side surface. Internal indexed metadata scans are not
-  optional: they are part of the storage engine.
+- Pouch v1 implements storage-local management surfaces only. Namespace query
+  configuration, index flush, transaction prepare/commit/rollback/replay, and
+  TC leader/cluster/resource-manager state are durable pouch operations backed
+  by internal segmented records. A `pouch://` client must never fall through to
+  HTTP transport for a server-side surface. Internal indexed metadata scans are
+  not optional: they are part of the storage engine.
 - Pouch v1 does not implement authentication, authorization, permissions, TLS,
   or remote networking concerns.
 - Pouch is not a fake HTTP server. The client adapter may preserve the public
@@ -2777,8 +2771,9 @@ acknowledgement and defer redelivery, and cross-client CAS. The optional e2e
 shard still covers broader consumer-service behavior.
 
 Current pouch client unit coverage includes deterministic local unsupported
-errors for LQL-shaped selectors, namespace mutation management, and every
-transaction-coordinator cluster/resource-manager method that pouch v1 defers.
+errors for LQL-shaped selector field projections, durable namespace query
+configuration, index flush, and local single-node transaction-coordinator
+leader, cluster, and resource-manager state.
 
 Current disk unit coverage includes queue nack and extend allocator-failure
 paths, TTL expiry, retry-exhaustion replay paths that prove failed

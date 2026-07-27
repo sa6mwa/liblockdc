@@ -133,6 +133,17 @@ static int pouch_query_capture_has(const pouch_query_key_capture *capture,
   return 0;
 }
 
+static int string_list_has(const lc_string_list *list, const char *value) {
+  size_t i;
+
+  for (i = 0U; i < list->count; ++i) {
+    if (strcmp(list->items[i], value) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int pouch_query_count_begin(void *context, lc_error *error) {
   (void)context;
   (void)error;
@@ -1419,6 +1430,172 @@ static void test_pouch_namespace_config_persists_and_routes_implicit_queries(
   lc_namespace_config_res_cleanup(&ns_res);
   lc_query_res_cleanup(&query_res);
   lc_update_res_cleanup(&update_res);
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  cleanup_root(root);
+}
+
+static void test_pouch_tc_surface_persists_local_single_node_state(
+    void **state) {
+  lc_client *client;
+  lc_tc_lease_acquire_req acquire_req;
+  lc_tc_lease_acquire_res acquire_res;
+  lc_tc_lease_renew_req renew_req;
+  lc_tc_lease_renew_res renew_res;
+  lc_tc_lease_release_req release_req;
+  lc_tc_lease_release_res release_res;
+  lc_tc_leader_res leader_res;
+  lc_tc_cluster_announce_req cluster_req;
+  lc_tc_cluster_res cluster_res;
+  lc_tc_rm_register_req rm_register_req;
+  lc_tc_rm_unregister_req rm_unregister_req;
+  lc_tc_rm_res rm_res;
+  lc_tc_rm_list_res rm_list;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&acquire_res, 0, sizeof(acquire_res));
+  memset(&renew_res, 0, sizeof(renew_res));
+  memset(&release_res, 0, sizeof(release_res));
+  memset(&leader_res, 0, sizeof(leader_res));
+  memset(&cluster_res, 0, sizeof(cluster_res));
+  memset(&rm_res, 0, sizeof(rm_res));
+  memset(&rm_list, 0, sizeof(rm_list));
+  lc_tc_lease_acquire_req_init(&acquire_req);
+  lc_tc_lease_renew_req_init(&renew_req);
+  lc_tc_lease_release_req_init(&release_req);
+  lc_error_init(&error);
+
+  make_root("tc-surface", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+
+  acquire_req.candidate_id = "node-a";
+  acquire_req.candidate_endpoint = "pouch://node-a";
+  acquire_req.term = 1UL;
+  acquire_req.ttl_ms = 60000L;
+  rc = client->tc_lease_acquire(client, &acquire_req, &acquire_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(acquire_res.granted);
+  assert_string_equal(acquire_res.leader_id, "node-a");
+  assert_string_equal(acquire_res.leader_endpoint, "pouch://node-a");
+  assert_int_equal(acquire_res.term, 1UL);
+  assert_true(acquire_res.expires_at_unix > 0L);
+  lc_tc_lease_acquire_res_cleanup(&acquire_res);
+
+  acquire_req.candidate_id = "node-b";
+  acquire_req.candidate_endpoint = "pouch://node-b";
+  rc = client->tc_lease_acquire(client, &acquire_req, &acquire_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(acquire_res.granted);
+  assert_string_equal(acquire_res.leader_id, "node-a");
+  lc_tc_lease_acquire_res_cleanup(&acquire_res);
+
+  renew_req.leader_id = "node-a";
+  renew_req.term = 1UL;
+  renew_req.ttl_ms = 60000L;
+  rc = client->tc_lease_renew(client, &renew_req, &renew_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(renew_res.renewed);
+  assert_string_equal(renew_res.leader_id, "node-a");
+  lc_tc_lease_renew_res_cleanup(&renew_res);
+
+  lc_client_close(client);
+  client = NULL;
+  open_pouch_client(root, &client, &error);
+  rc = client->tc_leader(client, &leader_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(leader_res.leader_id, "node-a");
+  assert_string_equal(leader_res.leader_endpoint, "pouch://node-a");
+  lc_tc_leader_res_cleanup(&leader_res);
+
+  release_req.leader_id = "node-b";
+  release_req.term = 1UL;
+  rc = client->tc_lease_release(client, &release_req, &release_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(release_res.released);
+  lc_tc_lease_release_res_cleanup(&release_res);
+
+  release_req.leader_id = "node-a";
+  rc = client->tc_lease_release(client, &release_req, &release_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(release_res.released);
+  lc_tc_lease_release_res_cleanup(&release_res);
+  rc = client->tc_leader(client, &leader_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(leader_res.leader_id, "");
+  lc_tc_leader_res_cleanup(&leader_res);
+
+  cluster_req.self_endpoint = "pouch://node-a";
+  rc = client->tc_cluster_announce(client, &cluster_req, &cluster_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(cluster_res.endpoints.count, 1U);
+  assert_true(string_list_has(&cluster_res.endpoints, "pouch://node-a"));
+  lc_tc_cluster_res_cleanup(&cluster_res);
+  lc_client_close(client);
+  client = NULL;
+  open_pouch_client(root, &client, &error);
+  rc = client->tc_cluster_list(client, &cluster_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(cluster_res.endpoints.count, 1U);
+  assert_true(string_list_has(&cluster_res.endpoints, "pouch://node-a"));
+  lc_tc_cluster_res_cleanup(&cluster_res);
+  rc = client->tc_cluster_leave(client, &cluster_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(cluster_res.endpoints.count, 0U);
+  lc_tc_cluster_res_cleanup(&cluster_res);
+
+  rm_register_req.backend_hash = "backend-a";
+  rm_register_req.endpoint = "pouch://rm-a";
+  rc = client->tc_rm_register(client, &rm_register_req, &rm_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(rm_res.backend_hash, "backend-a");
+  assert_int_equal(rm_res.endpoints.count, 1U);
+  assert_true(string_list_has(&rm_res.endpoints, "pouch://rm-a"));
+  lc_tc_rm_res_cleanup(&rm_res);
+
+  rm_register_req.endpoint = "pouch://rm-b";
+  rc = client->tc_rm_register(client, &rm_register_req, &rm_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rm_res.endpoints.count, 2U);
+  assert_true(string_list_has(&rm_res.endpoints, "pouch://rm-a"));
+  assert_true(string_list_has(&rm_res.endpoints, "pouch://rm-b"));
+  lc_tc_rm_res_cleanup(&rm_res);
+
+  rc = client->tc_rm_list(client, &rm_list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rm_list.backend_count, 1U);
+  assert_string_equal(rm_list.backends[0].backend_hash, "backend-a");
+  assert_int_equal(rm_list.backends[0].endpoints.count, 2U);
+  assert_true(string_list_has(&rm_list.backends[0].endpoints, "pouch://rm-a"));
+  assert_true(string_list_has(&rm_list.backends[0].endpoints, "pouch://rm-b"));
+  lc_tc_rm_list_res_cleanup(&rm_list);
+
+  rm_unregister_req.backend_hash = "backend-a";
+  rm_unregister_req.endpoint = "pouch://rm-a";
+  rc = client->tc_rm_unregister(client, &rm_unregister_req, &rm_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(rm_res.endpoints.count, 1U);
+  assert_true(string_list_has(&rm_res.endpoints, "pouch://rm-b"));
+  lc_tc_rm_res_cleanup(&rm_res);
+
+  rm_register_req.backend_hash = "";
+  rm_register_req.endpoint = "pouch://rm-c";
+  rc = client->tc_rm_register(client, &rm_register_req, &rm_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  lc_error_cleanup(&error);
+  lc_tc_lease_acquire_res_cleanup(&acquire_res);
+  lc_tc_lease_renew_res_cleanup(&renew_res);
+  lc_tc_lease_release_res_cleanup(&release_res);
+  lc_tc_leader_res_cleanup(&leader_res);
+  lc_tc_cluster_res_cleanup(&cluster_res);
+  lc_tc_rm_res_cleanup(&rm_res);
+  lc_tc_rm_list_res_cleanup(&rm_list);
   if (client != NULL) {
     lc_client_close(client);
   }
@@ -8459,6 +8636,7 @@ int main(void) {
           test_pouch_endpoint_query_engine_routes_implicit_queries),
       cmocka_unit_test(
           test_pouch_namespace_config_persists_and_routes_implicit_queries),
+      cmocka_unit_test(test_pouch_tc_surface_persists_local_single_node_state),
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
