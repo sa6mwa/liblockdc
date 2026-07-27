@@ -1734,6 +1734,21 @@ Latest release targets confirmed on 2026-07-23:
         about 0.8 ms, so closing dense/multi-value search still needs a
         lower-level posting/doc-table sidecar rather than more query-layer
         sorting fixes.
+      - [x] Avoid full term-value table materialization for key-only
+        single-term exact scalar sidecar reads when the scalar class is
+        non-numeric. The reader now validates the sorted term-field table,
+        scans the sorted term-value table only until the requested typed
+        field/value pair has been passed, seeks directly to the matching term
+        slice, and skips the remaining table lines without allocating them.
+        This preserves liblql JSON scalar equality as the semantic target:
+        strings, numbers, booleans, and null stay distinct, while Go lockd's
+        looser LQL scalar behavior is only a benchmark-reference caveat.
+        Numeric exact equality deliberately stays on the scalar-aware merge
+        path because equivalent JSON number spellings such as `1` and `1.0`
+        may live in separate value slices that must both satisfy one numeric
+        selector. Verified on 2026-07-27 with focused 4096-doc indexed
+        `EqSparse` key comparison: Go lockd disk measured about 35.5 ms wall
+        time for 64 rows and pouch measured about 12.9 ms C-side.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
