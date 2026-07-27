@@ -1,0 +1,1 @@
+lql:in{field=/tags[],any=planning|finance}

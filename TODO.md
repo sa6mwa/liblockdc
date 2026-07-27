@@ -1785,3 +1785,8 @@ Latest release targets confirmed on 2026-07-23:
       damage injection, then remove, append garbage to, or replace that
       snapshot before reopening scan and index clients so snapshot lifecycle
       replay/repair stays covered by scan/index parity checks.
+    - [x] Extend the pouch LQL planning fuzz harness to exercise the public
+      full-form `selector_lql` path as well as AST `selector_json`: inputs
+      prefixed with `lql:` now route through `selector_lql`, and seed corpus
+      entries cover strict equality, `/tags[]` array membership, date residual
+      filtering, recursive `exists`, and compound range/text selectors.

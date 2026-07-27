@@ -311,7 +311,8 @@ static void fuzz_damage_snapshot(const char *root, unsigned int mode) {
 }
 
 static int fuzz_query_keys(lc_client *client, const char *selector,
-                           size_t *rows_out, lc_error *error) {
+                           int selector_is_lql, size_t *rows_out,
+                           lc_error *error) {
   lc_query_key_handler handler;
   lc_query_req req;
   lc_query_res res;
@@ -326,7 +327,11 @@ static int fuzz_query_keys(lc_client *client, const char *selector,
   handler.chunk = fuzz_key_chunk;
   handler.end = fuzz_key_end;
   req.namespace_name = "fuzz";
-  req.selector_json = selector;
+  if (selector_is_lql) {
+    req.selector_lql = selector;
+  } else {
+    req.selector_json = selector;
+  }
   req.limit = 16L;
   rc = client->query_keys(client, &req, &handler, &count, &res, error);
   lc_query_res_cleanup(&res);
@@ -336,26 +341,45 @@ static int fuzz_query_keys(lc_client *client, const char *selector,
   return rc;
 }
 
-static char *fuzz_selector_from_input(const uint8_t *data, size_t size) {
+static char *fuzz_selector_from_input(const uint8_t *data, size_t size,
+                                      int *selector_is_lql) {
   static const char fallback[] = "{}";
+  static const char lql_prefix[] = "lql:";
+  const uint8_t *selector_data;
   char *selector;
+  size_t selector_size;
   size_t index;
 
-  if (size == 0U) {
-    size = sizeof(fallback) - 1U;
-    data = (const uint8_t *)fallback;
+  *selector_is_lql = 0;
+  selector_data = data;
+  selector_size = size;
+  if (selector_size >= sizeof(lql_prefix) - 1U &&
+      memcmp(selector_data, lql_prefix, sizeof(lql_prefix) - 1U) == 0) {
+    *selector_is_lql = 1;
+    selector_data += sizeof(lql_prefix) - 1U;
+    selector_size -= sizeof(lql_prefix) - 1U;
   }
-  if (size > 512U) {
-    size = 512U;
+  while (selector_size > 0U &&
+         (selector_data[selector_size - 1U] == '\n' ||
+          selector_data[selector_size - 1U] == '\r')) {
+    --selector_size;
   }
-  selector = (char *)malloc(size + 1U);
+  if (selector_size == 0U && !*selector_is_lql) {
+    selector_size = sizeof(fallback) - 1U;
+    selector_data = (const uint8_t *)fallback;
+  }
+  if (selector_size > 512U) {
+    selector_size = 512U;
+  }
+  selector = (char *)malloc(selector_size + 1U);
   if (selector == NULL) {
     return NULL;
   }
-  for (index = 0U; index < size; ++index) {
-    selector[index] = data[index] == 0U ? ' ' : (char)data[index];
+  for (index = 0U; index < selector_size; ++index) {
+    selector[index] =
+        selector_data[index] == 0U ? ' ' : (char)selector_data[index];
   }
-  selector[size] = '\0';
+  selector[selector_size] = '\0';
   return selector;
 }
 
@@ -372,9 +396,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   size_t scan_rows;
   int index_rc;
   int scan_rc;
+  int selector_is_lql;
   unsigned int damage;
 
-  selector = fuzz_selector_from_input(data, size);
+  selector = fuzz_selector_from_input(data, size, &selector_is_lql);
   if (selector == NULL) {
     return 0;
   }
@@ -411,9 +436,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
   scan_rc = fuzz_open_client(root, 1, &scan_client, &scan_error);
   if (index_rc == LC_OK && scan_rc == LC_OK) {
-    index_rc = fuzz_query_keys(index_client, selector, &index_rows,
-                               &index_error);
-    scan_rc = fuzz_query_keys(scan_client, selector, &scan_rows, &scan_error);
+    index_rc = fuzz_query_keys(index_client, selector, selector_is_lql,
+                               &index_rows, &index_error);
+    scan_rc = fuzz_query_keys(scan_client, selector, selector_is_lql,
+                              &scan_rows, &scan_error);
     if (index_rc == LC_OK && scan_rc == LC_OK && index_rows != scan_rows) {
       abort();
     }
