@@ -1409,6 +1409,11 @@ Latest release targets confirmed on 2026-07-23:
         pouch measured about 61 ms keys / 62 ms documents C-side. Pouch remains
         slower, but the sparse equality gap is now candidate/state-read work
         rather than unconditional index generation rebuild.
+      - [x] Fix the bounded acceptance benchmark selector so
+        `make benchmark-pouch-go-acceptance` actually runs both
+        `MediumLQL...` pouch cases and `MediumLockdDisk...` reference cases:
+        the target now compares indexed document/key scenarios against Go disk
+        while retaining pouch scan baselines under the same 3-minute wrapper.
       - [x] Batch candidate state reads after posting collection so indexed
         queries refresh namespace state once per candidate set instead of once
         per key. Verified on 2026-07-27 with focused 4096-document indexed
