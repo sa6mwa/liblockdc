@@ -103,6 +103,8 @@ typedef struct lc_pouch_query_index_term_reader {
   lc_pouch_query_index_range_bounds range_bounds;
   lc_pouch_query_index_date_bounds date_bounds;
   lc_pouch_index_parsed_date_bounds parsed_date_bounds;
+  char *value_scratch;
+  size_t value_scratch_capacity;
   lc_pouch_query_index_key_visit_fn visit;
   void *context;
 } lc_pouch_query_index_term_reader;
@@ -1149,6 +1151,69 @@ static char *lc_pouch_query_index_hex_decode(
   return decoded;
 }
 
+static char *lc_pouch_query_index_hex_decode_scratch(
+    lc_pouch_query_index_term_reader *reader, const char *token,
+    lc_error *error) {
+  char *next;
+  size_t index;
+  size_t length;
+  size_t decoded_length;
+
+  if (reader == NULL || token == NULL) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch query-index scratch decode requires reader and token",
+                 NULL, NULL, NULL);
+    return NULL;
+  }
+  if (token[0] == '\0' || strcmp(token, "-") == 0) {
+    decoded_length = 0U;
+  } else {
+    length = strlen(token);
+    if ((length % 2U) != 0U) {
+      lc_error_set(error, LC_ERR_INVALID, 0L,
+                   "pouch query-index row has invalid hex token", NULL, NULL,
+                   NULL);
+      return NULL;
+    }
+    decoded_length = length / 2U;
+  }
+  if (decoded_length + 1U > reader->value_scratch_capacity) {
+    next = (char *)lc_alloc_with_allocator(reader->allocator,
+                                           decoded_length + 1U);
+    if (next == NULL) {
+      lc_error_set(error, LC_ERR_NOMEM, 0L,
+                   "failed to allocate pouch query-index decoded value", NULL,
+                   NULL, NULL);
+      return NULL;
+    }
+    lc_free_with_allocator(reader->allocator, reader->value_scratch);
+    reader->value_scratch = next;
+    reader->value_scratch_capacity = decoded_length + 1U;
+  }
+  if (decoded_length == 0U) {
+    reader->value_scratch[0] = '\0';
+    return reader->value_scratch;
+  }
+  length = decoded_length * 2U;
+  for (index = 0U; index < length; index += 2U) {
+    int high;
+    int low;
+
+    high = lc_pouch_query_index_hex_value((unsigned char)token[index]);
+    low = lc_pouch_query_index_hex_value((unsigned char)token[index + 1U]);
+    if (high < 0 || low < 0) {
+      lc_error_set(error, LC_ERR_INVALID, 0L,
+                   "pouch query-index row has invalid hex token", NULL, NULL,
+                   NULL);
+      return NULL;
+    }
+    reader->value_scratch[index / 2U] =
+        (char)(((unsigned int)high << 4) | (unsigned int)low);
+  }
+  reader->value_scratch[decoded_length] = '\0';
+  return reader->value_scratch;
+}
+
 static int lc_pouch_query_index_parse_ulong_token(char **cursor,
                                                   unsigned long *out) {
   char *begin;
@@ -1303,6 +1368,55 @@ static int lc_pouch_query_index_parse_number_value(const char *text,
   return 1;
 }
 
+static int lc_pouch_query_index_parse_integer_hex_value(const char *token,
+                                                        double *out) {
+  double value;
+  size_t index;
+  size_t length;
+  int negative;
+  int saw_digit;
+
+  if (token == NULL || token[0] == '\0' || out == NULL) {
+    return 0;
+  }
+  length = strlen(token);
+  if ((length % 2U) != 0U) {
+    return 0;
+  }
+  value = 0.0;
+  negative = 0;
+  saw_digit = 0;
+  for (index = 0U; index < length; index += 2U) {
+    int high;
+    int low;
+    unsigned char ch;
+
+    high = lc_pouch_query_index_hex_value((unsigned char)token[index]);
+    low = lc_pouch_query_index_hex_value((unsigned char)token[index + 1U]);
+    if (high < 0 || low < 0) {
+      return 0;
+    }
+    ch = (unsigned char)(((unsigned int)high << 4) | (unsigned int)low);
+    if (index == 0U && ch == '-') {
+      negative = 1;
+      continue;
+    }
+    if (ch < '0' || ch > '9') {
+      return 0;
+    }
+    saw_digit = 1;
+    value = (value * 10.0) + (double)(ch - '0');
+    if (!isfinite(value)) {
+      return 0;
+    }
+  }
+  if (!saw_digit) {
+    return 0;
+  }
+  *out = negative ? -value : value;
+  return 1;
+}
+
 static int lc_pouch_query_index_range_contains_value(
     const lc_pouch_query_index_range_bounds *bounds, double value) {
   if (bounds == NULL ||
@@ -1403,15 +1517,14 @@ static int lc_pouch_query_index_term_reader_matches_value(
   }
   if (reader->prefix_match) {
     if (reader->ignore_case) {
-      value_text =
-          lc_pouch_query_index_hex_decode(reader->allocator, value_hex, error);
+      value_text = lc_pouch_query_index_hex_decode_scratch(reader, value_hex,
+                                                           error);
       if (value_text == NULL) {
         return error != NULL && error->code != LC_OK ? error->code
                                                      : LC_ERR_NOMEM;
       }
       *matched = lc_pouch_query_index_text_has_prefix(
           value_text, reader->value_text, 1);
-      lc_free_with_allocator(reader->allocator, value_text);
     } else {
       *matched = strncmp(value_hex, reader->value_hex,
                          strlen(reader->value_hex)) == 0;
@@ -1420,37 +1533,40 @@ static int lc_pouch_query_index_term_reader_matches_value(
   }
   if (reader->contains_match) {
     if (reader->ignore_case) {
-      value_text =
-          lc_pouch_query_index_hex_decode(reader->allocator, value_hex, error);
+      value_text = lc_pouch_query_index_hex_decode_scratch(reader, value_hex,
+                                                           error);
       if (value_text == NULL) {
         return error != NULL && error->code != LC_OK ? error->code
                                                      : LC_ERR_NOMEM;
       }
       *matched = lc_pouch_query_index_text_contains(value_text,
                                                     reader->value_text, 1);
-      lc_free_with_allocator(reader->allocator, value_text);
     } else {
       *matched = strstr(value_hex, reader->value_hex) != NULL;
     }
     return LC_OK;
   }
   if (reader->range_match) {
-    value_text =
-        lc_pouch_query_index_hex_decode(reader->allocator, value_hex, error);
-    if (value_text == NULL) {
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_NOMEM;
-    }
-    if (lc_pouch_query_index_parse_number_value(value_text, &number)) {
+    if (lc_pouch_query_index_parse_integer_hex_value(value_hex, &number)) {
       *matched = lc_pouch_query_index_range_contains_value(
           &reader->range_bounds, number);
+    } else {
+      value_text = lc_pouch_query_index_hex_decode_scratch(reader, value_hex,
+                                                           error);
+      if (value_text == NULL) {
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_NOMEM;
+      }
+      if (lc_pouch_query_index_parse_number_value(value_text, &number)) {
+        *matched = lc_pouch_query_index_range_contains_value(
+            &reader->range_bounds, number);
+      }
     }
-    lc_free_with_allocator(reader->allocator, value_text);
     return LC_OK;
   }
   if (reader->date_match) {
-    value_text =
-        lc_pouch_query_index_hex_decode(reader->allocator, value_hex, error);
+    value_text = lc_pouch_query_index_hex_decode_scratch(reader, value_hex,
+                                                         error);
     if (value_text == NULL) {
       return error != NULL && error->code != LC_OK ? error->code
                                                    : LC_ERR_NOMEM;
@@ -1459,7 +1575,6 @@ static int lc_pouch_query_index_term_reader_matches_value(
       *matched = lc_pouch_index_date_contains_value(
           &reader->parsed_date_bounds, &instant);
     }
-    lc_free_with_allocator(reader->allocator, value_text);
     return LC_OK;
   }
   *matched = strcmp(value_hex, reader->value_hex) == 0;
@@ -2679,6 +2794,7 @@ static int lc_pouch_query_index_visit_term_match(
     rc = lc_pouch_index_parse_date_bounds(
         date_bounds, &reader.parsed_date_bounds, error);
     if (rc != LC_OK) {
+      lc_free_with_allocator(&pouch->allocator, reader.value_scratch);
       lc_free_with_allocator(&pouch->allocator, field_hex);
       lc_free_with_allocator(&pouch->allocator, value_hex);
       lc_free_with_allocator(&pouch->allocator, sidecar_path);
@@ -2702,6 +2818,7 @@ static int lc_pouch_query_index_visit_term_match(
   if (rc == LC_OK) {
     *index_seq = sidecar.index_seq;
   }
+  lc_free_with_allocator(&pouch->allocator, reader.value_scratch);
   lc_free_with_allocator(&pouch->allocator, field_hex);
   lc_free_with_allocator(&pouch->allocator, value_hex);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
@@ -2826,6 +2943,7 @@ int lc_pouch_query_index_visit_scalar_any(
       *index_seq = sidecar.index_seq;
     }
   }
+  lc_free_with_allocator(&pouch->allocator, reader.value_scratch);
   for (index = 0U; index < value_count; ++index) {
     lc_free_with_allocator(&pouch->allocator, value_hexes[index]);
   }

@@ -1249,6 +1249,17 @@ Latest release targets confirmed on 2026-07-23:
         keys and about 31.8 ms C-side for documents; the target completed in
         1m22s under the 3-minute cap. Range, `InTags`, and `DateAfter` remain
         slower than Go disk in that run.
+      - [x] Reduce range/date/text term-reader allocation pressure: predicate
+        value decoding now uses a reusable reader scratch buffer, and plain
+        integer numeric terms take a direct hex parser before falling back to
+        the general decoded `strtod` path for decimals and exponent forms.
+        Unit range coverage now includes both integer terms and a decimal
+        fallback term. Verified on 2026-07-27 with the bounded 4096-doc
+        acceptance matrix: pouch `RangeHalf` measured about 29.9 ms C-side for
+        keys and 66.6 ms for documents; `DateAfter` measured about 9.9 ms for
+        keys and 28.5 ms for documents; the target completed in 1m22s.
+        `RangeHalf`, `InTags`, and `DateAfter` still require deeper
+        compiled-index/posting work to beat Go disk consistently.
     - [ ] Preserve final `liblql` predicate authority by treating indexed
       docID sets as candidate supersets whenever the planner cannot prove exact
       acceptance.

@@ -320,28 +320,46 @@ static void hex_encode_string(const char *value, char *out, size_t out_size) {
 
 static void assert_file_contains(const char *path, const char *needle) {
   FILE *fp;
-  char bytes[1024];
+  char *bytes;
+  long length;
   size_t nread;
 
   fp = fopen(path, "rb");
   assert_non_null(fp);
-  nread = fread(bytes, 1U, sizeof(bytes) - 1U, fp);
+  assert_int_equal(fseek(fp, 0L, SEEK_END), 0);
+  length = ftell(fp);
+  assert_true(length >= 0L);
+  assert_int_equal(fseek(fp, 0L, SEEK_SET), 0);
+  bytes = (char *)malloc((size_t)length + 1U);
+  assert_non_null(bytes);
+  nread = fread(bytes, 1U, (size_t)length, fp);
+  assert_int_equal(nread, (size_t)length);
   assert_int_equal(fclose(fp), 0);
   bytes[nread] = '\0';
   assert_non_null(strstr(bytes, needle));
+  free(bytes);
 }
 
 static void assert_file_not_contains(const char *path, const char *needle) {
   FILE *fp;
-  char bytes[2048];
+  char *bytes;
+  long length;
   size_t nread;
 
   fp = fopen(path, "rb");
   assert_non_null(fp);
-  nread = fread(bytes, 1U, sizeof(bytes) - 1U, fp);
+  assert_int_equal(fseek(fp, 0L, SEEK_END), 0);
+  length = ftell(fp);
+  assert_true(length >= 0L);
+  assert_int_equal(fseek(fp, 0L, SEEK_SET), 0);
+  bytes = (char *)malloc((size_t)length + 1U);
+  assert_non_null(bytes);
+  nread = fread(bytes, 1U, (size_t)length, fp);
+  assert_int_equal(nread, (size_t)length);
   assert_int_equal(fclose(fp), 0);
   bytes[nread] = '\0';
   assert_null(strstr(bytes, needle));
+  free(bytes);
 }
 
 static void assert_path_file_contains(const char *root, const char *leaf,
@@ -5852,6 +5870,16 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
+  rc = lc_source_from_memory("{\"n\":2.5}", strlen("{\"n\":2.5}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/decimal",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
   hidden_options.has_query_hidden = 1;
   hidden_options.query_hidden = 1;
   rc = lc_source_from_memory("{\"tags\":[\"planning\"],\"n\":4}",
@@ -6041,10 +6069,11 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   rc = client->query_keys(client, &query_req, &handler, &range_page,
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(range_page.count, 2);
+  assert_int_equal(range_page.count, 3);
   assert_null(query_res.cursor);
   assert_true(pouch_query_capture_has(&range_page, "doc/b"));
   assert_true(pouch_query_capture_has(&range_page, "doc/c"));
+  assert_true(pouch_query_capture_has(&range_page, "doc/decimal"));
   assert_false(pouch_query_capture_has(&range_page, "doc/a"));
   assert_false(pouch_query_capture_has(&range_page, "doc/hidden"));
   assert_false(pouch_query_capture_has(&range_page, "doc/deleted"));
