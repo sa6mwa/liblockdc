@@ -123,6 +123,51 @@ static int run_explicit_global_stale_cleanup_probe(void) {
   return 0;
 }
 
+static int run_orphan_owner_marker_cleanup_probe(void) {
+  char missing_root[] = TMP_AUTO_CLEANUP_PREFIX "orphan-owner";
+  char marker[512];
+  FILE *fp;
+  int written;
+
+  written = snprintf(marker, sizeof(marker), "%s.liblockdc-test-tmp-owner",
+                     missing_root);
+  if (written < 0 || (size_t)written >= sizeof(marker)) {
+    return 50;
+  }
+  lc_test_tmp_cleanup_path(missing_root, TMP_AUTO_CLEANUP_PREFIX);
+  if (path_exists(marker)) {
+    return 51;
+  }
+  if (lc_test_tmp_track_path(missing_root, TMP_AUTO_CLEANUP_PREFIX)) {
+    lc_test_tmp_cleanup_path(missing_root, TMP_AUTO_CLEANUP_PREFIX);
+    return 52;
+  }
+  if (path_exists(marker)) {
+    lc_test_tmp_cleanup_path(missing_root, TMP_AUTO_CLEANUP_PREFIX);
+    return 53;
+  }
+  fp = fopen(marker, "w");
+  if (fp == NULL) {
+    return 54;
+  }
+  if (fprintf(fp, "1\n") < 0) {
+    (void)fclose(fp);
+    lc_test_tmp_cleanup_path(missing_root, TMP_AUTO_CLEANUP_PREFIX);
+    return 55;
+  }
+  if (fclose(fp) != 0) {
+    lc_test_tmp_cleanup_path(missing_root, TMP_AUTO_CLEANUP_PREFIX);
+    return 56;
+  }
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-tmp-autocleanup-",
+                            TMP_AUTO_CLEANUP_PREFIX);
+  if (path_exists(marker)) {
+    lc_test_tmp_cleanup_path(missing_root, TMP_AUTO_CLEANUP_PREFIX);
+    return 57;
+  }
+  return 0;
+}
+
 int main(void) {
   char template_path[] = TMP_CLEANUP_PREFIX "XXXXXX";
   char root[512];
@@ -137,6 +182,9 @@ int main(void) {
   }
   if (mode != NULL && strcmp(mode, "explicit-global-stale") == 0) {
     return run_explicit_global_stale_cleanup_probe();
+  }
+  if (mode != NULL && strcmp(mode, "orphan-owner-marker") == 0) {
+    return run_orphan_owner_marker_cleanup_probe();
   }
 
   path_file = getenv("LOCKDC_TMP_CLEANUP_PATH_FILE");

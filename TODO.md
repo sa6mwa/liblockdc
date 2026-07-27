@@ -1758,6 +1758,15 @@ Latest release targets confirmed on 2026-07-23:
   - [ ] Refine pouch e2e coverage around segmented manifest/snapshot
     lifecycle, manifest repair, background compaction scheduling, marker
     recovery, search/index rebuild, and large namespace stress scenarios.
+    - [x] Register the dormant `lc_e2e_pouch_direct` shard in the e2e CMake
+      graph and add a local pouch lifecycle e2e: it seeds state, attachment,
+      queue, and retention namespaces through `pouch://`, forces pouch
+      maintenance compaction/cleanup, reopens the store, verifies indexed
+      survivor query behavior, verifies namespace retention deletion, verifies
+      attachment listing after maintenance, and dequeues/acks the surviving
+      queue message. The same slice fixes the shared test temp helper so
+      missing-path tracking cannot create orphan owner markers and stale
+      cleanup removes orphan `*.liblockdc-test-tmp-owner` sidecars.
   - [x] Add a separate Go/cgo benchmark module under `benchmark/` for opt-in
     e2e perf comparison and stress testing outside the liblockdc release gate.
   - [x] Launch a real latest pinned `pkt.systems/lockd` disk backend from the

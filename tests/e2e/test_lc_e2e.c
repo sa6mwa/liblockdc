@@ -13,6 +13,7 @@
 #include <cmocka.h>
 
 #include "lc/lc.h"
+#include "lc_pouch.h"
 #include "../support/lc_test_tmp.h"
 
 #define POUCH_E2E_TMP_PREFIX "/tmp/liblockdc-e2e-pouch-"
@@ -112,6 +113,10 @@ typedef struct query_keys_e2e_capture {
   unsigned char seen[512];
 } query_keys_e2e_capture;
 
+typedef struct pouch_e2e_key_count {
+  size_t rows;
+} pouch_e2e_key_count;
+
 static int query_keys_e2e_begin(void *context, lc_error *error) {
   query_keys_e2e_capture *capture;
 
@@ -162,6 +167,30 @@ static int query_keys_e2e_end(void *context, lc_error *error) {
   capture->end_calls += 1U;
   capture->current_length = 0U;
   capture->current[0] = '\0';
+  return 1;
+}
+
+static int pouch_e2e_key_begin(void *context, lc_error *error) {
+  (void)context;
+  (void)error;
+  return 1;
+}
+
+static int pouch_e2e_key_chunk(void *context, const char *bytes, size_t len,
+                               lc_error *error) {
+  (void)context;
+  (void)bytes;
+  (void)len;
+  (void)error;
+  return 1;
+}
+
+static int pouch_e2e_key_end(void *context, lc_error *error) {
+  pouch_e2e_key_count *count;
+
+  (void)error;
+  count = (pouch_e2e_key_count *)context;
+  count->rows++;
   return 1;
 }
 
@@ -483,10 +512,6 @@ static void cleanup_pouch_root(const char *root) {
 static void cleanup_all_pouch_roots(void) {
   lc_test_tmp_cleanup_stale("/tmp", "liblockdc-e2e-pouch-",
                             POUCH_E2E_TMP_PREFIX);
-}
-
-static void track_pouch_root(const char *root) {
-  assert_true(lc_test_tmp_track_path(root, POUCH_E2E_TMP_PREFIX));
 }
 
 static int setup_pouch_e2e_group(void **state) {
@@ -3564,8 +3589,6 @@ static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   (void)state;
   make_pouch_root("state-attachment", root, sizeof(root), endpoint,
                   sizeof(endpoint));
-  cleanup_pouch_root(root);
-  track_pouch_root(root);
 
   client = NULL;
   reader = NULL;
@@ -3669,6 +3692,234 @@ static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void pouch_e2e_run_maintenance(const char *root,
+                                      const char *namespace_name, int force,
+                                      int cleanup_only,
+                                      long retention_cutoff,
+                                      lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.force = force;
+  maintenance_options.cleanup_only = cleanup_only;
+  maintenance_options.retention_updated_before_unix = retention_cutoff;
+  rc =
+      lc_pouch_maintenance_run(pouch, &maintenance_options, &maintenance_result,
+                               error);
+  assert_lc_ok(rc, error);
+  if (force) {
+    assert_true(maintenance_result.compacted || maintenance_result.skipped);
+  }
+  if (retention_cutoff > 0L) {
+    assert_string_equal(maintenance_result.diagnostic, "retention-complete");
+  }
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+}
+
+static size_t pouch_e2e_query_key_count(lc_client *client,
+                                        const char *namespace_name,
+                                        const char *selector_json,
+                                        lc_error *error) {
+  lc_query_key_handler handler;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  pouch_e2e_key_count count;
+  int rc;
+
+  memset(&handler, 0, sizeof(handler));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&count, 0, sizeof(count));
+  handler.begin = pouch_e2e_key_begin;
+  handler.chunk = pouch_e2e_key_chunk;
+  handler.end = pouch_e2e_key_end;
+  query_req.namespace_name = namespace_name;
+  query_req.selector_json = selector_json;
+  query_req.engine = "index";
+  query_req.limit = 32L;
+  rc = lc_query_keys(client, &query_req, &handler, &count, &query_res, error);
+  assert_lc_ok(rc, error);
+  lc_query_res_cleanup(&query_res);
+  return count.rows;
+}
+
+static void test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(
+    void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_message *message;
+  lc_source *src;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list attachment_list;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  char root[256];
+  char endpoint[320];
+  char kind[96];
+  char keep_key[128];
+  char expired_kind[96];
+  char expired_key[128];
+  char selector_json[192];
+  char expired_selector_json[192];
+  char queue_name[160];
+  size_t rows;
+  int rc;
+
+  (void)state;
+  make_pouch_root("lifecycle-maintenance", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  message = NULL;
+  src = NULL;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_attach_req_init(&attach_req);
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachment_list, 0, sizeof(attachment_list));
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+
+  make_unique_name("pouch-life", kind, sizeof(kind));
+  make_unique_name("pouch-expired", expired_kind, sizeof(expired_kind));
+  snprintf(keep_key, sizeof(keep_key), "pouch/lifecycle/%s/keep", kind);
+  snprintf(expired_key, sizeof(expired_key), "pouch/lifecycle/%s/dead",
+           expired_kind);
+  snprintf(selector_json, sizeof(selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
+  snprintf(expired_selector_json, sizeof(expired_selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", expired_kind);
+  snprintf(queue_name, sizeof(queue_name), "pouch-life-%s", kind);
+
+  open_pouch_client(endpoint, &client, &error);
+  acquire_req.namespace_name = "life";
+  acquire_req.key = keep_key;
+  acquire_req.owner = "lc-e2e-pouch-life";
+  acquire_req.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  {
+    char body[256];
+
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"%s\",\"status\":\"keep\",\"value\":1}", kind);
+    save_json_text_or_die(lease, body, &error);
+  }
+  attach_req.name = "life.txt";
+  attach_req.content_type = "text/plain";
+  rc = lc_source_from_memory("life-object", strlen("life-object"), &src,
+                             &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->attach(lease, &attach_req, src, &attach_res, &error);
+  lc_source_close(src);
+  src = NULL;
+  assert_lc_ok(rc, &error);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire_req.namespace_name = "life-retention";
+  acquire_req.key = expired_key;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  {
+    char body[256];
+
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"%s\",\"status\":\"expired\",\"value\":2}",
+             expired_kind);
+    save_json_text_or_die(lease, body, &error);
+  }
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  enqueue_req.namespace_name = "life";
+  enqueue_req.queue = queue_name;
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 300L;
+  enqueue_req.max_attempts = 3;
+  rc = lc_source_from_memory("life-queue", strlen("life-queue"), &src, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->enqueue(client, &enqueue_req, src, &enqueue_res, &error);
+  lc_source_close(src);
+  src = NULL;
+  assert_lc_ok(rc, &error);
+
+  rows = pouch_e2e_query_key_count(client, "life", selector_json, &error);
+  assert_int_equal(rows, 1U);
+  rows = pouch_e2e_query_key_count(client, "life-retention",
+                                   expired_selector_json, &error);
+  assert_int_equal(rows, 1U);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_e2e_run_maintenance(root, "life", 1, 0, 0L, &error);
+  pouch_e2e_run_maintenance(root, "life", 0, 1, 0L, &error);
+  pouch_e2e_run_maintenance(root, "life-retention", 0, 0, 2147483647L,
+                            &error);
+
+  open_pouch_client(endpoint, &reader, &error);
+  rows = pouch_e2e_query_key_count(reader, "life", selector_json, &error);
+  assert_int_equal(rows, 1U);
+  rows = pouch_e2e_query_key_count(reader, "life-retention",
+                                   expired_selector_json, &error);
+  assert_int_equal(rows, 0U);
+
+  acquire_req.namespace_name = "life";
+  acquire_req.key = keep_key;
+  acquire_req.owner = "lc-e2e-pouch-life-reader";
+  rc = reader->acquire(reader, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->list_attachments(lease, &attachment_list, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachment_list.count, 1U);
+  assert_string_equal(attachment_list.items[0].name, "life.txt");
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  dequeue_req.namespace_name = "life";
+  dequeue_req.queue = queue_name;
+  dequeue_req.owner = "lc-e2e-pouch-life-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = reader->dequeue(reader, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  lc_attachment_list_cleanup(&attachment_list);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_attach_res_cleanup(&attach_res);
+  lc_client_close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_direct_consumer_service_with_state(void **state) {
   lc_client *client;
   lc_consumer_service *service;
@@ -3688,8 +3939,6 @@ static void test_pouch_direct_consumer_service_with_state(void **state) {
 
   (void)state;
   make_pouch_root("consumer", root, sizeof(root), endpoint, sizeof(endpoint));
-  cleanup_pouch_root(root);
-  track_pouch_root(root);
 
   client = NULL;
   service = NULL;
@@ -3803,6 +4052,8 @@ int main(void) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_direct_state_attachment_reopen_roundtrip),
+      cmocka_unit_test(
+          test_pouch_direct_lifecycle_maintenance_reopen_roundtrip),
       cmocka_unit_test(test_pouch_direct_consumer_service_with_state)};
   return cmocka_run_group_tests(tests, setup_pouch_e2e_group,
                                 teardown_pouch_e2e_group);

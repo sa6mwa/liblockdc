@@ -408,10 +408,14 @@ static void lc_test_tmp_cleanup_stale_for_template(const char *template_path,
 }
 
 int lc_test_tmp_track_path(const char *path, const char *allowed_prefix) {
+  struct stat st;
   size_t index;
   int written;
 
   if (!lc_test_tmp_has_prefix(path, allowed_prefix)) {
+    return 0;
+  }
+  if (lstat(path, &st) != 0) {
     return 0;
   }
   if (!lc_test_tmp_write_owner_marker(path)) {
@@ -547,6 +551,7 @@ void lc_test_tmp_cleanup_stale_older_than(const char *parent_dir,
                                           long min_age_seconds) {
   DIR *dir;
   struct dirent *entry;
+  size_t owner_suffix_len;
 
   if (!lc_test_tmp_is_global_stale_sweep(parent_dir, name_prefix,
                                         allowed_prefix)) {
@@ -556,6 +561,7 @@ void lc_test_tmp_cleanup_stale_older_than(const char *parent_dir,
   if (dir == NULL) {
     return;
   }
+  owner_suffix_len = strlen(LC_TEST_TMP_OWNER_SUFFIX);
   while ((entry = readdir(dir)) != NULL) {
     char path[LC_TEST_TMP_PATH_MAX];
     int written;
@@ -563,11 +569,30 @@ void lc_test_tmp_cleanup_stale_older_than(const char *parent_dir,
     if (!lc_test_tmp_has_prefix(entry->d_name, name_prefix)) {
       continue;
     }
-    if (lc_test_tmp_name_has_suffix(entry->d_name, LC_TEST_TMP_OWNER_SUFFIX)) {
-      continue;
-    }
     written = snprintf(path, sizeof(path), "%s/%s", parent_dir, entry->d_name);
     if (written < 0 || (size_t)written >= sizeof(path)) {
+      continue;
+    }
+    if (lc_test_tmp_name_has_suffix(entry->d_name, LC_TEST_TMP_OWNER_SUFFIX)) {
+      char base[LC_TEST_TMP_PATH_MAX];
+      struct stat st;
+      size_t path_len;
+      size_t base_len;
+
+      path_len = strlen(path);
+      if (path_len <= owner_suffix_len) {
+        continue;
+      }
+      base_len = path_len - owner_suffix_len;
+      if (base_len >= sizeof(base)) {
+        continue;
+      }
+      memcpy(base, path, base_len);
+      base[base_len] = '\0';
+      if (lstat(base, &st) != 0 &&
+          lc_test_tmp_is_old_enough(path, min_age_seconds)) {
+        (void)unlink(path);
+      }
       continue;
     }
     if (lc_test_tmp_has_live_owner(path)) {
