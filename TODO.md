@@ -779,21 +779,21 @@ Latest release targets confirmed on 2026-07-23:
         identity-matched `.lcpdtg` and supplies a global-to-local docID remap
         callback, while the index layer owns miss collection, local docID cache
         insertion, and cursor page selection.
-      - [x] Physically split result-cache/page planning into
+      - [ ] Physically split result-cache/page planning into
         `src/lc_pouch_index_result.c`, leaving `lc_pouch_index.c` focused on
-        document tables, docID algebra, term dictionaries, and adaptive
-        postings while preserving the same private `lc_pouch_index.h`
-        boundary.
-      - [x] Physically split adaptive sparse/dense posting encoding into
+        planner/collector orchestration while preserving the same private
+        `lc_pouch_index.h` boundary.
+      - [x] Physically split sparse posting encoding into
         `src/lc_pouch_index_posting.c`, keeping the private posting boundary
         separate from document-table, term-dictionary, and result-cache code.
-      - [x] Physically split term dictionaries, term-ID posting tables, and
+        Dense bitsets remain pending.
+      - [ ] Physically split term dictionaries, term-ID posting tables, and
         prepared-term cache lifecycle into `src/lc_pouch_index_terms.c`, so
         the private index layer has distinct document, posting, term, and
         result-cache modules.
-      - [x] Physically split document table and docID set algebra into
+      - [x] Physically split private docID set algebra into
         `src/lc_pouch_index_doc.c`, leaving `lc_pouch_index.c` focused on
-        planner/collector orchestration over the private index primitives.
+        temporal parsing while the dense document-table split remains pending.
       - [x] Document the current private index module map in
         `docs/pouch-storage.md`, including the pouch storage bridge responsibility that
         remains in `src/lc_pouch.c`.

@@ -11,6 +11,8 @@ foreach(required_source
     "src/lc_pouch_path.c"
     "src/lc_pouch_index.h"
     "src/lc_pouch_index.c"
+    "src/lc_pouch_index_doc.c"
+    "src/lc_pouch_index_posting.c"
     "src/lc_pouch_query_index.h"
     "src/lc_pouch_query_index.c"
     "src/lc_pouch_state.c"

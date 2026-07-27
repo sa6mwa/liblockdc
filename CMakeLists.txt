@@ -352,6 +352,8 @@ set(lc_sources
     src/lc_pouch_client.c
     src/lc_pouch.c
     src/lc_pouch_index.c
+    src/lc_pouch_index_doc.c
+    src/lc_pouch_index_posting.c
     src/lc_pouch_query_index.c
     src/lc_pouch_namespace.c
     src/lc_pouch_path.c

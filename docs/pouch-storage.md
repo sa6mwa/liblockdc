@@ -1400,23 +1400,22 @@ the long-term performance architecture. Incremental hot-loop optimizations are
 allowed only when they move toward this subsystem boundary or protect behavior
 while the subsystem is introduced.
 
-The current C source layout has started this subsystem boundary in
-`src/lc_pouch_index.c`, while the fuller split below remains the target module
-map for the compiled index work:
+The current C source layout has started this subsystem boundary by splitting
+small private index primitives out of the monolithic storage bridge, while the
+fuller compiled-index module map remains the target for the remaining work:
 
-- `src/lc_pouch_index.c` currently owns the first private docID set algebra,
-  date-bound parsing, and sparse delta-varint posting primitive. The active
-  exact/`in` query-index docID bridge exercises that posting primitive while
-  collapsing sorted candidate docIDs before key emission.
-- `src/lc_pouch_index_doc.c` should own the dense document table and broader
-  docID set algebra once the module split happens. It should map
-  namespace/key pairs to stable in-memory document IDs, resolve document IDs
-  back to namespace/key pairs, and provide sorted
-  union/intersection/subtraction helpers.
-- `src/lc_pouch_index_posting.c` should own adaptive sparse/dense posting
-  encoding after the split. Sparse postings are delta-varint docID streams;
-  dense postings are bitsets selected when density and encoded size justify
-  them. Dense bitsets and persisted posting generation files remain pending.
+- `src/lc_pouch_index.c` currently owns date-bound parsing and temporal bound
+  evaluation. It should become the planner/collector orchestration layer over
+  private index primitives.
+- `src/lc_pouch_index_doc.c` currently owns the private docID set algebra used
+  by indexed candidate collection. It should grow the dense document table:
+  namespace/key pairs to stable in-memory document IDs, reverse lookup, and
+  sorted union/intersection/subtraction helpers.
+- `src/lc_pouch_index_posting.c` currently owns sparse delta-varint docID
+  posting streams. The active exact/`in` query-index docID bridge exercises
+  that posting primitive while collapsing sorted candidate docIDs before key
+  emission. Dense bitsets and persisted posting generation files remain
+  pending.
 - `src/lc_pouch_index_terms.c` owns term dictionaries, term-ID posting tables,
   and prepared-term cache identity refresh/cleanup. Prepared bridge caches are
   keyed by an explicit private index identity containing the current index
@@ -1440,9 +1439,9 @@ map for the compiled index work:
   generation files. The pouch storage bridge publishes and consumes those files for
   simple primary prefix/contains plans; compound text plans still compile from
   sidecar postings so secondary filtering remains explicit.
-- `src/lc_pouch_index.c` is now the planner/collector orchestration layer over
-  those primitives. It invokes storage-supplied reader callbacks and normalizes
-  the resulting candidate docID sets.
+- `src/lc_pouch_index.c` is the target planner/collector orchestration layer
+  over those primitives. It should invoke storage-supplied reader callbacks and
+  normalize the resulting candidate docID sets.
 - `src/lc_pouch_temporal.c` owns private liblql-compatible temporal parsing and
   ordering comparison for date-only, RFC3339/RFC3339Nano offset, fractional,
   and naive UTC datetime strings used by indexed date planning and fast final
