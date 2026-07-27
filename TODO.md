@@ -1843,6 +1843,11 @@ Latest release targets confirmed on 2026-07-23:
       damage injection, then remove, append garbage to, or replace that
       snapshot before reopening scan and index clients so snapshot lifecycle
       replay/repair stays covered by scan/index parity checks.
+    - [x] Extend the separate pouch lifecycle fuzz target with post-maintenance
+      marker and query-index damage injection across the state/object/queue
+      namespace plus the retention namespace, and register a dedicated damage
+      smoke seed so full-surface lifecycle reopen still proves survivor,
+      attachment, queue, retention, and query-index repair behavior.
     - [x] Extend the pouch LQL planning fuzz harness to exercise the public
       full-form `selector_lql` path as well as AST `selector_json`: inputs
       prefixed with `lql:` now route through `selector_lql`, and seed corpus

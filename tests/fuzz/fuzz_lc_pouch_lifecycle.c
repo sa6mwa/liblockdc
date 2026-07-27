@@ -228,6 +228,83 @@ static int lifecycle_run_maintenance(const char *root,
   return rc;
 }
 
+static int lifecycle_namespace_path(char *path, size_t path_size,
+                                    const char *root,
+                                    const char *namespace_name,
+                                    const char *leaf) {
+  int written;
+
+  if (root == NULL || namespace_name == NULL || leaf == NULL) {
+    return 0;
+  }
+  written = snprintf(path, path_size, "%s/namespaces/%s/%s", root,
+                     namespace_name, leaf);
+  return written > 0 && (size_t)written < path_size;
+}
+
+static void lifecycle_write_text_file(const char *path, const char *text) {
+  FILE *fp;
+
+  if (path == NULL || text == NULL) {
+    return;
+  }
+  fp = fopen(path, "wb");
+  if (fp == NULL) {
+    return;
+  }
+  (void)fwrite(text, 1U, strlen(text), fp);
+  (void)fclose(fp);
+}
+
+static void lifecycle_damage_marker(const char *root,
+                                    const char *namespace_name,
+                                    unsigned int mode) {
+  char path[768];
+
+  if (mode == 0U ||
+      !lifecycle_namespace_path(path, sizeof(path), root, namespace_name,
+                                "markers/writer-lifecycle-peer.marker")) {
+    return;
+  }
+  if (mode == 1U) {
+    lifecycle_write_text_file(path, "sequence=not-a-number\n");
+  } else if (mode == 2U) {
+    lifecycle_write_text_file(path, "");
+  } else {
+    lifecycle_write_text_file(path, "sequence=184467440737095516150\n");
+  }
+}
+
+static void lifecycle_damage_query_index(const char *root,
+                                         const char *namespace_name,
+                                         unsigned int mode) {
+  char path[768];
+
+  if (mode == 0U ||
+      !lifecycle_namespace_path(path, sizeof(path), root, namespace_name,
+                                "index/query.index")) {
+    return;
+  }
+  if (mode == 1U) {
+    (void)remove(path);
+  } else if (mode == 2U) {
+    lifecycle_write_text_file(path, "not-a-pouch-query-index\nterm broken\n");
+  } else {
+    lifecycle_write_text_file(path,
+                              "format=pouch-query-index\n"
+                              "version=999999\n"
+                              "state_index_seq=999999\n"
+                              "row_count=1\n"
+                              "row_hash=1\n"
+                              "term_index_complete=1\n"
+                              "term_count=1\n"
+                              "term_hash=1\n"
+                              "presence_index_complete=1\n"
+                              "presence_count=1\n"
+                              "presence_hash=1\n");
+  }
+}
+
 static int lifecycle_verify_survivors(lc_client *client, lc_error *error) {
   lc_acquire_req acquire_req;
   lc_release_req release_req;
@@ -386,6 +463,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     stage = "retention";
     rc = lifecycle_run_maintenance(root, "life-retain", 0, 0, 2147483647L,
                                    &error);
+  }
+  if (rc == LC_OK) {
+    unsigned int damage;
+
+    damage = size > 1U ? (unsigned int)data[1] : knobs;
+    stage = "damage-lifecycle";
+    lifecycle_damage_marker(root, "life", (damage / 4U) % 4U);
+    lifecycle_damage_query_index(root, "life", damage % 4U);
+    lifecycle_damage_marker(root, "life-retain", (damage / 16U) % 4U);
+    lifecycle_damage_query_index(root, "life-retain", (damage / 64U) % 4U);
   }
   if (rc == LC_OK) {
     stage = "reopen";
