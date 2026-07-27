@@ -82,6 +82,19 @@ typedef struct lc_pouch_index_result_row_list {
   size_t capacity;
 } lc_pouch_index_result_row_list;
 
+typedef struct lc_pouch_index_term_field {
+  char *field_hex;
+  unsigned long first_line;
+  unsigned long line_count;
+} lc_pouch_index_term_field;
+
+typedef struct lc_pouch_index_term_value {
+  char *field_hex;
+  char *value_hex;
+  unsigned long first_line;
+  unsigned long line_count;
+} lc_pouch_index_term_value;
+
 typedef struct lc_pouch_index_posting {
   unsigned char *bytes;
   size_t length;
@@ -163,6 +176,21 @@ int lc_pouch_index_result_row_list_add(
     const char *key, const char *key_hex, unsigned long doc_id,
     unsigned long version, unsigned long bytes, int has_query_hidden,
     int query_hidden, size_t value_index, lc_error *error);
+void lc_pouch_index_term_fields_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_term_field *fields,
+    size_t count);
+void lc_pouch_index_term_values_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_term_value *values,
+    size_t count);
+int lc_pouch_index_term_fields_find(const lc_pouch_index_term_field *fields,
+                                    size_t count, const char *field_hex,
+                                    unsigned long *first_line,
+                                    unsigned long *line_count);
+int lc_pouch_index_term_values_find(const lc_pouch_index_term_value *values,
+                                    size_t count, const char *field_hex,
+                                    const char *value_hex,
+                                    unsigned long *first_line,
+                                    unsigned long *line_count);
 void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
                                     lc_pouch_index_posting *posting);
 int lc_pouch_index_posting_append_sorted_unique(

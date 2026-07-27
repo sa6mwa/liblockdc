@@ -391,6 +391,104 @@ static void test_index_result_row_list_copies_keys_and_metadata(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_index_term_fields_find_sorted_ranges(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_term_field *fields;
+  unsigned long first;
+  unsigned long count;
+  int found;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  fields = (lc_pouch_index_term_field *)lc_alloc_with_allocator(
+      &allocator, 3U * sizeof(*fields));
+  assert_non_null(fields);
+  memset(fields, 0, 3U * sizeof(*fields));
+  fields[0].field_hex = lc_strdup_with_allocator(&allocator, "616765");
+  fields[0].first_line = 0UL;
+  fields[0].line_count = 2UL;
+  fields[1].field_hex = lc_strdup_with_allocator(&allocator, "6e616d65");
+  fields[1].first_line = 2UL;
+  fields[1].line_count = 4UL;
+  fields[2].field_hex = lc_strdup_with_allocator(&allocator, "74616773");
+  fields[2].first_line = 6UL;
+  fields[2].line_count = 3UL;
+  assert_non_null(fields[0].field_hex);
+  assert_non_null(fields[1].field_hex);
+  assert_non_null(fields[2].field_hex);
+
+  first = 99UL;
+  count = 88UL;
+  found = lc_pouch_index_term_fields_find(fields, 3U, "6e616d65", &first,
+                                          &count);
+  assert_true(found);
+  assert_int_equal(first, 2);
+  assert_int_equal(count, 4);
+
+  found = lc_pouch_index_term_fields_find(fields, 3U, "6f776e6572", &first,
+                                          &count);
+  assert_false(found);
+  assert_int_equal(first, 2);
+  assert_int_equal(count, 4);
+
+  lc_pouch_index_term_fields_cleanup(&allocator, fields, 3U);
+}
+
+static void test_index_term_values_find_sorted_ranges(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_term_value *values;
+  unsigned long first;
+  unsigned long count;
+  int found;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  values = (lc_pouch_index_term_value *)lc_alloc_with_allocator(
+      &allocator, 4U * sizeof(*values));
+  assert_non_null(values);
+  memset(values, 0, 4U * sizeof(*values));
+  values[0].field_hex = lc_strdup_with_allocator(&allocator, "616765");
+  values[0].value_hex = lc_strdup_with_allocator(&allocator, "3330");
+  values[0].first_line = 0UL;
+  values[0].line_count = 1UL;
+  values[1].field_hex = lc_strdup_with_allocator(&allocator, "6e616d65");
+  values[1].value_hex = lc_strdup_with_allocator(&allocator, "616c696365");
+  values[1].first_line = 1UL;
+  values[1].line_count = 2UL;
+  values[2].field_hex = lc_strdup_with_allocator(&allocator, "6e616d65");
+  values[2].value_hex = lc_strdup_with_allocator(&allocator, "626f62");
+  values[2].first_line = 3UL;
+  values[2].line_count = 1UL;
+  values[3].field_hex = lc_strdup_with_allocator(&allocator, "74616773");
+  values[3].value_hex = lc_strdup_with_allocator(&allocator, "706c616e");
+  values[3].first_line = 4UL;
+  values[3].line_count = 5UL;
+  assert_non_null(values[0].field_hex);
+  assert_non_null(values[0].value_hex);
+  assert_non_null(values[1].field_hex);
+  assert_non_null(values[1].value_hex);
+  assert_non_null(values[2].field_hex);
+  assert_non_null(values[2].value_hex);
+  assert_non_null(values[3].field_hex);
+  assert_non_null(values[3].value_hex);
+
+  first = 99UL;
+  count = 88UL;
+  found = lc_pouch_index_term_values_find(
+      values, 4U, "6e616d65", "626f62", &first, &count);
+  assert_true(found);
+  assert_int_equal(first, 3);
+  assert_int_equal(count, 1);
+
+  found = lc_pouch_index_term_values_find(
+      values, 4U, "6e616d65", "6361726f6c", &first, &count);
+  assert_false(found);
+  assert_int_equal(first, 3);
+  assert_int_equal(count, 1);
+
+  lc_pouch_index_term_values_cleanup(&allocator, values, 4U);
+}
+
 static void test_index_posting_roundtrips_sparse_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_posting posting;
@@ -9756,6 +9854,8 @@ int main(void) {
       cmocka_unit_test(test_index_doc_table_maps_sorted_keys_to_docids),
       cmocka_unit_test(test_index_result_key_list_sorts_and_compacts_docids),
       cmocka_unit_test(test_index_result_row_list_copies_keys_and_metadata),
+      cmocka_unit_test(test_index_term_fields_find_sorted_ranges),
+      cmocka_unit_test(test_index_term_values_find_sorted_ranges),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),

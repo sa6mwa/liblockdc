@@ -799,6 +799,10 @@ Latest release targets confirmed on 2026-07-23:
         prepared-term cache lifecycle into `src/lc_pouch_index_terms.c`, so
         the private index layer has distinct document, posting, term, and
         result-cache modules.
+        - [x] Add the first physical `lc_pouch_index_terms.c` boundary:
+          sidecar term field/value table records, cleanup, and sorted binary
+          lookup now live in the private index term module while the query
+          bridge still owns sidecar parsing and reader orchestration.
       - [x] Physically split private docID set algebra into
         `src/lc_pouch_index_doc.c`, including sorted unique append and
         merge-based union/intersection/subtraction helpers plus the first
@@ -952,12 +956,12 @@ Latest release targets confirmed on 2026-07-23:
       scans.
       - [x] Add the first private term dictionary primitive in
         `lc_pouch_index`: `(field,value)` terms are interned into stable term
-        IDs with sorted lookup and duplicate preservation coverage. Disk
-        readers still need to build and consume compiled dictionaries.
+        IDs with sorted lookup and duplicate preservation coverage. Pouch
+        readers still need to build and consume compiled dictionaries broadly.
       - [x] Add the first term-ID posting table primitive in `lc_pouch_index`:
         exact terms now map to adaptive sparse/dense docID postings with
-        binary lookup, missing-term, and replacement coverage. Disk readers
-        still need to compile sidecar postings into this table.
+        binary lookup, missing-term, and replacement coverage. Pouch readers
+        still need to compile sidecar postings into this table broadly.
       - [x] Add the first immutable exact-term generation codec in
         `lc_pouch_index`: namespace-scoped term dictionaries and adaptive
         term-ID postings now round-trip under index sequence plus segmented

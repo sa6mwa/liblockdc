@@ -14,6 +14,7 @@ foreach(required_source
     "src/lc_pouch_index_doc.c"
     "src/lc_pouch_index_posting.c"
     "src/lc_pouch_index_result.c"
+    "src/lc_pouch_index_terms.c"
     "src/lc_pouch_query_index.h"
     "src/lc_pouch_query_index.c"
     "src/lc_pouch_state.c"
