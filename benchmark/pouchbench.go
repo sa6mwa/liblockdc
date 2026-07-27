@@ -29,7 +29,7 @@ func runPouchC(b *testing.B, rows int64, engine, scenario string, documents bool
 			&result,
 		)
 		if rc != 0 {
-			b.Fatalf("pouch C benchmark failed: rc=%d scenario=%s rows=%d engine=%s documents=%t", int(rc), scenario, rows, engine, documents)
+			b.Fatalf("pouch C benchmark failed: rc=%d scenario=%s rows=%d engine=%s documents=%t error=%q", int(rc), scenario, rows, engine, documents, C.GoString(&result.error[0]))
 		}
 		totalCNS += uint64(result.c_ns)
 	}

@@ -5733,9 +5733,151 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_true(bytes_contain_text(error.message, strlen(error.message),
                                  "supports exact scalar equality, in, exists, "
-                                 "prefix, contains, and range"));
+                                 "prefix, contains, range, and date"));
 
   free(namespace_path);
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_query_keys_index_date_lql_filters_presence_candidates(
+    void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture date_page;
+  lc_pouch_state_write_options hidden_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&date_page, 0, sizeof(date_page));
+  memset(&hidden_options, 0, sizeof(hidden_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-date-lql", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory(
+      "{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":1}",
+      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":1}"),
+      &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/new",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory(
+      "{\"created_at\":\"2024-01-01T00:00:00Z\",\"n\":2}",
+      strlen("{\"created_at\":\"2024-01-01T00:00:00Z\",\"n\":2}"),
+      &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/old",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"created_at\":\"not-a-date\",\"n\":3}",
+                             strlen("{\"created_at\":\"not-a-date\",\"n\":3}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/invalid",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("{\"category\":\"missing-date\",\"n\":4}",
+                             strlen("{\"category\":\"missing-date\",\"n\":4}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/missing",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  hidden_options.has_query_hidden = 1;
+  hidden_options.query_hidden = 1;
+  rc = lc_source_from_memory(
+      "{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":5}",
+      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":5}"),
+      &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/hidden",
+                            source, &hidden_options, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory(
+      "{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":6}",
+      strlen("{\"created_at\":\"2026-01-01T00:00:00Z\",\"n\":6}"),
+      &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-date", "doc/deleted",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_pouch_state_delete(pouch, "docs/query-index-date", "doc/deleted",
+                             NULL, &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/query-index-date";
+  query_req.selector_lql =
+      "date{field=/created_at,after=2025-01-01T00:00:00Z}";
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &date_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(date_page.count, 1);
+  assert_true(pouch_query_capture_has(&date_page, "doc/new"));
+  assert_false(pouch_query_capture_has(&date_page, "doc/old"));
+  assert_false(pouch_query_capture_has(&date_page, "doc/invalid"));
+  assert_false(pouch_query_capture_has(&date_page, "doc/missing"));
+  assert_false(pouch_query_capture_has(&date_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&date_page, "doc/deleted"));
+  assert_null(query_res.cursor);
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -6330,7 +6472,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_true(bytes_contain_text(error.message, strlen(error.message),
                                  "supports exact scalar equality, in, exists, "
-                                 "prefix, contains, and range"));
+                                 "prefix, contains, range, and date"));
 
   lc_sink_close(first_sink);
   lc_sink_close(second_sink);
@@ -7729,6 +7871,8 @@ int main(void) {
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
+      cmocka_unit_test(
+          test_query_keys_index_date_lql_filters_presence_candidates),
       cmocka_unit_test(
           test_query_keys_index_recursive_exists_uses_container_presence),
       cmocka_unit_test(test_query_documents_scan_streams_rows),

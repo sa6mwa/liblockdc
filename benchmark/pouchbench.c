@@ -298,6 +298,9 @@ int lockdc_pouch_bench_run(const char *scenario, long rows, const char *engine,
     lc_client_close(client);
   }
   lockdc_bench_cleanup_root(root_template);
+  if (rc != LC_OK && error.message[0] != '\0') {
+    snprintf(out->error, sizeof(out->error), "%s", error.message);
+  }
   lc_error_cleanup(&error);
   out->rc = rc;
   out->rows = matched_rows;

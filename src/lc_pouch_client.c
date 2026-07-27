@@ -900,6 +900,7 @@ static int lc_pouch_query_index_plan_from_selector(
   lql_selector_node root;
   lql_selector_string_term string_term;
   lql_selector_range_term range_term;
+  lql_selector_date_term date_term;
   lql_selector_in_term in_term;
   lql_error lql_error_value;
   lql_status status;
@@ -1050,6 +1051,28 @@ static int lc_pouch_query_index_plan_from_selector(
     plan->range = 1;
     return LC_OK;
   }
+  if (root.kind == LQL_SELECTOR_NODE_DATE) {
+    memset(&date_term, 0, sizeof(date_term));
+    status = runtime->selector_node_date_term(runtime, root, &date_term,
+                                              &lql_error_value);
+    if (status != LQL_STATUS_OK) {
+      return lc_pouch_query_lql_error(error, status, &lql_error_value,
+                                      "failed to inspect pouch date selector");
+    }
+    if (date_term.field.len == 0U) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query index engine supports non-empty date "
+                          "selectors only",
+                          NULL, NULL, "pouch-redesign");
+    }
+    plan->field = lc_pouch_query_dup_lql_string(date_term.field, error);
+    if (plan->field == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+    }
+    plan->exists = 1;
+    return LC_OK;
+  }
   if (root.kind == LQL_SELECTOR_NODE_IN) {
     memset(&in_term, 0, sizeof(in_term));
     status = runtime->selector_node_in_term(runtime, root, &in_term,
@@ -1112,7 +1135,7 @@ static int lc_pouch_query_index_plan_from_selector(
   }
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch query index engine supports exact scalar "
-                      "equality, in, exists, prefix, contains, and range "
+                      "equality, in, exists, prefix, contains, range, and date "
                       "selectors only",
                       NULL, NULL, "pouch-redesign");
 }

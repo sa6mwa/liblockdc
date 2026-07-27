@@ -1631,11 +1631,15 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Add `BenchmarkMediumLockdDiskKeys` and
       `BenchmarkMediumLockdDiskDocuments` with the same document-count,
       engine, and scenario environment controls as the pouch medium matrix.
-    - [ ] Add Go/cgo pouch-vs-lockd disk comparison coverage for the same
+    - [x] Add Go/cgo pouch-vs-lockd disk comparison coverage for the same
       `DateAfter` residual-filter scenario as the native C benchmark: seeded
       documents include valid, invalid, and out-of-range `/created_at` values,
       while both backends run `date{field=/created_at,after=...}` through the
       normal document and key-return benchmark matrix.
+      Pouch now accepts indexed full-form date selectors by using the
+      `/created_at` presence index as the candidate source and the liblql
+      selector as the final filter; the bounded medium matrix includes
+      `DateAfter` for both pouch and real lockd disk comparisons.
   - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
     Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`
