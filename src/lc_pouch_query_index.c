@@ -15,6 +15,7 @@
 #define LC_POUCH_QUERY_INDEX_FORMAT "pouch-query-index"
 #define LC_POUCH_QUERY_INDEX_VERSION 11UL
 #define LC_POUCH_QUERY_INDEX_LEAF "query.index"
+#define LC_POUCH_QUERY_INDEX_DOC_TABLE_LEAF "query.index.lcpdtg"
 #define LC_POUCH_QUERY_INDEX_HASH_OFFSET 2166136261UL
 #define LC_POUCH_QUERY_INDEX_HASH_PRIME 16777619UL
 #define LC_POUCH_QUERY_INDEX_HASH_MASK 0xffffffffUL
@@ -1982,6 +1983,39 @@ static char *lc_pouch_query_index_path(lc_pouch *pouch,
   return sidecar_path;
 }
 
+static char *lc_pouch_query_index_doc_table_path(lc_pouch *pouch,
+                                                 const char *namespace_name,
+                                                 lc_error *error) {
+  char *namespace_path;
+  char *index_path;
+  char *generation_path;
+
+  namespace_path =
+      lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
+                              namespace_name);
+  if (namespace_path == NULL) {
+    return NULL;
+  }
+  index_path = lc_pouch_path_join(&pouch->allocator, namespace_path, "index");
+  lc_free_with_allocator(&pouch->allocator, namespace_path);
+  if (index_path == NULL) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to allocate pouch query-index directory path", NULL,
+                 NULL, NULL);
+    return NULL;
+  }
+  generation_path = lc_pouch_path_join(
+      &pouch->allocator, index_path, LC_POUCH_QUERY_INDEX_DOC_TABLE_LEAF);
+  lc_free_with_allocator(&pouch->allocator, index_path);
+  if (generation_path == NULL) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to allocate pouch query-index doc table generation "
+                 "path",
+                 NULL, NULL, NULL);
+  }
+  return generation_path;
+}
+
 static int lc_pouch_query_index_parse_header_line(const char *line,
                                                   const char *name,
                                                   unsigned long *out) {
@@ -3311,6 +3345,7 @@ static int lc_pouch_query_index_build_text(
     unsigned long *term_count_out, unsigned long *term_hash_out,
     unsigned long *term_field_count_out, unsigned long *term_value_count_out,
     unsigned long *presence_count_out, unsigned long *presence_hash_out,
+    char **doc_table_generation_out, size_t *doc_table_generation_length_out,
     lc_error *error) {
   lc_pouch_query_index_text header;
   lc_pouch_query_index_text rows;
@@ -3345,13 +3380,17 @@ static int lc_pouch_query_index_build_text(
   if (summary == NULL || out == NULL || row_hash_out == NULL ||
       term_count_out == NULL || term_hash_out == NULL ||
       term_field_count_out == NULL || term_value_count_out == NULL ||
-      presence_count_out == NULL || presence_hash_out == NULL) {
+      presence_count_out == NULL || presence_hash_out == NULL ||
+      doc_table_generation_out == NULL ||
+      doc_table_generation_length_out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index build requires summary outputs",
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
   out->allocator = summary->allocator;
+  *doc_table_generation_out = NULL;
+  *doc_table_generation_length_out = 0U;
   *row_hash_out = lc_pouch_query_index_hash_init();
   *term_count_out = 0UL;
   *term_hash_out = lc_pouch_query_index_hash_init();
@@ -3764,6 +3803,11 @@ static int lc_pouch_query_index_build_text(
                                           presences.length, NULL, error);
   }
   if (rc == LC_OK) {
+    rc = lc_pouch_index_doc_table_generation_encode(
+        &doc_table, index_seq, row_hash, summary->allocator,
+        doc_table_generation_out, doc_table_generation_length_out, error);
+  }
+  if (rc == LC_OK) {
     *out = header;
     memset(&header, 0, sizeof(header));
     *row_hash_out = row_hash;
@@ -3780,6 +3824,11 @@ static int lc_pouch_query_index_build_text(
   lc_free_with_allocator(summary->allocator, term_values.bytes);
   lc_free_with_allocator(summary->allocator, terms.bytes);
   lc_free_with_allocator(summary->allocator, presences.bytes);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(summary->allocator, *doc_table_generation_out);
+    *doc_table_generation_out = NULL;
+    *doc_table_generation_length_out = 0U;
+  }
   lc_pouch_index_doc_table_cleanup(summary->allocator, &doc_table);
   return rc;
 }
@@ -3801,6 +3850,9 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_query_index_summary summary;
   lc_pouch_query_index_text text;
   char *sidecar_path;
+  char *doc_table_path;
+  char *doc_table_generation;
+  size_t doc_table_generation_length;
   unsigned long expected_hash;
   unsigned long expected_term_count;
   unsigned long expected_term_hash;
@@ -3808,6 +3860,8 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
   unsigned long expected_term_value_count;
   unsigned long expected_presence_count;
   unsigned long expected_presence_hash;
+  int doc_table_present;
+  int doc_table_valid;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -3820,6 +3874,9 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
   memset(out, 0, sizeof(*out));
   memset(&summary, 0, sizeof(summary));
   memset(&text, 0, sizeof(text));
+  doc_table_path = NULL;
+  doc_table_generation = NULL;
+  doc_table_generation_length = 0U;
   summary.allocator = &pouch->allocator;
   summary.pouch = pouch;
   summary.namespace_name = namespace_name;
@@ -3830,12 +3887,27 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
   if (sidecar_path == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
+  doc_table_path =
+      lc_pouch_query_index_doc_table_path(pouch, namespace_name, error);
+  if (doc_table_path == NULL) {
+    lc_free_with_allocator(&pouch->allocator, sidecar_path);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
   rc = lc_pouch_query_index_read(sidecar_path, &sidecar, error);
   if (rc == LC_OK && sidecar.present && sidecar.valid &&
       sidecar.index_seq == state_index_seq) {
-    out->index_seq = state_index_seq;
-    lc_free_with_allocator(&pouch->allocator, sidecar_path);
-    return LC_OK;
+    doc_table_present = 0;
+    doc_table_valid = 0;
+    rc = lc_pouch_index_doc_table_generation_validate_file(
+        &pouch->allocator, doc_table_path, sidecar.index_seq,
+        sidecar.row_count, sidecar.row_hash, &doc_table_present,
+        &doc_table_valid, error);
+    if (rc == LC_OK && doc_table_present && doc_table_valid) {
+      out->index_seq = state_index_seq;
+      lc_free_with_allocator(&pouch->allocator, doc_table_path);
+      lc_free_with_allocator(&pouch->allocator, sidecar_path);
+      return LC_OK;
+    }
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_visit(pouch, namespace_name,
@@ -3856,7 +3928,9 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                          &expected_term_field_count,
                                          &expected_term_value_count,
                                          &expected_presence_count,
-                                         &expected_presence_hash, error);
+                                         &expected_presence_hash,
+                                         &doc_table_generation,
+                                         &doc_table_generation_length, error);
   }
   if (rc == LC_OK &&
       (!sidecar.present || !sidecar.valid ||
@@ -3876,10 +3950,21 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
     out->repaired = 1;
   }
   if (rc == LC_OK) {
+    (void)doc_table_generation_length;
+    rc = lc_pouch_path_write_text_file(
+        doc_table_path, doc_table_generation != NULL ? doc_table_generation : "",
+        error);
+    if (rc == LC_OK) {
+      out->repaired = 1;
+    }
+  }
+  if (rc == LC_OK) {
     out->index_seq = state_index_seq;
   }
+  lc_free_with_allocator(&pouch->allocator, doc_table_generation);
   lc_free_with_allocator(&pouch->allocator, text.bytes);
   lc_pouch_query_index_summary_cleanup(&summary);
+  lc_free_with_allocator(&pouch->allocator, doc_table_path);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
   return rc;
 }

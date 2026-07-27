@@ -182,6 +182,15 @@ int lc_pouch_index_doc_table_get(const lc_pouch_index_doc_table *table,
                                  unsigned long doc_id,
                                  const lc_pouch_index_doc **doc,
                                  lc_error *error);
+int lc_pouch_index_doc_table_generation_encode(
+    const lc_pouch_index_doc_table *table, unsigned long index_seq,
+    unsigned long row_hash, const lc_allocator *allocator, char **out_bytes,
+    size_t *out_length, lc_error *error);
+int lc_pouch_index_doc_table_generation_validate_file(
+    const lc_allocator *allocator, const char *path,
+    unsigned long expected_index_seq,
+    unsigned long expected_row_count, unsigned long expected_row_hash,
+    int *present, int *valid, lc_error *error);
 void lc_pouch_index_result_key_list_cleanup(
     const lc_allocator *allocator, lc_pouch_index_result_key_list *list);
 int lc_pouch_index_result_key_list_add(

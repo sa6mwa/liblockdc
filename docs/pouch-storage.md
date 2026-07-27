@@ -1096,7 +1096,8 @@ key/docID ordered. Numeric exact equality and multi-term unions still use the
 sorted/compacted docID path because one numeric selector can match several JSON
 number spellings, and OR/in unions can overlap. Go lockd disk benchmark results
 are treated as implementation-performance references only; pouch indexed query
-semantics follow liblql's typed JSON scalar model.
+semantics follow liblql's real JSON scalar model, not Go LQL's looser scalar
+coercion.
 Exact scalar document-result queries use the same typed docID candidate stream
 to choose the requested cursor page before opening state bodies, then read and
 stream only those selected current documents. This keeps exact predicates out of
@@ -1517,19 +1518,21 @@ forward and reverse lookup, and per-namespace document-table generations can
 persist sorted keys under the same index sequence plus segmented manifest
 identity used by compiled reader files. The document table is the cutover
 target for immutable compiled generation readers.
-The pouch storage bridge now maintains that document table alongside query summaries
-and routes field-predicate candidate docIDs through it before converting
-results back to summary entries. Disk publishes per-namespace document-table
-generation files under
-`<root>/%2elockd/logstore/query.index.docs/<escaped-namespace>.lcpdtg`
-during full query-index rebuilds and after successful compaction replay. The
-current query path still rebuilds the live in-memory global document table from
-summary refresh state; exact-term, field-presence, numeric range,
-text/trigram, and temporal generations are cut over to namespace-local
-persisted docIDs and remap through these document-table files when loading
-prepared postings. Result-page selection still needs the same namespace-local
-doc table cutover before compiled reader files can stop depending on the global
-docID table.
+The pouch storage bridge now maintains that document table alongside query
+summaries and routes field-predicate candidate docIDs through it before
+converting results back to summary entries. Pouch publishes the first
+per-namespace document-table generation file under
+`<root>/<escaped-namespace>/index/query.index.lcpdtg` during query-index
+flush/rebuild. Flush validates the generation's format, version, index
+sequence, row count, row hash, and sorted document rows; a missing, stale, or
+corrupt generation is repaired even when `index/query.index` is already
+current. The current query path still rebuilds the live in-memory global
+document table from summary refresh state; exact-term, field-presence, numeric
+range, text/trigram, and temporal generations remain the cutover target for
+namespace-local persisted docIDs and remap through document-table generations
+when loading prepared postings. Result-page selection still needs the same
+namespace-local doc table cutover before compiled reader files can stop
+depending on the global docID table.
 Even before that cutover, the query path no longer depends on direct
 summary-array-position casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:

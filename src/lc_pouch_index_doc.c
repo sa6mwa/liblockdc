@@ -2,7 +2,14 @@
 
 #include "lc_api_internal.h"
 
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#define LC_POUCH_INDEX_DOC_TABLE_GENERATION_FORMAT                          \
+  "pouch-doc-table-generation"
+#define LC_POUCH_INDEX_DOC_TABLE_GENERATION_VERSION 1UL
 
 void lc_pouch_index_docid_set_cleanup(const lc_allocator *allocator,
                                       lc_pouch_index_docid_set *set) {
@@ -408,5 +415,424 @@ int lc_pouch_index_doc_table_get(const lc_pouch_index_doc_table *table,
                         NULL, "pouch-redesign");
   }
   *doc = &table->items[doc_id];
+  return LC_OK;
+}
+
+static int lc_pouch_index_doc_generation_reserve(
+    const lc_allocator *allocator, char **bytes, size_t *capacity,
+    size_t length, size_t needed, lc_error *error) {
+  char *next_bytes;
+  size_t next_capacity;
+
+  if (bytes == NULL || capacity == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc table generation reserve requires output",
+                        NULL, NULL, NULL);
+  }
+  if (needed <= *capacity) {
+    return LC_OK;
+  }
+  next_capacity = *capacity == 0U ? 256U : *capacity;
+  while (next_capacity < needed) {
+    if (next_capacity > ((size_t)-1 / 2U)) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch doc table generation exceeds local limit",
+                          NULL, NULL, NULL);
+    }
+    next_capacity *= 2U;
+  }
+  next_bytes = (char *)lc_alloc_with_allocator(allocator, next_capacity);
+  if (next_bytes == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch doc table generation", NULL,
+                        NULL, NULL);
+  }
+  if (*bytes != NULL) {
+    memcpy(next_bytes, *bytes, length);
+    lc_free_with_allocator(allocator, *bytes);
+  }
+  *bytes = next_bytes;
+  *capacity = next_capacity;
+  return LC_OK;
+}
+
+static int lc_pouch_index_doc_generation_append(
+    const lc_allocator *allocator, char **bytes, size_t *length,
+    size_t *capacity, const char *data, size_t data_length,
+    lc_error *error) {
+  int rc;
+
+  if (length == NULL || data == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc table generation append requires data",
+                        NULL, NULL, NULL);
+  }
+  if (data_length > (size_t)-1 - *length - 1U) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch doc table generation exceeds local limit", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_index_doc_generation_reserve(
+      allocator, bytes, capacity, *length, *length + data_length + 1U, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memcpy(*bytes + *length, data, data_length);
+  *length += data_length;
+  (*bytes)[*length] = '\0';
+  return LC_OK;
+}
+
+static int lc_pouch_index_doc_generation_append_cstr(
+    const lc_allocator *allocator, char **bytes, size_t *length,
+    size_t *capacity, const char *text, lc_error *error) {
+  return lc_pouch_index_doc_generation_append(
+      allocator, bytes, length, capacity, text, strlen(text), error);
+}
+
+int lc_pouch_index_doc_table_generation_encode(
+    const lc_pouch_index_doc_table *table, unsigned long index_seq,
+    unsigned long row_hash, const lc_allocator *allocator, char **out_bytes,
+    size_t *out_length, lc_error *error) {
+  char *bytes;
+  size_t length;
+  size_t capacity;
+  char line[256];
+  size_t index;
+  int written;
+  int rc;
+
+  if (table == NULL || out_bytes == NULL || out_length == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc table generation encode requires table and "
+                        "outputs",
+                        NULL, NULL, NULL);
+  }
+  *out_bytes = NULL;
+  *out_length = 0U;
+  bytes = NULL;
+  length = 0U;
+  capacity = 0U;
+  rc = lc_pouch_index_doc_generation_append_cstr(
+      allocator, &bytes, &length, &capacity,
+      "format=" LC_POUCH_INDEX_DOC_TABLE_GENERATION_FORMAT "\n", error);
+  if (rc == LC_OK) {
+    written = snprintf(line, sizeof(line), "version=%lu\n",
+                       LC_POUCH_INDEX_DOC_TABLE_GENERATION_VERSION);
+    rc = written >= 0 && (size_t)written < sizeof(line)
+             ? lc_pouch_index_doc_generation_append(
+                   allocator, &bytes, &length, &capacity, line,
+                   (size_t)written, error)
+             : lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch doc table generation version exceeds local "
+                            "limit",
+                            NULL, NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    written = snprintf(line, sizeof(line), "index_seq=%lu\n", index_seq);
+    rc = written >= 0 && (size_t)written < sizeof(line)
+             ? lc_pouch_index_doc_generation_append(
+                   allocator, &bytes, &length, &capacity, line,
+                   (size_t)written, error)
+             : lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch doc table generation index exceeds local "
+                            "limit",
+                            NULL, NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    written =
+        snprintf(line, sizeof(line), "row_count=%lu\n",
+                 (unsigned long)table->count);
+    rc = written >= 0 && (size_t)written < sizeof(line)
+             ? lc_pouch_index_doc_generation_append(
+                   allocator, &bytes, &length, &capacity, line,
+                   (size_t)written, error)
+             : lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch doc table generation count exceeds local "
+                            "limit",
+                            NULL, NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    written = snprintf(line, sizeof(line), "row_hash=%lu\n", row_hash);
+    rc = written >= 0 && (size_t)written < sizeof(line)
+             ? lc_pouch_index_doc_generation_append(
+                   allocator, &bytes, &length, &capacity, line,
+                   (size_t)written, error)
+             : lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch doc table generation hash exceeds local "
+                            "limit",
+                            NULL, NULL, NULL);
+  }
+  for (index = 0U; rc == LC_OK && index < table->count; ++index) {
+    const lc_pouch_index_doc *doc;
+
+    doc = &table->items[index];
+    written = snprintf(line, sizeof(line), "doc ");
+    rc = written >= 0 && (size_t)written < sizeof(line)
+             ? lc_pouch_index_doc_generation_append(
+                   allocator, &bytes, &length, &capacity, line,
+                   (size_t)written, error)
+             : lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch doc table generation row exceeds local "
+                            "limit",
+                            NULL, NULL, NULL);
+    if (rc == LC_OK) {
+      rc = lc_pouch_index_doc_generation_append_cstr(
+          allocator, &bytes, &length, &capacity, doc->key_hex, error);
+    }
+    if (rc == LC_OK) {
+      written = snprintf(line, sizeof(line), " %lu %lu %d %d\n",
+                         doc->version, doc->bytes,
+                         doc->has_query_hidden ? 1 : 0,
+                         doc->query_hidden ? 1 : 0);
+      rc = written >= 0 && (size_t)written < sizeof(line)
+               ? lc_pouch_index_doc_generation_append(
+                     allocator, &bytes, &length, &capacity, line,
+                     (size_t)written, error)
+               : lc_error_set(error, LC_ERR_INVALID, 0L,
+                              "pouch doc table generation row exceeds local "
+                              "limit",
+                              NULL, NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    *out_bytes = bytes;
+    *out_length = length;
+    bytes = NULL;
+  }
+  lc_free_with_allocator(allocator, bytes);
+  return rc;
+}
+
+static int lc_pouch_index_doc_generation_parse_ulong(
+    const char *text, unsigned long *out) {
+  char *end;
+  unsigned long value;
+
+  if (text == NULL || text[0] == '\0' || out == NULL) {
+    return 0;
+  }
+  errno = 0;
+  value = strtoul(text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0') {
+    return 0;
+  }
+  *out = value;
+  return 1;
+}
+
+static int lc_pouch_index_doc_generation_header_ulong(
+    const char *line, const char *prefix, unsigned long *out) {
+  size_t prefix_len;
+
+  prefix_len = strlen(prefix);
+  if (strncmp(line, prefix, prefix_len) != 0) {
+    return 0;
+  }
+  return lc_pouch_index_doc_generation_parse_ulong(line + prefix_len, out);
+}
+
+static char *lc_pouch_index_doc_generation_next_line(char **cursor) {
+  char *line;
+  char *newline;
+
+  if (cursor == NULL || *cursor == NULL || **cursor == '\0') {
+    return NULL;
+  }
+  line = *cursor;
+  newline = strchr(line, '\n');
+  if (newline == NULL) {
+    *cursor = line + strlen(line);
+  } else {
+    *newline = '\0';
+    *cursor = newline + 1;
+  }
+  return line;
+}
+
+static int lc_pouch_index_doc_generation_validate_bytes(
+    const lc_allocator *allocator, const char *bytes, size_t length,
+    unsigned long expected_index_seq,
+    unsigned long expected_row_count, unsigned long expected_row_hash) {
+  char *copy;
+  char *cursor;
+  char *line;
+  char *previous_key;
+  unsigned long version;
+  unsigned long row_count;
+  unsigned long row_hash;
+  unsigned long actual_count;
+  unsigned long ignored;
+  int has_hidden;
+  int hidden;
+  int consumed;
+  int valid;
+
+  copy = (char *)lc_alloc_with_allocator(allocator, length + 1U);
+  if (copy == NULL) {
+    return 0;
+  }
+  if (length > 0U) {
+    memcpy(copy, bytes, length);
+  }
+  copy[length] = '\0';
+  cursor = copy;
+  valid = 0;
+  line = lc_pouch_index_doc_generation_next_line(&cursor);
+  if (line == NULL ||
+      strcmp(line,
+             "format=" LC_POUCH_INDEX_DOC_TABLE_GENERATION_FORMAT) != 0) {
+    goto done;
+  }
+  line = lc_pouch_index_doc_generation_next_line(&cursor);
+  if (line == NULL ||
+      !lc_pouch_index_doc_generation_header_ulong(line, "version=", &ignored) ||
+      ignored != LC_POUCH_INDEX_DOC_TABLE_GENERATION_VERSION) {
+    goto done;
+  }
+  line = lc_pouch_index_doc_generation_next_line(&cursor);
+  if (line == NULL ||
+      !lc_pouch_index_doc_generation_header_ulong(line, "index_seq=",
+                                                  &ignored) ||
+      ignored != expected_index_seq) {
+    goto done;
+  }
+  line = lc_pouch_index_doc_generation_next_line(&cursor);
+  if (line == NULL ||
+      !lc_pouch_index_doc_generation_header_ulong(line, "row_count=",
+                                                  &row_count) ||
+      row_count != expected_row_count) {
+    goto done;
+  }
+  line = lc_pouch_index_doc_generation_next_line(&cursor);
+  if (line == NULL ||
+      !lc_pouch_index_doc_generation_header_ulong(line, "row_hash=",
+                                                  &row_hash) ||
+      row_hash != expected_row_hash) {
+    goto done;
+  }
+  previous_key = NULL;
+  actual_count = 0UL;
+  while ((line = lc_pouch_index_doc_generation_next_line(&cursor)) != NULL) {
+    char *key;
+    char *rest;
+
+    if (line[0] == '\0') {
+      continue;
+    }
+    if (strncmp(line, "doc ", 4U) != 0) {
+      goto done;
+    }
+    key = line + 4U;
+    rest = strchr(key, ' ');
+    if (rest == NULL || rest == key) {
+      goto done;
+    }
+    *rest++ = '\0';
+    if (previous_key != NULL && strcmp(previous_key, key) >= 0) {
+      goto done;
+    }
+    consumed = 0;
+    if (sscanf(rest, "%lu %lu %d %d %n", &version, &ignored, &has_hidden,
+               &hidden, &consumed) != 4 ||
+        consumed <= 0 || rest[consumed] != '\0' ||
+        (has_hidden != 0 && has_hidden != 1) ||
+        (hidden != 0 && hidden != 1)) {
+      goto done;
+    }
+    (void)version;
+    previous_key = key;
+    ++actual_count;
+  }
+  valid = actual_count == row_count;
+
+done:
+  lc_free_with_allocator(allocator, copy);
+  return valid;
+}
+
+int lc_pouch_index_doc_table_generation_validate_file(
+    const lc_allocator *allocator, const char *path,
+    unsigned long expected_index_seq,
+    unsigned long expected_row_count, unsigned long expected_row_hash,
+    int *present, int *valid, lc_error *error) {
+  FILE *fp;
+  char *bytes;
+  size_t length;
+  size_t capacity;
+  size_t got;
+
+  if (path == NULL || present == NULL || valid == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc table generation validation requires path "
+                        "and outputs",
+                        NULL, NULL, NULL);
+  }
+  *present = 0;
+  *valid = 0;
+  fp = fopen(path, "rb");
+  if (fp == NULL) {
+    if (errno == ENOENT) {
+      return LC_OK;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open pouch doc table generation",
+                        strerror(errno), NULL, NULL);
+  }
+  *present = 1;
+  bytes = NULL;
+  length = 0U;
+  capacity = 0U;
+  for (;;) {
+    if (length == capacity) {
+      char *next_bytes;
+      size_t next_capacity;
+
+      next_capacity = capacity == 0U ? 4096U : capacity * 2U;
+      if (next_capacity <= capacity) {
+        fclose(fp);
+        lc_free_with_allocator(allocator, bytes);
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "pouch doc table generation exceeds local limit",
+                            NULL, NULL, NULL);
+      }
+      next_bytes = (char *)lc_alloc_with_allocator(allocator, next_capacity);
+      if (next_bytes == NULL) {
+        fclose(fp);
+        lc_free_with_allocator(allocator, bytes);
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch doc table generation",
+                            NULL, NULL, NULL);
+      }
+      if (bytes != NULL) {
+        memcpy(next_bytes, bytes, length);
+        lc_free_with_allocator(allocator, bytes);
+      }
+      bytes = next_bytes;
+      capacity = next_capacity;
+    }
+    got = fread(bytes + length, 1U, capacity - length, fp);
+    length += got;
+    if (got == 0U) {
+      if (ferror(fp)) {
+        fclose(fp);
+        lc_free_with_allocator(allocator, bytes);
+        return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                            "failed to read pouch doc table generation",
+                            strerror(errno), NULL, NULL);
+      }
+      break;
+    }
+  }
+  if (fclose(fp) != 0) {
+    lc_free_with_allocator(allocator, bytes);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to close pouch doc table generation",
+                        strerror(errno), NULL, NULL);
+  }
+  *valid = lc_pouch_index_doc_generation_validate_bytes(
+      allocator, bytes, length, expected_index_seq, expected_row_count,
+      expected_row_hash);
+  lc_free_with_allocator(allocator, bytes);
   return LC_OK;
 }

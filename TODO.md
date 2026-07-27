@@ -845,9 +845,11 @@ Latest release targets confirmed on 2026-07-23:
         implicit dense docIDs, duplicate rejection, and corruption/truncation
         rejection coverage.
       - [x] Publish immutable per-namespace document-table generation files
-        from the pouch storage bridge: full query-index rebuilds and compaction publish
-        `.lcpdtg` files under the backend logstore with client coverage
-        decoding default and non-default namespace artifacts.
+        from the pouch storage bridge: query-index flush/rebuild now publishes
+        `index/query.index.lcpdtg` inside the pouch namespace index directory,
+        validates format/version/index sequence/row count/row hash/sorted
+        document rows, and repairs missing or corrupt generation files even
+        when the main `index/query.index` sidecar is current.
       - [x] Cut exact-term generation files over to namespace-local docIDs:
         exact generation build stores postings by the matching per-namespace
         document-table generation, prepared exact readers require an
@@ -1752,8 +1754,9 @@ Latest release targets confirmed on 2026-07-23:
         field/value pair has been passed, seeks directly to the matching term
         slice, and skips the remaining table lines without allocating them.
         This preserves liblql JSON scalar equality as the semantic target:
-        strings, numbers, booleans, and null stay distinct, while Go lockd's
-        looser LQL scalar behavior is only a benchmark-reference caveat.
+        strings, numbers, booleans, and null stay distinct real JSON scalars,
+        while Go lockd's looser LQL scalar behavior is only a
+        benchmark-reference caveat.
         Numeric exact equality deliberately stays on the scalar-aware merge
         path because equivalent JSON number spellings such as `1` and `1.0`
         may live in separate value slices that must both satisfy one numeric

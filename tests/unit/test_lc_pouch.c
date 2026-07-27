@@ -7885,9 +7885,14 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   pouch_query_key_capture number_page;
   pouch_query_key_capture string_page;
   pouch_query_key_capture bool_page;
+  pouch_query_key_capture false_page;
+  pouch_query_key_capture null_page;
   pouch_query_key_capture root_or_page;
   pouch_query_key_capture mixed_in_page;
+  lc_sink *document_sink;
   lc_error error;
+  const void *document_bytes;
+  size_t document_length;
   char root[512];
   int rc;
 
@@ -7900,8 +7905,13 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   memset(&number_page, 0, sizeof(number_page));
   memset(&string_page, 0, sizeof(string_page));
   memset(&bool_page, 0, sizeof(bool_page));
+  memset(&false_page, 0, sizeof(false_page));
+  memset(&null_page, 0, sizeof(null_page));
   memset(&root_or_page, 0, sizeof(root_or_page));
   memset(&mixed_in_page, 0, sizeof(mixed_in_page));
+  document_sink = NULL;
+  document_bytes = NULL;
+  document_length = 0U;
   lc_query_req_init(&query_req);
   lc_error_init(&error);
   make_root("query-keys-index-scalar-types", root, sizeof(root));
@@ -7989,6 +7999,34 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
                                  "\"query_candidates\":1"));
   lc_query_res_cleanup(&query_res);
 
+  memset(&false_page, 0, sizeof(false_page));
+  query_req.selector_lql = "eq{field=/flag,value=false}";
+  query_req.selector_json = NULL;
+  rc = client->query_keys(client, &query_req, &handler, &false_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(false_page.count, 1);
+  assert_true(pouch_query_capture_has(&false_page, "doc/number"));
+  assert_false(pouch_query_capture_has(&false_page, "doc/string-number"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":1"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&null_page, 0, sizeof(null_page));
+  query_req.selector_lql = NULL;
+  query_req.selector_json = "{\"eq\":{\"field\":\"/v\",\"value\":null}}";
+  rc = client->query_keys(client, &query_req, &handler, &null_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(null_page.count, 1);
+  assert_true(pouch_query_capture_has(&null_page, "doc/null"));
+  assert_false(pouch_query_capture_has(&null_page, "doc/string-null"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":1"));
+  lc_query_res_cleanup(&query_res);
+
   memset(&root_or_page, 0, sizeof(root_or_page));
   query_req.selector_lql =
       "or.eq{field=/v,value=1},or.eq{field=/flag,value=true}";
@@ -8025,7 +8063,29 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"query_candidates\":5"));
+  lc_query_res_cleanup(&query_res);
 
+  query_req.selector_lql = "eq{field=/flag,value=false}";
+  query_req.selector_json = NULL;
+  query_req.return_mode = "documents";
+  query_req.fields_json = "{\"flag\":true}";
+  rc = lc_sink_to_memory(&document_sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, document_sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(document_sink, &document_bytes, &document_length,
+                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(document_length > 0U);
+  assert_true(bytes_contain_text(document_bytes, document_length,
+                                 "\"flag\":false"));
+  assert_false(bytes_contain_text(document_bytes, document_length,
+                                  "\"flag\":\"false\""));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":1"));
+
+  lc_sink_close(document_sink);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -9180,6 +9240,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   lc_error error;
   char *namespace_path;
   char sidecar_path[1024];
+  char doc_table_path[1024];
   char root[512];
   unsigned long delete_version;
   int rc;
@@ -9305,6 +9366,36 @@ static void test_flush_index_reports_projection_high_water(void **state) {
                             "2f6b696e64");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "666c757368");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "format=pouch-doc-table-generation");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "version=1");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "index_seq=4");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "row_count=2");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "row_hash=");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "doc 646f632f6c697665 ");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "doc 646f632f68696464656e ");
+  lc_index_flush_res_cleanup(&flush_res);
+
+  snprintf(doc_table_path, sizeof(doc_table_path),
+           "%s/index/query.index.lcpdtg", namespace_path);
+  write_text_file(doc_table_path, "broken\n");
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
+  assert_true(flush_res.index_seq >= delete_version);
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "format=pouch-doc-table-generation");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "index_seq=4");
+  assert_path_file_contains(namespace_path, "index/query.index.lcpdtg",
+                            "row_count=2");
   lc_index_flush_res_cleanup(&flush_res);
 
   snprintf(sidecar_path, sizeof(sidecar_path), "%s/index/query.index",
