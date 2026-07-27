@@ -2,7 +2,74 @@
 
 #include "lc_api_internal.h"
 
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
+
+static int lc_pouch_index_term_hex_token_valid(const char *token) {
+  size_t index;
+  unsigned char ch;
+
+  if (token == NULL || token[0] == '\0') {
+    return 0;
+  }
+  for (index = 0U; token[index] != '\0'; ++index) {
+    ch = (unsigned char)token[index];
+    if (!((ch >= (unsigned char)'0' && ch <= (unsigned char)'9') ||
+          (ch >= (unsigned char)'a' && ch <= (unsigned char)'f') ||
+          (ch >= (unsigned char)'A' && ch <= (unsigned char)'F'))) {
+      return 0;
+    }
+  }
+  return index % 2U == 0U;
+}
+
+static char *lc_pouch_index_term_next_token(char **cursor, int final_token) {
+  char *start;
+  char *space;
+
+  if (cursor == NULL || *cursor == NULL) {
+    return NULL;
+  }
+  start = *cursor;
+  if (final_token) {
+    space = strchr(start, '\n');
+    if (space != NULL) {
+      *space = '\0';
+    }
+    if (strchr(start, ' ') != NULL) {
+      return NULL;
+    }
+    *cursor = NULL;
+    return start;
+  }
+  space = strchr(start, ' ');
+  if (space == NULL) {
+    return NULL;
+  }
+  *space = '\0';
+  *cursor = space + 1;
+  return start;
+}
+
+static int lc_pouch_index_term_parse_ulong_token(const char *token,
+                                                 unsigned long *out,
+                                                 const char *message,
+                                                 lc_error *error) {
+  char *end;
+  unsigned long parsed;
+
+  if (token == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  errno = 0;
+  parsed = strtoul(token, &end, 10);
+  if (errno != 0 || end == token || *end != '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  *out = parsed;
+  return LC_OK;
+}
 
 void lc_pouch_index_term_fields_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_field *fields,
@@ -99,6 +166,123 @@ int lc_pouch_index_term_values_find(const lc_pouch_index_term_value *values,
     }
   }
   return 0;
+}
+
+int lc_pouch_index_term_field_parse_line(
+    char *line, lc_pouch_index_term_field *field,
+    const lc_allocator *allocator, lc_error *error) {
+  char *cursor;
+  char *field_hex;
+  char *first_token;
+  char *count_token;
+  unsigned long first_line;
+  unsigned long line_count;
+  int rc;
+
+  if (line == NULL || field == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term field requires line and output",
+                        NULL, NULL, NULL);
+  }
+  if (strncmp(line, "term_field ", sizeof("term_field ") - 1U) != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term field has invalid prefix", NULL,
+                        NULL, NULL);
+  }
+  cursor = line + sizeof("term_field ") - 1U;
+  field_hex = lc_pouch_index_term_next_token(&cursor, 0);
+  first_token = lc_pouch_index_term_next_token(&cursor, 0);
+  count_token = lc_pouch_index_term_next_token(&cursor, 1);
+  if (field_hex == NULL || strcmp(field_hex, "-") == 0 ||
+      !lc_pouch_index_term_hex_token_valid(field_hex) ||
+      first_token == NULL || count_token == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term field has invalid fields", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_index_term_parse_ulong_token(
+      first_token, &first_line,
+      "pouch index term field has invalid first line", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_term_parse_ulong_token(
+      count_token, &line_count,
+      "pouch index term field has invalid line count", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  field->field_hex = lc_strdup_with_allocator(allocator, field_hex);
+  if (field->field_hex == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index term field", NULL,
+                        NULL, NULL);
+  }
+  field->first_line = first_line;
+  field->line_count = line_count;
+  return LC_OK;
+}
+
+int lc_pouch_index_term_value_parse_line(
+    char *line, lc_pouch_index_term_value *value,
+    const lc_allocator *allocator, lc_error *error) {
+  char *cursor;
+  char *field_hex;
+  char *value_hex;
+  char *first_token;
+  char *count_token;
+  unsigned long first_line;
+  unsigned long line_count;
+  int rc;
+
+  if (line == NULL || value == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term value requires line and output",
+                        NULL, NULL, NULL);
+  }
+  if (strncmp(line, "term_value ", sizeof("term_value ") - 1U) != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term value has invalid prefix", NULL,
+                        NULL, NULL);
+  }
+  cursor = line + sizeof("term_value ") - 1U;
+  field_hex = lc_pouch_index_term_next_token(&cursor, 0);
+  value_hex = lc_pouch_index_term_next_token(&cursor, 0);
+  first_token = lc_pouch_index_term_next_token(&cursor, 0);
+  count_token = lc_pouch_index_term_next_token(&cursor, 1);
+  if (field_hex == NULL || value_hex == NULL || strcmp(field_hex, "-") == 0 ||
+      !lc_pouch_index_term_hex_token_valid(field_hex) ||
+      !lc_pouch_index_term_hex_token_valid(value_hex) ||
+      first_token == NULL || count_token == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term value has invalid fields", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_index_term_parse_ulong_token(
+      first_token, &first_line,
+      "pouch index term value has invalid first line", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_term_parse_ulong_token(
+      count_token, &line_count,
+      "pouch index term value has invalid line count", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  value->field_hex = lc_strdup_with_allocator(allocator, field_hex);
+  value->value_hex = lc_strdup_with_allocator(allocator, value_hex);
+  if (value->field_hex == NULL || value->value_hex == NULL) {
+    lc_free_with_allocator(allocator, value->field_hex);
+    lc_free_with_allocator(allocator, value->value_hex);
+    memset(value, 0, sizeof(*value));
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index term value", NULL,
+                        NULL, NULL);
+  }
+  value->first_line = first_line;
+  value->line_count = line_count;
+  return LC_OK;
 }
 
 void lc_pouch_index_term_ranges_cleanup(

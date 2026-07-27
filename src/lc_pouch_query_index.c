@@ -2118,64 +2118,6 @@ static int lc_pouch_query_index_read_terms(
   return rc;
 }
 
-static int lc_pouch_query_index_parse_term_field(
-    char *line, lc_pouch_index_term_field *field,
-    const lc_allocator *allocator, lc_error *error) {
-  char *cursor;
-  char *field_hex;
-  char *first_token;
-  char *count_token;
-  char *end;
-  unsigned long first_line;
-  unsigned long line_count;
-
-  if (line == NULL || field == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term field requires line and "
-                        "output",
-                        NULL, NULL, NULL);
-  }
-  if (strncmp(line, "term_field ", sizeof("term_field ") - 1U) != 0) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term field has invalid prefix",
-                        NULL, NULL, NULL);
-  }
-  cursor = line + sizeof("term_field ") - 1U;
-  field_hex = lc_pouch_query_index_next_token(&cursor, 0);
-  first_token = lc_pouch_query_index_next_token(&cursor, 0);
-  count_token = lc_pouch_query_index_next_token(&cursor, 1);
-  if (field_hex == NULL || strcmp(field_hex, "-") == 0 ||
-      !lc_pouch_query_index_hex_token_valid(field_hex) ||
-      first_token == NULL || count_token == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term field has invalid fields",
-                        NULL, NULL, NULL);
-  }
-  errno = 0;
-  first_line = strtoul(first_token, &end, 10);
-  if (errno != 0 || end == first_token || *end != '\0') {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term field has invalid first line",
-                        NULL, NULL, NULL);
-  }
-  errno = 0;
-  line_count = strtoul(count_token, &end, 10);
-  if (errno != 0 || end == count_token || *end != '\0') {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term field has invalid line count",
-                        NULL, NULL, NULL);
-  }
-  field->field_hex = lc_strdup_with_allocator(allocator, field_hex);
-  if (field->field_hex == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index term field",
-                        NULL, NULL, NULL);
-  }
-  field->first_line = first_line;
-  field->line_count = line_count;
-  return LC_OK;
-}
-
 static int lc_pouch_query_index_read_terms_slice(
     FILE *fp, unsigned long term_count, lc_pouch_query_index_term_reader *reader,
     int *valid, lc_error *error) {
@@ -2279,8 +2221,9 @@ static int lc_pouch_query_index_read_term_fields(
     if (rc != LC_OK || !got_line) {
       break;
     }
-    rc = lc_pouch_query_index_parse_term_field(line.bytes, &parsed, allocator,
-                                               error);
+    rc =
+        lc_pouch_index_term_field_parse_line(line.bytes, &parsed, allocator,
+                                             error);
     if (rc != LC_OK) {
       break;
     }
@@ -2318,71 +2261,6 @@ static int lc_pouch_query_index_read_term_fields(
                                      (size_t)term_field_count);
   lc_free_with_allocator(line.allocator, line.bytes);
   return rc;
-}
-
-static int lc_pouch_query_index_parse_term_value(
-    char *line, lc_pouch_index_term_value *value,
-    const lc_allocator *allocator, lc_error *error) {
-  char *cursor;
-  char *field_hex;
-  char *value_hex;
-  char *first_token;
-  char *count_token;
-  char *end;
-  unsigned long first_line;
-  unsigned long line_count;
-
-  if (line == NULL || value == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term value requires line and "
-                        "output",
-                        NULL, NULL, NULL);
-  }
-  if (strncmp(line, "term_value ", sizeof("term_value ") - 1U) != 0) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term value has invalid prefix",
-                        NULL, NULL, NULL);
-  }
-  cursor = line + sizeof("term_value ") - 1U;
-  field_hex = lc_pouch_query_index_next_token(&cursor, 0);
-  value_hex = lc_pouch_query_index_next_token(&cursor, 0);
-  first_token = lc_pouch_query_index_next_token(&cursor, 0);
-  count_token = lc_pouch_query_index_next_token(&cursor, 1);
-  if (field_hex == NULL || value_hex == NULL || strcmp(field_hex, "-") == 0 ||
-      !lc_pouch_query_index_hex_token_valid(field_hex) ||
-      !lc_pouch_query_index_hex_token_valid(value_hex) ||
-      first_token == NULL || count_token == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term value has invalid fields",
-                        NULL, NULL, NULL);
-  }
-  errno = 0;
-  first_line = strtoul(first_token, &end, 10);
-  if (errno != 0 || end == first_token || *end != '\0') {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term value has invalid first line",
-                        NULL, NULL, NULL);
-  }
-  errno = 0;
-  line_count = strtoul(count_token, &end, 10);
-  if (errno != 0 || end == count_token || *end != '\0') {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index term value has invalid line count",
-                        NULL, NULL, NULL);
-  }
-  value->field_hex = lc_strdup_with_allocator(allocator, field_hex);
-  value->value_hex = lc_strdup_with_allocator(allocator, value_hex);
-  if (value->field_hex == NULL || value->value_hex == NULL) {
-    lc_free_with_allocator(allocator, value->field_hex);
-    lc_free_with_allocator(allocator, value->value_hex);
-    memset(value, 0, sizeof(*value));
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index term value",
-                        NULL, NULL, NULL);
-  }
-  value->first_line = first_line;
-  value->line_count = line_count;
-  return LC_OK;
 }
 
 static int lc_pouch_query_index_read_term_values(
@@ -2433,8 +2311,9 @@ static int lc_pouch_query_index_read_term_values(
     if (rc != LC_OK || !got_line) {
       break;
     }
-    rc = lc_pouch_query_index_parse_term_value(line.bytes, &parsed, allocator,
-                                               error);
+    rc =
+        lc_pouch_index_term_value_parse_line(line.bytes, &parsed, allocator,
+                                             error);
     if (rc != LC_OK) {
       break;
     }

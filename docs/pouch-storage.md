@@ -1423,11 +1423,12 @@ fuller compiled-index module map remains the target for the remaining work:
   still need to consume that adaptive boundary broadly.
 - `src/lc_pouch_index_terms.c` currently owns the first term dictionary
   boundary: sidecar term field/value table records, cleanup, and sorted binary
-  lookup, plus exact value range collection and merged field span selection for
-  sidecar term readers. It should grow into the owner for term dictionaries,
-  term-ID posting tables, and prepared-term cache identity refresh/cleanup.
-  Prepared bridge caches are keyed by an explicit private index identity
-  containing the current index sequence and segmented manifest generation.
+  lookup, sidecar `term_field`/`term_value` line parsing, plus exact value
+  range collection and merged field span selection for sidecar term readers. It
+  should grow into the owner for term dictionaries, term-ID posting tables, and
+  prepared-term cache identity refresh/cleanup. Prepared bridge caches are
+  keyed by an explicit private index identity containing the current index
+  sequence and segmented manifest generation.
 - `src/lc_pouch_index_result.c` owns the first result-list primitive split out
   of the query bridge: sorted key/docID vectors, deterministic
   docID/key/value-slot ordering, key allocation ownership, and adjacent docID

@@ -201,6 +201,12 @@ int lc_pouch_index_term_values_find(const lc_pouch_index_term_value *values,
                                     const char *value_hex,
                                     unsigned long *first_line,
                                     unsigned long *line_count);
+int lc_pouch_index_term_field_parse_line(
+    char *line, lc_pouch_index_term_field *field,
+    const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_term_value_parse_line(
+    char *line, lc_pouch_index_term_value *value,
+    const lc_allocator *allocator, lc_error *error);
 void lc_pouch_index_term_ranges_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_range *ranges);
 int lc_pouch_index_term_values_collect_ranges(

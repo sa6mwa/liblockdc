@@ -489,6 +489,80 @@ static void test_index_term_values_find_sorted_ranges(void **state) {
   lc_pouch_index_term_values_cleanup(&allocator, values, 4U);
 }
 
+static void test_index_term_parses_sidecar_records(void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_term_field field;
+  lc_pouch_index_term_value value;
+  char field_line[] = "term_field 616765 2 4\n";
+  char value_line[] = "term_value 74616773 706c616e 6 8\n";
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&field, 0, sizeof(field));
+  memset(&value, 0, sizeof(value));
+
+  rc = lc_pouch_index_term_field_parse_line(field_line, &field, &allocator,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(field.field_hex, "616765");
+  assert_int_equal(field.first_line, 2);
+  assert_int_equal(field.line_count, 4);
+
+  rc = lc_pouch_index_term_value_parse_line(value_line, &value, &allocator,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(value.field_hex, "74616773");
+  assert_string_equal(value.value_hex, "706c616e");
+  assert_int_equal(value.first_line, 6);
+  assert_int_equal(value.line_count, 8);
+
+  lc_free_with_allocator(&allocator, field.field_hex);
+  lc_free_with_allocator(&allocator, value.field_hex);
+  lc_free_with_allocator(&allocator, value.value_hex);
+  lc_error_cleanup(&error);
+}
+
+static void test_index_term_rejects_invalid_sidecar_records(void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_term_field field;
+  lc_pouch_index_term_value value;
+  char bad_field_prefix[] = "field 616765 0 1\n";
+  char bad_field_hex[] = "term_field 61676x 0 1\n";
+  char bad_value_number[] = "term_value 74616773 706c616e nope 1\n";
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&field, 0, sizeof(field));
+  memset(&value, 0, sizeof(value));
+
+  rc = lc_pouch_index_term_field_parse_line(bad_field_prefix, &field,
+                                            &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_index_term_field_parse_line(bad_field_hex, &field, &allocator,
+                                            &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_index_term_value_parse_line(bad_value_number, &value,
+                                            &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  lc_free_with_allocator(&allocator, field.field_hex);
+  lc_free_with_allocator(&allocator, value.field_hex);
+  lc_free_with_allocator(&allocator, value.value_hex);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_term_values_collect_exact_ranges(void **state) {
   lc_allocator allocator;
   lc_error error;
@@ -9946,6 +10020,8 @@ int main(void) {
       cmocka_unit_test(test_index_result_row_list_copies_keys_and_metadata),
       cmocka_unit_test(test_index_term_fields_find_sorted_ranges),
       cmocka_unit_test(test_index_term_values_find_sorted_ranges),
+      cmocka_unit_test(test_index_term_parses_sidecar_records),
+      cmocka_unit_test(test_index_term_rejects_invalid_sidecar_records),
       cmocka_unit_test(test_index_term_values_collect_exact_ranges),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
