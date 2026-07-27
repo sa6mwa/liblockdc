@@ -8042,6 +8042,8 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   lc_query_req query_req;
   lc_query_res query_res;
   lc_query_key_handler handler;
+  pouch_query_key_capture bucket_first_page;
+  pouch_query_key_capture bucket_second_page;
   pouch_query_key_capture first_page;
   pouch_query_key_capture second_page;
   pouch_query_key_capture reversed_page;
@@ -8063,6 +8065,8 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   document_length = 0U;
   memset(&query_res, 0, sizeof(query_res));
   memset(&handler, 0, sizeof(handler));
+  memset(&bucket_first_page, 0, sizeof(bucket_first_page));
+  memset(&bucket_second_page, 0, sizeof(bucket_second_page));
   memset(&first_page, 0, sizeof(first_page));
   memset(&second_page, 0, sizeof(second_page));
   memset(&reversed_page, 0, sizeof(reversed_page));
@@ -8110,9 +8114,35 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
   query_req.namespace_name = "docs/query-index-or";
-  query_req.selector_lql = selector_lql;
+  query_req.selector_lql = "eq{field=/bucket,value=needle}";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
+  query_req.limit = 1L;
+  rc = client->query_keys(client, &query_req, &handler, &bucket_first_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(bucket_first_page.count, 1);
+  assert_string_equal(bucket_first_page.keys[0], "doc/a");
+  assert_non_null(query_res.cursor);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":2"));
+
+  snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
+  query_req.cursor = cursor;
+  lc_query_res_cleanup(&query_res);
+  rc = client->query_keys(client, &query_req, &handler, &bucket_second_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(bucket_second_page.count, 1);
+  assert_string_equal(bucket_second_page.keys[0], "doc/overlap");
+  assert_null(query_res.cursor);
+  assert_false(pouch_query_capture_has(&bucket_first_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&bucket_second_page, "doc/hidden"));
+  lc_query_res_cleanup(&query_res);
+
+  query_req.cursor = NULL;
+  query_req.selector_lql = selector_lql;
   query_req.limit = 2L;
   rc = client->query_keys(client, &query_req, &handler, &first_page,
                           &query_res, &error);

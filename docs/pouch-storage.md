@@ -1088,8 +1088,14 @@ then loading only candidate documents for final `liblql` acceptance and
 key-only scalar queries preserve liblql JSON scalar semantics in the index
 itself: strings, numbers, booleans, and null do not coerce into each other,
 while numeric equality compares parsed JSON number values so equivalent
-spellings such as `1` and `1.0` match the same numeric selector. Unsupported
-indexed selector shapes fail closed instead of falling back to scan.
+spellings such as `1` and `1.0` match the same numeric selector. Key-only
+single-term exact scalar lookups for non-numeric scalar classes stream their
+term slice directly because one typed term cannot produce duplicate docIDs and
+the slice is already key/docID ordered. Numeric exact equality and multi-term
+unions still use the sorted/compacted docID path because one numeric selector
+can match several JSON number spellings, and OR/in unions can overlap.
+Unsupported indexed selector shapes fail closed instead of falling back to
+scan.
 Explicit scan mode remains available for full-log/full-summary scanning through
 the ordered metadata summary API, but it does not accept refresh hints because
 no durable query index is consulted.

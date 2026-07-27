@@ -1718,6 +1718,22 @@ Latest release targets confirmed on 2026-07-23:
         where Go lockd disk measured about 31.8 ms wall time for 640 rows and
         pouch measured about 17.1 ms C-side for the same focused key-only
         root-OR sample.
+      - [x] Bypass the intermediate key-list sort/compact pass for key-only
+        single-term exact scalar lookups when the scalar class is non-numeric.
+        One exact non-numeric typed term cannot overlap itself, and term rows
+        are already key/docID ordered because docIDs are assigned from the
+        sorted row table. Numeric equality keeps the conservative path because
+        liblql treats equivalent JSON number spellings as equal, so one query
+        value may match multiple value slices that need a final merge. Focused
+        coverage now pages an indexed `bucket=needle` equality query through
+        the direct path and proves hidden rows are excluded. Verified on
+        2026-07-27 with focused 4096-doc indexed `EqSparse` key comparison:
+        Go lockd disk measured about 40.5 ms wall time for 64 rows and pouch
+        measured about 13.5 ms C-side. The medium matrix still shows pouch
+        indexed 1024-doc dense equality at about 4.3 ms C-side versus Go at
+        about 0.8 ms, so closing dense/multi-value search still needs a
+        lower-level posting/doc-table sidecar rather than more query-layer
+        sorting fixes.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

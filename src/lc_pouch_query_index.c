@@ -2093,6 +2093,10 @@ static int lc_pouch_query_index_read_terms(
     }
     if (reader != NULL && reader->visit != NULL) {
       rc = lc_pouch_query_index_parse_and_visit_term(line.bytes, reader, error);
+      if (rc == LC_POUCH_STATE_READ_MANY_STOP) {
+        rc = LC_OK;
+        reader->stop = 1;
+      }
       if (rc != LC_OK) {
         *valid = 0;
         break;
@@ -2153,6 +2157,10 @@ static int lc_pouch_query_index_read_terms_slice(
     }
     if (reader != NULL && reader->visit != NULL) {
       rc = lc_pouch_query_index_parse_and_visit_term(line.bytes, reader, error);
+      if (rc == LC_POUCH_STATE_READ_MANY_STOP) {
+        rc = LC_OK;
+        reader->stop = 1;
+      }
       if (rc != LC_OK) {
         break;
       }
@@ -4308,9 +4316,15 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     term_reader.exact_numeric =
         lc_pouch_query_index_term_keys_have_numeric(exact_terms,
                                                     exact_term_count);
-    term_reader.visit_doc_ids = 1;
-    term_reader.visit = lc_pouch_query_index_docid_key_collect;
-    term_reader.context = &doc_context;
+    if (exact_term_count == 1U && exact_terms[0].value_type != 'n') {
+      term_reader.visit_doc_ids = 0;
+      term_reader.visit = visit;
+      term_reader.context = context;
+    } else {
+      term_reader.visit_doc_ids = 1;
+      term_reader.visit = lc_pouch_query_index_docid_key_collect;
+      term_reader.context = &doc_context;
+    }
     rc = lc_pouch_query_index_read_with_reader(sidecar_path, &sidecar, NULL,
                                                &term_reader, NULL, error);
     if (rc == LC_OK && (!sidecar.present || !sidecar.valid)) {
@@ -4325,8 +4339,10 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     }
     if (rc == LC_OK) {
       *index_seq = sidecar.index_seq;
-      rc = lc_pouch_query_index_docid_key_emit(
-          &pouch->allocator, &keys, visit, context, error);
+      if (term_reader.visit_doc_ids) {
+        rc = lc_pouch_query_index_docid_key_emit(
+            &pouch->allocator, &keys, visit, context, error);
+      }
     }
   }
   lc_free_with_allocator(&pouch->allocator, term_reader.value_scratch);
